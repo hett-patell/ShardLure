@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -32,16 +33,23 @@ type CowrieStats struct {
 	DeployCmd bool
 }
 
+// Confidence scores are 0-100.
+const (
+	ConfidenceJournalBase    = 55
+	ConfidenceJournalHighAPH = 70
+	ConfidenceCowrieBase     = 72
+	ConfidenceCowriePayload  = 84
+)
+
 // BuildFromJournal groups journal events into actors (1 IP = 1 actor for journal mode).
 func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) ([]*models.Actor, map[string]string) {
 	byIP := map[string]*IPStats{}
-	eventToActor := map[string]string{} // key: raw line or composite   use index
+	eventToActor := map[string]string{}
 
 	for _, e := range events {
-		if e.Kind == models.KindAccepted {
-			if adminIPs[e.SrcIP] {
-				continue
-			}
+		if adminIPs[e.SrcIP] {
+			// Never classify known admin sources as attackers.
+			continue
 		}
 		if e.SrcIP == "" {
 			continue
@@ -85,7 +93,7 @@ func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) ([]*mode
 			PrimaryIP:       ip,
 			Playbook:        playbook,
 			Intent:          "unknown",
-			Confidence:      55,
+			Confidence:      ConfidenceJournalBase,
 			FirstSeen:       st.First,
 			LastSeen:        st.Last,
 			EventCount:      len(st.Events),
@@ -94,12 +102,13 @@ func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) ([]*mode
 			UsernameHash:    uhash,
 			Notes:           fmt.Sprintf("%d distinct usernames", len(st.Users)),
 		}
-		if aph > 100 {
-			a.Confidence = 70
+		if st.Last.Sub(st.First).Hours() >= 0.25 && aph > 100 {
+			a.Confidence = ConfidenceJournalHighAPH
 		}
 		actors = append(actors, a)
 		for _, e := range st.Events {
 			e.ActorID = id
+			eventToActor[eventKey(e)] = id
 		}
 	}
 
@@ -118,7 +127,8 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) ([]*model
 		if e.SrcIP == "" {
 			continue
 		}
-		if adminIPs[e.SrcIP] && e.Kind == models.KindAccepted {
+		if adminIPs[e.SrcIP] {
+			// Keep admin traffic out of attacker clustering in all cases.
 			continue
 		}
 		key := e.HASSH
@@ -145,9 +155,6 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) ([]*model
 		}
 		if e.TS.After(st.Last) {
 			st.Last = e.TS
-		}
-		if st.PrimaryIP == "" {
-			st.PrimaryIP = e.SrcIP
 		}
 		if st.HASSH == "" {
 			st.HASSH = e.HASSH
@@ -198,7 +205,7 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) ([]*model
 			PrimaryIP:       st.PrimaryIP,
 			Playbook:        playbook,
 			Intent:          intent,
-			Confidence:      72,
+			Confidence:      ConfidenceCowrieBase,
 			FirstSeen:       st.First,
 			LastSeen:        st.Last,
 			EventCount:      len(st.Events),
@@ -210,11 +217,12 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) ([]*model
 			Notes:           fmt.Sprintf("%d events, %d usernames", len(st.Events), len(st.Users)),
 		}
 		if st.Payload || st.DeployCmd {
-			a.Confidence = 84
+			a.Confidence = ConfidenceCowriePayload
 		}
 		actors = append(actors, a)
 		for _, e := range st.Events {
 			e.ActorID = id
+			eventToActor[eventKey(e)] = id
 		}
 	}
 
@@ -237,12 +245,20 @@ func usernameSetHash(users []string) string {
 	if len(users) == 0 {
 		return ""
 	}
-	sample := users
-	if len(sample) > 40 {
-		sample = sample[:40]
+	h := sha256.New()
+	for i, u := range users {
+		if i > 0 {
+			_, _ = io.WriteString(h, ",")
+		}
+		_, _ = io.WriteString(h, u)
 	}
-	h := sha256.Sum256([]byte(strings.Join(sample, ",")))
-	return hex.EncodeToString(h[:8])
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:8])
+}
+
+func eventKey(e *models.Event) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d",
+		e.Source, e.Kind, e.SrcIP, e.Username, e.SessionID, e.TS.UTC().Format(time.RFC3339Nano), e.ID)
 }
 
 func AdminSet(ips []string) map[string]bool {
