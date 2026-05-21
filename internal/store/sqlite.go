@@ -31,6 +31,12 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Honeypot DBs can contain attacker-supplied passwords; restrict to owner.
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			_ = os.Chmod(p, 0o600)
+		}
+	}
 	return s, nil
 }
 
@@ -64,7 +70,6 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_ip ON events(src_ip);
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
-CREATE INDEX IF NOT EXISTS idx_events_raw ON events(raw);
 CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_ip, session_id, username, command);
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -107,8 +112,21 @@ CREATE TABLE IF NOT EXISTS actor_users (
   count INTEGER,
   PRIMARY KEY (actor_id, username)
 );
+
+CREATE TABLE IF NOT EXISTS ingest_state (
+  source TEXT NOT NULL,
+  path TEXT NOT NULL,
+  inode INTEGER NOT NULL DEFAULT 0,
+  offset INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, path)
+);
 `
 	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Drop the historical raw-column index; it was high-cost and unused.
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_events_raw`); err != nil {
 		return err
 	}
 	if err := s.ensureLegacyColumns(); err != nil {

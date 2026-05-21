@@ -16,12 +16,6 @@ WHERE source=? AND kind=? AND ts=? AND src_ip=? AND session_id=? AND username=? 
 	return n > 0, err
 }
 
-func (s *Store) EventRawExists(raw string) (bool, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(1) FROM events WHERE raw=?`, raw).Scan(&n)
-	return n > 0, err
-}
-
 func (s *Store) EventsBySource(source models.Source) ([]*models.Event, error) {
 	rows, err := s.db.Query(`SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, raw, actor_id
 FROM events WHERE source=? ORDER BY ts ASC`, source)

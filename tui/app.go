@@ -15,21 +15,21 @@ import (
 type tickMsg time.Time
 
 type model struct {
-	st       *store.Store
-	dbPath   string
-	actors   table.Model
-	events   viewport.Model
-	detail   viewport.Model
+	st        *store.Store
+	dbPath    string
+	actors    table.Model
+	events    viewport.Model
+	detail    viewport.Model
 	actorRows []table.Row
-	cursor   int
-	width    int
-	height   int
-	err      error
+	cursor    int
+	width     int
+	height    int
+	err       error
 }
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	accentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 )
 
@@ -40,7 +40,7 @@ func Run(st *store.Store, dbPath string) error {
 	return err
 }
 
-func newModel(st *store.Store, dbPath string) model {
+func newModel(st *store.Store, dbPath string) *model {
 	cols := []table.Column{
 		{Title: "IP", Width: 16},
 		{Title: "Playbook", Width: 22},
@@ -54,18 +54,18 @@ func newModel(st *store.Store, dbPath string) model {
 		table.WithFocused(true),
 	)
 	t.SetStyles(table.Styles{
-		Header: titleStyle,
+		Header:   titleStyle,
 		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")),
 	})
 
 	ev := viewport.New(80, 8)
 	dt := viewport.New(80, 10)
-	m := model{st: st, dbPath: dbPath, actors: t, events: ev, detail: dt}
+	m := &model{st: st, dbPath: dbPath, actors: t, events: ev, detail: dt}
 	_ = m.loadData()
 	return m
 }
 
-func (m model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd {
 	return tick()
 }
 
@@ -73,7 +73,7 @@ func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func (m model) loadData() error {
+func (m *model) loadData() error {
 	list, err := m.st.ListActors(30)
 	if err != nil {
 		return err
@@ -97,7 +97,7 @@ func (m model) loadData() error {
 	return m.refreshPanels()
 }
 
-func (m model) refreshPanels() error {
+func (m *model) refreshPanels() error {
 	events, err := m.st.RecentEvents(40)
 	if err != nil {
 		return err
@@ -106,9 +106,13 @@ func (m model) refreshPanels() error {
 	now := time.Now()
 	for _, e := range events {
 		ago := now.Sub(e.TS).Truncate(time.Second)
+		kindStr := string(e.Kind)
+		if len(kindStr) > 12 {
+			kindStr = kindStr[:12]
+		}
 		eb.WriteString(fmt.Sprintf("%s  %s  %-14s  %s  %s\n",
 			dimStyle.Render(fmt.Sprintf("%-8s", ago)),
-			string(e.Kind)[:min(12, len(string(e.Kind)))],
+			kindStr,
 			e.SrcIP,
 			e.Username,
 			trunc(e.ActorID, 18)))
@@ -138,7 +142,7 @@ func (m model) refreshPanels() error {
 	return nil
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -177,7 +181,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmd, tick())
 }
 
-func (m model) View() string {
+func (m *model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("error: %v\n", m.err)
 	}
@@ -212,11 +216,4 @@ func trunc(s string, n int) string {
 		return s
 	}
 	return s[:n-3] + "..."
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

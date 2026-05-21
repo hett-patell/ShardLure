@@ -1,8 +1,8 @@
 # ShardLure
 
-**Attacker identity engine for SSH honeypot telemetry.**
+**Attacker identity engine for SSH honeypot telemetry.** Aka: it makes the bots think they hit a real prod box, then puts their entire playbook on blast.
 
-ShardLure clusters SSH bots by **playbook fingerprint** (OpenSSH journal lines) or **HASSH** (Cowrie sessions), not just IP address. It includes a VPS installer, Cowrie integration, live ingest, a forensic TUI, and a web dashboard.
+ShardLure clusters SSH bots by **playbook fingerprint** (OpenSSH journal lines) or **HASSH** (Cowrie sessions), not just IP. Same actor on three IPs? Still one actor. Different actor with the same address? Different rows. The vibe is "username taste profile, not who's-at-the-door." It ships with a VPS installer, Cowrie integration, live ingest, a forensic TUI, and a web dashboard that spins a globe at you.
 
 ```text
 attacker -> port 22 (Cowrie) -> JSON/journal ingest -> SQLite actors -> dashboard
@@ -25,24 +25,28 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 
 ## Features
 
-- **Dual ingest:** OpenSSH journal exports and Cowrie JSON logs.
-- **Actor clustering:** group journal actors by source IP and Cowrie actors by HASSH.
-- **Intent classification:** probe, proxy, deploy, mixed, or unknown.
-- **Live mode:** tail Cowrie and journal data into a live dashboard.
-- **VPS bootstrap:** install Cowrie, migrate real SSH, configure systemd, and start services.
-- **Stealth persona:** Ubuntu-style banners, honeyfs content, regenerated SSH host keys.
-- **Bait files:** fake `.env`, AWS credentials, DB credentials, and deployment files.
-- **Deploy-safe sync:** tar-over-SSH scripts to avoid text/binary corruption issues.
+- **Dual ingest:** OpenSSH journal exports and Cowrie JSON logs. No vendor lock-in, no SaaS dashboard reading your shame.
+- **Actor clustering:** journal actors by source IP, Cowrie actors by HASSH. Botnets get sorted by their *vibe* (HASSH + username corpus), not just where their NAT slingshot lands.
+- **Intent classification:** probe, proxy, deploy, mixed, or unknown. The "deploy" ones are the spicy ones — that's curl-bash-into-tmp energy.
+- **Live mode:** tails Cowrie + journal straight into a globe dashboard. Real-time slay.
+- **VPS bootstrap:** installs Cowrie, moves real SSH to a private port, writes systemd units, starts everything. One command, no yak shaving.
+- **Stealth persona:** Ubuntu-style banner, fake `prod-app-server-01` hostname, regenerated host keys so you don't get fingerprinted as "obvious honeypot #4892."
+- **Bait files:** fake `.env`, AWS creds, DB creds, deploy keys, nginx site. Looks legit, is poison.
+- **Deploy-safe sync:** tar-over-SSH because `scp` of Go/Python sources mysteriously turns them into UTF-16. We do not gaslight you about this — see Troubleshooting.
+- **Incremental Cowrie ingest:** tracks file offset + inode, so a 100MB cowrie.json doesn't get re-scanned every 5 seconds. Your I/O thanks us.
+- **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
 
 ## Quick Start
 
-On a fresh Ubuntu/Debian VPS:
+On a fresh Ubuntu/Debian VPS. Bring your SSH key, leave your password auth at the door.
 
 ```bash
 git clone https://github.com/hett-patell/shardlure.git
 cd shardlure
 sudo python3 scripts/shardlure.py run
 ```
+
+The installer is paranoid on your behalf: it refuses to move SSH off port 22 if it can't find an `authorized_keys`, and it rolls the sshd config back automatically if the new one fails `sshd -t`. No accidental "locked myself out at 2am" lore.
 
 The installer asks for:
 
@@ -59,7 +63,7 @@ sudo python3 scripts/shardlure.py status
 systemctl status cowrie shardlure-live
 ```
 
-Open the dashboard at `http://<tailscale-ip>:8080`. Keep `8080` off the public internet; port `22` is the bait.
+Open the dashboard at `http://<tailscale-ip>:8080`. Keep `8080` off the public internet — port `22` is the bait, your dashboard is not bait, do not get those confused.
 
 For an extra dashboard guard, set `SHARDLURE_DASH_TOKEN` before running `web` or `live`.
 
@@ -233,37 +237,37 @@ All credentials are intentionally fake. Regenerate bait values per deployment so
 +-------------+     +--------------+     +-------------+
 ```
 
-- **Journal actors:** `journal:<src_ip>`, clustered by username playbook.
-- **Cowrie actors:** `cowrie:<hassh>`, clustered by HASSH fingerprint.
-- **Admin IPs:** excluded from clustering.
+- **Journal actors:** `journal:<src_ip>`, clustered by username playbook (their attempted-username distribution is their personality).
+- **Cowrie actors:** `cowrie:<hassh>`, clustered by HASSH fingerprint (TLS-but-for-SSH client identity hash).
+- **Admin IPs:** explicitly excluded from clustering so you don't accidentally classify yourself as a "fast_dictionary_spray" actor.
 
 ## Security Notes
 
-- Verify `ssh -p 2222 user@host` in a second terminal before closing your original session.
-- Keep the dashboard on Tailscale or another private network.
-- Set `SHARDLURE_DASH_TOKEN` for dashboard defense in depth.
-- External geolocation is opt-in. Set `SHARDLURE_GEO_HTTP=1` to allow ip-api.com lookups.
-- Cowrie SSH host keys are regenerated during install.
-- Keep bait credentials fake.
-- Treat SQLite databases as sensitive; honeypot logs can contain real reused attacker passwords.
+- Verify `ssh -p 2222 user@host` in a second terminal **before** closing your original session. "I'll fix it in the morning" SSH stories never end well.
+- Keep the dashboard on Tailscale or another private network. Exposing the dashboard to the internet is what we call self-doxxing.
+- Set `SHARDLURE_DASH_TOKEN` for dashboard defense in depth (constant-time compared, sent as `Authorization: Bearer …` or `X-ShardLure-Token`).
+- External geolocation is opt-in. Set `SHARDLURE_GEO_HTTP=1` to allow ip-api.com lookups. Off by default because phoning home is not a feature.
+- Cowrie SSH host keys are regenerated during install so you don't share a fingerprint with every other lazy honeypot on Shodan.
+- Keep bait credentials fake. Yes really. Do not get clever and put "almost real" creds in there.
+- The SQLite database is chmod'd to `0600` automatically — it can contain attacker-supplied passwords, which sometimes overlap with their *actually reused* real ones. Treat the file like a loaded gun.
 
 ## Troubleshooting
 
 ### NUL Bytes Or UTF-16 Corruption
 
-Symptoms:
+Symptoms (your editor/transfer pipeline silently re-encoded your source files):
 
 - `SyntaxError: null bytes`
 - `cannot execute binary file`
 - `unexpected NUL in input`
 
-Fix:
+This is not a you-problem, it's a tooling-problem. Fix:
 
 ```bash
 bash scripts/push-sources.sh arm
 ```
 
-Avoid direct `scp` for Go/Python sources in this project.
+Avoid direct `scp` for Go/Python sources in this project. We are not in our `scp` era.
 
 ### Cowrie PTY Or Shell Fails
 
@@ -295,7 +299,29 @@ ls /var/lib/shardlure/cowrie/honeyfs/opt/app/
 - [x] Stealth persona and bait file planting
 - [x] Live journal tail and Cowrie append ingest
 - [x] Configurable dashboard home point
-- [ ] GeoLite2 MMDB enrichment
+- [x] Incremental Cowrie ingest (offset + inode tracking, no more O(file) per tick)
+- [x] Idempotent journal append (dedup against existing events)
+- [x] Graceful shutdown on SIGINT/SIGTERM (so Ctrl-C is no longer a war crime)
+- [x] DB chmod 0600 + sshd-config auto-rollback on failed reload
+- [ ] GeoLite2 MMDB enrichment (escape the ip-api.com rate limits arc)
+- [ ] Real-time WebSocket feed (current dashboard polls every 5s, which is fine but mid)
+
+## FAQ (Frequently Asked Vibes)
+
+**Q: Does this make my server safer?**
+A: Marginally. It moves real SSH to a private port (good) and runs a fake one (interesting). The main value is *intel*: you learn what botnets are doing to boxes that look like yours.
+
+**Q: Will I get cool maps?**
+A: Yes. There is a globe. It rotates. Red arcs converge on your home point like you're in a 2007 hacker movie.
+
+**Q: Is this production-ready?**
+A: It's "single-VPS, one-operator, runs-on-my-laptop" ready. If you want a fleet, you'll want to front the SQLite with something less single-writer. PRs welcome.
+
+**Q: Why Go + Python?**
+A: Cowrie is Python. The ingest, classifier, and dashboard are Go because parsing a million journal lines in Python on a 1-vCPU droplet is suffering. The Python is *only* the installer.
+
+**Q: The bait files. Are they convincing?**
+A: They're convincing to bots. A human auditing them for 30 seconds would clock the fake Stripe keys. That's fine — bots are the customer here.
 
 ## License
 

@@ -21,12 +21,16 @@ func IngestJournalctl(st *store.Store, unit string, since string, adminIPs []str
 	if err != nil {
 		return nil, fmt.Errorf("journalctl: %w", err)
 	}
-	events, err := ParseReader(strings.NewReader(string(out)))
+	events, skipped, err := parseReaderCounting(strings.NewReader(string(out)))
 	if err != nil {
 		return nil, err
 	}
 
-	return persistJournalEvents(st, events, adminIPs, replace)
+	res, err := persistJournalEvents(st, events, adminIPs, replace)
+	if res != nil {
+		res.SkippedLines = skipped
+	}
+	return res, err
 }
 
 func IngestJournalctlToFile(path string, unit string, since string) error {

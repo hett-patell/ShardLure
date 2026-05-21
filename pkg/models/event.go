@@ -72,7 +72,7 @@ type ActorIP struct {
 }
 
 type ActorUser struct {
-	ActorID string
+	ActorID  string
 	Username string
-	Count   int
+	Count    int
 }

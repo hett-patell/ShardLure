@@ -68,10 +68,40 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	}
 	defer f.Close()
 
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	inode := fileInode(fi)
+
+	prev, _, err := st.GetIngestState(models.SourceCowrie, path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reset offset if the file was rotated (different inode) or truncated.
+	startOffset := prev.Offset
+	if prev.Inode != inode || fi.Size() < startOffset {
+		startOffset = 0
+	}
+	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+		return nil, err
+	}
+
 	events, skipped, err := parseReader(f)
 	if err != nil {
 		return nil, err
 	}
+
+	// Persist new offset BEFORE returning so that on rerun we don't re-scan;
+	// dedup still runs in case the offset is somehow stale (e.g. partial line).
+	newState := store.IngestState{
+		Source: models.SourceCowrie,
+		Path:   path,
+		Inode:  inode,
+		Offset: fi.Size(),
+	}
+
 	var fresh []*models.Event
 	for _, e := range events {
 		exists, err := st.EventExists(e)
@@ -84,6 +114,9 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		fresh = append(fresh, e)
 	}
 	if len(fresh) == 0 {
+		if err := st.SetIngestState(newState); err != nil {
+			return nil, err
+		}
 		return &Result{Skipped: skipped}, nil
 	}
 	all, err := st.EventsBySource(models.SourceCowrie)
@@ -95,7 +128,13 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	if res != nil {
 		res.Skipped = skipped
 	}
-	return res, err
+	if err != nil {
+		return res, err
+	}
+	if err := st.SetIngestState(newState); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 func syncCowrieActors(st *store.Store, all, fresh []*models.Event, adminIPs []string) (*Result, error) {

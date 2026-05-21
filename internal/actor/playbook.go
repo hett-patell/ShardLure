@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	reCNName = regexp.MustCompile(`(?i)^(zhang|chen|wang|li|liu|yang|huang|zhao|wu|zhou|xu|sun|ma|zhu|hu|guo|he|gao|lin|luo|zheng|liang|xie|song|tang|han|feng|yu|dong|wei|ye|shi|weiqq|yaojun|wenshuo)`)
+	reCNName     = regexp.MustCompile(`(?i)^(zhang|chen|wang|li|liu|yang|huang|zhao|wu|zhou|xu|sun|ma|zhu|hu|guo|he|gao|lin|luo|zheng|liang|xie|song|tang|han|feng|yu|dong|wei|ye|shi|weiqq|yaojun|wenshuo)`)
 	serviceUsers = map[string]bool{
 		"oracle": true, "hadoop": true, "postgres": true, "mysql": true,
 		"jenkins": true, "gitlab": true, "ftpuser": true, "redis": true,

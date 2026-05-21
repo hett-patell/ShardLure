@@ -82,7 +82,9 @@ func main() {
 				fmt.Println("tailscale ip not found on this host (interface tailscale0 missing)")
 			}
 		}
-		if err := web.New(st, addr, webOptions(cfg)).Run(); err != nil {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := web.New(st, addr, webOptions(cfg)).RunContext(ctx); err != nil {
 			fatal(err)
 		}
 	case "live":
@@ -118,7 +120,15 @@ func cmdIngest(st *store.Store, cfg config.Config, args []string) {
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Printf("ingested %d events -> %d actors (skipped %d admin logins)\n", res.Events, res.Actors, res.SkippedAdmin)
+		extras := ""
+		if res.SkippedLines > 0 {
+			extras += fmt.Sprintf(", skipped %d malformed sshd lines", res.SkippedLines)
+		}
+		if res.Duplicates > 0 {
+			extras += fmt.Sprintf(", deduped %d existing events", res.Duplicates)
+		}
+		fmt.Printf("ingested %d events -> %d actors (skipped %d admin logins%s)\n",
+			res.Events, res.Actors, res.SkippedAdmin, extras)
 	case "cowrie":
 		res, err := cowrie.IngestFile(st, path, cfg.AdminIPs, replace)
 		if err != nil {
@@ -182,8 +192,9 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 		fatal(fmt.Errorf("initial cowrie ingest: %w", err))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
 	if journalSSH {
 		go func() {
 			if err := journal.TailFollow(ctx, st, cfg.Journal.Unit, cfg.AdminIPs); err != nil && ctx.Err() == nil {
@@ -194,21 +205,19 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		for range t.C {
-			if _, err := cowrie.IngestFileAppend(st, cowriePath, cfg.AdminIPs); err != nil {
-				fmt.Fprintf(os.Stderr, "live ingest warning: %v\n", err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if _, err := cowrie.IngestFileAppend(st, cowriePath, cfg.AdminIPs); err != nil {
+					fmt.Fprintf(os.Stderr, "live ingest warning: %v\n", err)
+				}
 			}
 		}
 	}()
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		cancel()
-		os.Exit(0)
-	}()
-	if err := web.New(st, addr, webOptions(cfg)).Run(); err != nil {
+	if err := web.New(st, addr, webOptions(cfg)).RunContext(ctx); err != nil {
 		fatal(err)
 	}
 }
@@ -265,16 +274,12 @@ func findSetupScript() string {
 }
 
 func cmdActors(st *store.Store, args []string) {
-	limit := 25
-	for i, a := range args {
-		if strings.HasPrefix(a, "--limit=") {
-			fmt.Sscanf(a, "--limit=%d", &limit)
-		}
-		if a == "--limit" && i+1 < len(args) {
-			fmt.Sscanf(args[i+1], "%d", &limit)
-		}
+	fs := flag.NewFlagSet("actors", flag.ExitOnError)
+	limit := fs.Int("limit", 25, "max actors to list")
+	if err := fs.Parse(args); err != nil {
+		fatal(err)
 	}
-	actors, err := st.ListActors(limit)
+	actors, err := st.ListActors(*limit)
 	if err != nil {
 		fatal(err)
 	}

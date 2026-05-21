@@ -1,6 +1,8 @@
 package journal
 
 import (
+	"bufio"
+	"io"
 	"os"
 
 	"github.com/networkshard/shardlure/internal/actor"
@@ -12,6 +14,8 @@ type Result struct {
 	Events       int
 	Actors       int
 	SkippedAdmin int
+	SkippedLines int
+	Duplicates   int
 }
 
 func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (*Result, error) {
@@ -21,22 +25,77 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	}
 	defer f.Close()
 
-	events, err := ParseReader(f)
+	events, skippedLines, err := parseReaderCounting(f)
 	if err != nil {
 		return nil, err
 	}
 
-	return persistJournalEvents(st, events, adminIPs, replace)
+	res, err := persistJournalEvents(st, events, adminIPs, replace)
+	if res != nil {
+		res.SkippedLines = skippedLines
+	}
+	return res, err
+}
+
+// parseReaderCounting parses journal lines and returns (events, malformedLineCount, err).
+// A "malformed" line is non-empty and does not match any sshd regex we care about.
+func parseReaderCounting(r io.Reader) ([]*models.Event, int, error) {
+	var events []*models.Event
+	var skipped int
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" {
+			continue
+		}
+		if e, ok := ParseLine(line); ok {
+			events = append(events, e)
+			continue
+		}
+		// Only count lines that look like sshd traffic but failed to parse;
+		// random unrelated journal lines aren't "skipped" telemetry.
+		if looksLikeSSHD(line) {
+			skipped++
+		}
+	}
+	return events, skipped, sc.Err()
+}
+
+func looksLikeSSHD(line string) bool {
+	for _, marker := range []string{"sshd[", "Invalid user", "Failed password", "Failed publickey", "Accepted "} {
+		if containsASCII(line, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsASCII(haystack, needle string) bool {
+	return len(needle) > 0 && len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
+}
+
+func indexOf(s, sub string) int {
+	n := len(sub)
+	if n == 0 {
+		return 0
+	}
+	for i := 0; i+n <= len(s); i++ {
+		if s[i:i+n] == sub {
+			return i
+		}
+	}
+	return -1
 }
 
 func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
-	skipped := 0
+	skippedAdmin := 0
 	var stored []*models.Event
 	var attack []*models.Event
 	for _, e := range events {
 		if e.Kind == models.KindAccepted && admin[e.SrcIP] {
-			skipped++
+			skippedAdmin++
 			continue
 		}
 		if e.Kind == models.KindAccepted {
@@ -49,27 +108,42 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 	}
 
 	var actors []*models.Actor
+	var duplicates int
 	if replace {
 		actors = actor.BuildFromJournal(attack, admin)
 		if err := st.ReplaceSourceEventsAndActors(models.SourceJournal, stored, actors); err != nil {
 			return nil, err
 		}
 	} else {
+		// Dedup against what's already persisted before appending.
+		var fresh []*models.Event
+		for _, e := range stored {
+			exists, err := st.EventExists(e)
+			if err != nil {
+				return nil, err
+			}
+			if exists {
+				duplicates++
+				continue
+			}
+			fresh = append(fresh, e)
+		}
 		all, err := st.EventsBySource(models.SourceJournal)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, stored...)
+		all = append(all, fresh...)
 		actors = actor.BuildFromJournal(filterAttackJournalEvents(all), admin)
-		if err := st.AppendEventsAndReplaceActors(models.SourceJournal, stored, all, actors); err != nil {
+		if err := st.AppendEventsAndReplaceActors(models.SourceJournal, fresh, all, actors); err != nil {
 			return nil, err
 		}
 	}
 
 	return &Result{
-		Events:       len(stored),
+		Events:       len(stored) - duplicates,
 		Actors:       len(actors),
-		SkippedAdmin: skipped,
+		SkippedAdmin: skippedAdmin,
+		Duplicates:   duplicates,
 	}, nil
 }
 
