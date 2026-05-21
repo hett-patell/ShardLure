@@ -14,6 +14,10 @@ type Store struct {
 	db *sql.DB
 }
 
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -134,21 +138,25 @@ func (s *Store) ensureLegacyColumns() error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for name, ddl := range map[string]string{
-		"src_port":  `ALTER TABLE events ADD COLUMN src_port INTEGER DEFAULT 0`,
-		"password":  `ALTER TABLE events ADD COLUMN password TEXT`,
-		"session_id": `ALTER TABLE events ADD COLUMN session_id TEXT`,
-		"hassh":     `ALTER TABLE events ADD COLUMN hassh TEXT`,
-		"ssh_client": `ALTER TABLE events ADD COLUMN ssh_client TEXT`,
-		"ja4":       `ALTER TABLE events ADD COLUMN ja4 TEXT`,
-		"command":   `ALTER TABLE events ADD COLUMN command TEXT`,
-		"sha256":    `ALTER TABLE events ADD COLUMN sha256 TEXT`,
-		"filename":  `ALTER TABLE events ADD COLUMN filename TEXT`,
-		"raw":       `ALTER TABLE events ADD COLUMN raw TEXT`,
-		"actor_id":  `ALTER TABLE events ADD COLUMN actor_id TEXT`,
-	} {
-		if !cols[name] {
-			if _, err := s.db.Exec(ddl); err != nil {
+	legacyColumns := []struct {
+		name string
+		ddl  string
+	}{
+		{"src_port", `ALTER TABLE events ADD COLUMN src_port INTEGER DEFAULT 0`},
+		{"password", `ALTER TABLE events ADD COLUMN password TEXT`},
+		{"session_id", `ALTER TABLE events ADD COLUMN session_id TEXT`},
+		{"hassh", `ALTER TABLE events ADD COLUMN hassh TEXT`},
+		{"ssh_client", `ALTER TABLE events ADD COLUMN ssh_client TEXT`},
+		{"ja4", `ALTER TABLE events ADD COLUMN ja4 TEXT`},
+		{"command", `ALTER TABLE events ADD COLUMN command TEXT`},
+		{"sha256", `ALTER TABLE events ADD COLUMN sha256 TEXT`},
+		{"filename", `ALTER TABLE events ADD COLUMN filename TEXT`},
+		{"raw", `ALTER TABLE events ADD COLUMN raw TEXT`},
+		{"actor_id", `ALTER TABLE events ADD COLUMN actor_id TEXT`},
+	}
+	for _, col := range legacyColumns {
+		if !cols[col.name] {
+			if _, err := s.db.Exec(col.ddl); err != nil {
 				return err
 			}
 		}
@@ -157,17 +165,31 @@ func (s *Store) ensureLegacyColumns() error {
 }
 
 func (s *Store) InsertEvent(e *models.Event) error {
-	_, err := s.db.Exec(`
+	return insertEvent(s.db, e)
+}
+
+func insertEvent(db sqlExecer, e *models.Event) error {
+	res, err := db.Exec(`
 INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, raw, actor_id)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.Kind, e.SrcIP, e.SrcPort,
 		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient, e.JA4,
 		e.Command, e.SHA256, e.Filename, e.Raw, e.ActorID)
-	return err
+	if err != nil {
+		return err
+	}
+	if id, err := res.LastInsertId(); err == nil {
+		e.ID = id
+	}
+	return nil
 }
 
 func (s *Store) UpsertActor(a *models.Actor) error {
-	_, err := s.db.Exec(`
+	return upsertActor(s.db, a)
+}
+
+func upsertActor(db sqlExecer, a *models.Actor) error {
+	_, err := db.Exec(`
 INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
@@ -184,7 +206,11 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 func (s *Store) UpsertActorIP(actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
-	_, err := s.db.Exec(`
+	return upsertActorIP(s.db, actorID, ip, firstSeen, lastSeen, count)
+}
+
+func upsertActorIP(db sqlExecer, actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
+	_, err := db.Exec(`
 INSERT INTO actor_ips (actor_id, ip, first_seen, last_seen, count) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(actor_id, ip) DO UPDATE SET
   first_seen=CASE WHEN excluded.first_seen < first_seen THEN excluded.first_seen ELSE first_seen END,
@@ -195,7 +221,11 @@ ON CONFLICT(actor_id, ip) DO UPDATE SET
 }
 
 func (s *Store) UpsertActorUser(actorID, user string, count int) error {
-	_, err := s.db.Exec(`
+	return upsertActorUser(s.db, actorID, user, count)
+}
+
+func upsertActorUser(db sqlExecer, actorID, user string, count int) error {
+	_, err := db.Exec(`
 INSERT INTO actor_users (actor_id, username, count) VALUES (?, ?, ?)
 ON CONFLICT(actor_id, username) DO UPDATE SET count=excluded.count`,
 		actorID, user, count)

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -44,45 +45,13 @@ FROM events WHERE source=? ORDER BY ts ASC`, source)
 }
 
 func (s *Store) DeleteActorsBySource(source models.Source) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM actor_ips WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM actor_users WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM actors WHERE source=?`, source); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return s.WithTx(func(tx *sql.Tx) error {
+		return deleteActorsTx(tx, source)
+	})
 }
 
 func (s *Store) ClearBySource(source models.Source) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM actor_ips WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM actor_users WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM actors WHERE source=?`, source); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM events WHERE source=?`, source); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return s.WithTx(func(tx *sql.Tx) error {
+		return clearSourceTx(tx, source)
+	})
 }

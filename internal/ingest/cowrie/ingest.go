@@ -51,12 +51,7 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	if err != nil {
 		return nil, err
 	}
-	if replace {
-		if err := st.ClearBySource(models.SourceCowrie); err != nil {
-			return nil, err
-		}
-	}
-	res, err := persistEvents(st, events, adminIPs)
+	res, err := persistEvents(st, events, adminIPs, replace)
 	if res != nil {
 		res.Skipped = skipped
 	}
@@ -91,96 +86,46 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	if len(fresh) == 0 {
 		return &Result{Skipped: skipped}, nil
 	}
-	for _, e := range fresh {
-		if err := st.InsertEvent(e); err != nil {
-			return nil, fmt.Errorf("insert event: %w", err)
-		}
+	all, err := st.EventsBySource(models.SourceCowrie)
+	if err != nil {
+		return nil, err
 	}
-	res, err := syncCowrieActors(st, adminIPs)
+	all = append(all, fresh...)
+	res, err := syncCowrieActors(st, all, fresh, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
 	}
 	return res, err
 }
 
-func syncCowrieActors(st *store.Store, adminIPs []string) (*Result, error) {
-	all, err := st.EventsBySource(models.SourceCowrie)
-	if err != nil {
-		return nil, err
-	}
+func syncCowrieActors(st *store.Store, all, fresh []*models.Event, adminIPs []string) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
 	actors, _ := actor.BuildFromCowrie(all, admin)
-	if err := st.DeleteActorsBySource(models.SourceCowrie); err != nil {
+	if err := st.AppendEventsAndReplaceActors(models.SourceCowrie, fresh, all, actors); err != nil {
 		return nil, err
-	}
-	for _, a := range actors {
-		if err := st.UpsertActor(a); err != nil {
-			return nil, err
-		}
-		ipStats := map[string]int{}
-		users := map[string]int{}
-		for _, e := range all {
-			if e.ActorID != a.ID {
-				continue
-			}
-			if err := st.UpdateEventActor(e.ID, a.ID); err != nil {
-				return nil, err
-			}
-			ipStats[e.SrcIP]++
-			if e.Username != "" {
-				users[e.Username]++
-			}
-		}
-		for ip, c := range ipStats {
-			if err := st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, c); err != nil {
-				return nil, err
-			}
-		}
-		for u, c := range users {
-			if err := st.UpsertActorUser(a.ID, u, c); err != nil {
-				return nil, err
-			}
-		}
 	}
 	return &Result{Events: len(all), Actors: len(actors)}, nil
 }
 
-func persistEvents(st *store.Store, events []*models.Event, adminIPs []string) (*Result, error) {
+func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
-	actors, _ := actor.BuildFromCowrie(events, admin)
-
-	for _, e := range events {
-		if err := st.InsertEvent(e); err != nil {
-			return nil, fmt.Errorf("insert event: %w", err)
+	if replace {
+		actors, _ := actor.BuildFromCowrie(events, admin)
+		if err := st.ReplaceSourceEventsAndActors(models.SourceCowrie, events, actors); err != nil {
+			return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
 		}
+		return &Result{Events: len(events), Actors: len(actors)}, nil
 	}
-	for _, a := range actors {
-		if err := st.UpsertActor(a); err != nil {
-			return nil, err
-		}
-		ipStats := map[string]int{}
-		users := map[string]int{}
-		for _, e := range events {
-			if e.ActorID != a.ID {
-				continue
-			}
-			ipStats[e.SrcIP]++
-			if e.Username != "" {
-				users[e.Username]++
-			}
-		}
-		for ip, c := range ipStats {
-			if err := st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, c); err != nil {
-				return nil, err
-			}
-		}
-		for u, c := range users {
-			if err := st.UpsertActorUser(a.ID, u, c); err != nil {
-				return nil, err
-			}
-		}
+	all, err := st.EventsBySource(models.SourceCowrie)
+	if err != nil {
+		return nil, err
 	}
-	return &Result{Events: len(events), Actors: len(actors)}, nil
+	all = append(all, events...)
+	actors, _ := actor.BuildFromCowrie(all, admin)
+	if err := st.AppendEventsAndReplaceActors(models.SourceCowrie, events, all, actors); err != nil {
+		return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
+	}
+	return &Result{Events: len(all), Actors: len(actors)}, nil
 }
 
 func parseReader(r io.Reader) ([]*models.Event, int, error) {
