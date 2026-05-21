@@ -1,10 +1,12 @@
 package web
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -15,9 +17,10 @@ import (
 )
 
 type Server struct {
-	st   *store.Store
-	addr string
-	geo  *geoResolver
+	st            *store.Store
+	addr          string
+	geo           *geoResolver
+	dashboardAuth string
 }
 
 func New(st *store.Store, addr string) *Server {
@@ -25,9 +28,10 @@ func New(st *store.Store, addr string) *Server {
 		addr = ":8080"
 	}
 	return &Server{
-		st:   st,
-		addr: addr,
-		geo:  newGeoResolver(),
+		st:            st,
+		addr:          addr,
+		geo:           newGeoResolver(),
+		dashboardAuth: strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
 	}
 }
 
@@ -44,9 +48,31 @@ func (s *Server) Run() error {
 	return srv.ListenAndServe()
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(indexHTML))
+}
+
+func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.dashboardAuth == "" {
+		return true
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if token == "" {
+		token = strings.TrimSpace(r.Header.Get("X-ShardLure-Token"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(r.URL.Query().Get("token"))
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(s.dashboardAuth)) == 1 {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="shardlure-dashboard"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
 }
 
 type dashboardResponse struct {
@@ -128,7 +154,10 @@ type homePoint struct {
 	CC      string  `json:"cc"`
 }
 
-func (s *Server) handleDashboard(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	actors, err := s.st.ListActors(100)
