@@ -13,11 +13,11 @@ import (
 )
 
 var (
-	reInvalid = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Invalid user (?P<user>\S+) from (?P<ip>\S+)`)
-	reFailed = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed password for (?:invalid user )?(?P<user>\S+).*?from (?P<ip>\S+)`)
+	reInvalid   = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Invalid user (?P<user>\S+) from (?P<ip>\S+)`)
+	reFailed    = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed password for (?:invalid user )?(?P<user>\S+).*?from (?P<ip>\S+)`)
 	reFailedKey = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed publickey for (?P<user>\S+).*?from (?P<ip>\S+)`)
-	reAccepted = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Accepted publickey for (?P<user>\S+) from (?P<ip>\S+)`)
-	rePort     = regexp.MustCompile(`port (\d+)`)
+	reAccepted  = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Accepted publickey for (?P<user>\S+) from (?P<ip>\S+)`)
+	rePort      = regexp.MustCompile(`port (\d+)`)
 )
 
 type match struct {

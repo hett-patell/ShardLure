@@ -53,5 +53,9 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 	if err := sc.Err(); err != nil {
 		return err
 	}
+	if ctx.Err() != nil {
+		_ = cmd.Wait()
+		return nil
+	}
 	return cmd.Wait()
 }

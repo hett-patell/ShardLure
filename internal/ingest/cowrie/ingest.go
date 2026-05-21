@@ -100,7 +100,7 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 
 func syncCowrieActors(st *store.Store, all, fresh []*models.Event, adminIPs []string) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
-	actors, _ := actor.BuildFromCowrie(all, admin)
+	actors := actor.BuildFromCowrie(all, admin)
 	if err := st.AppendEventsAndReplaceActors(models.SourceCowrie, fresh, all, actors); err != nil {
 		return nil, err
 	}
@@ -110,7 +110,7 @@ func syncCowrieActors(st *store.Store, all, fresh []*models.Event, adminIPs []st
 func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
 	if replace {
-		actors, _ := actor.BuildFromCowrie(events, admin)
+		actors := actor.BuildFromCowrie(events, admin)
 		if err := st.ReplaceSourceEventsAndActors(models.SourceCowrie, events, actors); err != nil {
 			return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
 		}
@@ -121,7 +121,7 @@ func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, r
 		return nil, err
 	}
 	all = append(all, events...)
-	actors, _ := actor.BuildFromCowrie(all, admin)
+	actors := actor.BuildFromCowrie(all, admin)
 	if err := st.AppendEventsAndReplaceActors(models.SourceCowrie, events, all, actors); err != nil {
 		return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
 	}

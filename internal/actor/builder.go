@@ -13,8 +13,8 @@ import (
 )
 
 type IPStats struct {
-	Events     []*models.Event
-	Users      map[string]int
+	Events      []*models.Event
+	Users       map[string]int
 	First, Last time.Time
 }
 
@@ -46,9 +46,8 @@ const (
 )
 
 // BuildFromJournal groups journal events into actors (1 IP = 1 actor for journal mode).
-func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) ([]*models.Actor, map[string]string) {
+func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) []*models.Actor {
 	byIP := map[string]*IPStats{}
-	eventToActor := map[string]string{}
 
 	for _, e := range events {
 		if adminIPs[e.SrcIP] {
@@ -112,20 +111,18 @@ func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) ([]*mode
 		actors = append(actors, a)
 		for _, e := range st.Events {
 			e.ActorID = id
-			eventToActor[eventKey(e)] = id
 		}
 	}
 
 	sort.Slice(actors, func(i, j int) bool {
 		return actors[i].LastSeen.After(actors[j].LastSeen)
 	})
-	return actors, eventToActor
+	return actors
 }
 
 // BuildFromCowrie groups events by HASSH (fallback: source IP).
-func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) ([]*models.Actor, map[string]string) {
+func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) []*models.Actor {
 	byKey := map[string]*CowrieStats{}
-	eventToActor := map[string]string{}
 
 	for _, e := range events {
 		if e.SrcIP == "" {
@@ -226,14 +223,13 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) ([]*model
 		actors = append(actors, a)
 		for _, e := range st.Events {
 			e.ActorID = id
-			eventToActor[eventKey(e)] = id
 		}
 	}
 
 	sort.Slice(actors, func(i, j int) bool {
 		return actors[i].LastSeen.After(actors[j].LastSeen)
 	})
-	return actors, eventToActor
+	return actors
 }
 
 func sortedKeys(m map[string]int) []string {
@@ -258,11 +254,6 @@ func usernameSetHash(users []string) string {
 	}
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:8])
-}
-
-func eventKey(e *models.Event) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d",
-		e.Source, e.Kind, e.SrcIP, e.Username, e.SessionID, e.TS.UTC().Format(time.RFC3339Nano), e.ID)
 }
 
 func AdminSet(ips []string) map[string]bool {

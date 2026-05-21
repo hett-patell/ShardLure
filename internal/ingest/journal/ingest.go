@@ -9,8 +9,8 @@ import (
 )
 
 type Result struct {
-	Events int
-	Actors int
+	Events       int
+	Actors       int
 	SkippedAdmin int
 }
 
@@ -48,8 +48,9 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 		stored = append(stored, e)
 	}
 
-	actors, _ := actor.BuildFromJournal(attack, admin)
+	var actors []*models.Actor
 	if replace {
+		actors = actor.BuildFromJournal(attack, admin)
 		if err := st.ReplaceSourceEventsAndActors(models.SourceJournal, stored, actors); err != nil {
 			return nil, err
 		}
@@ -59,15 +60,15 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 			return nil, err
 		}
 		all = append(all, stored...)
-		actors, _ = actor.BuildFromJournal(filterAttackJournalEvents(all), admin)
+		actors = actor.BuildFromJournal(filterAttackJournalEvents(all), admin)
 		if err := st.AppendEventsAndReplaceActors(models.SourceJournal, stored, all, actors); err != nil {
 			return nil, err
 		}
 	}
 
 	return &Result{
-		Events: len(stored),
-		Actors: len(actors),
+		Events:       len(stored),
+		Actors:       len(actors),
 		SkippedAdmin: skipped,
 	}, nil
 }

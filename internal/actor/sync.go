@@ -19,7 +19,7 @@ func SyncJournalIP(st *store.Store, ip string, admin map[string]bool) error {
 	for i := range events {
 		ptrs[i] = events[i]
 	}
-	actors, _ := BuildFromJournal(ptrs, admin)
+	actors := BuildFromJournal(ptrs, admin)
 	if len(actors) == 0 {
 		return nil
 	}

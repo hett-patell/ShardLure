@@ -13,7 +13,7 @@ type Config struct {
 	AdminIPs []string `yaml:"admin_ips"`
 
 	SSH struct {
-		AdminPort   int `yaml:"admin_port"`
+		AdminPort    int `yaml:"admin_port"`
 		HoneypotPort int `yaml:"honeypot_port"`
 	} `yaml:"ssh"`
 

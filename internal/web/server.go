@@ -102,16 +102,16 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 }
 
 type dashboardResponse struct {
-	GeneratedAt string         `json:"generatedAt"`
-	Summary     summaryBlock   `json:"summary"`
-	Actors      []actorCard    `json:"actors"`
-	Recent      []recentRecord `json:"recent"`
-	TopIPs      []topIPRow     `json:"topIps"`
-	TopUsers    []topUserRow   `json:"topUsers"`
-	TopCommands []topCommandRow `json:"topCommands"`
+	GeneratedAt  string          `json:"generatedAt"`
+	Summary      summaryBlock    `json:"summary"`
+	Actors       []actorCard     `json:"actors"`
+	Recent       []recentRecord  `json:"recent"`
+	TopIPs       []topIPRow      `json:"topIps"`
+	TopUsers     []topUserRow    `json:"topUsers"`
+	TopCommands  []topCommandRow `json:"topCommands"`
 	TopCountries []topCountryRow `json:"topCountries"`
-	Hourly      []hourPoint    `json:"hourly"`
-	Home        homePoint      `json:"home"`
+	Hourly       []hourPoint     `json:"hourly"`
+	Home         homePoint       `json:"home"`
 }
 
 type summaryBlock struct {
@@ -206,11 +206,27 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	allEvents, err := s.st.RecentEvents(10000)
+	topIPs, err := s.st.TopSourceIPs(25)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	topUsers, err := s.st.TopUsernames(20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	topCommands, err := s.st.TopCommands(20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hourly, err := s.st.HourlyEventCounts(72)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	uniqueIPs, _ := s.st.UniqueIPCount()
 	ec, _ := s.st.EventCount()
 	ac, _ := s.st.ActorCount()
 
@@ -223,17 +239,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Home: s.home,
 	}
 
-	type ipAgg struct {
-		Hits int
-		CC   string
-		City string
-		Cn   string
-	}
-	ipStats := map[string]*ipAgg{}
-	userStats := map[string]int{}
-	commandStats := map[string]int{}
 	countryStats := map[string]*topCountryRow{}
-	hourly := map[int64]int{}
 
 	for _, a := range actors {
 		card := actorCard{
@@ -257,70 +263,38 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		resp.Actors = append(resp.Actors, card)
 	}
 
-	for _, e := range allEvents {
-		if e.SrcIP == "" {
-			continue
-		}
-		ia, ok := ipStats[e.SrcIP]
-		if !ok {
-			ia = &ipAgg{}
-			ipStats[e.SrcIP] = ia
-		}
-		ia.Hits++
-		if e.Username != "" && e.Username != "?" {
-			userStats[e.Username]++
-		}
-		if e.Command != "" {
-			commandStats[e.Command]++
-		}
-		b := e.TS.UTC().Unix() - (e.TS.UTC().Unix() % 3600)
-		hourly[b]++
-
-		if ia.CC == "" && !isPrivateIP(e.SrcIP) {
-			g := s.geo.resolve(e.SrcIP)
+	for _, row := range topIPs {
+		var cc, country, city string
+		if !isPrivateIP(row.Key) {
+			g := s.geo.resolve(row.Key)
 			if g.OK {
-				ia.CC = g.CC
-				ia.Cn = g.Country
-				ia.City = g.City
+				cc = g.CC
+				country = g.Country
+				city = g.City
 			}
 		}
-	}
-
-	for ip, agg := range ipStats {
 		resp.TopIPs = append(resp.TopIPs, topIPRow{
-			IP:      ip,
-			Hits:    agg.Hits,
-			CC:      agg.CC,
-			Country: agg.Cn,
-			City:    agg.City,
+			IP:      row.Key,
+			Hits:    row.Hits,
+			CC:      cc,
+			Country: country,
+			City:    city,
 		})
-		if agg.CC != "" {
-			row, ok := countryStats[agg.CC]
+		if cc != "" {
+			countryRow, ok := countryStats[cc]
 			if !ok {
-				row = &topCountryRow{CC: agg.CC, Country: agg.Cn}
-				countryStats[agg.CC] = row
+				countryRow = &topCountryRow{CC: cc, Country: country}
+				countryStats[cc] = countryRow
 			}
-			row.Hits += agg.Hits
+			countryRow.Hits += row.Hits
 		}
 	}
-	sort.Slice(resp.TopIPs, func(i, j int) bool { return resp.TopIPs[i].Hits > resp.TopIPs[j].Hits })
-	if len(resp.TopIPs) > 25 {
-		resp.TopIPs = resp.TopIPs[:25]
-	}
 
-	for u, n := range userStats {
-		resp.TopUsers = append(resp.TopUsers, topUserRow{User: u, Hits: n})
+	for _, row := range topUsers {
+		resp.TopUsers = append(resp.TopUsers, topUserRow{User: row.Key, Hits: row.Hits})
 	}
-	sort.Slice(resp.TopUsers, func(i, j int) bool { return resp.TopUsers[i].Hits > resp.TopUsers[j].Hits })
-	if len(resp.TopUsers) > 20 {
-		resp.TopUsers = resp.TopUsers[:20]
-	}
-	for c, n := range commandStats {
-		resp.TopCommands = append(resp.TopCommands, topCommandRow{Command: c, Hits: n})
-	}
-	sort.Slice(resp.TopCommands, func(i, j int) bool { return resp.TopCommands[i].Hits > resp.TopCommands[j].Hits })
-	if len(resp.TopCommands) > 20 {
-		resp.TopCommands = resp.TopCommands[:20]
+	for _, row := range topCommands {
+		resp.TopCommands = append(resp.TopCommands, topCommandRow{Command: row.Key, Hits: row.Hits})
 	}
 
 	for _, c := range countryStats {
@@ -330,19 +304,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if len(resp.TopCountries) > 12 {
 		resp.TopCountries = resp.TopCountries[:12]
 	}
-	resp.Summary.UniqueIPs = len(ipStats)
+	resp.Summary.UniqueIPs = uniqueIPs
 	resp.Summary.Countries = len(countryStats)
 
-	var keys []int64
-	for k := range hourly {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	if len(keys) > 72 {
-		keys = keys[len(keys)-72:]
-	}
-	for _, k := range keys {
-		resp.Hourly = append(resp.Hourly, hourPoint{T: k, N: hourly[k]})
+	for _, row := range hourly {
+		resp.Hourly = append(resp.Hourly, hourPoint{T: row.Hour.Unix(), N: row.Hits})
 	}
 
 	for _, e := range events {
@@ -378,7 +344,7 @@ type geoResolver struct {
 }
 
 func newGeoResolver() *geoResolver {
-	enabled := strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) != "0"
+	enabled := strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) == "1"
 	return &geoResolver{
 		cache:    map[string]geoEntry{},
 		inflight: map[string]bool{},
