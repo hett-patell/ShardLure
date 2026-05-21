@@ -31,6 +31,7 @@ func (s *Store) UniqueIPCount() (int, error) {
 }
 
 func (s *Store) HourlyEventCounts(limit int) ([]HourCount, error) {
+	// events.ts is stored as RFC3339Nano UTC text, so the first 13 bytes are YYYY-MM-DDTHH.
 	rows, err := s.db.Query(`
 SELECT hour, hits FROM (
   SELECT substr(ts, 1, 13) AS hour, COUNT(*) AS hits

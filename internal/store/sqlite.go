@@ -42,6 +42,7 @@ func (s *Store) migrate() error {
 	schema := `
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- RFC3339Nano UTC text; dashboard hourly aggregation relies on ISO prefix ordering.
   ts TEXT NOT NULL,
   source TEXT NOT NULL,
   kind TEXT NOT NULL,
