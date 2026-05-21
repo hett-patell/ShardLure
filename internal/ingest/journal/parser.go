@@ -1,0 +1,106 @@
+package journal
+
+import (
+	"bufio"
+	"io"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/networkshard/shardlure/pkg/models"
+)
+
+var (
+	reInvalid = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Invalid user (?P<user>\S+) from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
+	reFailed = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed password for (?:invalid user )?(?P<user>\S+).*?from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
+	reFailedKey = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed publickey for (?P<user>\S+).*?from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
+	reAccepted = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Accepted publickey for (?P<user>\S+) from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
+	rePort     = regexp.MustCompile(`port (\d+)`)
+)
+
+func SanitizeUser(u string) string {
+	if u == "" {
+		return "?"
+	}
+	var b strings.Builder
+	for _, r := range u {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('?')
+		}
+		if b.Len() >= 32 {
+			break
+		}
+	}
+	s := b.String()
+	if s == "" {
+		return "?"
+	}
+	return s
+}
+
+func ParseLine(line string) (*models.Event, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, false
+	}
+
+	type match struct {
+		ts, user, ip string
+		kind         models.EventKind
+	}
+	var m match
+
+	switch {
+	case reInvalid.MatchString(line):
+		g := reInvalid.FindStringSubmatch(line)
+		m = match{g[1], g[2], g[3], models.KindInvalidUser}
+	case reFailed.MatchString(line):
+		g := reFailed.FindStringSubmatch(line)
+		m = match{g[1], g[2], g[3], models.KindFailedPass}
+	case reFailedKey.MatchString(line):
+		g := reFailedKey.FindStringSubmatch(line)
+		m = match{g[1], g[2], g[3], models.KindFailedKey}
+	case reAccepted.MatchString(line):
+		g := reAccepted.FindStringSubmatch(line)
+		m = match{g[1], g[2], g[3], models.KindAccepted}
+	default:
+		return nil, false
+	}
+
+	ts, err := time.Parse(time.RFC3339, m.ts)
+	if err != nil {
+		// short-iso may lack Z; try appending
+		ts, err = time.Parse("2006-01-02T15:04:05-07:00", m.ts)
+		if err != nil {
+			return nil, false
+		}
+	}
+
+	e := &models.Event{
+		TS:       ts.UTC(),
+		Source:   models.SourceJournal,
+		Kind:     m.kind,
+		SrcIP:    m.ip,
+		Username: SanitizeUser(m.user),
+		Raw:      line,
+	}
+	if p := rePort.FindStringSubmatch(line); len(p) > 1 {
+		e.SrcPort, _ = strconv.Atoi(p[1])
+	}
+	return e, true
+}
+
+func ParseReader(r io.Reader) ([]*models.Event, error) {
+	var events []*models.Event
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if e, ok := ParseLine(sc.Text()); ok {
+			events = append(events, e)
+		}
+	}
+	return events, sc.Err()
+}

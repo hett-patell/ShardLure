@@ -1,0 +1,60 @@
+-rw-rw-r-- 1 hett hett 486 May 21 13:35 /home/hett/ShardLure/shardlure/go.mod
+=== UTF16 fix ===
+  File "<string>", line 1
+    from pathlib import Path; root=Path(/home/hett/ShardLure/shardlure); fixed=0
+                                        ^
+SyntaxError: invalid syntax
+=== Step 2: go mod tidy build test ===
+go: errors parsing go.mod:
+go.mod:1:2: unexpected input character '\x00'
+=== Step 2: go mod tidy build test ===
+go: downloading modernc.org/sqlite v1.34.5
+go: downloading github.com/charmbracelet/bubbles v0.20.0
+go: downloading github.com/charmbracelet/lipgloss v1.0.0
+go: downloading github.com/charmbracelet/bubbletea v1.2.4
+go: downloading github.com/charmbracelet/x/exp/golden v0.0.0-20240815200342-61de596daa2b
+go: downloading github.com/muesli/termenv v0.15.2
+go: downloading golang.org/x/sys v0.27.0
+go: downloading github.com/charmbracelet/x/ansi v0.4.5
+go: downloading golang.org/x/sync v0.9.0
+go: downloading golang.org/x/text v0.3.8
+go: downloading github.com/aymanbagabas/go-udiff v0.2.0
+go: downloading modernc.org/mathutil v1.6.0
+go: downloading modernc.org/fileutil v1.3.0
+go: downloading modernc.org/libc v1.55.3
+go: downloading github.com/google/pprof v0.0.0-20240409012703-83162a5b38cd
+go: downloading github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec
+go: downloading github.com/ncruces/go-strftime v0.1.9
+go: downloading modernc.org/memory v1.8.0
+go: downloading github.com/dustin/go-humanize v1.0.1
+go: downloading modernc.org/ccgo/v4 v4.19.2
+go: downloading modernc.org/gc/v2 v2.4.1
+go: downloading modernc.org/cc/v4 v4.21.4
+go: downloading modernc.org/strutil v1.2.0
+go: downloading modernc.org/opt v0.1.3
+go: downloading golang.org/x/tools v0.19.0
+go: downloading golang.org/x/mod v0.16.0
+go: downloading modernc.org/token v1.1.0
+go: downloading modernc.org/sortutil v1.2.0
+error obtaining VCS status: exit status 128
+	Use -buildvcs=false to disable VCS stamping.
+# github.com/networkshard/shardlure/internal/web
+internal/web/server.go:669:84: invalid UTF-8 encoding
+# github.com/networkshard/shardlure/internal/web
+internal/web/server.go:669:84: invalid UTF-8 encoding
+?   	github.com/networkshard/shardlure/cmd/shardlure	[no test files]
+?   	github.com/networkshard/shardlure/internal/actor	[no test files]
+?   	github.com/networkshard/shardlure/internal/config	[no test files]
+ok  	github.com/networkshard/shardlure/internal/ingest/cowrie	0.003s
+--- FAIL: TestParseSample (0.00s)
+    parser_test.go:21: expected 7 events, got 0
+FAIL
+FAIL	github.com/networkshard/shardlure/internal/ingest/journal	0.003s
+?   	github.com/networkshard/shardlure/internal/store	[no test files]
+?   	github.com/networkshard/shardlure/internal/web	[no test files]
+?   	github.com/networkshard/shardlure/pkg/models	[no test files]
+?   	github.com/networkshard/shardlure/tui	[no test files]
+FAIL
+=== Step 3: git init ===
+Initialized empty Git repository in /home/hett/ShardLure/shardlure/.git/
+=== Step 4: git add status ===
