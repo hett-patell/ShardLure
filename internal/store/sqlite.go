@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -45,6 +44,7 @@ CREATE TABLE IF NOT EXISTS events (
   src_ip TEXT,
   src_port INTEGER DEFAULT 0,
   username TEXT,
+  -- Honeypot passwords are attacker-supplied telemetry and can still be sensitive.
   password TEXT,
   session_id TEXT,
   hassh TEXT,
@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_ip ON events(src_ip);
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
+CREATE INDEX IF NOT EXISTS idx_events_raw ON events(raw);
+CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_ip, session_id, username, command);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS actors (
   id TEXT PRIMARY KEY,
@@ -96,8 +103,57 @@ CREATE TABLE IF NOT EXISTS actor_users (
   PRIMARY KEY (actor_id, username)
 );
 `
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	if err := s.ensureLegacyColumns(); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)`, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+func (s *Store) ensureLegacyColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(events)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for name, ddl := range map[string]string{
+		"src_port":  `ALTER TABLE events ADD COLUMN src_port INTEGER DEFAULT 0`,
+		"password":  `ALTER TABLE events ADD COLUMN password TEXT`,
+		"session_id": `ALTER TABLE events ADD COLUMN session_id TEXT`,
+		"hassh":     `ALTER TABLE events ADD COLUMN hassh TEXT`,
+		"ssh_client": `ALTER TABLE events ADD COLUMN ssh_client TEXT`,
+		"ja4":       `ALTER TABLE events ADD COLUMN ja4 TEXT`,
+		"command":   `ALTER TABLE events ADD COLUMN command TEXT`,
+		"sha256":    `ALTER TABLE events ADD COLUMN sha256 TEXT`,
+		"filename":  `ALTER TABLE events ADD COLUMN filename TEXT`,
+		"raw":       `ALTER TABLE events ADD COLUMN raw TEXT`,
+		"actor_id":  `ALTER TABLE events ADD COLUMN actor_id TEXT`,
+	} {
+		if !cols[name] {
+			if _, err := s.db.Exec(ddl); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) InsertEvent(e *models.Event) error {
@@ -127,12 +183,14 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
-func (s *Store) UpsertActorIP(actorID, ip string, ts time.Time, count int) error {
+func (s *Store) UpsertActorIP(actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
 	_, err := s.db.Exec(`
 INSERT INTO actor_ips (actor_id, ip, first_seen, last_seen, count) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(actor_id, ip) DO UPDATE SET
-  last_seen=excluded.last_seen, count=excluded.count`,
-		actorID, ip, ts.UTC().Format(time.RFC3339Nano), ts.UTC().Format(time.RFC3339Nano), count)
+  first_seen=CASE WHEN excluded.first_seen < first_seen THEN excluded.first_seen ELSE first_seen END,
+  last_seen=CASE WHEN excluded.last_seen > last_seen THEN excluded.last_seen ELSE last_seen END,
+  count=excluded.count`,
+		actorID, ip, firstSeen.UTC().Format(time.RFC3339Nano), lastSeen.UTC().Format(time.RFC3339Nano), count)
 	return err
 }
 
@@ -146,10 +204,13 @@ ON CONFLICT(actor_id, username) DO UPDATE SET count=excluded.count`,
 
 func (s *Store) ListActors(limit int) ([]models.Actor, error) {
 	q := `SELECT id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes FROM actors ORDER BY last_seen DESC`
+	var rows *sql.Rows
+	var err error
 	if limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", limit)
+		rows, err = s.db.Query(q+" LIMIT ?", limit)
+	} else {
+		rows, err = s.db.Query(q)
 	}
-	rows, err := s.db.Query(q)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +248,18 @@ FROM actors WHERE id=?`, id)
 }
 
 func (s *Store) ActorUsers(id string) ([]models.ActorUser, error) {
-	rows, err := s.db.Query(`SELECT actor_id, username, count FROM actor_users WHERE actor_id=? ORDER BY count DESC LIMIT 30`, id)
+	return s.ActorUsersLimit(id, 30)
+}
+
+func (s *Store) ActorUsersLimit(id string, limit int) ([]models.ActorUser, error) {
+	q := `SELECT actor_id, username, count FROM actor_users WHERE actor_id=? ORDER BY count DESC`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = s.db.Query(q+` LIMIT ?`, id, limit)
+	} else {
+		rows, err = s.db.Query(q, id)
+	}
 	if err != nil {
 		return nil, err
 	}

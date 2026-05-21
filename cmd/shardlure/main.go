@@ -124,7 +124,11 @@ func cmdIngest(st *store.Store, cfg config.Config, args []string) {
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Printf("ingested %d cowrie events -> %d actors\n", res.Events, res.Actors)
+		if res.Skipped > 0 {
+			fmt.Printf("ingested %d cowrie events -> %d actors (skipped %d malformed/unsupported lines)\n", res.Events, res.Actors, res.Skipped)
+		} else {
+			fmt.Printf("ingested %d cowrie events -> %d actors\n", res.Events, res.Actors)
+		}
 	default:
 		fatal(fmt.Errorf("unknown ingest mode: %s (expected journal|cowrie)", mode))
 	}

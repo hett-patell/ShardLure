@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -15,8 +16,9 @@ import (
 )
 
 type Result struct {
-	Events int
-	Actors int
+	Events  int
+	Actors  int
+	Skipped int
 }
 
 type cowrieLine struct {
@@ -45,16 +47,20 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	}
 	defer f.Close()
 
-	events, err := parseReader(f)
+	events, skipped, err := parseReader(f)
 	if err != nil {
 		return nil, err
 	}
 	if replace {
-		if err := st.ClearAll(); err != nil {
+		if err := st.ClearBySource(models.SourceCowrie); err != nil {
 			return nil, err
 		}
 	}
-	return persistEvents(st, events, adminIPs)
+	res, err := persistEvents(st, events, adminIPs)
+	if res != nil {
+		res.Skipped = skipped
+	}
+	return res, err
 }
 
 func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result, error) {
@@ -67,13 +73,13 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	}
 	defer f.Close()
 
-	events, err := parseReader(f)
+	events, skipped, err := parseReader(f)
 	if err != nil {
 		return nil, err
 	}
 	var fresh []*models.Event
 	for _, e := range events {
-		exists, err := st.EventRawExists(e.Raw)
+		exists, err := st.EventExists(e)
 		if err != nil {
 			return nil, err
 		}
@@ -83,14 +89,18 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		fresh = append(fresh, e)
 	}
 	if len(fresh) == 0 {
-		return syncCowrieActors(st, adminIPs)
+		return &Result{Skipped: skipped}, nil
 	}
 	for _, e := range fresh {
 		if err := st.InsertEvent(e); err != nil {
 			return nil, fmt.Errorf("insert event: %w", err)
 		}
 	}
-	return syncCowrieActors(st, adminIPs)
+	res, err := syncCowrieActors(st, adminIPs)
+	if res != nil {
+		res.Skipped = skipped
+	}
+	return res, err
 }
 
 func syncCowrieActors(st *store.Store, adminIPs []string) (*Result, error) {
@@ -122,7 +132,7 @@ func syncCowrieActors(st *store.Store, adminIPs []string) (*Result, error) {
 			}
 		}
 		for ip, c := range ipStats {
-			if err := st.UpsertActorIP(a.ID, ip, a.LastSeen, c); err != nil {
+			if err := st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, c); err != nil {
 				return nil, err
 			}
 		}
@@ -160,7 +170,7 @@ func persistEvents(st *store.Store, events []*models.Event, adminIPs []string) (
 			}
 		}
 		for ip, c := range ipStats {
-			if err := st.UpsertActorIP(a.ID, ip, a.LastSeen, c); err != nil {
+			if err := st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, c); err != nil {
 				return nil, err
 			}
 		}
@@ -173,9 +183,10 @@ func persistEvents(st *store.Store, events []*models.Event, adminIPs []string) (
 	return &Result{Events: len(events), Actors: len(actors)}, nil
 }
 
-func parseReader(f *os.File) ([]*models.Event, error) {
+func parseReader(r io.Reader) ([]*models.Event, int, error) {
 	var out []*models.Event
-	sc := bufio.NewScanner(f)
+	var skipped int
+	sc := bufio.NewScanner(r)
 	buf := make([]byte, 0, 256*1024)
 	sc.Buffer(buf, 2*1024*1024)
 	for sc.Scan() {
@@ -185,18 +196,20 @@ func parseReader(f *os.File) ([]*models.Event, error) {
 		}
 		var rec cowrieLine
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			skipped++
 			continue
 		}
 		e, ok := toEvent(rec, line)
 		if !ok {
+			skipped++
 			continue
 		}
 		out = append(out, e)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return nil, skipped, err
 	}
-	return out, nil
+	return out, skipped, nil
 }
 
 func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
@@ -207,7 +220,10 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 	if !ok {
 		return nil, false
 	}
-	ts := parseTS(r.Timestamp)
+	ts, ok := parseTS(r.Timestamp)
+	if !ok {
+		return nil, false
+	}
 	srcPort := toInt(r.SrcPort)
 	command := strings.TrimSpace(r.Input)
 	if command == "" {
@@ -260,10 +276,10 @@ func mapKind(eventID string) (models.EventKind, bool) {
 	}
 }
 
-func parseTS(s string) time.Time {
+func parseTS(s string) (time.Time, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return time.Now().UTC()
+		return time.Time{}, false
 	}
 	layouts := []string{
 		time.RFC3339Nano,
@@ -272,10 +288,10 @@ func parseTS(s string) time.Time {
 	}
 	for _, l := range layouts {
 		if t, err := time.Parse(l, s); err == nil {
-			return t.UTC()
+			return t.UTC(), true
 		}
 	}
-	return time.Now().UTC()
+	return time.Time{}, false
 }
 
 func toInt(v any) int {

@@ -73,7 +73,7 @@ func IngestJournalctl(st *store.Store, unit string, since string, adminIPs []str
 			}
 		}
 		for ip, c := range ipStats {
-			if err := st.UpsertActorIP(a.ID, ip, a.LastSeen, c); err != nil {
+			if err := st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, c); err != nil {
 				return nil, err
 			}
 		}

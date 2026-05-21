@@ -6,6 +6,15 @@ import (
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
+func (s *Store) EventExists(e *models.Event) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(1) FROM events
+WHERE source=? AND kind=? AND ts=? AND src_ip=? AND session_id=? AND username=? AND command=?`,
+		e.Source, e.Kind, e.TS.UTC().Format(time.RFC3339Nano), e.SrcIP, e.SessionID, e.Username, e.Command).Scan(&n)
+	return n > 0, err
+}
+
 func (s *Store) EventRawExists(raw string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(1) FROM events WHERE raw=?`, raw).Scan(&n)
@@ -35,6 +44,45 @@ FROM events WHERE source=? ORDER BY ts ASC`, source)
 }
 
 func (s *Store) DeleteActorsBySource(source models.Source) error {
-	_, err := s.db.Exec(`DELETE FROM actors WHERE source=?`, source)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM actor_ips WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM actor_users WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM actors WHERE source=?`, source); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ClearBySource(source models.Source) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM actor_ips WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM actor_users WHERE actor_id IN (SELECT id FROM actors WHERE source=?)`, source); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM actors WHERE source=?`, source); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM events WHERE source=?`, source); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

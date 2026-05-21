@@ -38,7 +38,7 @@ func SyncJournalIP(st *store.Store, ip string, admin map[string]bool) error {
 			return err
 		}
 	}
-	if err := st.UpsertActorIP(a.ID, ip, a.LastSeen, len(ptrs)); err != nil {
+	if err := st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, len(ptrs)); err != nil {
 		return err
 	}
 	for _, e := range ptrs {
