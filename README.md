@@ -1,4 +1,6 @@
 # ShardLure
+<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/68c62b67-de22-48d8-8360-78c6e28d5640" />
+<br></br>
 
 **Attacker identity engine for SSH honeypot telemetry.**
 
@@ -394,6 +396,7 @@ ls /var/lib/shardlure/cowrie/honeyfs/opt/app/
 Or through honeypot SSH access.
 
 ---
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/e62fe09e-e9fb-4d4e-891e-342298640e08" />
 
 ## Roadmap
 
