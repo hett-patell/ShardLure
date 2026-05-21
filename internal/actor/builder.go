@@ -103,6 +103,7 @@ func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) []*model
 			UniqueUsers:     len(st.Users),
 			AttemptsPerHour: aph,
 			UsernameHash:    uhash,
+			ProbeScore:      journalProbeScore(len(st.Events), aph, len(st.Users)),
 			Notes:           fmt.Sprintf("%d distinct usernames", len(st.Users)),
 		}
 		if st.Last.Sub(st.First).Hours() >= 0.25 && aph > 100 {
@@ -215,6 +216,7 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) []*models
 			HASSH:           st.HASSH,
 			SSHClient:       st.Client,
 			UsernameHash:    uhash,
+			ProbeScore:      cowrieProbeScore(st, aph),
 			Notes:           fmt.Sprintf("%d events, %d usernames", len(st.Events), len(st.Users)),
 		}
 		if st.Payload || st.DeployCmd {
@@ -262,4 +264,62 @@ func AdminSet(ips []string) map[string]bool {
 		m[ip] = true
 	}
 	return m
+}
+
+// cowrieProbeScore returns a 0-100 score combining the boolean event-type
+// signals we already detect during clustering with the per-hour attempt rate.
+// Higher = more confidently a probe/recon actor. Used to populate
+// Actor.ProbeScore which the dashboard and IOC export can sort on.
+func cowrieProbeScore(st *CowrieStats, aph float64) int {
+	score := 0
+	if st.Probe {
+		score += 40
+	}
+	if st.Tunnel {
+		score += 15
+	}
+	if st.Payload {
+		score += 25
+	}
+	if st.DeployCmd {
+		score += 25
+	}
+	switch {
+	case aph >= 120:
+		score += 20
+	case aph >= 60:
+		score += 12
+	case aph >= 20:
+		score += 6
+	}
+	if score > 100 {
+		score = 100
+	}
+	return score
+}
+
+// journalProbeScore is the journal-source analogue. We only have failed-auth
+// signals there, so the score is mostly rate-driven.
+func journalProbeScore(eventCount int, aph float64, uniqueUsers int) int {
+	score := 30 // any failed-auth volume on the bait port is probe-like by default
+	switch {
+	case aph >= 120:
+		score += 35
+	case aph >= 60:
+		score += 22
+	case aph >= 20:
+		score += 12
+	}
+	if uniqueUsers >= 10 {
+		score += 20
+	} else if uniqueUsers >= 3 {
+		score += 10
+	}
+	if eventCount >= 100 {
+		score += 10
+	}
+	if score > 100 {
+		score = 100
+	}
+	return score
 }

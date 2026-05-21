@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type CountRow struct {
 	Key  string
@@ -12,17 +15,22 @@ type HourCount struct {
 	Hits int
 }
 
-func (s *Store) TopSourceIPs(limit int) ([]CountRow, error) {
-	return s.topCounts("src_ip", "src_ip IS NOT NULL AND src_ip != ''", limit)
+// topCountsColumns whitelists the columns topCounts() may aggregate over.
+// SQLite parameterized queries can't bind identifiers, so we splice the
+// column name into the SQL string. Restricting it to this allowlist
+// guarantees the splice is safe even if a future caller passes the
+// wrong value.
+var topCountsColumns = map[string]string{
+	"src_ip":   "src_ip IS NOT NULL AND src_ip != ''",
+	"username": "username IS NOT NULL AND username != '' AND username != '?'",
+	"command":  "command IS NOT NULL AND command != ''",
 }
 
-func (s *Store) TopUsernames(limit int) ([]CountRow, error) {
-	return s.topCounts("username", "username IS NOT NULL AND username != '' AND username != '?'", limit)
-}
+func (s *Store) TopSourceIPs(limit int) ([]CountRow, error) { return s.topCounts("src_ip", limit) }
 
-func (s *Store) TopCommands(limit int) ([]CountRow, error) {
-	return s.topCounts("command", "command IS NOT NULL AND command != ''", limit)
-}
+func (s *Store) TopUsernames(limit int) ([]CountRow, error) { return s.topCounts("username", limit) }
+
+func (s *Store) TopCommands(limit int) ([]CountRow, error) { return s.topCounts("command", limit) }
 
 func (s *Store) UniqueIPCount() (int, error) {
 	var n int
@@ -61,7 +69,14 @@ SELECT hour, hits FROM (
 	return out, rows.Err()
 }
 
-func (s *Store) topCounts(column string, where string, limit int) ([]CountRow, error) {
+// topCounts aggregates row counts grouped by an allowlisted column.
+// column MUST be a key of topCountsColumns; any other value returns an error.
+// Never accept user input here.
+func (s *Store) topCounts(column string, limit int) ([]CountRow, error) {
+	where, ok := topCountsColumns[column]
+	if !ok {
+		return nil, fmt.Errorf("topCounts: column %q not in allowlist", column)
+	}
 	query := "SELECT " + column + ", COUNT(*) AS hits FROM events WHERE " + where + " GROUP BY " + column + " ORDER BY hits DESC"
 	var rows rowScanner
 	var err error

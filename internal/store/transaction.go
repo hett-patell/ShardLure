@@ -49,6 +49,16 @@ func replaceActorsTx(tx *sql.Tx, source models.Source, events []*models.Event, a
 		return err
 	}
 
+	// Single pass over events: bucket by actor_id so the outer loop over
+	// actors is O(M) lookup instead of O(N) per actor.
+	byActor := make(map[string][]*models.Event, len(actors))
+	for _, e := range events {
+		if e.ActorID == "" {
+			continue
+		}
+		byActor[e.ActorID] = append(byActor[e.ActorID], e)
+	}
+
 	for _, a := range actors {
 		if err := upsertActor(tx, a); err != nil {
 			return err
@@ -61,10 +71,7 @@ func replaceActorsTx(tx *sql.Tx, source models.Source, events []*models.Event, a
 		}{}
 		userStats := map[string]int{}
 
-		for _, e := range events {
-			if e.ActorID != a.ID {
-				continue
-			}
+		for _, e := range byActor[a.ID] {
 			if e.ID != 0 {
 				if err := updateEventActor(tx, e.ID, a.ID); err != nil {
 					return err

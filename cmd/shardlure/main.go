@@ -335,7 +335,8 @@ func cmdIOC(st *store.Store) {
 	}
 	fmt.Println("# ShardLure IOC slice (journal actors)")
 	for _, a := range actors {
-		fmt.Printf("%s  playbook=%s  events=%d  rate=%.0f/h\n", a.PrimaryIP, a.Playbook, a.EventCount, a.AttemptsPerHour)
+		fmt.Printf("%s  playbook=%s  events=%d  rate=%.0f/h  probe=%d\n",
+			a.PrimaryIP, a.Playbook, a.EventCount, a.AttemptsPerHour, a.ProbeScore)
 	}
 }
 

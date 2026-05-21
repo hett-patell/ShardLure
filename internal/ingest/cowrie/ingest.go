@@ -47,7 +47,7 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	}
 	defer f.Close()
 
-	events, skipped, err := parseReader(f)
+	events, skipped, _, err := parseReader(f)
 	if err != nil {
 		return nil, err
 	}
@@ -88,18 +88,23 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		return nil, err
 	}
 
-	events, skipped, err := parseReader(f)
+	events, skipped, consumed, err := parseReader(f)
 	if err != nil {
 		return nil, err
 	}
 
-	// Persist new offset BEFORE returning so that on rerun we don't re-scan;
-	// dedup still runs in case the offset is somehow stale (e.g. partial line).
+	// Advance offset by exactly the bytes the scanner consumed, not by
+	// fi.Size(): cowrie may have appended more bytes between Stat() and
+	// EOF, and we don't want to claim those bytes were scanned.
+	newOffset := startOffset + consumed
+	if newOffset > fi.Size() {
+		newOffset = fi.Size()
+	}
 	newState := store.IngestState{
 		Source: models.SourceCowrie,
 		Path:   path,
 		Inode:  inode,
-		Offset: fi.Size(),
+		Offset: newOffset,
 	}
 
 	var fresh []*models.Event
@@ -167,14 +172,25 @@ func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, r
 	return &Result{Events: len(all), Actors: len(actors)}, nil
 }
 
-func parseReader(r io.Reader) ([]*models.Event, int, error) {
+// parseReader returns parsed events, the count of skipped/malformed lines,
+// and the exact number of bytes consumed by the scanner. The byte count is
+// used by IngestFileAppend to advance the persisted offset accurately,
+// without skipping a partial line at the tail if the writer (cowrie) appended
+// more data while we were reading.
+func parseReader(r io.Reader) ([]*models.Event, int, int64, error) {
 	var out []*models.Event
 	var skipped int
+	var consumed int64
 	sc := bufio.NewScanner(r)
 	buf := make([]byte, 0, 256*1024)
 	sc.Buffer(buf, 2*1024*1024)
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+		raw := sc.Bytes()
+		// +1 for the line terminator the scanner already stripped.
+		// (Last line may lack one; we don't advance the offset past EOF
+		// so the extra +1 there is harmless — capped by the actual file size.)
+		consumed += int64(len(raw)) + 1
+		line := strings.TrimSpace(string(raw))
 		if line == "" {
 			continue
 		}
@@ -191,9 +207,9 @@ func parseReader(r io.Reader) ([]*models.Event, int, error) {
 		out = append(out, e)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, skipped, err
+		return nil, skipped, consumed, err
 	}
-	return out, skipped, nil
+	return out, skipped, consumed, nil
 }
 
 func toEvent(r cowrieLine, raw string) (*models.Event, bool) {

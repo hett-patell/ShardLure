@@ -5,6 +5,12 @@ import (
 	"strings"
 )
 
+// reCNName is a COARSE heuristic, not an identity classifier. It matches
+// usernames that share a prefix with extremely common SSH-spray dictionaries
+// observed in the wild (predominantly Chinese-origin botnets). It is used
+// only as one signal among several to bucket a session into the
+// "fast_dictionary_spray" playbook. Treat the playbook label as "this looks
+// like a known spray pattern", not as a statement about the operator.
 var (
 	reCNName     = regexp.MustCompile(`(?i)^(zhang|chen|wang|li|liu|yang|huang|zhao|wu|zhou|xu|sun|ma|zhu|hu|guo|he|gao|lin|luo|zheng|liang|xie|song|tang|han|feng|yu|dong|wei|ye|shi|weiqq|yaojun|wenshuo)`)
 	serviceUsers = map[string]bool{
@@ -14,6 +20,27 @@ var (
 	cryptoUsers = map[string]bool{
 		"sol": true, "solana": true, "ethereum": true, "miner": true,
 	}
+)
+
+// Playbook classification thresholds (attempts per hour). These come from
+// empirical observation of journalctl traces on small VPS honeypots; they
+// are deliberately round numbers, not tuned constants. Adjust if your
+// deployment sees very different traffic.
+const (
+	// Sustained rate above this with a high CN-name ratio looks like a
+	// commodity dictionary spray.
+	playbookFastSprayAPH = 120.0
+	// Service-account enumeration is usually quiet & methodical, not loud.
+	playbookServiceAccountMaxAPH = 80.0
+	// "default credential" spray (admin/root/test/user) needs both volume
+	// and at least two of the canonical default usernames.
+	playbookDefaultCredAPH = 40.0
+	// Anything above this we just call a generic dictionary spray.
+	playbookDictionarySprayAPH = 60.0
+	// Below 0.30 in the CN-name ratio is "no signal".
+	playbookCNRatioThreshold = 0.30
+	// Crypto cluster has to be more than incidental.
+	playbookCryptoRatioThreshold = 0.15
 )
 
 // ClassifyPlaybook returns a playbook tag from observed usernames and rate.
@@ -43,21 +70,21 @@ func ClassifyPlaybook(usernames []string, attemptsPerHour float64) string {
 	}
 
 	n := float64(len(usernames))
-	if attemptsPerHour >= 120 && float64(cn)/n > 0.3 {
+	if attemptsPerHour >= playbookFastSprayAPH && float64(cn)/n > playbookCNRatioThreshold {
 		return "fast_dictionary_spray"
 	}
-	if svc >= 2 && attemptsPerHour < 80 {
+	if svc >= 2 && attemptsPerHour < playbookServiceAccountMaxAPH {
 		return "service_account_enum"
 	}
 	// Avoid over-classifying large sprays as crypto campaigns when
 	// they only include one incidental "sol/solana" username.
-	if crypto >= 2 || (crypto >= 1 && float64(crypto)/n >= 0.15) {
+	if crypto >= 2 || (crypto >= 1 && float64(crypto)/n >= playbookCryptoRatioThreshold) {
 		return "crypto_target"
 	}
-	if admin >= 2 && attemptsPerHour >= 40 {
+	if admin >= 2 && attemptsPerHour >= playbookDefaultCredAPH {
 		return "default_credential_spray"
 	}
-	if attemptsPerHour >= 60 {
+	if attemptsPerHour >= playbookDictionarySprayAPH {
 		return "dictionary_spray"
 	}
 	return "opportunistic"

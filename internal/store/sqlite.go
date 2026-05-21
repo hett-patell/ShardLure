@@ -324,6 +324,12 @@ func (s *Store) ActorUsersLimit(id string, limit int) ([]models.ActorUser, error
 	return out, rows.Err()
 }
 
+// RecentEvents returns a SUMMARY of the most recent events: only the
+// columns needed by the TUI live-feed and the web dashboard recent list
+// (id, ts, source, kind, src_ip, username, command, actor_id, raw).
+// Fields not selected (src_port, password, session_id, hassh, ssh_client,
+// ja4, sha256, filename) are left at their zero value. If you need a
+// full event row use EventsByIP or EventsBySource instead.
 func (s *Store) RecentEvents(limit int) ([]models.Event, error) {
 	rows, err := s.db.Query(`
 SELECT id, ts, source, kind, src_ip, username, command, actor_id, raw FROM events ORDER BY ts DESC LIMIT ?`, limit)
@@ -370,13 +376,4 @@ func (s *Store) ActorCount() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM actors`).Scan(&n)
 	return n, err
-}
-
-func (s *Store) ClearAll() error {
-	for _, t := range []string{"events", "actors", "actor_ips", "actor_users"} {
-		if _, err := s.db.Exec(`DELETE FROM ` + t); err != nil {
-			return err
-		}
-	}
-	return nil
 }

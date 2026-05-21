@@ -58,9 +58,15 @@ type Actor struct {
 	HASSH           string
 	SSHClient       string
 	UsernameHash    string
-	Campaigns       string
-	ProbeScore      int
-	Notes           string
+	// Campaigns is a free-form, comma-separated list of operator-assigned
+	// tags (e.g. "mirai-variant,torproxy"). Reserved for manual annotation
+	// and future automated campaign correlation — clustering does not
+	// populate it today.
+	Campaigns string
+	// ProbeScore is 0-100. Populated by actor.cowrieProbeScore /
+	// actor.journalProbeScore from the event mix and attempt rate.
+	ProbeScore int
+	Notes      string
 }
 
 type ActorIP struct {
