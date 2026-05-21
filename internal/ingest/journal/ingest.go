@@ -1,7 +1,6 @@
 package journal
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/networkshard/shardlure/internal/actor"
@@ -27,14 +26,13 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 		return nil, err
 	}
 
-	admin := actor.AdminSet(adminIPs)
-	if replace {
-		if err := st.ClearAll(); err != nil {
-			return nil, err
-		}
-	}
+	return persistJournalEvents(st, events, adminIPs, replace)
+}
 
+func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
+	admin := actor.AdminSet(adminIPs)
 	skipped := 0
+	var stored []*models.Event
 	var attack []*models.Event
 	for _, e := range events {
 		if e.Kind == models.KindAccepted && admin[e.SrcIP] {
@@ -42,52 +40,44 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 			continue
 		}
 		if e.Kind == models.KindAccepted {
-			// non-allowlisted success   still store but don't build actor
-			if err := st.InsertEvent(e); err != nil {
-				return nil, err
-			}
+			// Non-allowlisted success is stored as telemetry but does not form an attacker actor.
+			stored = append(stored, e)
 			continue
 		}
 		attack = append(attack, e)
+		stored = append(stored, e)
 	}
 
 	actors, _ := actor.BuildFromJournal(attack, admin)
-	for _, e := range attack {
-		if err := st.InsertEvent(e); err != nil {
-			return nil, fmt.Errorf("insert event: %w", err)
-		}
-	}
-
-	for _, a := range actors {
-		if err := st.UpsertActor(a); err != nil {
+	if replace {
+		if err := st.ReplaceSourceEventsAndActors(models.SourceJournal, stored, actors); err != nil {
 			return nil, err
 		}
-		ipStats := map[string]int{}
-		users := map[string]int{}
-		for _, e := range attack {
-			if e.ActorID != a.ID {
-				continue
-			}
-			ipStats[e.SrcIP]++
-			if e.Username != "" {
-				users[e.Username]++
-			}
+	} else {
+		all, err := st.EventsBySource(models.SourceJournal)
+		if err != nil {
+			return nil, err
 		}
-		for ip, c := range ipStats {
-			if err := st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, c); err != nil {
-				return nil, err
-			}
-		}
-		for u, c := range users {
-			if err := st.UpsertActorUser(a.ID, u, c); err != nil {
-				return nil, err
-			}
+		all = append(all, stored...)
+		actors, _ = actor.BuildFromJournal(filterAttackJournalEvents(all), admin)
+		if err := st.AppendEventsAndReplaceActors(models.SourceJournal, stored, all, actors); err != nil {
+			return nil, err
 		}
 	}
 
 	return &Result{
-		Events: len(attack),
+		Events: len(stored),
 		Actors: len(actors),
 		SkippedAdmin: skipped,
 	}, nil
+}
+
+func filterAttackJournalEvents(events []*models.Event) []*models.Event {
+	var out []*models.Event
+	for _, e := range events {
+		if e.Kind != models.KindAccepted {
+			out = append(out, e)
+		}
+	}
+	return out
 }

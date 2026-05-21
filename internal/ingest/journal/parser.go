@@ -3,6 +3,7 @@ package journal
 import (
 	"bufio"
 	"io"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,12 +13,17 @@ import (
 )
 
 var (
-	reInvalid = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Invalid user (?P<user>\S+) from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
-	reFailed = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed password for (?:invalid user )?(?P<user>\S+).*?from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
-	reFailedKey = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed publickey for (?P<user>\S+).*?from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
-	reAccepted = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Accepted publickey for (?P<user>\S+) from (?P<ip>\d+\.\d+\.\d+\.\d+)`)
+	reInvalid = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Invalid user (?P<user>\S+) from (?P<ip>\S+)`)
+	reFailed = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed password for (?:invalid user )?(?P<user>\S+).*?from (?P<ip>\S+)`)
+	reFailedKey = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Failed publickey for (?P<user>\S+).*?from (?P<ip>\S+)`)
+	reAccepted = regexp.MustCompile(`^(?P<ts>\S+)\s+\S+\s+sshd\[\d+\]:\s+Accepted publickey for (?P<user>\S+) from (?P<ip>\S+)`)
 	rePort     = regexp.MustCompile(`port (\d+)`)
 )
+
+type match struct {
+	ts, user, ip string
+	kind         models.EventKind
+}
 
 func SanitizeUser(u string) string {
 	if u == "" {
@@ -47,26 +53,21 @@ func ParseLine(line string) (*models.Event, bool) {
 		return nil, false
 	}
 
-	type match struct {
-		ts, user, ip string
-		kind         models.EventKind
-	}
 	var m match
 
 	switch {
 	case reInvalid.MatchString(line):
-		g := reInvalid.FindStringSubmatch(line)
-		m = match{g[1], g[2], g[3], models.KindInvalidUser}
+		m = matchFromRegex(reInvalid, line, models.KindInvalidUser)
 	case reFailed.MatchString(line):
-		g := reFailed.FindStringSubmatch(line)
-		m = match{g[1], g[2], g[3], models.KindFailedPass}
+		m = matchFromRegex(reFailed, line, models.KindFailedPass)
 	case reFailedKey.MatchString(line):
-		g := reFailedKey.FindStringSubmatch(line)
-		m = match{g[1], g[2], g[3], models.KindFailedKey}
+		m = matchFromRegex(reFailedKey, line, models.KindFailedKey)
 	case reAccepted.MatchString(line):
-		g := reAccepted.FindStringSubmatch(line)
-		m = match{g[1], g[2], g[3], models.KindAccepted}
+		m = matchFromRegex(reAccepted, line, models.KindAccepted)
 	default:
+		return nil, false
+	}
+	if m.ts == "" || m.user == "" || net.ParseIP(m.ip) == nil {
 		return nil, false
 	}
 
@@ -91,6 +92,26 @@ func ParseLine(line string) (*models.Event, bool) {
 		e.SrcPort, _ = strconv.Atoi(p[1])
 	}
 	return e, true
+}
+
+func matchFromRegex(re *regexp.Regexp, line string, kind models.EventKind) match {
+	g := re.FindStringSubmatch(line)
+	if len(g) == 0 {
+		return match{kind: kind}
+	}
+	get := func(name string) string {
+		idx := re.SubexpIndex(name)
+		if idx < 0 || idx >= len(g) {
+			return ""
+		}
+		return g[idx]
+	}
+	return match{
+		ts:   get("ts"),
+		user: get("user"),
+		ip:   get("ip"),
+		kind: kind,
+	}
 }
 
 func ParseReader(r io.Reader) ([]*models.Event, error) {

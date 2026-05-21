@@ -33,6 +33,10 @@ type CowrieStats struct {
 	DeployCmd bool
 }
 
+func JournalActorID(ip string) string {
+	return fmt.Sprintf("journal:%s", ip)
+}
+
 // Confidence scores are 0-100.
 const (
 	ConfidenceJournalBase    = 55
@@ -84,7 +88,7 @@ func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) ([]*mode
 		aph := float64(len(st.Events)) / hours
 
 		uhash := usernameSetHash(users)
-		id := fmt.Sprintf("journal:%s", ip)
+		id := JournalActorID(ip)
 		playbook := ClassifyPlaybook(users, aph)
 
 		a := &models.Actor{

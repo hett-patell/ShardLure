@@ -18,7 +18,12 @@ type Config struct {
 	} `yaml:"ssh"`
 
 	Dashboard struct {
-		Port int `yaml:"port"`
+		Port        int     `yaml:"port"`
+		HomeLat     float64 `yaml:"home_lat"`
+		HomeLon     float64 `yaml:"home_lon"`
+		HomeCity    string  `yaml:"home_city"`
+		HomeCountry string  `yaml:"home_country"`
+		HomeCC      string  `yaml:"home_cc"`
 	} `yaml:"dashboard"`
 
 	Journal struct {
@@ -44,6 +49,11 @@ func Default() Config {
 	c.SSH.AdminPort = 2222
 	c.SSH.HoneypotPort = 22
 	c.Dashboard.Port = 8080
+	c.Dashboard.HomeLat = 19.0760
+	c.Dashboard.HomeLon = 72.8777
+	c.Dashboard.HomeCity = "Mumbai"
+	c.Dashboard.HomeCountry = "India"
+	c.Dashboard.HomeCC = "IN"
 	c.Cowrie.Home = filepath.Join(dir, "cowrie")
 	c.Cowrie.JSONLog = filepath.Join(dir, "cowrie", "var", "log", "cowrie", "cowrie.json")
 	return c

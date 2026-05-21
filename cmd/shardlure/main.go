@@ -82,7 +82,7 @@ func main() {
 				fmt.Println("tailscale ip not found on this host (interface tailscale0 missing)")
 			}
 		}
-		if err := web.New(st, addr).Run(); err != nil {
+		if err := web.New(st, addr, webOptions(cfg)).Run(); err != nil {
 			fatal(err)
 		}
 	case "live":
@@ -208,8 +208,18 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 		cancel()
 		os.Exit(0)
 	}()
-	if err := web.New(st, addr).Run(); err != nil {
+	if err := web.New(st, addr, webOptions(cfg)).Run(); err != nil {
 		fatal(err)
+	}
+}
+
+func webOptions(cfg config.Config) web.Options {
+	return web.Options{
+		HomeLat:     cfg.Dashboard.HomeLat,
+		HomeLon:     cfg.Dashboard.HomeLon,
+		HomeCity:    cfg.Dashboard.HomeCity,
+		HomeCountry: cfg.Dashboard.HomeCountry,
+		HomeCC:      cfg.Dashboard.HomeCC,
 	}
 }
 

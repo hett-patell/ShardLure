@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -40,11 +41,14 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 		if e.Kind == models.KindAccepted && admin[e.SrcIP] {
 			continue
 		}
-		e.ActorID = "journal:" + e.SrcIP
+		e.ActorID = actor.JournalActorID(e.SrcIP)
 		if err := st.InsertEvent(e); err != nil {
+			fmt.Fprintf(os.Stderr, "journal tail insert failed: %v\n", err)
 			continue
 		}
-		_ = actor.SyncJournalIP(st, e.SrcIP, admin)
+		if err := actor.SyncJournalIP(st, e.SrcIP, admin); err != nil {
+			fmt.Fprintf(os.Stderr, "journal actor sync failed for %s: %v\n", e.SrcIP, err)
+		}
 	}
 	if err := sc.Err(); err != nil {
 		return err

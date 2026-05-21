@@ -21,17 +21,43 @@ type Server struct {
 	addr          string
 	geo           *geoResolver
 	dashboardAuth string
+	home          homePoint
 }
 
-func New(st *store.Store, addr string) *Server {
+type Options struct {
+	HomeLat     float64
+	HomeLon     float64
+	HomeCity    string
+	HomeCountry string
+	HomeCC      string
+}
+
+func New(st *store.Store, addr string, opts ...Options) *Server {
 	if addr == "" {
 		addr = ":8080"
+	}
+	home := defaultHomePoint()
+	if len(opts) > 0 {
+		if opts[0].HomeLat != 0 || opts[0].HomeLon != 0 {
+			home.Lat = opts[0].HomeLat
+			home.Lon = opts[0].HomeLon
+		}
+		if opts[0].HomeCity != "" {
+			home.City = opts[0].HomeCity
+		}
+		if opts[0].HomeCountry != "" {
+			home.Country = opts[0].HomeCountry
+		}
+		if opts[0].HomeCC != "" {
+			home.CC = opts[0].HomeCC
+		}
 	}
 	return &Server{
 		st:            st,
 		addr:          addr,
 		geo:           newGeoResolver(),
 		dashboardAuth: strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
+		home:          home,
 	}
 }
 
@@ -154,6 +180,16 @@ type homePoint struct {
 	CC      string  `json:"cc"`
 }
 
+func defaultHomePoint() homePoint {
+	return homePoint{
+		Lat:     19.0760,
+		Lon:     72.8777,
+		City:    "Mumbai",
+		Country: "India",
+		CC:      "IN",
+	}
+}
+
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDashboardAuth(w, r) {
 		return
@@ -184,13 +220,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			EventCount: ec,
 			ActorCount: ac,
 		},
-		Home: homePoint{
-			Lat:     19.0760,
-			Lon:     72.8777,
-			City:    "Mumbai",
-			Country: "India",
-			CC:      "IN",
-		},
+		Home: s.home,
 	}
 
 	type ipAgg struct {
@@ -343,23 +373,37 @@ type geoResolver struct {
 	cache    map[string]geoEntry
 	inflight map[string]bool
 	http     *http.Client
+	sem      chan struct{}
+	enabled  bool
 }
 
 func newGeoResolver() *geoResolver {
+	enabled := strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) != "0"
 	return &geoResolver{
 		cache:    map[string]geoEntry{},
 		inflight: map[string]bool{},
 		http:     &http.Client{Timeout: 1500 * time.Millisecond},
+		sem:      make(chan struct{}, 4),
+		enabled:  enabled,
 	}
 }
 
 func (g *geoResolver) resolve(ip string) geoEntry {
+	if !g.enabled {
+		return geoEntry{}
+	}
 	g.mu.Lock()
 	if v, ok := g.cache[ip]; ok && time.Now().Before(v.Expiry) {
 		g.mu.Unlock()
 		return v
 	}
 	if g.inflight[ip] {
+		g.mu.Unlock()
+		return geoEntry{}
+	}
+	select {
+	case g.sem <- struct{}{}:
+	default:
 		g.mu.Unlock()
 		return geoEntry{}
 	}
@@ -371,7 +415,9 @@ func (g *geoResolver) resolve(ip string) geoEntry {
 }
 
 func (g *geoResolver) fetch(ip string) {
-	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,countryCode,lat,lon", ip)
+	defer func() { <-g.sem }()
+
+	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,countryCode,city,lat,lon", ip)
 	resp, err := g.http.Get(url)
 	if err != nil {
 		g.mu.Lock()
