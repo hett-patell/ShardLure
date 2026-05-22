@@ -79,6 +79,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/sessions", s.handleIntelSessions)
 	mux.HandleFunc("/api/intel/session", s.handleIntelSession)
 	mux.HandleFunc("/api/intel/enrich", s.handleIntelEnrich)
+	mux.HandleFunc("/api/intel/ttp", s.handleIntelTTP)
 	mux.HandleFunc("/api/ioc/list", s.handleIOCList)
 	mux.HandleFunc("/api/ioc/csv", s.handleIOCCSV)
 	mux.HandleFunc("/api/ioc/stix", s.handleIOCSTIX)

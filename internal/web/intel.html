@@ -470,6 +470,40 @@
     margin-left: auto;
   }
   .enrich-card .ec-status.stale { color: var(--warn); }
+
+  /* ==== Slice F: TTP harvesting ==== */
+  .ttp-table { table-layout: fixed; }
+  .ttp-table .ttp-tmpl { width: 48%; }
+  .ttp-table td.tmpl {
+    font-family: var(--mono); font-size: 11px; color: var(--text);
+    word-break: break-all; cursor: pointer;
+  }
+  .ttp-table td.tmpl:hover { color: var(--accent); }
+  .ttp-table .ph-IP, .ttp-table .ph-URL, .ttp-table .ph-PATH,
+  .ttp-table .ph-HEX, .ttp-table .ph-N, .ttp-table .ph-PORT {
+    color: var(--accent); background: rgba(255,91,110,0.06);
+    padding: 0 3px; border-radius: 3px; font-size: 10px;
+  }
+  .ttp-table td.num { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .ttp-table td.tcol .tt {
+    border: 1px solid rgba(255,91,110,0.3); background: rgba(255,91,110,0.06);
+    color: var(--accent); font-family: var(--mono); font-size: 9px;
+    padding: 1px 5px; border-radius: 4px; margin-right: 3px;
+  }
+  .ttp-table td.range { color: var(--dim); font-family: var(--mono); font-size: 10px; }
+  .ttp-table tr.expand-row td {
+    background: rgba(255,91,110,0.03); padding: 12px 14px;
+    border-top: 1px dotted rgba(255,91,110,0.3);
+  }
+  .ttp-table .ttp-samples {
+    font-family: var(--mono); font-size: 10.5px; color: var(--good);
+    display: grid; gap: 4px;
+  }
+  .ttp-table .ttp-samples .ts-line { padding: 2px 0; word-break: break-all; }
+  .ttp-table .ttp-samples .ts-line::before { content: '$ '; color: var(--dim-2); }
+  .ttp-table .ttp-actors-list {
+    margin-top: 8px; font-family: var(--mono); font-size: 10px; color: var(--purple);
+  }
 </style>
 </head>
 <body>
@@ -682,11 +716,20 @@
           <h2>TTP harvesting</h2>
           <span class="meta" id="ttp-meta">clustered command sequences</span>
         </div>
-        <div class="coming-soon" id="ttp-placeholder">
-          <div class="cs-title">Slice F</div>
-          Aggregates the actual command sequences attackers run into reusable
-          playbooks, sorted by frequency. Click any to copy the exact one-liner.
-        </div>
+        <table class="dense ttp-table" id="ttp-table">
+          <thead>
+            <tr>
+              <th class="ttp-tmpl">command template</th>
+              <th class="num">count</th>
+              <th class="num">actors</th>
+              <th>techniques</th>
+              <th>first → last</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section class="panel" id="panel-payloads">
@@ -1493,6 +1536,88 @@ document.querySelector('#ioc-table tbody').addEventListener('click', function(e)
   // Scroll the enrich panel into view so the result is visible.
   document.getElementById('panel-enrich').scrollIntoView({ behavior: 'smooth', block: 'center' });
 });
+
+// ==== Slice F: TTP harvesting =====================================
+function highlightTemplate(tmpl) {
+  // Wrap <PLACEHOLDER> tokens in <span class="ph-NAME"> so they
+  // visually pop against the literal command bytes.
+  return escHtml(tmpl).replace(/&lt;([A-Z]+)&gt;/g, function(_, name) {
+    return '<span class="ph-' + name + '">&lt;' + name + '&gt;</span>';
+  });
+}
+
+function renderTTP(data) {
+  const tb = document.querySelector('#ttp-table tbody');
+  const meta = document.getElementById('ttp-meta');
+  meta.textContent = data.total + ' templates · ' + data.windowHours + 'h window';
+
+  if (!data.rows || data.rows.length === 0) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no commands captured in window</div></td></tr>';
+    return;
+  }
+
+  let html = '';
+  data.rows.forEach(function(r, i) {
+    const techs = (r.techniques || []).map(function(t) {
+      return '<span class="tt">' + escHtml(t) + '</span>';
+    }).join('');
+    const range = fmtShortTime(r.firstSeen) + ' → ' + fmtShortTime(r.lastSeen);
+    html += '<tr class="ttp-row" data-i="' + i + '">' +
+      '<td class="tmpl">' + highlightTemplate(r.template) + '</td>' +
+      '<td class="num">' + r.count + '</td>' +
+      '<td class="num">' + r.actorCount + '</td>' +
+      '<td class="tcol">' + techs + '</td>' +
+      '<td class="range">' + range + '</td>' +
+      '</tr>';
+  });
+  tb.innerHTML = html;
+
+  // Click-to-expand: insert a samples row below the clicked template.
+  tb.querySelectorAll('.ttp-row').forEach(function(row) {
+    row.addEventListener('click', function() {
+      const i = parseInt(row.dataset.i, 10);
+      const r = data.rows[i];
+      const next = row.nextElementSibling;
+      if (next && next.classList.contains('expand-row')) {
+        next.remove();
+        return;
+      }
+      const samples = (r.samples || []).map(function(s) {
+        return '<div class="ts-line">' + escHtml(s) + '</div>';
+      }).join('');
+      const actors = (r.actors || []).join(', ');
+      const exp = document.createElement('tr');
+      exp.className = 'expand-row';
+      exp.innerHTML = '<td colspan="5">' +
+        '<div class="ttp-samples">' + samples + '</div>' +
+        (actors ? '<div class="ttp-actors-list">actors: ' + escHtml(actors) + '</div>' : '') +
+        '</td>';
+      row.parentNode.insertBefore(exp, row.nextSibling);
+    });
+  });
+}
+
+async function refreshTTP() {
+  const window = Filters.window || '7d';
+  try {
+    const r = await fetch('/api/intel/ttp?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderTTP(await r.json());
+  } catch (_) {}
+}
+
+const _setActiveForTTP = setActiveView;
+setActiveView = function(name) {
+  _setActiveForTTP(name);
+  if (name === 'red') refreshTTP();
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', refreshTTP);
+});
+setInterval(function() {
+  if (document.getElementById('view-red').classList.contains('active')) refreshTTP();
+}, 30000);
+if (readTabFromHash() === 'red') refreshTTP();
 </script>
 </body>
 </html>

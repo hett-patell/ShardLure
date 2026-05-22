@@ -12,6 +12,7 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/enrich"
 	"github.com/networkshard/shardlure/internal/intel/ioc"
 	"github.com/networkshard/shardlure/internal/intel/mitre"
+	"github.com/networkshard/shardlure/internal/intel/ttp"
 )
 
 // ==== /api/intel/mitre ============================================
@@ -252,6 +253,44 @@ func windowHoursFromQuery(v string, fallback int) int {
 		return n
 	}
 	return fallback
+}
+
+// ==== /api/intel/ttp ==============================================
+
+type ttpResponse struct {
+	GeneratedAt string    `json:"generatedAt"`
+	WindowHours int       `json:"windowHours"`
+	Total       int       `json:"total"`
+	Rows        []ttp.Row `json:"rows"`
+}
+
+func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // default 7d for TTP
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	events, err := s.st.EventsSince(since, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	limit := 100
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
+		limit = n
+	}
+	rows := ttp.Harvest(events, 0)
+	total := len(rows)
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	_ = json.NewEncoder(w).Encode(ttpResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+		Total:       total,
+		Rows:        rows,
+	})
 }
 
 // ==== /api/intel/enrich ===========================================
