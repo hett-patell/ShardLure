@@ -2252,8 +2252,18 @@ setActiveView = function(name) {
 document.querySelectorAll('.chip[data-window]').forEach(function(c) {
   c.addEventListener('click', refreshDeobf);
 });
+// Auto-refresh once a minute, but bail out if the operator looks
+// busy reading the panel: scrolled away from the top, or has an
+// active text selection inside the rows. Replacing innerHTML in
+// either case would reset scroll position and clobber the
+// selection - both noisy enough to be reported as bugs.
 setInterval(function() {
-  if (document.getElementById('view-red').classList.contains('active')) refreshDeobf();
+  if (!document.getElementById('view-red').classList.contains('active')) return;
+  var rows = document.getElementById('deobf-rows');
+  if (rows && rows.scrollTop > 4) return;
+  var sel = window.getSelection && window.getSelection();
+  if (sel && sel.toString() && rows && rows.contains(sel.anchorNode)) return;
+  refreshDeobf();
 }, 60000);
 if (readTabFromHash() === 'red') refreshDeobf();
 </script>

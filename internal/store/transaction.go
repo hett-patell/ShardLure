@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -78,6 +79,32 @@ func clearSourceTx(tx *sql.Tx, source models.Source) error {
 	}
 	_, err := tx.Exec("DELETE FROM events WHERE source=?", source)
 	return err
+}
+
+// UpsertJournalActorAtomic applies the three actor-related writes
+// (actor row, single-IP row, optional user row) for a freshly-
+// observed journal event in one transaction. The live journal tail
+// calls this on every event so callers must keep it cheap; it does
+// not iterate event history, only writes the rows the in-memory
+// collector says changed.
+//
+// A nil username (empty or "?") skips the user upsert. The IP row
+// is always written because journal actors are one-IP-each.
+func (s *Store) UpsertJournalActorAtomic(a *models.Actor, ip string, ipFirst, ipLast time.Time, ipCount int, username string, userCount int) error {
+	return s.WithTx(func(tx *sql.Tx) error {
+		if err := upsertActor(tx, a); err != nil {
+			return err
+		}
+		if err := upsertActorIP(tx, a.ID, ip, ipFirst, ipLast, ipCount); err != nil {
+			return err
+		}
+		if username != "" && username != "?" {
+			if err := upsertActorUser(tx, a.ID, username, userCount); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func deleteActorsTx(tx *sql.Tx, source models.Source) error {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,4 +86,78 @@ func TestSafeDialAcceptsAllowed(t *testing.T) {
 		t.Fatalf("safeDial: %v", err)
 	}
 	_ = conn.Close()
+}
+
+// TestSafeDialResolvesHostname exercises the DNS path: a hostname
+// (not a literal IP) goes through net.DefaultResolver.LookupIP,
+// every returned address is checked against blockedIP, then the
+// first survivor is dialed. localhost is used because every host
+// resolves it without hitting the network.
+//
+// Two flavours:
+//
+//	1. TestLoopback=true: localhost resolves to 127.0.0.1 / ::1, both
+//	   pass the loopback escape, dial should succeed.
+//	2. TestLoopback=false: every resolved IP is loopback and thus
+//	   blocked; the call must error with "blocked resolved target".
+func TestSafeDialResolvesHostname(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	// Allow path: hostname resolves to loopback, loopback permitted.
+	// safeDial picks the first resolved IP, which may be either v4
+	// or v6 depending on the host; we already have a v4 listener,
+	// so check what the resolver hands back and skip the dial leg
+	// if it picked v6 (we still want to assert the no-error path).
+	allowed := NewSafeFetcher(t.TempDir(), 1<<20, 0, nil)
+	allowed.TestLoopback = true
+	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", "localhost")
+	if err != nil || len(ips) == 0 {
+		t.Skipf("localhost resolver unavailable: %v", err)
+	}
+	if ips[0].To4() != nil {
+		conn, err := allowed.safeDial(context.Background(), "tcp", "localhost:"+port)
+		if err != nil {
+			t.Fatalf("safeDial(localhost) with TestLoopback=true: %v", err)
+		}
+		_ = conn.Close()
+	} else {
+		// IPv6 first - just confirm the filter passes; don't dial
+		// because we only have a v4 listener.
+		t.Logf("localhost resolves to %s first (IPv6); skipping dial leg", ips[0])
+	}
+
+	// Block path: same hostname, loopback now disallowed - the
+	// rejection must come from the filter, not from the dial.
+	blocked := NewSafeFetcher(t.TempDir(), 1<<20, 0, nil)
+	// TestLoopback intentionally false.
+	if _, err := blocked.safeDial(context.Background(), "tcp", "localhost:"+port); err == nil {
+		t.Error("safeDial(localhost) without loopback escape: expected blocked-target error, got nil")
+	}
+}
+
+// TestSafeDialRejectsUnresolvable confirms a DNS failure surfaces as
+// a wrapped "dns lookup" error rather than crashing or returning a
+// successful dial against some default. Uses .invalid (RFC 6761) so
+// resolvers consistently say NXDOMAIN.
+func TestSafeDialRejectsUnresolvable(t *testing.T) {
+	f := NewSafeFetcher(t.TempDir(), 1<<20, 0, nil)
+	f.TestLoopback = true
+	_, err := f.safeDial(context.Background(), "tcp", "no-such-host.invalid:80")
+	if err == nil {
+		t.Fatal("expected DNS error, got nil")
+	}
+	if !strings.Contains(err.Error(), "dns lookup") {
+		t.Errorf("error should mention dns lookup, got %v", err)
+	}
 }

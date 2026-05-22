@@ -14,8 +14,8 @@ import (
 // event history is read, and per-event work is O(1) regardless of
 // how many events have already been processed for the same IP.
 func TestSyncJournalEventIncremental(t *testing.T) {
-	ResetLiveCollectorForTest()
-	defer ResetLiveCollectorForTest()
+	resetLiveCollectorForTest()
+	defer resetLiveCollectorForTest()
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "sync.db"))
 	if err != nil {
@@ -64,8 +64,8 @@ func TestSyncJournalEventIncremental(t *testing.T) {
 // TestSyncJournalEventSkipsAdmin ensures admin-source events do not
 // pollute the live collector or create actor rows.
 func TestSyncJournalEventSkipsAdmin(t *testing.T) {
-	ResetLiveCollectorForTest()
-	defer ResetLiveCollectorForTest()
+	resetLiveCollectorForTest()
+	defer resetLiveCollectorForTest()
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "sync-admin.db"))
 	if err != nil {
@@ -88,5 +88,58 @@ func TestSyncJournalEventSkipsAdmin(t *testing.T) {
 	}
 	if len(actors) != 0 {
 		t.Errorf("admin event created an actor row: %+v", actors)
+	}
+}
+
+// TestSyncJournalEventRejectsAdminMismatch confirms the second call
+// errors out when the admin set differs from the bound one. Catches
+// the "different goroutine, different admin map" misuse described
+// in the doc comment.
+func TestSyncJournalEventRejectsAdminMismatch(t *testing.T) {
+	resetLiveCollectorForTest()
+	defer resetLiveCollectorForTest()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "admin-mismatch.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	e := &models.Event{
+		TS: time.Now(), Source: models.SourceJournal, Kind: models.KindFailedPass,
+		SrcIP: "198.51.100.1", Username: "root", ActorID: JournalActorID("198.51.100.1"),
+		Raw: "{}",
+	}
+	if err := st.InsertEvent(e); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := SyncJournalEvent(st, e, map[string]bool{"10.0.0.1": true}); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	err = SyncJournalEvent(st, e, map[string]bool{"10.0.0.2": true})
+	if err == nil {
+		t.Fatal("expected mismatch error, got nil")
+	}
+}
+
+// TestAdminSetsEqual is a small unit covering the helper used by
+// SyncJournalEvent's mismatch check.
+func TestAdminSetsEqual(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b map[string]bool
+		want bool
+	}{
+		{"both nil", nil, nil, true},
+		{"empty vs nil", map[string]bool{}, nil, true},
+		{"same one", map[string]bool{"x": true}, map[string]bool{"x": true}, true},
+		{"different size", map[string]bool{"x": true}, map[string]bool{"x": true, "y": true}, false},
+		{"different value", map[string]bool{"x": true}, map[string]bool{"x": false}, false},
+		{"different key", map[string]bool{"x": true}, map[string]bool{"y": true}, false},
+	}
+	for _, c := range cases {
+		if got := adminSetsEqual(c.a, c.b); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
 	}
 }
