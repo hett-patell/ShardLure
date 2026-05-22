@@ -602,12 +602,12 @@ async function refresh() {
   sparkData = (d.hourly || []).slice(-72);
   drawSpark(sparkData);
 
-  const points = actors.filter(function(a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); });
+  const points = actors.filter(function(a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); })
+    .sort(function(a, b) { return (b.events || 0) - (a.events || 0); })
+    .map(function(a) { return { lat: a.lat, lng: a.lon, n: a.events || 0, ip: a.ip, playbook: a.playbook || '' }; });
   if (!points.length && actors.length) {
     document.getElementById('s-countries').textContent = '…';
   }
-    .sort(function(a, b) { return (b.events || 0) - (a.events || 0); })
-    .map(function(a) { return { lat: a.lat, lng: a.lon, n: a.events || 0, ip: a.ip, playbook: a.playbook || '' }; });
   const maxN = Math.max.apply(null, [1].concat(points.map(function(p){ return p.n; })));
   globe.pointsData(points)
     .pointAltitude(function(p){ return 0.005 + 0.18 * Math.sqrt((p.n || 0) / maxN); })
