@@ -1,4 +1,6 @@
 # ShardLure
+<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/68c62b67-de22-48d8-8360-78c6e28d5640" />
+<br></br>
 
 **Attacker identity engine for SSH honeypot telemetry.** Aka: it makes the bots think they hit a real prod box, then puts their entire playbook on blast.
 
@@ -184,6 +186,8 @@ Do not commit your real config. `admin_ips` may reveal private network details s
 
 ## Deployment
 
+<img width="1918" height="964" alt="image" src="https://github.com/user-attachments/assets/9a86570e-bda5-4cc0-a095-a4c49c391281" />
+
 Use tar pipe deployment instead of direct `scp` for source files:
 
 ```bash
@@ -292,6 +296,7 @@ This is harmless on rerun. `do_load` indicates the file content was loaded.
 ```bash
 ls /var/lib/shardlure/cowrie/honeyfs/opt/app/
 ```
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/e62fe09e-e9fb-4d4e-891e-342298640e08" />
 
 ## Roadmap
 
