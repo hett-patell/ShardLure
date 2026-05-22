@@ -6,3 +6,5 @@
 .build-log.txt
 .ready-check.txt
 coverage.out
+.playwright-mcp/
+

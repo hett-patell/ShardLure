@@ -7,16 +7,21 @@
 <style>
   :root {
     --bg: #02060d;
-    --glass: rgba(12, 18, 28, 0.55);
-    --glass-2: rgba(20, 28, 40, 0.55);
+    --bg-pane: #050b14;
+    --glass: rgba(12, 18, 28, 0.62);
+    --glass-2: rgba(20, 28, 40, 0.62);
     --line: rgba(120, 160, 200, 0.14);
     --line-strong: rgba(120, 160, 200, 0.28);
     --text: #dde6f2;
     --dim: #7a8aa3;
+    --dim-2: #5a6a82;
     --accent: #ff5b6e;
     --accent-2: #4cc9f0;
     --good: #6ee7b7;
     --warn: #fbbf24;
+    --purple: #a78bfa;
+    --red-team: #ff8a4c;
+    --blue-team: #4cc9f0;
     --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
@@ -131,21 +136,162 @@
   .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: rgba(255,91,110,0.4); background: rgba(255,91,110,0.08); }
   tr.cap-row-new td { animation: capFade 0.45s ease; }
   @keyframes capFade { from { background: rgba(110,231,183,0.12); } to { background: transparent; } }
+
+  /* ==== SOC console v2: tabs, sticky filter bar, denser data ==== */
+  body { padding-top: 0; }
+  .wrap { max-width: 1640px; padding-top: 16px; }
+
+  /* Top bar: brand + nav + global toolbar */
+  .topbar {
+    position: sticky; top: 0; z-index: 50;
+    margin: -16px -24px 18px;
+    padding: 12px 24px;
+    background: linear-gradient(180deg, rgba(2,6,13,0.96), rgba(2,6,13,0.82));
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(10px);
+  }
+  .topbar-inner { max-width: 1640px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand .b1 { font-size: 16px; font-weight: 700; letter-spacing: 0.02em; }
+  .brand .b2 { font-family: var(--mono); font-size: 10px; color: var(--dim); letter-spacing: 0.18em; text-transform: uppercase; }
+  .brand .live-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--good);
+    margin-left: 4px;
+    box-shadow: 0 0 0 0 rgba(110,231,183,0.5); animation: livePulse 1.6s infinite;
+  }
+  @keyframes livePulse { 0%,100% { box-shadow: 0 0 0 0 rgba(110,231,183,0.55); } 50% { box-shadow: 0 0 0 6px rgba(110,231,183,0); } }
+
+  .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; align-items: center; }
+  .chip {
+    font-family: var(--mono); font-size: 10.5px; padding: 5px 9px; border-radius: 6px;
+    border: 1px solid var(--line); color: var(--dim); background: rgba(0,0,0,0.25);
+    cursor: pointer; user-select: none;
+    letter-spacing: 0.04em;
+  }
+  .chip:hover { color: var(--text); border-color: var(--line-strong); }
+  .chip.on { color: var(--text); border-color: var(--accent-2); background: rgba(76,201,240,0.08); }
+  .chip-sep { color: var(--dim-2); font-family: var(--mono); font-size: 10px; padding: 0 2px; }
+  .toolbar input.search {
+    background: rgba(0,0,0,0.35); border: 1px solid var(--line); color: var(--text);
+    font-family: var(--mono); font-size: 11px; padding: 5px 9px; border-radius: 6px; min-width: 180px;
+    outline: none;
+  }
+  .toolbar input.search:focus { border-color: var(--accent-2); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+  .tab {
+    padding: 9px 16px; font-family: var(--mono); font-size: 11px;
+    color: var(--dim); text-transform: uppercase; letter-spacing: 0.12em;
+    cursor: pointer; border-bottom: 2px solid transparent;
+    margin-bottom: -1px; user-select: none;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent-2); }
+  .tab.blue.active { border-bottom-color: var(--blue-team); }
+  .tab.red.active { border-bottom-color: var(--red-team); }
+  .tab .tdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* Denser tables and panels */
+  .panel { padding: 12px 14px; }
+  .panel h2 { font-size: 10px; letter-spacing: 0.16em; margin: 0 0 8px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .panel-head h2 { margin: 0; }
+  .panel-head .meta { font-family: var(--mono); font-size: 10px; color: var(--dim); letter-spacing: 0.06em; }
+  .panel.compact { padding: 10px 12px; }
+  .grid { gap: 12px; }
+  table { font-size: 11px; }
+  th, td { padding: 5px 6px; }
+
+  /* Tag/badge cluster shared across tabs */
+  .tag {
+    display: inline-block; font-family: var(--mono); font-size: 9.5px;
+    padding: 2px 6px; border-radius: 4px; letter-spacing: 0.05em;
+    border: 1px solid var(--line); color: var(--dim);
+  }
+  .tag.hot { color: var(--accent); border-color: rgba(255,91,110,0.4); background: rgba(255,91,110,0.08); }
+  .tag.warm { color: var(--warn); border-color: rgba(251,191,36,0.4); background: rgba(251,191,36,0.08); }
+  .tag.cool { color: var(--accent-2); border-color: rgba(76,201,240,0.4); background: rgba(76,201,240,0.08); }
+  .tag.ok { color: var(--good); border-color: rgba(110,231,183,0.4); background: rgba(110,231,183,0.08); }
+  .tag.red { color: var(--red-team); border-color: rgba(255,138,76,0.4); background: rgba(255,138,76,0.08); }
+  .tag.blue { color: var(--blue-team); border-color: rgba(76,201,240,0.4); background: rgba(76,201,240,0.08); }
+  .tag.purple { color: var(--purple); border-color: rgba(167,139,250,0.4); background: rgba(167,139,250,0.08); }
+
+  /* Sparkline row */
+  .spark { display: inline-flex; align-items: flex-end; height: 14px; gap: 1px; }
+  .spark i { display: block; width: 3px; background: var(--accent-2); border-radius: 1px; opacity: 0.85; }
+
+  /* "Coming soon" placeholder for slices not yet implemented */
+  .coming-soon {
+    border: 1px dashed var(--line-strong); border-radius: 10px;
+    padding: 24px; text-align: center; color: var(--dim);
+    font-family: var(--mono); font-size: 11px;
+  }
+  .coming-soon .cs-title { color: var(--text); font-size: 13px; margin-bottom: 6px; font-family: inherit; letter-spacing: 0.08em; text-transform: uppercase; }
+  .coming-soon .cs-list { display: inline-block; text-align: left; margin-top: 12px; line-height: 1.9; }
+  .coming-soon .cs-list .k { color: var(--accent-2); }
+
+  /* Team banners */
+  .team-banner {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; border-radius: 10px; margin-bottom: 12px;
+    font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--line);
+  }
+  .team-banner.blue {
+    background: linear-gradient(90deg, rgba(76,201,240,0.08), rgba(76,201,240,0.02));
+    border-color: rgba(76,201,240,0.25);
+  }
+  .team-banner.red {
+    background: linear-gradient(90deg, rgba(255,138,76,0.08), rgba(255,138,76,0.02));
+    border-color: rgba(255,138,76,0.25);
+  }
+  .team-banner .tb-title { font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; }
+  .team-banner.blue .tb-title { color: var(--blue-team); }
+  .team-banner.red .tb-title { color: var(--red-team); }
+  .team-banner .tb-sub { color: var(--dim); }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div>
-      <h1>ShardLure Intel</h1>
-      <div class="sub">threat actors · commands · payload capture · heatmap</div>
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="b1">ShardLure</span>
+      <span class="b2">Intel Console</span>
+      <span class="live-dot" title="live"></span>
     </div>
-    <nav class="nav">
-      <a href="/">Globe</a>
-      <a href="/intel" class="active">Intel</a>
-    </nav>
-  </header>
+    <div class="toolbar">
+      <a class="chip" href="/" title="3D globe">⌖ Globe</a>
+      <span class="chip-sep">·</span>
+      <span class="chip-sep">window:</span>
+      <span class="chip" data-window="1h">1h</span>
+      <span class="chip on" data-window="24h">24h</span>
+      <span class="chip" data-window="7d">7d</span>
+      <span class="chip" data-window="30d">30d</span>
+      <span class="chip-sep">·</span>
+      <span class="chip-sep">source:</span>
+      <span class="chip on" data-source="all">all</span>
+      <span class="chip" data-source="journal">journal</span>
+      <span class="chip" data-source="cowrie">cowrie</span>
+      <span class="chip-sep">·</span>
+      <input class="search" id="search-input" placeholder="search IP / user / command…" />
+    </div>
+  </div>
+</div>
 
+<div class="wrap">
+  <div class="tabs" id="tabs">
+    <span class="tab active" data-view="overview"><span class="tdot"></span>Overview</span>
+    <span class="tab blue" data-view="blue"><span class="tdot" style="background:var(--blue-team)"></span>Blue Team</span>
+    <span class="tab red" data-view="red"><span class="tdot" style="background:var(--red-team)"></span>Red Team</span>
+  </div>
+
+  <!-- ============ OVERVIEW TAB ============ -->
+  <section class="view active" id="view-overview">
   <div class="stats">
     <div class="stat"><div class="num accent" id="s-events">0</div><div class="label">events</div></div>
     <div class="stat"><div class="num blue" id="s-actors">0</div><div class="label">actors</div></div>
@@ -235,6 +381,155 @@
       </div>
     </section>
   </div>
+  </section><!-- /view-overview -->
+
+  <!-- ============ BLUE TEAM TAB ============ -->
+  <section class="view" id="view-blue">
+    <div class="team-banner blue">
+      <span class="tb-title">Blue Team</span>
+      <span class="tb-sub">Defensive view · MITRE ATT&amp;CK coverage, sessions, IOCs and threat intel enrichment</span>
+    </div>
+
+    <div class="grid">
+      <section class="panel full" id="panel-mitre">
+        <div class="panel-head">
+          <h2>MITRE ATT&amp;CK coverage</h2>
+          <span class="meta" id="mitre-meta">techniques observed —</span>
+        </div>
+        <div class="coming-soon" id="mitre-placeholder">
+          <div class="cs-title">Slice B</div>
+          Maps every captured command into ATT&amp;CK techniques
+          (<span class="tag cool">T1078</span> <span class="tag cool">T1110</span>
+          <span class="tag cool">T1059</span> <span class="tag cool">T1105</span>
+          <span class="tag cool">T1496</span> <span class="tag cool">T1018</span>)
+          and renders a coverage grid.
+        </div>
+      </section>
+
+      <section class="panel full" id="panel-sessions">
+        <div class="panel-head">
+          <h2>Cowrie sessions · play-by-play</h2>
+          <span class="meta" id="sessions-meta">—</span>
+        </div>
+        <div class="coming-soon" id="sessions-placeholder">
+          <div class="cs-title">Slice C</div>
+          Per-session timeline of every command with relative timestamps,
+          like a terminal recording. Ideal for incident-response walkthroughs.
+        </div>
+      </section>
+
+      <section class="panel" id="panel-ioc">
+        <div class="panel-head">
+          <h2>IOC export</h2>
+          <span class="meta">STIX 2.1 · CSV</span>
+        </div>
+        <div class="coming-soon" id="ioc-placeholder">
+          <div class="cs-title">Slice D</div>
+          One-click STIX 2.1 bundles and CSV downloads:
+          <div class="cs-list">
+            <div><span class="k">IPs</span> &nbsp;all attacker source addresses</div>
+            <div><span class="k">hashes</span> &nbsp;every captured payload SHA-256</div>
+            <div><span class="k">URLs</span> &nbsp;C2 / payload-hosting URLs</div>
+            <div><span class="k">users</span> &nbsp;observed credential attempts</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-enrich">
+        <div class="panel-head">
+          <h2>Threat intel enrichment</h2>
+          <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise</span>
+        </div>
+        <div class="coming-soon" id="enrich-placeholder">
+          <div class="cs-title">Slice E</div>
+          Cached lookups against AbuseIPDB, VirusTotal and GreyNoise
+          (env-keyed, 24h TTL). Reputation and tags show inline on actor detail.
+        </div>
+      </section>
+    </div>
+  </section><!-- /view-blue -->
+
+  <!-- ============ RED TEAM TAB ============ -->
+  <section class="view" id="view-red">
+    <div class="team-banner red">
+      <span class="tb-title">Red Team</span>
+      <span class="tb-sub">Offensive view · harvested TTPs, payload library, wordlists, infrastructure pivots and replay</span>
+    </div>
+
+    <div class="grid">
+      <section class="panel full" id="panel-ttp">
+        <div class="panel-head">
+          <h2>TTP harvesting</h2>
+          <span class="meta" id="ttp-meta">clustered command sequences</span>
+        </div>
+        <div class="coming-soon" id="ttp-placeholder">
+          <div class="cs-title">Slice F</div>
+          Aggregates the actual command sequences attackers run into reusable
+          playbooks, sorted by frequency. Click any to copy the exact one-liner.
+        </div>
+      </section>
+
+      <section class="panel" id="panel-payloads">
+        <div class="panel-head">
+          <h2>Payload library</h2>
+          <span class="meta" id="payloads-meta">captured binaries / scripts</span>
+        </div>
+        <div class="coming-soon" id="payloads-placeholder">
+          <div class="cs-title">Slice G</div>
+          Browseable index of every captured binary or script:
+          SHA-256, magic bytes, strings preview, decoded shell content.
+        </div>
+      </section>
+
+      <section class="panel" id="panel-wordlist">
+        <div class="panel-head">
+          <h2>Credential wordlists</h2>
+          <span class="meta">john / hashcat ready</span>
+        </div>
+        <div class="coming-soon" id="wordlist-placeholder">
+          <div class="cs-title">Slice H</div>
+          Export observed usernames, passwords and combos as wordlists,
+          de-duplicated and ranked by frequency.
+        </div>
+      </section>
+
+      <section class="panel full" id="panel-graph">
+        <div class="panel-head">
+          <h2>Infrastructure pivoting</h2>
+          <span class="meta" id="graph-meta">actor ↔ URL ↔ ASN</span>
+        </div>
+        <div class="coming-soon" id="graph-placeholder">
+          <div class="cs-title">Slice I</div>
+          Force-directed graph grouping attacker IPs by ASN, by C2/payload-hosting URL,
+          and by HASSH fingerprint. Hover for details, drag to rearrange.
+        </div>
+      </section>
+
+      <section class="panel" id="panel-replay">
+        <div class="panel-head">
+          <h2>Attack replay / synthesis</h2>
+          <span class="meta">bash · ansible</span>
+        </div>
+        <div class="coming-soon" id="replay-placeholder">
+          <div class="cs-title">Slice J</div>
+          Pick an actor, generate an Ansible/bash script that replicates their
+          full attack chain — for purple-team exercises against a target you own.
+        </div>
+      </section>
+
+      <section class="panel" id="panel-deobf">
+        <div class="panel-head">
+          <h2>Obfuscation analysis</h2>
+          <span class="meta">base64 · hex · eval</span>
+        </div>
+        <div class="coming-soon" id="deobf-placeholder">
+          <div class="cs-title">Slice K</div>
+          Automatically decodes base64 / hex / eval-piped payloads and shows
+          plaintext alongside the original obfuscated form.
+        </div>
+      </section>
+    </div>
+  </section><!-- /view-red -->
 </div>
 
 <script>
@@ -431,6 +726,7 @@ function renderActors(actors) {
       loadActorDetail(selectedActor);
     });
   });
+  if (typeof applyClientSearch === 'function') applyClientSearch();
 }
 
 function renderCommands(cmds) {
@@ -444,6 +740,7 @@ function renderCommands(cmds) {
       '<td>' + esc(c.user || '—') + '</td><td>' + esc(c.kind) + '</td>' +
       '<td class="cmd" title="' + esc(c.command) + '">' + esc(c.command) + '</td></tr>';
   }).join('');
+  if (typeof applyClientSearch === 'function') applyClientSearch();
 }
 
 function renderCapture(d) {
@@ -480,6 +777,7 @@ function renderCapture(d) {
       '<td class="ip">' + esc(a.srcIp || '—') + '</td>' +
       '<td>' + esc(origin || '—') + '</td></tr>';
   }).join('');
+  if (typeof applyClientSearch === 'function') applyClientSearch();
 }
 
 async function refreshCapture() {
@@ -516,6 +814,77 @@ setInterval(refreshCapture, 2000);
 window.addEventListener('resize', function() {
   if (window._lastHeatmap) drawHeatmap(window._lastHeatmap);
 });
+
+/* ==== Slice A: tabs, sticky filter bar, search ==== */
+const Filters = { window: '24h', source: 'all', search: '' };
+
+function setActiveView(name) {
+  document.querySelectorAll('.tab').forEach(function(t) {
+    t.classList.toggle('active', t.getAttribute('data-view') === name);
+  });
+  document.querySelectorAll('.view').forEach(function(v) {
+    v.classList.toggle('active', v.id === 'view-' + name);
+  });
+  // Persist via hash so refresh keeps the user on the same tab.
+  if (location.hash.replace('#', '') !== 'tab=' + name) {
+    history.replaceState(null, '', '#tab=' + name);
+  }
+}
+
+function readTabFromHash() {
+  const m = /tab=([a-z]+)/.exec(location.hash || '');
+  return (m && ['overview','blue','red'].indexOf(m[1]) >= 0) ? m[1] : 'overview';
+}
+
+document.querySelectorAll('.tab').forEach(function(t) {
+  t.addEventListener('click', function(){ setActiveView(t.getAttribute('data-view')); });
+});
+window.addEventListener('hashchange', function() {
+  setActiveView(readTabFromHash());
+});
+
+function bindChipGroup(attr, key) {
+  document.querySelectorAll('.chip[data-' + attr + ']').forEach(function(c) {
+    c.addEventListener('click', function() {
+      document.querySelectorAll('.chip[data-' + attr + ']').forEach(function(o){ o.classList.remove('on'); });
+      c.classList.add('on');
+      Filters[key] = c.getAttribute('data-' + attr);
+      // Slice A surfaces filters in the URL but does not yet re-query the
+      // server; downstream slices (B-K) will read Filters.* when they wire
+      // their own /api/intel/* requests. The search field below already
+      // filters the existing overview client-side.
+      applyClientSearch();
+    });
+  });
+}
+bindChipGroup('window', 'window');
+bindChipGroup('source', 'source');
+
+const searchInput = document.getElementById('search-input');
+let searchTimer = 0;
+searchInput.addEventListener('input', function() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(function() {
+    Filters.search = searchInput.value.trim().toLowerCase();
+    applyClientSearch();
+  }, 120);
+});
+
+/* Client-side filter applied to existing actor + command tables; the
+ * server-side filtering will be added per slice as needs grow. */
+function applyClientSearch() {
+  const q = Filters.search;
+  const matches = function(row) {
+    if (!q) return true;
+    return (row.textContent || '').toLowerCase().indexOf(q) >= 0;
+  };
+  document.querySelectorAll('#actors-table tbody tr, #cmds-table tbody tr, #capture-table tbody tr').forEach(function(tr) {
+    tr.style.display = matches(tr) ? '' : 'none';
+  });
+}
+
+// Initial tab from URL hash
+setActiveView(readTabFromHash());
 </script>
 </body>
 </html>
