@@ -405,6 +405,71 @@
   #ioc-table .ioc-actors {
     color: var(--purple); font-family: var(--mono); font-size: 10px;
   }
+  #ioc-table td:first-child { cursor: pointer; }
+  #ioc-table td:first-child:hover { color: var(--blue-team); }
+
+  /* ==== Slice E: threat intel enrichment ==== */
+  .enrich-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+  .enrich-input {
+    flex: 1; background: rgba(255,255,255,0.02); border: 1px solid var(--line);
+    border-radius: 6px; color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 6px 10px;
+  }
+  .enrich-input:focus { outline: none; border-color: rgba(76,201,240,0.5); }
+  .enrich-btn {
+    background: transparent; color: var(--blue-team); border: 1px solid rgba(76,201,240,0.4);
+    font-family: var(--mono); font-size: 11px; padding: 5px 16px; border-radius: 6px;
+    cursor: pointer; letter-spacing: 0.04em;
+  }
+  .enrich-btn:hover { background: rgba(76,201,240,0.08); }
+  .enrich-cards { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .enrich-card {
+    border: 1px solid var(--line); border-left: 3px solid var(--line-strong);
+    border-radius: 6px; padding: 10px 12px; background: rgba(255,255,255,0.01);
+  }
+  .enrich-card .ec-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 4px;
+  }
+  .enrich-card .ec-name {
+    font-family: var(--mono); font-size: 11px; color: var(--text);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .enrich-card .ec-verdict {
+    font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 4px;
+    letter-spacing: 0.05em;
+  }
+  .enrich-card.verdict-malicious  { border-left-color: var(--accent); }
+  .enrich-card.verdict-malicious  .ec-verdict { background: rgba(255,91,110,0.12); color: var(--accent); }
+  .enrich-card.verdict-suspicious { border-left-color: var(--warn); }
+  .enrich-card.verdict-suspicious .ec-verdict { background: rgba(255,196,87,0.12); color: var(--warn); }
+  .enrich-card.verdict-benign     { border-left-color: var(--good); }
+  .enrich-card.verdict-benign     .ec-verdict { background: rgba(72,219,156,0.12); color: var(--good); }
+  .enrich-card.verdict-unknown    .ec-verdict { background: rgba(255,255,255,0.04); color: var(--dim); }
+  .enrich-card.verdict-error      { border-left-color: var(--accent); }
+  .enrich-card .ec-summary {
+    font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 4px;
+  }
+  .enrich-card .ec-meta {
+    display: flex; flex-wrap: wrap; gap: 10px; margin-top: 5px;
+    font-family: var(--mono); font-size: 10px; color: var(--dim-2);
+  }
+  .enrich-card .ec-meta b { color: var(--text); font-weight: 500; }
+  .enrich-card .ec-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .enrich-card .ec-tag {
+    border: 1px solid var(--line); color: var(--purple); font-family: var(--mono);
+    font-size: 9px; padding: 1px 6px; border-radius: 4px;
+  }
+  .enrich-card .ec-link {
+    color: var(--blue-team); font-family: var(--mono); font-size: 10px;
+    text-decoration: none; margin-left: 8px;
+  }
+  .enrich-card .ec-link:hover { text-decoration: underline; }
+  .enrich-card .ec-status {
+    font-family: var(--mono); font-size: 9px; color: var(--dim-2);
+    margin-left: auto;
+  }
+  .enrich-card .ec-status.stale { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -593,10 +658,12 @@
           <h2>Threat intel enrichment</h2>
           <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise</span>
         </div>
-        <div class="coming-soon" id="enrich-placeholder">
-          <div class="cs-title">Slice E</div>
-          Cached lookups against AbuseIPDB, VirusTotal and GreyNoise
-          (env-keyed, 24h TTL). Reputation and tags show inline on actor detail.
+        <div class="enrich-toolbar">
+          <input id="enrich-ip" class="enrich-input" placeholder="lookup an IP (1.2.3.4)…" />
+          <button id="enrich-go" class="enrich-btn">lookup</button>
+        </div>
+        <div class="enrich-cards" id="enrich-cards">
+          <div class="empty">click an IP in the IOC table or enter one above.</div>
         </div>
       </section>
     </div>
@@ -1342,6 +1409,90 @@ setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshIOC();
 }, 30000);
 if (readTabFromHash() === 'blue') refreshIOC();
+
+// ==== Slice E: threat intel enrichment ============================
+function renderEnrichCard(r) {
+  const verdict = (r.verdict || 'unknown').toLowerCase();
+  const cls = r.error && !r.cached ? 'verdict-error' : 'verdict-' + verdict;
+  const status = r.cached
+    ? (r.stale ? '<span class="ec-status stale">cached · stale</span>'
+               : '<span class="ec-status">cached</span>')
+    : (r.configured ? '<span class="ec-status">live</span>'
+                    : '<span class="ec-status">unconfigured</span>');
+
+  let meta = '';
+  if (r.asn || r.asOwner) meta += '<span><b>' + escHtml(r.asn || '') + '</b> ' + escHtml(r.asOwner || '') + '</span>';
+  if (r.country) meta += '<span><b>country</b> ' + escHtml(r.country) + '</span>';
+  if (r.score != null) meta += '<span><b>score</b> ' + r.score + '</span>';
+
+  let tags = '';
+  if (r.tags && r.tags.length) {
+    tags = '<div class="ec-tags">' + r.tags.map(function(t) {
+      return '<span class="ec-tag">' + escHtml(t) + '</span>';
+    }).join('') + '</div>';
+  }
+
+  const link = r.url ? '<a class="ec-link" href="' + escHtml(r.url) + '" target="_blank" rel="noopener">open ↗</a>' : '';
+  const summary = r.summary || (r.error ? 'error: ' + escHtml(r.error)
+                              : (r.configured ? 'no data' : 'set API key in env'));
+
+  return '<div class="enrich-card ' + cls + '">' +
+    '<div class="ec-head">' +
+      '<span class="ec-name">' + escHtml(r.source) + '</span>' +
+      '<span class="ec-verdict">' + escHtml(verdict) + '</span>' +
+      link + status +
+    '</div>' +
+    '<div class="ec-summary">' + escHtml(summary) + '</div>' +
+    (meta ? '<div class="ec-meta">' + meta + '</div>' : '') +
+    tags +
+    '</div>';
+}
+
+async function runEnrich(ip) {
+  const box = document.getElementById('enrich-cards');
+  const meta = document.getElementById('enrich-meta');
+  meta.textContent = 'looking up ' + ip + '…';
+  box.innerHTML = '<div class="empty">contacting providers…</div>';
+  try {
+    const r = await fetch('/api/intel/enrich?ip=' + encodeURIComponent(ip), { cache: 'no-store' });
+    if (!r.ok) {
+      box.innerHTML = '<div class="empty">lookup failed (' + r.status + ')</div>';
+      meta.textContent = 'AbuseIPDB · VirusTotal · GreyNoise';
+      return;
+    }
+    const d = await r.json();
+    meta.textContent = ip + ' · ' + d.results.length + ' providers';
+    box.innerHTML = d.results.map(renderEnrichCard).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="empty">error: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+document.getElementById('enrich-go').addEventListener('click', function() {
+  const ip = document.getElementById('enrich-ip').value.trim();
+  if (ip) runEnrich(ip);
+});
+document.getElementById('enrich-ip').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    const ip = e.target.value.trim();
+    if (ip) runEnrich(ip);
+  }
+});
+
+// Wire the IOC table: clicking the value cell of an IP indicator
+// fires an enrichment lookup. Re-attached on every render via event
+// delegation on the tbody.
+document.querySelector('#ioc-table tbody').addEventListener('click', function(e) {
+  if (IOC.kind !== 'ip') return;
+  const td = e.target.closest('td:first-child');
+  if (!td) return;
+  const ip = td.textContent.trim();
+  if (!ip) return;
+  document.getElementById('enrich-ip').value = ip;
+  runEnrich(ip);
+  // Scroll the enrich panel into view so the result is visible.
+  document.getElementById('panel-enrich').scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
 </script>
 </body>
 </html>

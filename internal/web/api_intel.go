@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/intel/enrich"
 	"github.com/networkshard/shardlure/internal/intel/ioc"
 	"github.com/networkshard/shardlure/internal/intel/mitre"
 )
@@ -251,6 +252,62 @@ func windowHoursFromQuery(v string, fallback int) int {
 		return n
 	}
 	return fallback
+}
+
+// ==== /api/intel/enrich ===========================================
+
+type enrichResponse struct {
+	GeneratedAt string           `json:"generatedAt"`
+	IP          string           `json:"ip"`
+	Results     []enrich.Result  `json:"results"`
+}
+
+func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+	if ip == "" {
+		http.Error(w, "missing ip", http.StatusBadRequest)
+		return
+	}
+	// Basic IPv4 sanity check; nothing fancy, just keep the API from
+	// being a generic outbound request relay.
+	if !looksLikeIP(ip) {
+		http.Error(w, "invalid ip", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	resolver := enrich.NewResolver(s.st)
+	results := resolver.LookupAll(r.Context(), ip)
+
+	_ = json.NewEncoder(w).Encode(enrichResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		IP:          ip,
+		Results:     results,
+	})
+}
+
+func looksLikeIP(s string) bool {
+	if len(s) < 7 || len(s) > 45 { // covers IPv4 + IPv6 bounds
+		return false
+	}
+	dots := 0
+	colons := 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		case r == '.':
+			dots++
+		case r == ':':
+			colons++
+		default:
+			return false
+		}
+	}
+	return (dots == 3 && colons == 0) || colons >= 2
 }
 
 // ==== /api/ioc/list and /api/ioc/{csv,stix} =======================
