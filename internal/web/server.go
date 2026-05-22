@@ -75,6 +75,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/intel", s.handleIntelPage)
 	mux.HandleFunc("/api/intel", s.handleIntel)
+	mux.HandleFunc("/api/intel/mitre", s.handleIntelMitre)
 	mux.HandleFunc("/api/actor", s.handleActorDetail)
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/dashboard", s.handleDashboard)
