@@ -10,7 +10,8 @@ import (
 )
 
 func main() {
-	st, err := store.Open("/tmp/shardlure-test-home/.local/share/shardlure/shardlure.db")
+	home, _ := os.UserHomeDir()
+	st, err := store.Open(home + "/.local/share/shardlure/shardlure.db")
 	if err != nil { fmt.Println(err); os.Exit(1) }
 	defer st.Close()
 	now := time.Now().UTC()

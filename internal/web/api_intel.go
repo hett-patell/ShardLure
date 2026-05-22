@@ -94,6 +94,131 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// ==== /api/intel/sessions and /api/intel/session =================
+
+type sessionsResponse struct {
+	GeneratedAt string             `json:"generatedAt"`
+	WindowHours int                `json:"windowHours"`
+	Sessions    []sessionRow       `json:"sessions"`
+}
+
+type sessionRow struct {
+	ID        string `json:"id"`
+	IP        string `json:"ip"`
+	User      string `json:"user,omitempty"`
+	HASSH     string `json:"hassh,omitempty"`
+	Client    string `json:"client,omitempty"`
+	Actor     string `json:"actor,omitempty"`
+	Start     string `json:"start"`
+	End       string `json:"end"`
+	DurMillis int64  `json:"durMs"`
+	Events    int    `json:"events"`
+	Commands  int    `json:"commands"`
+}
+
+func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	sessions, err := s.st.ListSessions(since, 200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := sessionsResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+	}
+	for _, sm := range sessions {
+		dur := sm.EndTS.Sub(sm.StartTS).Milliseconds()
+		if dur < 0 {
+			dur = 0
+		}
+		resp.Sessions = append(resp.Sessions, sessionRow{
+			ID:        sm.ID,
+			IP:        sm.SrcIP,
+			User:      sm.Username,
+			HASSH:     sm.HASSH,
+			Client:    sm.SSHClient,
+			Actor:     actor.TrimActorPrefix(sm.ActorID),
+			Start:     sm.StartTS.UTC().Format(time.RFC3339),
+			End:       sm.EndTS.UTC().Format(time.RFC3339),
+			DurMillis: dur,
+			Events:    sm.EventCount,
+			Commands:  sm.CmdCount,
+		})
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type sessionDetailResponse struct {
+	ID    string             `json:"id"`
+	IP    string             `json:"ip"`
+	User  string             `json:"user,omitempty"`
+	Start string             `json:"start"`
+	End   string             `json:"end"`
+	Lines []sessionEventRow  `json:"lines"`
+}
+
+type sessionEventRow struct {
+	TS       string   `json:"ts"`
+	OffsetMs int64    `json:"offsetMs"`
+	Kind     string   `json:"kind"`
+	User     string   `json:"user,omitempty"`
+	Command  string   `json:"command,omitempty"`
+	SHA256   string   `json:"sha256,omitempty"`
+	Filename string   `json:"filename,omitempty"`
+	Techs    []string `json:"techs,omitempty"`
+}
+
+func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	events, err := s.st.SessionEvents(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(events) == 0 {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	resp := sessionDetailResponse{
+		ID:    id,
+		IP:    events[0].SrcIP,
+		User:  events[len(events)-1].Username,
+		Start: events[0].TS.UTC().Format(time.RFC3339),
+		End:   events[len(events)-1].TS.UTC().Format(time.RFC3339),
+	}
+	t0 := events[0].TS
+	for _, e := range events {
+		row := sessionEventRow{
+			TS:       e.TS.UTC().Format(time.RFC3339),
+			OffsetMs: e.TS.Sub(t0).Milliseconds(),
+			Kind:     string(e.Kind),
+			User:     e.Username,
+			Command:  e.Command,
+			SHA256:   e.SHA256,
+			Filename: e.Filename,
+			Techs:    mitre.ClassifyOne(e),
+		}
+		resp.Lines = append(resp.Lines, row)
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // windowHoursFromQuery accepts UI chip values (1h/24h/7d/30d) or a
 // bare integer hours value. Defaults to fallback on parse failure so
 // the endpoint never 400s on a stray query string.

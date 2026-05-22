@@ -308,6 +308,68 @@
     display: inline-flex; gap: 6px; align-items: center;
   }
   .mitre-top .mt-pill b { color: var(--text); font-weight: 600; }
+
+  /* ==== Slice C: cowrie session timeline ==== */
+  .sess-list { max-height: 360px; overflow: auto; }
+  .sess-row {
+    display: grid; grid-template-columns: 28px 1fr 130px 90px 90px 70px 80px; gap: 8px;
+    align-items: center; padding: 8px 6px;
+    border-bottom: 1px dotted var(--line);
+    font-family: var(--mono); font-size: 11px;
+    cursor: pointer; transition: background 0.12s;
+  }
+  .sess-row:hover { background: rgba(76,201,240,0.05); }
+  .sess-row .sess-num { color: var(--dim-2); text-align: right; }
+  .sess-row .sess-ip { color: var(--accent-2); }
+  .sess-row .sess-user { color: var(--text); }
+  .sess-row .sess-dur, .sess-row .sess-when { color: var(--dim); text-align: right; }
+  .sess-row .sess-n { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
+  .sess-row .sess-c { color: var(--good); text-align: right; font-variant-numeric: tabular-nums; }
+  .sess-row .sess-id { color: var(--purple); font-size: 10px; }
+
+  /* terminal-style modal */
+  .sess-modal {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(2,6,13,0.85); backdrop-filter: blur(6px);
+    display: none; align-items: stretch; justify-content: center;
+    padding: 40px 24px;
+  }
+  .sess-modal.open { display: flex; }
+  .sess-modal .sm-card {
+    background: #050b14; border: 1px solid var(--line-strong); border-radius: 14px;
+    width: 100%; max-width: 1100px; display: flex; flex-direction: column;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+  }
+  .sm-head {
+    display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sm-head .sm-title { font-family: var(--mono); font-size: 12px; color: var(--text); flex: 1; }
+  .sm-head .sm-sub { font-family: var(--mono); font-size: 10px; color: var(--dim); }
+  .sm-head .sm-close {
+    border: 1px solid var(--line); background: transparent; color: var(--dim);
+    font-family: var(--mono); font-size: 11px; padding: 4px 10px; border-radius: 6px;
+    cursor: pointer;
+  }
+  .sm-head .sm-close:hover { color: var(--accent); border-color: rgba(255,91,110,0.5); }
+  .sm-body {
+    flex: 1; overflow: auto; padding: 14px 18px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+    background: #02060d;
+  }
+  .sm-line { display: grid; grid-template-columns: 64px 110px 1fr 220px; gap: 10px; padding: 2px 0; }
+  .sm-line .ln-off { color: var(--dim-2); text-align: right; }
+  .sm-line .ln-kind { color: var(--accent-2); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; padding-top: 1px; }
+  .sm-line .ln-txt { color: var(--good); word-break: break-all; }
+  .sm-line.kind-failed_password .ln-txt, .sm-line.kind-invalid_user .ln-txt { color: var(--accent); }
+  .sm-line.kind-accepted .ln-txt { color: var(--warn); }
+  .sm-line.kind-connect .ln-txt { color: var(--purple); }
+  .sm-line .ln-techs { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .sm-line .ln-techs .tt {
+    border: 1px solid rgba(76,201,240,0.3); background: rgba(76,201,240,0.06);
+    color: var(--blue-team); font-size: 9px; padding: 1px 5px; border-radius: 4px;
+    letter-spacing: 0.04em;
+  }
 </style>
 </head>
 <body>
@@ -459,10 +521,8 @@
           <h2>Cowrie sessions · play-by-play</h2>
           <span class="meta" id="sessions-meta">—</span>
         </div>
-        <div class="coming-soon" id="sessions-placeholder">
-          <div class="cs-title">Slice C</div>
-          Per-session timeline of every command with relative timestamps,
-          like a terminal recording. Ideal for incident-response walkthroughs.
+        <div class="sess-list" id="sessions-list">
+          <div class="empty">loading…</div>
         </div>
       </section>
 
@@ -578,6 +638,18 @@
       </section>
     </div>
   </section><!-- /view-red -->
+</div>
+
+<!-- Cowrie session play-by-play modal (slice C) -->
+<div class="sess-modal" id="sess-modal">
+  <div class="sm-card">
+    <div class="sm-head">
+      <div class="sm-title" id="sm-title">session</div>
+      <div class="sm-sub" id="sm-sub"></div>
+      <button class="sm-close" id="sm-close">close (esc)</button>
+    </div>
+    <div class="sm-body" id="sm-body"></div>
+  </div>
 </div>
 
 <script>
@@ -1020,6 +1092,144 @@ setInterval(function() {
 }, 30000);
 // Kick off once in case the page loaded with #tab=blue.
 if (readTabFromHash() === 'blue') refreshMitre();
+
+// ==== Slice C: Cowrie session timeline ============================
+function fmtDur(ms) {
+  if (ms < 1000) return ms + 'ms';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm' + (s % 60) + 's';
+  const h = Math.floor(m / 60);
+  return h + 'h' + (m % 60) + 'm';
+}
+function fmtOffset(ms) {
+  if (ms === 0) return '+0.0s';
+  const s = ms / 1000;
+  if (s < 60) return '+' + s.toFixed(1) + 's';
+  const m = Math.floor(s / 60);
+  return '+' + m + 'm' + (s % 60).toFixed(0) + 's';
+}
+function relTime(iso) {
+  const t = new Date(iso).getTime();
+  const d = (Date.now() - t) / 1000;
+  if (d < 60) return Math.floor(d) + 's ago';
+  if (d < 3600) return Math.floor(d / 60) + 'm ago';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+  return Math.floor(d / 86400) + 'd ago';
+}
+
+function renderSessions(data) {
+  const list = document.getElementById('sessions-list');
+  const meta = document.getElementById('sessions-meta');
+  if (!data.sessions || data.sessions.length === 0) {
+    list.innerHTML = '<div class="empty">no cowrie sessions in window</div>';
+    meta.textContent = '0 sessions · ' + data.windowHours + 'h window';
+    return;
+  }
+  meta.textContent = data.sessions.length + ' sessions · ' + data.windowHours + 'h window';
+  let html = '';
+  data.sessions.forEach(function(s, i) {
+    const user = s.user ? s.user : '<span style="color:var(--dim-2)">—</span>';
+    html += '<div class="sess-row" data-sid="' + s.id + '">' +
+      '<span class="sess-num">' + (i + 1) + '</span>' +
+      '<span class="sess-id">' + s.id + '</span>' +
+      '<span class="sess-ip">' + s.ip + '</span>' +
+      '<span class="sess-user">' + user + '</span>' +
+      '<span class="sess-dur">' + fmtDur(s.durMs) + '</span>' +
+      '<span class="sess-n" title="events">' + s.events + 'e</span>' +
+      '<span class="sess-c" title="commands">' + s.commands + 'c</span>' +
+      '</div>';
+  });
+  list.innerHTML = html;
+  list.querySelectorAll('.sess-row').forEach(function(row) {
+    row.addEventListener('click', function() { openSession(row.dataset.sid); });
+  });
+}
+
+async function refreshSessions() {
+  try {
+    const window = Filters.window || '24h';
+    const r = await fetch('/api/intel/sessions?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderSessions(await r.json());
+  } catch (_) {}
+}
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+  });
+}
+
+function renderSessionDetail(d) {
+  document.getElementById('sm-title').textContent = 'session ' + d.id + ' · ' + d.ip + (d.user ? ' · ' + d.user : '');
+  const dur = new Date(d.end).getTime() - new Date(d.start).getTime();
+  document.getElementById('sm-sub').textContent = new Date(d.start).toUTCString() + ' · ' + fmtDur(dur) + ' · ' + d.lines.length + ' events';
+  let html = '';
+  d.lines.forEach(function(ln) {
+    let txt = '';
+    if (ln.command) txt = '$ ' + escHtml(ln.command);
+    else if (ln.kind === 'failed_password') txt = 'failed login: ' + escHtml(ln.user || '?');
+    else if (ln.kind === 'invalid_user') txt = 'invalid user: ' + escHtml(ln.user || '?');
+    else if (ln.kind === 'accepted') txt = '*** authenticated as ' + escHtml(ln.user || '?') + ' ***';
+    else if (ln.kind === 'connect') txt = '-- session opened --';
+    else if (ln.kind === 'disconnect') txt = '-- session closed --';
+    else if (ln.sha256) txt = 'download ' + escHtml(ln.filename || '') + ' [' + ln.sha256.slice(0, 12) + ']';
+    else txt = escHtml(ln.kind);
+    const techs = (ln.techs || []).map(function(t) { return '<span class="tt">' + t + '</span>'; }).join('');
+    html += '<div class="sm-line kind-' + escHtml(ln.kind) + '">' +
+      '<span class="ln-off">' + fmtOffset(ln.offsetMs) + '</span>' +
+      '<span class="ln-kind">' + escHtml(ln.kind) + '</span>' +
+      '<span class="ln-txt">' + txt + '</span>' +
+      '<span class="ln-techs">' + techs + '</span>' +
+      '</div>';
+  });
+  document.getElementById('sm-body').innerHTML = html;
+}
+
+async function openSession(sid) {
+  const modal = document.getElementById('sess-modal');
+  document.getElementById('sm-title').textContent = 'session ' + sid;
+  document.getElementById('sm-sub').textContent = '';
+  document.getElementById('sm-body').innerHTML = '<div class="empty">loading…</div>';
+  modal.classList.add('open');
+  try {
+    const r = await fetch('/api/intel/session?id=' + encodeURIComponent(sid) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      document.getElementById('sm-body').innerHTML = '<div class="empty">failed to load (' + r.status + ')</div>';
+      return;
+    }
+    renderSessionDetail(await r.json());
+  } catch (e) {
+    document.getElementById('sm-body').innerHTML = '<div class="empty">error: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function closeSession() {
+  document.getElementById('sess-modal').classList.remove('open');
+}
+document.getElementById('sm-close').addEventListener('click', closeSession);
+document.getElementById('sess-modal').addEventListener('click', function(e) {
+  if (e.target.id === 'sess-modal') closeSession();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeSession();
+});
+
+// Hook sessions loader into Blue tab activation and window chips.
+const _setActiveForSessions = setActiveView;
+setActiveView = function(name) {
+  _setActiveForSessions(name);
+  if (name === 'blue') refreshSessions();
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', refreshSessions);
+});
+setInterval(function() {
+  if (document.getElementById('view-blue').classList.contains('active')) refreshSessions();
+}, 30000);
+if (readTabFromHash() === 'blue') refreshSessions();
 </script>
 </body>
 </html>

@@ -76,6 +76,8 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/intel", s.handleIntelPage)
 	mux.HandleFunc("/api/intel", s.handleIntel)
 	mux.HandleFunc("/api/intel/mitre", s.handleIntelMitre)
+	mux.HandleFunc("/api/intel/sessions", s.handleIntelSessions)
+	mux.HandleFunc("/api/intel/session", s.handleIntelSession)
 	mux.HandleFunc("/api/actor", s.handleActorDetail)
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/dashboard", s.handleDashboard)
