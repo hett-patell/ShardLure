@@ -546,6 +546,36 @@
     white-space: pre;
   }
   .pm-hex .ph-off { color: var(--dim-2); }
+
+  /* ==== Slice H: wordlist export ==== */
+  .wl-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px; gap: 12px;
+  }
+  .wl-kinds { display: flex; gap: 6px; }
+  .wl-kind {
+    background: transparent; color: var(--dim); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; padding: 4px 10px; border-radius: 6px;
+    cursor: pointer; letter-spacing: 0.04em;
+  }
+  .wl-kind:hover { color: var(--text); border-color: var(--line-strong); }
+  .wl-kind.active {
+    color: var(--accent); border-color: rgba(255,91,110,0.5);
+    background: rgba(255,91,110,0.08);
+  }
+  .wl-preview {
+    max-height: 320px; overflow: auto;
+    font-family: var(--mono); font-size: 11px;
+    background: #021018; border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .wl-row {
+    display: grid; grid-template-columns: 32px 1fr 50px; gap: 8px;
+    padding: 2px 0; align-items: baseline;
+  }
+  .wl-row .wl-rank { color: var(--dim-2); text-align: right; }
+  .wl-row .wl-v    { color: var(--text); word-break: break-all; }
+  .wl-row .wl-c    { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -798,12 +828,18 @@
       <section class="panel" id="panel-wordlist">
         <div class="panel-head">
           <h2>Credential wordlists</h2>
-          <span class="meta">john / hashcat ready</span>
+          <span class="meta" id="wl-meta">john / hashcat ready</span>
         </div>
-        <div class="coming-soon" id="wordlist-placeholder">
-          <div class="cs-title">Slice H</div>
-          Export observed usernames, passwords and combos as wordlists,
-          de-duplicated and ranked by frequency.
+        <div class="wl-toolbar">
+          <div class="wl-kinds">
+            <button class="wl-kind active" data-kind="users">users</button>
+            <button class="wl-kind" data-kind="passwords">passwords</button>
+            <button class="wl-kind" data-kind="combos">combos</button>
+          </div>
+          <a class="ioc-dl" id="wl-dl" download>download .txt</a>
+        </div>
+        <div class="wl-preview" id="wl-preview">
+          <div class="empty">loading…</div>
         </div>
       </section>
 
@@ -1805,6 +1841,66 @@ setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshPayloads();
 }, 30000);
 if (readTabFromHash() === 'red') refreshPayloads();
+
+// ==== Slice H: credential wordlist export =========================
+const WL = { kind: 'users' };
+
+function renderWordlist(data) {
+  const box = document.getElementById('wl-preview');
+  const meta = document.getElementById('wl-meta');
+  meta.textContent = data.total + ' ' + WL.kind + ' · ' + data.windowHours + 'h window';
+
+  if (!data.entries || data.entries.length === 0) {
+    box.innerHTML = '<div class="empty">no ' + WL.kind + ' captured in window</div>';
+    return;
+  }
+  let html = '';
+  data.entries.slice(0, 50).forEach(function(e, i) {
+    const value = WL.kind === 'combos'
+      ? (escHtml(e.username || '') + ':' + escHtml(e.password || ''))
+      : escHtml(e.username || e.password || '');
+    html += '<div class="wl-row">' +
+      '<span class="wl-rank">' + (i+1) + '</span>' +
+      '<span class="wl-v">' + value + '</span>' +
+      '<span class="wl-c">' + e.count + '</span>' +
+      '</div>';
+  });
+  document.getElementById('wl-preview').innerHTML = html;
+}
+
+async function refreshWordlist() {
+  const window = Filters.window || '30d';
+  const dl = document.getElementById('wl-dl');
+  dl.href = '/api/intel/wordlist?kind=' + WL.kind + '&format=txt&window=' + encodeURIComponent(window);
+  try {
+    const r = await fetch('/api/intel/wordlist?kind=' + WL.kind + '&format=json&limit=50&window=' +
+                         encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderWordlist(await r.json());
+  } catch (_) {}
+}
+
+document.querySelectorAll('.wl-kind').forEach(function(b) {
+  b.addEventListener('click', function() {
+    document.querySelectorAll('.wl-kind').forEach(function(x) { x.classList.remove('active'); });
+    b.classList.add('active');
+    WL.kind = b.dataset.kind;
+    refreshWordlist();
+  });
+});
+
+const _setActiveForWL = setActiveView;
+setActiveView = function(name) {
+  _setActiveForWL(name);
+  if (name === 'red') refreshWordlist();
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', refreshWordlist);
+});
+setInterval(function() {
+  if (document.getElementById('view-red').classList.contains('active')) refreshWordlist();
+}, 30000);
+if (readTabFromHash() === 'red') refreshWordlist();
 </script>
 </body>
 </html>

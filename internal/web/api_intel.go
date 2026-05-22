@@ -14,6 +14,7 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/mitre"
 	"github.com/networkshard/shardlure/internal/intel/payload"
 	"github.com/networkshard/shardlure/internal/intel/ttp"
+	"github.com/networkshard/shardlure/internal/intel/wordlist"
 )
 
 // ==== /api/intel/mitre ============================================
@@ -292,6 +293,99 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		Rows:        rows,
 	})
+}
+
+// ==== /api/intel/wordlist =========================================
+
+type wordlistResponse struct {
+	GeneratedAt string            `json:"generatedAt"`
+	WindowHours int               `json:"windowHours"`
+	Kind        string            `json:"kind"`
+	Total       int               `json:"total"`
+	Entries     []wordlist.Entry  `json:"entries"`
+}
+
+func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	if kind == "" {
+		kind = "users"
+	}
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "json"
+	}
+
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 720) // 30d default
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	events, err := s.st.EventsSince(since, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var entries []wordlist.Entry
+	switch kind {
+	case "users", "usernames":
+		entries = wordlist.CollectUsernames(events)
+	case "passwords":
+		entries = wordlist.CollectPasswords(events)
+	case "combos":
+		entries = wordlist.CollectCombos(events)
+	default:
+		http.Error(w, "invalid kind (users|passwords|combos)", http.StatusBadRequest)
+		return
+	}
+
+	// Optional limit for JSON preview; TXT downloads always send the
+	// full list since that's the whole point.
+	if format == "json" {
+		limit := 100
+		if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 50000 {
+			limit = n
+		}
+		total := len(entries)
+		if len(entries) > limit {
+			entries = entries[:limit]
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(wordlistResponse{
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			WindowHours: windowHours,
+			Kind:        kind,
+			Total:       total,
+			Entries:     entries,
+		})
+		return
+	}
+
+	// TXT download path - one entry per line, hashcat/hydra-compatible.
+	var fname string
+	switch kind {
+	case "users", "usernames":
+		fname = "shardlure-users-"
+	case "passwords":
+		fname = "shardlure-passwords-"
+	case "combos":
+		fname = "shardlure-combos-"
+	}
+	fname += time.Now().UTC().Format("20060102T150405Z") + ".txt"
+
+	var sb strings.Builder
+	switch kind {
+	case "users", "usernames":
+		wordlist.WriteLines(&sb, entries, func(e wordlist.Entry) string { return e.Username })
+	case "passwords":
+		wordlist.WriteLines(&sb, entries, func(e wordlist.Entry) string { return e.Password })
+	case "combos":
+		wordlist.WriteCombos(&sb, entries)
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
+	_, _ = w.Write([]byte(sb.String()))
 }
 
 // ==== /api/intel/payloads and /api/intel/payload =================

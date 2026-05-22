@@ -16,7 +16,17 @@ func main() {
 	defer st.Close()
 	now := time.Now().UTC()
 	mk := func(off time.Duration, src models.Source, kind models.EventKind, ip, user, cmd, sid, actor string) *models.Event {
-		return &models.Event{TS: now.Add(off), Source: src, Kind: kind, SrcIP: ip, Username: user, Command: cmd, SessionID: sid, ActorID: actor, Raw: "{}"}
+		// Inject a representative password on cowrie failed-pass events
+		// so the wordlist exporter has something to surface.
+		var pw string
+		if kind == models.KindFailedPass {
+			switch user {
+			case "root":  pw = "toor"
+			case "admin": pw = "admin"
+			default:      pw = "123456"
+			}
+		}
+		return &models.Event{TS: now.Add(off), Source: src, Kind: kind, SrcIP: ip, Username: user, Password: pw, Command: cmd, SessionID: sid, ActorID: actor, Raw: "{}"}
 	}
 	events := []*models.Event{
 		mk(-3*time.Hour, models.SourceJournal, models.KindFailedPass, "80.94.92.186", "root", "", "", "journal:80.94.92.186"),
