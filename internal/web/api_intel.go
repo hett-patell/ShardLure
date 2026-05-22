@@ -14,6 +14,7 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/mitre"
 	"github.com/networkshard/shardlure/internal/intel/payload"
 	"github.com/networkshard/shardlure/internal/intel/ttp"
+	"github.com/networkshard/shardlure/internal/intel/graph"
 	"github.com/networkshard/shardlure/internal/intel/wordlist"
 )
 
@@ -292,6 +293,38 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 		WindowHours: windowHours,
 		Total:       total,
 		Rows:        rows,
+	})
+}
+
+// ==== /api/intel/graph ============================================
+
+func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
+	topN := 60
+	if n, err := strconv.Atoi(r.URL.Query().Get("top")); err == nil && n > 0 && n <= 500 {
+		topN = n
+	}
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	events, err := s.st.EventsSince(since, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	g := graph.Build(events, topN)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(struct {
+		GeneratedAt string        `json:"generatedAt"`
+		WindowHours int           `json:"windowHours"`
+		Nodes       []graph.Node  `json:"nodes"`
+		Edges       []graph.Edge  `json:"edges"`
+	}{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+		Nodes:       g.Nodes,
+		Edges:       g.Edges,
 	})
 }
 

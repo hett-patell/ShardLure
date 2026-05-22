@@ -83,6 +83,12 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/payloads", s.handleIntelPayloads)
 	mux.HandleFunc("/api/intel/payload", s.handleIntelPayload)
 	mux.HandleFunc("/api/intel/wordlist", s.handleIntelWordlist)
+	mux.HandleFunc("/api/intel/graph", s.handleIntelGraph)
+	mux.HandleFunc("/vendor/vis-network.min.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+		_, _ = w.Write(visNetworkJS)
+	})
 	mux.HandleFunc("/api/ioc/list", s.handleIOCList)
 	mux.HandleFunc("/api/ioc/csv", s.handleIOCCSV)
 	mux.HandleFunc("/api/ioc/stix", s.handleIOCSTIX)

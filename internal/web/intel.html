@@ -576,7 +576,32 @@
   .wl-row .wl-rank { color: var(--dim-2); text-align: right; }
   .wl-row .wl-v    { color: var(--text); word-break: break-all; }
   .wl-row .wl-c    { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* ==== Slice I: pivot graph ==== */
+  .graph-canvas {
+    height: 520px;
+    background: #021018;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .graph-legend {
+    display: flex; align-items: center; gap: 14px;
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    margin-bottom: 10px;
+  }
+  .graph-legend .lg {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; margin-right: 4px;
+  }
+  .lg-actor { background: #ff5b6e; }
+  .lg-ip    { background: #4fc3f7; }
+  .lg-hassh { background: #ffb74d; }
+  .lg-user  { background: #81c784; }
+  .graph-spacer { flex: 1; }
+  .graph-stats { color: var(--dim-2); }
 </style>
+<script src="/vendor/vis-network.min.js"></script>
 </head>
 <body>
 <div class="topbar">
@@ -846,13 +871,17 @@
       <section class="panel full" id="panel-graph">
         <div class="panel-head">
           <h2>Infrastructure pivoting</h2>
-          <span class="meta" id="graph-meta">actor ↔ URL ↔ ASN</span>
+          <span class="meta" id="graph-meta">force-directed · drag · scroll to zoom</span>
         </div>
-        <div class="coming-soon" id="graph-placeholder">
-          <div class="cs-title">Slice I</div>
-          Force-directed graph grouping attacker IPs by ASN, by C2/payload-hosting URL,
-          and by HASSH fingerprint. Hover for details, drag to rearrange.
+        <div class="graph-legend">
+          <span class="lg lg-actor"></span>actor
+          <span class="lg lg-ip"></span>ip
+          <span class="lg lg-hassh"></span>hassh
+          <span class="lg lg-user"></span>user
+          <span class="graph-spacer"></span>
+          <span id="graph-stats" class="graph-stats">loading…</span>
         </div>
+        <div id="graph-canvas" class="graph-canvas"></div>
       </section>
 
       <section class="panel" id="panel-replay">
@@ -1901,6 +1930,95 @@ setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshWordlist();
 }, 30000);
 if (readTabFromHash() === 'red') refreshWordlist();
+
+// ==== Slice I: infrastructure pivot graph =========================
+const GRAPH = { network: null, container: null };
+
+const NODE_STYLE = {
+  actor: { color: '#ff5b6e', shape: 'dot' },
+  ip:    { color: '#4fc3f7', shape: 'square' },
+  hassh: { color: '#ffb74d', shape: 'diamond' },
+  user:  { color: '#81c784', shape: 'triangle' },
+};
+
+async function refreshGraph() {
+  const window = Filters.window || '7d';
+  const stats = document.getElementById('graph-stats');
+  try {
+    const r = await fetch('/api/intel/graph?window=' + encodeURIComponent(window) +
+                         '&top=80&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      stats.textContent = 'load failed';
+      return;
+    }
+    const data = await r.json();
+    renderGraph(data);
+    stats.textContent = data.nodes.length + ' nodes · ' + data.edges.length + ' edges · ' +
+                        data.windowHours + 'h window';
+  } catch (e) {
+    stats.textContent = 'load failed: ' + e.message;
+  }
+}
+
+function renderGraph(data) {
+  if (typeof vis === 'undefined') {
+    document.getElementById('graph-canvas').innerHTML =
+      '<div class="empty" style="padding:24px">vis-network failed to load</div>';
+    return;
+  }
+  const nodes = data.nodes.map(function(n) {
+    const style = NODE_STYLE[n.kind] || NODE_STYLE.user;
+    return {
+      id: n.id, label: n.label, shape: style.shape,
+      color: { background: style.color, border: style.color },
+      font: { color: '#cdd6da', face: 'JetBrains Mono, ui-monospace, monospace', size: 11 },
+      size: 8 + Math.min(22, Math.sqrt(n.weight) * 3),
+      title: n.kind + ' · weight ' + n.weight,
+    };
+  });
+  const edges = data.edges.map(function(e) {
+    return {
+      from: e.from, to: e.to,
+      width: Math.min(4, Math.log2(1 + e.weight)),
+      color: { color: 'rgba(120,140,170,0.35)', highlight: '#ff5b6e' },
+      smooth: false,
+      title: 'co-occur × ' + e.weight,
+    };
+  });
+
+  const container = document.getElementById('graph-canvas');
+  if (GRAPH.network) GRAPH.network.destroy();
+  GRAPH.network = new vis.Network(
+    container,
+    { nodes: nodes, edges: edges },
+    {
+      physics: {
+        solver: 'forceAtlas2Based',
+        forceAtlas2Based: { gravitationalConstant: -50, springLength: 110, damping: 0.4 },
+        stabilization: { iterations: 200 },
+      },
+      interaction: { hover: true, tooltipDelay: 150, dragNodes: true, zoomView: true },
+      nodes: { borderWidth: 1 },
+      edges: { selectionWidth: 2 },
+    }
+  );
+}
+
+const _setActiveForGraph = setActiveView;
+setActiveView = function(name) {
+  _setActiveForGraph(name);
+  if (name === 'red') {
+    // Defer: panel must be visible for vis-network sizing to work.
+    setTimeout(refreshGraph, 50);
+  }
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', function() { setTimeout(refreshGraph, 50); });
+});
+setInterval(function() {
+  if (document.getElementById('view-red').classList.contains('active')) refreshGraph();
+}, 60000);
+if (readTabFromHash() === 'red') setTimeout(refreshGraph, 100);
 </script>
 </body>
 </html>
