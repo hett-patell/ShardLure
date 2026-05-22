@@ -370,6 +370,24 @@
     color: var(--blue-team); font-size: 9px; padding: 1px 5px; border-radius: 4px;
     letter-spacing: 0.04em;
   }
+  .sm-transcript {
+    margin-top: 16px; border: 1px solid var(--line); border-radius: 6px;
+    background: #01040a;
+  }
+  .sm-transcript summary {
+    cursor: pointer; padding: 8px 12px; font-family: var(--mono);
+    font-size: 10.5px; color: var(--dim); letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .sm-transcript summary:hover { color: var(--text); }
+  .sm-transcript[open] summary { border-bottom: 1px solid var(--line); color: var(--blue-team); }
+  .sm-tty {
+    margin: 0; padding: 10px 14px;
+    font-family: var(--mono); font-size: 11px; line-height: 1.45;
+    color: var(--text); background: transparent;
+    white-space: pre-wrap; word-break: break-all;
+    max-height: 480px; overflow: auto;
+  }
 
   /* ==== Slice D: IOC export ==== */
   .ioc-toolbar {
@@ -1370,8 +1388,18 @@ function applyClientSearch() {
   });
 }
 
-// Initial tab from URL hash
+// Initial tab from URL hash. Capture any session=<id> deep-link
+// BEFORE setActiveView rewrites the hash to #tab=<view>, then
+// auto-open the modal once the page is ready.
+const __deepLinkSession = (function() {
+  const m = /session=([a-z0-9]+)/i.exec(location.hash || '');
+  return m ? m[1] : '';
+})();
 setActiveView(readTabFromHash());
+if (__deepLinkSession) {
+  // Defer one tick so openSession's modal markup is in the DOM.
+  setTimeout(function() { openSession(__deepLinkSession); }, 0);
+}
 
 /* ==== Slice B: MITRE ATT&CK grid ====================================
  * Loads /api/intel/mitre when the Blue tab is visible. The grid is
@@ -1552,6 +1580,16 @@ function renderSessionDetail(d) {
       '<span class="ln-techs">' + techs + '</span>' +
       '</div>';
   });
+  if (d.transcript && d.transcript.text) {
+    const t = d.transcript;
+    const sha = t.sha256 ? t.sha256.slice(0, 12) : '';
+    const note = t.truncated ? ' · truncated' : '';
+    html += '<details class="sm-transcript" open>' +
+      '<summary>tty transcript · ' + fmtBytes(t.bytes || 0) +
+      (sha ? ' · sha ' + escHtml(sha) : '') + note + '</summary>' +
+      '<pre class="sm-tty">' + escHtml(t.text) + '</pre>' +
+      '</details>';
+  }
   document.getElementById('sm-body').innerHTML = html;
 }
 

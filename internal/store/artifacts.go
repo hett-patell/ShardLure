@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -187,6 +189,113 @@ LIMIT 1`, sha256)
 	var ts, created string
 	if err := row.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
 		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		return nil, err
+	}
+	a.TS, _ = parseTime(ts)
+	a.CreatedAt, _ = parseTime(created)
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = a.TS
+	}
+	return &a, nil
+}
+
+// ensureCowrieTTYIndex creates the small lookup table that binds a
+// closed cowrie ttylog (named by its sha256) to the session it
+// belonged to. The table is populated incrementally by the cowrie
+// ingest from `cowrie.log.closed` events; the capture pass uses it to
+// stamp session_id onto the resulting artifact row.
+func (s *Store) ensureCowrieTTYIndex() error {
+	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS cowrie_tty_index (
+  sha256     TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  ts         TEXT NOT NULL
+)`)
+	return err
+}
+
+// RecordCowrieTTYBinding inserts (or updates) a sha->session mapping
+// for a closed Cowrie ttylog. Safe to call repeatedly with the same
+// inputs.
+func (s *Store) RecordCowrieTTYBinding(sha, sessionID string, ts time.Time) error {
+	sha = strings.TrimSpace(strings.ToLower(sha))
+	sessionID = strings.TrimSpace(sessionID)
+	if sha == "" || sessionID == "" {
+		return nil
+	}
+	if err := s.ensureCowrieTTYIndex(); err != nil {
+		return err
+	}
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	_, err := s.db.Exec(`
+INSERT INTO cowrie_tty_index (sha256, session_id, ts)
+VALUES (?, ?, ?)
+ON CONFLICT(sha256) DO UPDATE SET
+  session_id=excluded.session_id,
+  ts=excluded.ts`,
+		sha, sessionID, ts.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// SessionIDForCowrieTTYShasum returns the session id that owns the
+// given cowrie ttylog sha256, or ("", nil) if no binding has been
+// recorded yet.
+func (s *Store) SessionIDForCowrieTTYShasum(sha string) (string, error) {
+	sha = strings.TrimSpace(strings.ToLower(sha))
+	if sha == "" {
+		return "", nil
+	}
+	if err := s.ensureCowrieTTYIndex(); err != nil {
+		return "", err
+	}
+	var sid string
+	err := s.db.QueryRow(`SELECT session_id FROM cowrie_tty_index WHERE sha256=?`, sha).Scan(&sid)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return sid, err
+}
+
+// SetArtifactSessionByURL backfills the session_id of an existing
+// artifact row by its (unique) URL key. Used by the cowrie TTY sync
+// pass to bind a captured ttylog artifact to the session it belonged
+// to, once we can match the shasum against an ingested cowrie event.
+func (s *Store) SetArtifactSessionByURL(url, sessionID string) error {
+	if url == "" || sessionID == "" {
+		return nil
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE artifacts SET session_id=? WHERE url=? AND (session_id IS NULL OR session_id='')`, sessionID, url)
+	return err
+}
+
+// CowrieTTYArtifactForSession returns the most recent cowrie-tty
+// artifact attached to a session, if any. The intel session view uses
+// this to surface the decoded transcript next to the event timeline.
+func (s *Store) CowrieTTYArtifactForSession(sessionID string) (*Artifact, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	row := s.db.QueryRow(`
+SELECT id, ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at
+FROM artifacts
+WHERE session_id=? AND origin='cowrie_tty'
+ORDER BY COALESCE(ts, created_at) DESC
+LIMIT 1`, sessionID)
+	var a Artifact
+	var ts, created string
+	if err := row.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
+		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
 		return nil, err
 	}
 	a.TS, _ = parseTime(ts)

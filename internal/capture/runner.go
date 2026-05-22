@@ -19,6 +19,7 @@ type Runner struct {
 	st   *store.Store
 	cfg  config.Config
 	fetch *SafeFetcher
+	ttyIndexed bool // one-shot backfill flag for the sha->session table
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
@@ -71,8 +72,36 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		return n + c2, err
 	}
 	n += c2
+	// One-shot: backfill the sha->session index from all available
+	// cowrie.json (current + rotated) log files so the cowrie-tty
+	// artifacts captured before the index existed get bound to the
+	// right session on the next sync pass. Cheap (line scan, only
+	// looks at cowrie.log.closed) and idempotent.
+	if !r.ttyIndexed {
+		r.backfillCowrieTTYIndex()
+		r.ttyIndexed = true
+	}
 	c3, err := r.syncCowrieTTY()
 	return n + c3, err
+}
+
+// backfillCowrieTTYIndex scans the cowrie.json log (and rotated
+// siblings) for `cowrie.log.closed` events and records the sha->session
+// binding for each. Safe to call repeatedly thanks to the ON CONFLICT
+// UPDATE on the index row; we gate it behind ttyIndexed so it only
+// fires once per process lifetime.
+func (r *Runner) backfillCowrieTTYIndex() {
+	path := r.cfg.Cowrie.JSONLog
+	if path == "" {
+		return
+	}
+	candidates := []string{path}
+	if matches, err := filepath.Glob(path + ".*"); err == nil {
+		candidates = append(candidates, matches...)
+	}
+	for _, p := range candidates {
+		_ = indexTTYBindingsFromFile(r.st, p)
+	}
 }
 
 // syncCowrieTTY copies cowrie ttylog session recordings into the evidence
@@ -111,6 +140,13 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 			return n, err
 		}
 		if exists {
+			// Best-effort backfill: artifact rows recorded before
+			// session binding existed have empty session_id. Try
+			// to resolve and stamp it so the intel session view can
+			// surface the transcript. We just LOOK UP -- no copy.
+			if sid, _ := r.st.SessionIDForCowrieTTYShasum(name); sid != "" {
+				_ = r.st.SetArtifactSessionByURL(urlKey, sid)
+			}
 			continue
 		}
 		srcPath := filepath.Join(src, name)
@@ -126,8 +162,13 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 			transcript := RenderTranscript(frames, DefaultTranscriptOptions())
 			_ = os.WriteFile(dstRaw+".txt", []byte(transcript), 0o600)
 		}
+		// Best-effort: resolve the session id from the
+		// cowrie.log.closed event that names this shasum so the
+		// intel UI can attach the transcript to the right session.
+		sessionID, _ := r.st.SessionIDForCowrieTTYShasum(name)
 		if err := r.st.RecordArtifact(store.Artifact{
 			TS:        time.Now().UTC(),
+			SessionID: sessionID,
 			URL:       urlKey,
 			LocalPath: dstRaw,
 			SHA256:    sum,

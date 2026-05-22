@@ -49,10 +49,11 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	}
 	defer f.Close()
 
-	events, skipped, _, err := parseReader(f)
+	events, skipped, _, bindings, err := parseReader(f)
 	if err != nil {
 		return nil, err
 	}
+	persistTTYBindings(st, bindings)
 	res, err := persistEvents(st, events, adminIPs, replace)
 	if res != nil {
 		res.Skipped = skipped
@@ -93,10 +94,11 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		return nil, err
 	}
 
-	events, skipped, consumed, err := parseReader(f)
+	events, skipped, consumed, bindings, err := parseReader(f)
 	if err != nil {
 		return nil, err
 	}
+	persistTTYBindings(st, bindings)
 
 	// Advance offset by exactly the bytes the scanner consumed, not by
 	// fi.Size(): cowrie may have appended more bytes between Stat() and
@@ -198,6 +200,16 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 	return out, nil
 }
 
+// persistTTYBindings stores cowrie ttylog sha->session bindings so the
+// capture pass can stamp session_id onto cowrie-tty artifacts. Best
+// effort: a write failure here is logged via the store's normal error
+// path but does not block event ingest.
+func persistTTYBindings(st *store.Store, bindings []ttyBinding) {
+	for _, b := range bindings {
+		_ = st.RecordCowrieTTYBinding(b.SHA, b.SessionID, b.TS)
+	}
+}
+
 type cowrieIdentity struct {
 	TS       string
 	Kind     models.EventKind
@@ -285,13 +297,24 @@ func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, r
 	return &Result{Events: len(events), Actors: len(actors)}, nil
 }
 
+// ttyBinding pairs a closed cowrie ttylog (named by its sha256) with the
+// session that produced it. Cowrie emits this mapping in
+// `cowrie.log.closed` events, which we DON'T persist as regular events
+// (no useful kind), so we surface them as a side output of parsing.
+type ttyBinding struct {
+	SHA       string
+	SessionID string
+	TS        time.Time
+}
+
 // parseReader returns parsed events, the count of skipped/malformed lines,
 // and the exact number of bytes consumed by the scanner. The byte count is
 // used by IngestFileAppend to advance the persisted offset accurately,
 // without skipping a partial line at the tail if the writer (cowrie) appended
 // more data while we were reading.
-func parseReader(r io.Reader) ([]*models.Event, int, int64, error) {
+func parseReader(r io.Reader) ([]*models.Event, int, int64, []ttyBinding, error) {
 	var out []*models.Event
+	var bindings []ttyBinding
 	var skipped int
 	var consumed int64
 	sc := bufio.NewScanner(r)
@@ -312,6 +335,20 @@ func parseReader(r io.Reader) ([]*models.Event, int, int64, error) {
 			skipped++
 			continue
 		}
+		// Sidechannel: cowrie.log.closed carries the sha->session
+		// binding for a freshly-renamed ttylog. We capture it here
+		// rather than turning it into a top-level event kind to
+		// avoid polluting MITRE/IOC/UI surfaces with operational
+		// noise from cowrie's own log rotation.
+		if rec.EventID == "cowrie.log.closed" && rec.SHA256 != "" && rec.Session != "" {
+			if ts, ok := parseTS(rec.Timestamp); ok {
+				bindings = append(bindings, ttyBinding{
+					SHA:       strings.ToLower(strings.TrimSpace(rec.SHA256)),
+					SessionID: rec.Session,
+					TS:        ts,
+				})
+			}
+		}
 		e, ok := toEvent(rec, line)
 		if !ok {
 			skipped++
@@ -320,9 +357,9 @@ func parseReader(r io.Reader) ([]*models.Event, int, int64, error) {
 		out = append(out, e)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, skipped, consumed, err
+		return nil, skipped, consumed, nil, err
 	}
-	return out, skipped, consumed, nil
+	return out, skipped, consumed, bindings, nil
 }
 
 func toEvent(r cowrieLine, raw string) (*models.Event, bool) {

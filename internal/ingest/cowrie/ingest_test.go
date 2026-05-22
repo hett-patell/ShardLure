@@ -80,7 +80,7 @@ func TestParseReaderCountsSkippedLines(t *testing.T) {
 		`{"eventid":"cowrie.login.failed","timestamp":"not-a-time","src_ip":"1.2.3.4","username":"root","session":"s2"}`,
 		`{"eventid":"cowrie.unknown","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4"}`,
 	}, "\n")
-	events, skipped, _, err := parseReader(strings.NewReader(input))
+	events, skipped, _, _, err := parseReader(strings.NewReader(input))
 	if err != nil {
 		t.Fatalf("parseReader: %v", err)
 	}

@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,12 +165,24 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 type sessionDetailResponse struct {
-	ID    string             `json:"id"`
-	IP    string             `json:"ip"`
-	User  string             `json:"user,omitempty"`
-	Start string             `json:"start"`
-	End   string             `json:"end"`
-	Lines []sessionEventRow  `json:"lines"`
+	ID         string            `json:"id"`
+	IP         string            `json:"ip"`
+	User       string            `json:"user,omitempty"`
+	Start      string            `json:"start"`
+	End        string            `json:"end"`
+	Lines      []sessionEventRow `json:"lines"`
+	Transcript *sessionTranscript `json:"transcript,omitempty"`
+}
+
+// sessionTranscript is the decoded cowrie ttylog for the session, if
+// one was captured. Bytes is the raw artifact size on disk; Text is the
+// human-readable transcript (ANSI-stripped). Truncated reports whether
+// Text was clipped to keep the JSON payload small.
+type sessionTranscript struct {
+	SHA256    string `json:"sha256"`
+	Bytes     int64  `json:"bytes"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 type sessionEventRow struct {
@@ -238,6 +251,29 @@ func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Lines = append(resp.Lines, row)
 	}
+
+	// Attach the decoded TTY transcript if cowrie captured one for
+	// this session. We cap the inline payload at 256 KiB so a huge
+	// transcript can't bloat the JSON response -- the raw file is
+	// still on disk for anyone who wants the full session replay.
+	if art, err := s.st.CowrieTTYArtifactForSession(id); err == nil && art != nil && art.LocalPath != "" {
+		const maxInline = 256 * 1024
+		if data, err := os.ReadFile(art.LocalPath + ".txt"); err == nil && len(data) > 0 {
+			text := string(data)
+			truncated := false
+			if len(text) > maxInline {
+				text = text[:maxInline]
+				truncated = true
+			}
+			resp.Transcript = &sessionTranscript{
+				SHA256:    art.SHA256,
+				Bytes:     art.SizeBytes,
+				Text:      text,
+				Truncated: truncated,
+			}
+		}
+	}
+
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
