@@ -105,3 +105,28 @@ func TestWriteSTIX(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteSTIXDeterministic confirms two successive exports of the
+// same indicator set produce byte-identical JSON. Regression guard
+// for Fix #9 (replacing time.Now() in WriteSTIX with stable
+// indicator-derived timestamps).
+func TestWriteSTIXDeterministic(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	indicators := []Indicator{
+		{Kind: KindIP, Value: "1.2.3.4", FirstSeen: t0, LastSeen: t0.Add(time.Hour), Count: 3, Sources: []string{"cowrie"}},
+		{Kind: KindUser, Value: "root", FirstSeen: t0, LastSeen: t0.Add(2 * time.Hour), Count: 5, Sources: []string{"cowrie"}},
+	}
+	var a, b bytes.Buffer
+	if err := WriteSTIX(&a, indicators); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	// Sleep across at least one second to prove we're not implicitly
+	// hashing the wall clock.
+	time.Sleep(1100 * time.Millisecond)
+	if err := WriteSTIX(&b, indicators); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	if !bytes.Equal(a.Bytes(), b.Bytes()) {
+		t.Errorf("STIX export not deterministic:\n--- A ---\n%s\n--- B ---\n%s", a.String(), b.String())
+	}
+}

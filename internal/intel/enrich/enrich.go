@@ -97,7 +97,14 @@ func (r *Resolver) LookupAll(ctx context.Context, ip string) []Result {
 func (r *Resolver) lookup(ctx context.Context, ip, source string, fetch fetchFn) Result {
 	// Try the cache first regardless of TTL: if the fetch fails later
 	// we want to fall back to the cached value, even if stale.
-	cached, hit, _ := r.St.GetEnrichment(ip, source)
+	cached, hit, cacheErr := r.St.GetEnrichment(ip, source)
+	if cacheErr != nil {
+		// Cache is broken (DB corruption, locked file, schema
+		// drift). Don't silently bypass the cache - that turns one
+		// DB error into a flood of live API calls. Return a
+		// fail-open Result so the UI can show "cache error" once.
+		return Result{Source: source, Error: "cache: " + cacheErr.Error()}
+	}
 	now := r.Now()
 	if hit {
 		fresh := now.Sub(cached.FetchedAt) < CacheTTL

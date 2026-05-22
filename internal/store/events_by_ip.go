@@ -1,8 +1,6 @@
 package store
 
 import (
-	"time"
-
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
@@ -28,7 +26,7 @@ FROM events WHERE src_ip=? ORDER BY ts ASC`
 			&e.SessionID, &e.HASSH, &e.SSHClient, &e.JA4, &e.Command, &e.SHA256, &e.Filename, &e.Raw, &e.ActorID); err != nil {
 			return nil, err
 		}
-		e.TS, _ = time.Parse(time.RFC3339Nano, ts)
+		e.TS, _ = parseTime(ts)
 		out = append(out, &e)
 	}
 	return out, rows.Err()

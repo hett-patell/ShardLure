@@ -115,7 +115,7 @@ FROM events WHERE command IS NOT NULL AND command != '' ORDER BY ts DESC LIMIT ?
 			&e.SessionID, &e.SHA256, &e.Filename, &source); err != nil {
 			return nil, err
 		}
-		e.TS, _ = time.Parse(time.RFC3339Nano, ts)
+		e.TS, _ = parseTime(ts)
 		e.Kind = models.EventKind(kind)
 		e.Source = models.Source(source)
 		out = append(out, e)
@@ -146,7 +146,7 @@ FROM events WHERE actor_id=? ORDER BY ts DESC`
 			&e.SessionID, &e.SHA256, &e.Filename, &source); err != nil {
 			return nil, err
 		}
-		e.TS, _ = time.Parse(time.RFC3339Nano, ts)
+		e.TS, _ = parseTime(ts)
 		e.Kind = models.EventKind(kind)
 		e.Source = models.Source(source)
 		out = append(out, e)

@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 )
 
 // MaxDepth caps recursive decoding (e.g. base64-of-base64-of-hex).
@@ -91,43 +93,43 @@ func stepDecode(s string) (Layer, string, bool) {
 	// 1) echo "<b64>" | base64 -d wrapper
 	if m := echoB64Pipe.FindStringSubmatch(s); len(m) == 2 {
 		if dec, ok := tryBase64(m[1]); ok {
-			return Layer{Kind: "echo-pipe-base64", Encoded: truncate(m[1], 80), Decoded: dec}, dec, true
+			return Layer{Kind: "echo-pipe-base64", Encoded: intelutil.Truncate(m[1], 80), Decoded: dec}, dec, true
 		}
 	}
 	// 2) bash -c "$(echo … | base64 -d)" wrapper
 	if m := bashCSubshell.FindStringSubmatch(s); len(m) == 2 {
 		if dec, ok := tryBase64(m[1]); ok {
-			return Layer{Kind: "bash-c-subshell-base64", Encoded: truncate(m[1], 80), Decoded: dec}, dec, true
+			return Layer{Kind: "bash-c-subshell-base64", Encoded: intelutil.Truncate(m[1], 80), Decoded: dec}, dec, true
 		}
 	}
 	// 3) printf '\xNN...' hex sequence
 	if m := printfHex.FindStringSubmatch(s); len(m) == 2 {
 		dec := decodePrintfHex(m[1])
-		return Layer{Kind: "printf-hex", Encoded: truncate(m[1], 80), Decoded: dec}, dec, true
+		return Layer{Kind: "printf-hex", Encoded: intelutil.Truncate(m[1], 80), Decoded: dec}, dec, true
 	}
 	// 4) eval "..." wrapper: strip and continue decoding the inner
 	if m := evalWrap.FindStringSubmatch(s); len(m) == 2 {
 		inner := strings.TrimSpace(m[1])
 		if inner != "" && inner != s {
-			return Layer{Kind: "eval", Encoded: truncate(s, 80), Decoded: inner}, inner, true
+			return Layer{Kind: "eval", Encoded: intelutil.Truncate(s, 80), Decoded: inner}, inner, true
 		}
 	}
 	// 5) Bare base64 token (longest-match heuristic)
 	if m := bareB64.FindStringSubmatch(s); len(m) == 4 {
 		if dec, ok := tryBase64(m[2]); ok && looksPrintable(dec) {
-			return Layer{Kind: "base64", Encoded: truncate(m[2], 80), Decoded: dec}, dec, true
+			return Layer{Kind: "base64", Encoded: intelutil.Truncate(m[2], 80), Decoded: dec}, dec, true
 		}
 	}
 	// 6) Bare hex blob
 	if m := bareHex.FindStringSubmatch(s); len(m) == 2 {
 		if dec, ok := tryHex(m[1]); ok && looksPrintable(dec) {
-			return Layer{Kind: "hex", Encoded: truncate(m[1], 80), Decoded: dec}, dec, true
+			return Layer{Kind: "hex", Encoded: intelutil.Truncate(m[1], 80), Decoded: dec}, dec, true
 		}
 	}
 	// 7) URL-encoded
 	if urlEnc.MatchString(s) {
 		if dec, err := url.QueryUnescape(s); err == nil && dec != s {
-			return Layer{Kind: "urlencoded", Encoded: truncate(s, 80), Decoded: dec}, dec, true
+			return Layer{Kind: "urlencoded", Encoded: intelutil.Truncate(s, 80), Decoded: dec}, dec, true
 		}
 	}
 	return Layer{}, "", false
@@ -198,9 +200,4 @@ func looksPrintable(s string) bool {
 	return float64(printable)/float64(len([]rune(s))) >= 0.85
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
+

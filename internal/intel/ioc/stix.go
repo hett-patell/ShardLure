@@ -5,8 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 )
 
 // STIX 2.1 bundle exporter.
@@ -21,6 +24,12 @@ import (
 const (
 	stixSpecVersion = "2.1"
 	stixIdentity    = "identity--6e1b3f7b-8c19-4d6e-9c1c-7a3d2b7a51a0" // stable, hard-coded
+	// stixIdentityCreated is the fixed birthdate of the ShardLure
+	// identity SDO. Hard-coded so re-exports byte-match across runs
+	// (matters for diffing intel feeds and for downstream TIPs that
+	// dedupe on SDO content hashes). 2024-01-01T00:00:00Z is the
+	// project's first public commit window.
+	stixIdentityCreated = "2024-01-01T00:00:00Z"
 	stixIdentityName = "ShardLure"
 )
 
@@ -62,31 +71,42 @@ type externalRef struct {
 }
 
 // WriteSTIX serialises a STIX 2.1 bundle to w.
+//
+// All timestamps in the bundle are derived from indicator data
+// (FirstSeen / LastSeen) or from package-level constants. The output
+// is therefore byte-stable for a fixed input set: a re-export with
+// the same indicators produces the same JSON, which lets downstream
+// TIPs dedupe and lets us diff intel feeds in CI. The bundle ID
+// itself is also deterministic - it hashes the sorted indicator IDs
+// rather than the wall clock.
 func WriteSTIX(w io.Writer, indicators []Indicator) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-
 	objects := []stixObject{
 		{
 			Type:          "identity",
 			SpecVersion:   stixSpecVersion,
 			ID:            stixIdentity,
-			Created:       now,
-			Modified:      now,
+			Created:       stixIdentityCreated,
+			Modified:      stixIdentityCreated,
 			Name:          stixIdentityName,
 			Description:   "ShardLure honeypot intelligence platform",
 			IdentityClass: "organization",
 		},
 	}
 
+	// Indicator IDs are deterministic (uuidFromSeed on kind+value)
+	// so hashing them gives a stable bundle ID.
+	var idSeed strings.Builder
 	for _, ind := range indicators {
-		obj, ok := indicatorToSTIX(ind, now)
+		obj, ok := indicatorToSTIX(ind)
 		if !ok {
 			continue
 		}
+		idSeed.WriteString(obj.ID)
+		idSeed.WriteByte('|')
 		objects = append(objects, obj)
 	}
 
-	bundleID := "bundle--" + uuidFromSeed("shardlure-bundle-"+now)
+	bundleID := "bundle--" + uuidFromSeed("shardlure-bundle-"+idSeed.String())
 	bundle := stixBundle{
 		Type:        "bundle",
 		ID:          bundleID,
@@ -99,7 +119,15 @@ func WriteSTIX(w io.Writer, indicators []Indicator) error {
 	return enc.Encode(&bundle)
 }
 
-func indicatorToSTIX(ind Indicator, created string) (stixObject, bool) {
+func indicatorToSTIX(ind Indicator) (stixObject, bool) {
+	// Use the indicator's own FirstSeen / LastSeen for Created /
+	// Modified so re-exports byte-match. wall clock is intentionally
+	// not consulted here.
+	created := ind.FirstSeen.UTC().Format(time.RFC3339)
+	modified := ind.LastSeen.UTC().Format(time.RFC3339)
+	if ind.LastSeen.Before(ind.FirstSeen) {
+		modified = created
+	}
 	var (
 		pattern string
 		labels  = []string{"malicious-activity"}
@@ -125,9 +153,9 @@ func indicatorToSTIX(ind Indicator, created string) (stixObject, bool) {
 		joinOrNone(ind.Sources, ",") + " sources from " +
 		ind.FirstSeen.UTC().Format(time.RFC3339) + " to " +
 		ind.LastSeen.UTC().Format(time.RFC3339) + ". " +
-		"Count: " + itoa(ind.Count) + "."
+		"Count: " + strconv.Itoa(ind.Count) + "."
 	if ind.SampleCommand != "" {
-		desc += " Sample: " + truncate(ind.SampleCommand, 256)
+		desc += " Sample: " + intelutil.Truncate(ind.SampleCommand, 256)
 	}
 
 	return stixObject{
@@ -135,7 +163,7 @@ func indicatorToSTIX(ind Indicator, created string) (stixObject, bool) {
 		SpecVersion:    stixSpecVersion,
 		ID:             id,
 		Created:        created,
-		Modified:       created,
+		Modified:       modified,
 		Name:           string(ind.Kind) + ":" + ind.Value,
 		Description:    desc,
 		Pattern:        pattern,
@@ -160,37 +188,6 @@ func joinOrNone(parts []string, sep string) string {
 		return "no"
 	}
 	return strings.Join(parts, sep)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
-func itoa(i int) string {
-	// avoid pulling strconv for one call site; ints in IOC counts are tiny
-	if i == 0 {
-		return "0"
-	}
-	neg := false
-	if i < 0 {
-		neg = true
-		i = -i
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }
 
 // uuidFromSeed produces a deterministic UUIDv5-shaped string from a

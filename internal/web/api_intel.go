@@ -204,10 +204,23 @@ func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pick the most recent non-empty username. The previous code
+	// pulled events[len-1].Username, which is almost always a
+	// `command` event with Username="" - cowrie only stamps the user
+	// on the login/auth events at the start of the session. Walk
+	// from newest to oldest so re-auth events (e.g. su) take
+	// precedence over the initial login.
+	var user string
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Username != "" {
+			user = events[i].Username
+			break
+		}
+	}
 	resp := sessionDetailResponse{
 		ID:    id,
 		IP:    events[0].SrcIP,
-		User:  events[len(events)-1].Username,
+		User:  user,
 		Start: events[0].TS.UTC().Format(time.RFC3339),
 		End:   events[len(events)-1].TS.UTC().Format(time.RFC3339),
 	}

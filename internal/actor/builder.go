@@ -179,6 +179,59 @@ func (c *journalCollector) Add(e *models.Event) { c.add(e) }
 // Finalize is the exported wrapper around finalize().
 func (c *journalCollector) Finalize() []*AggregatedActor { return c.finalize() }
 
+// FinalizeIP returns the current AggregatedActor for a single IP
+// without iterating the whole byIP map. Returns nil if the IP has
+// been filtered out (admin) or has no recorded events yet. Used by
+// the live journal tail so each new event triggers an O(1) actor
+// upsert instead of an O(N) full rebuild.
+func (c *journalCollector) FinalizeIP(ip string) *AggregatedActor {
+	st, ok := c.byIP[ip]
+	if !ok || st.Count == 0 {
+		return nil
+	}
+	users := sortedKeys(st.Users)
+	hours := st.Last.Sub(st.First).Hours()
+	if hours < minWindowHours {
+		hours = minWindowHours
+	}
+	aph := float64(st.Count) / hours
+	uhash := usernameSetHash(users)
+	id := JournalActorID(ip)
+	playbook := ClassifyPlaybook(users, aph)
+
+	a := &models.Actor{
+		ID:              id,
+		Source:          models.SourceJournal,
+		PrimaryIP:       ip,
+		Playbook:        playbook,
+		Intent:          "unknown",
+		Confidence:      ConfidenceJournalBase,
+		FirstSeen:       st.First,
+		LastSeen:        st.Last,
+		EventCount:      st.Count,
+		UniqueUsers:     len(st.Users),
+		AttemptsPerHour: aph,
+		UsernameHash:    uhash,
+		ProbeScore:      journalProbeScore(st.Count, aph, len(st.Users)),
+		Notes:           fmt.Sprintf("%d distinct usernames", len(st.Users)),
+	}
+	if st.Last.Sub(st.First).Hours() >= minWindowHours && aph > 100 {
+		a.Confidence = ConfidenceJournalHighAPH
+	}
+	ips := map[string]IPStat{
+		ip: {Count: st.Count, First: st.First, Last: st.Last},
+	}
+	// Copy st.Users so the returned aggregator can outlive the next
+	// add() call (finalize() in the bulk path doesn't bother because
+	// the collector is discarded right after; FinalizeIP is meant to
+	// be called repeatedly).
+	usersCopy := make(map[string]int, len(st.Users))
+	for k, v := range st.Users {
+		usersCopy[k] = v
+	}
+	return &AggregatedActor{Actor: a, IPs: ips, Users: usersCopy}
+}
+
 func (c *journalCollector) add(e *models.Event) {
 	if e == nil || e.SrcIP == "" || c.admin[e.SrcIP] {
 		return

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"time"
 )
 
@@ -40,8 +41,13 @@ func (s *Store) GetEnrichment(ip, source string) (*EnrichmentRecord, bool, error
 	var r EnrichmentRecord
 	var fetched string
 	if err := row.Scan(&r.IP, &r.Source, &r.Payload, &fetched); err != nil {
-		// sql.ErrNoRows surfaces as a single common "not found" path.
-		return nil, false, nil
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		// Genuine DB error (corruption, locked file, schema drift):
+		// don't pretend it's just a cache miss. The resolver decides
+		// whether to fail open or surface the error to the UI.
+		return nil, false, err
 	}
 	r.FetchedAt, _ = parseTime(fetched)
 	return &r, true, nil

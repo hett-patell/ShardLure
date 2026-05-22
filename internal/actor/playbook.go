@@ -41,6 +41,8 @@ const (
 	playbookCNRatioThreshold = 0.30
 	// Crypto cluster has to be more than incidental.
 	playbookCryptoRatioThreshold = 0.15
+	// Two or more ops/CI usernames flips us into the ops-target bucket.
+	playbookOpsMinHits = 2
 )
 
 // ClassifyPlaybook returns a playbook tag from observed usernames and rate.
@@ -80,6 +82,12 @@ func ClassifyPlaybook(usernames []string, attemptsPerHour float64) string {
 	// they only include one incidental "sol/solana" username.
 	if crypto >= 2 || (crypto >= 1 && float64(crypto)/n >= playbookCryptoRatioThreshold) {
 		return "crypto_target"
+	}
+	// Two or more k8s/deploy/ci-flavoured usernames signal someone
+	// hunting CI/CD or container ops accounts rather than blasting
+	// stock credentials.
+	if k8s >= playbookOpsMinHits {
+		return "ops_target"
 	}
 	if admin >= 2 && attemptsPerHour >= playbookDefaultCredAPH {
 		return "default_credential_spray"

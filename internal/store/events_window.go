@@ -11,6 +11,11 @@ import (
 // session_id, hashes, source). limit caps the rows scanned so analysts
 // can't accidentally walk an entire 30-day log file from a UI fetch.
 //
+// Pass limit=0 (or any non-positive value) to use the default cap of
+// 5000 rows. Pass an explicit positive limit if you want fewer; there
+// is no way to request "all rows" - this method is intentionally
+// bounded. For unbounded streaming, use IterateEventsBySource.
+//
 // Use this for read-only analytics. Streaming ingest paths should
 // continue to call IterateEventsBySource so they can consume
 // arbitrarily large slices without buffering everything in memory.

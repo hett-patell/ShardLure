@@ -52,7 +52,7 @@ FROM events WHERE source=? ORDER BY ts ASC`, source)
 			&e.SessionID, &e.HASSH, &e.SSHClient, &e.JA4, &e.Command, &e.SHA256, &e.Filename, &e.Raw, &e.ActorID); err != nil {
 			return err
 		}
-		e.TS, _ = time.Parse(time.RFC3339Nano, ts)
+		e.TS, _ = parseTime(ts)
 		if err := fn(e); err != nil {
 			return err
 		}

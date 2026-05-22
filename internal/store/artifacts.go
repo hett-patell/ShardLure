@@ -126,7 +126,7 @@ FROM artifacts`)
 		return out, err
 	}
 	if last != "" {
-		out.LastTS, _ = time.Parse(time.RFC3339Nano, last)
+		out.LastTS, _ = parseTime(last)
 	}
 	return out, nil
 }
@@ -160,8 +160,8 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 			&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
 			return nil, err
 		}
-		a.TS, _ = time.Parse(time.RFC3339Nano, ts)
-		a.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		a.TS, _ = parseTime(ts)
+		a.CreatedAt, _ = parseTime(created)
 		if a.CreatedAt.IsZero() {
 			a.CreatedAt = a.TS
 		}
@@ -189,8 +189,8 @@ LIMIT 1`, sha256)
 		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
 		return nil, err
 	}
-	a.TS, _ = time.Parse(time.RFC3339Nano, ts)
-	a.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	a.TS, _ = parseTime(ts)
+	a.CreatedAt, _ = parseTime(created)
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = a.TS
 	}
@@ -221,8 +221,8 @@ LIMIT ?`, limit)
 			&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
 			return nil, err
 		}
-		a.TS, _ = time.Parse(time.RFC3339Nano, ts)
-		a.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		a.TS, _ = parseTime(ts)
+		a.CreatedAt, _ = parseTime(created)
 		if a.CreatedAt.IsZero() {
 			a.CreatedAt = a.TS
 		}
@@ -261,21 +261,7 @@ LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*EventRow
-	for rows.Next() {
-		var e EventRow
-		var ts, cmd, fn, sum string
-		if err := rows.Scan(&e.ID, &ts, &e.SrcIP, &e.SessionID, &e.ActorID, &cmd, &fn, &sum); err != nil {
-			return nil, err
-		}
-		e.TS, _ = time.Parse(time.RFC3339Nano, ts)
-		e.Command = cmd
-		e.Filename = fn
-		e.SHA256 = sum
-		out = append(out, &e)
-	}
-	return out, rows.Err()
+	return scanEventRowsWithFile(rows)
 }
 
 // EventRow is a slim event view for capture processing.
@@ -290,12 +276,9 @@ type EventRow struct {
 	SHA256    string
 }
 
-func scanEventRows(rows interface {
-	Next() bool
-	Scan(dest ...any) error
-	Err() error
-	Close() error
-}) ([]*EventRow, error) {
+// scanEventRows uses the package-level rowScanner interface declared
+// in dashboard.go.
+func scanEventRows(rows rowScanner) ([]*EventRow, error) {
 	defer rows.Close()
 	var out []*EventRow
 	for rows.Next() {
@@ -304,8 +287,30 @@ func scanEventRows(rows interface {
 		if err := rows.Scan(&e.ID, &ts, &e.SrcIP, &e.SessionID, &e.ActorID, &cmd); err != nil {
 			return nil, err
 		}
-		e.TS, _ = time.Parse(time.RFC3339Nano, ts)
+		e.TS, _ = parseTime(ts)
 		e.Command = cmd
+		out = append(out, &e)
+	}
+	return out, rows.Err()
+}
+
+// scanEventRowsWithFile is the file_download variant: same columns
+// as scanEventRows plus filename and sha256. Kept separate (rather
+// than overloaded with optional pointers) because database/sql Scan
+// needs the exact column count.
+func scanEventRowsWithFile(rows rowScanner) ([]*EventRow, error) {
+	defer rows.Close()
+	var out []*EventRow
+	for rows.Next() {
+		var e EventRow
+		var ts, cmd, fn, sum string
+		if err := rows.Scan(&e.ID, &ts, &e.SrcIP, &e.SessionID, &e.ActorID, &cmd, &fn, &sum); err != nil {
+			return nil, err
+		}
+		e.TS, _ = parseTime(ts)
+		e.Command = cmd
+		e.Filename = fn
+		e.SHA256 = sum
 		out = append(out, &e)
 	}
 	return out, rows.Err()
