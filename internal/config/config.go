@@ -35,6 +35,14 @@ type Config struct {
 		JSONLog string `yaml:"json_log"`
 	} `yaml:"cowrie"`
 
+	Capture struct {
+		Enabled         bool   `yaml:"enabled"`
+		EvidenceDir     string `yaml:"evidence_dir"`
+		QuarantineFetch bool   `yaml:"quarantine_fetch"`
+		MaxBytes        int64  `yaml:"max_bytes"`
+		TimeoutSec      int    `yaml:"timeout_sec"`
+	} `yaml:"capture"`
+
 	GeoIP struct {
 		MMDB string `yaml:"mmdb"`
 	} `yaml:"geoip"`
@@ -56,6 +64,10 @@ func Default() Config {
 	c.Dashboard.HomeCC = "IN"
 	c.Cowrie.Home = filepath.Join(dir, "cowrie")
 	c.Cowrie.JSONLog = filepath.Join(dir, "cowrie", "var", "log", "cowrie", "cowrie.json")
+	c.Capture.Enabled = true
+	c.Capture.QuarantineFetch = true
+	c.Capture.MaxBytes = 50 << 20
+	c.Capture.TimeoutSec = 45
 	return c
 }
 
@@ -104,4 +116,11 @@ func (c Config) Save(path string) error {
 
 func (c Config) DBPath() string {
 	return filepath.Join(c.DataDir, "shardlure.db")
+}
+
+func (c Config) CaptureEvidenceDir() string {
+	if c.Capture.EvidenceDir != "" {
+		return c.Capture.EvidenceDir
+	}
+	return filepath.Join(c.DataDir, "evidence")
 }

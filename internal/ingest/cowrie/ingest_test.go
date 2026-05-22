@@ -38,6 +38,31 @@ func TestToEventCommand(t *testing.T) {
 	}
 }
 
+func TestToEventFileDownload(t *testing.T) {
+	rec := cowrieLine{
+		EventID:   "cowrie.session.file_download",
+		Timestamp: "2026-05-21T12:00:00.000000Z",
+		SrcIP:     "1.2.3.4",
+		Session:   "s1",
+		URL:       "http://evil.example/malware",
+		Outfile:   "/var/lib/cowrie/downloads/abc123",
+		SHA256:    "deadbeef",
+	}
+	e, ok := toEvent(rec, `{}`)
+	if !ok {
+		t.Fatal("expected parse")
+	}
+	if e.Kind != models.KindFileDown {
+		t.Fatalf("kind=%s", e.Kind)
+	}
+	if e.Command != "http://evil.example/malware" {
+		t.Fatalf("command=%q", e.Command)
+	}
+	if e.Filename != "/var/lib/cowrie/downloads/abc123" {
+		t.Fatalf("filename=%q", e.Filename)
+	}
+}
+
 func TestMapKindTunnel(t *testing.T) {
 	k, ok := mapKind("cowrie.direct-tcpip.request")
 	if !ok {

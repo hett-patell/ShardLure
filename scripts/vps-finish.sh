@@ -92,6 +92,12 @@ lines += [
     "dashboard:", f"  port: {dash_port}",
     "journal:", "  unit: ssh",
     "cowrie:", f"  home: {COWRIE_HOME}", f"  json_log: {COWRIE_LOG}",
+    "capture:",
+    "  enabled: true",
+    f"  evidence_dir: {DATA / 'evidence'}",
+    "  quarantine_fetch: true",
+    "  max_bytes: 52428800",
+    "  timeout_sec: 45",
 ]
 CONFIG.write_text("\n".join(lines) + "\n")
 shutil.copy2("/tmp/shardlure", BIN)

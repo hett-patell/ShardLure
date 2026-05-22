@@ -98,6 +98,39 @@
   .cmd-line.event .txt { color: var(--text); }
   .scroll { max-height: 420px; overflow: auto; }
   .scroll.tall { max-height: 520px; }
+
+  .cap-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .cap-head h2 { margin: 0; }
+  .cap-live {
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(110,231,183,0.35);
+    color: var(--good); background: rgba(110,231,183,0.08);
+  }
+  .cap-live.active { animation: capPulse 1.2s infinite; }
+  @keyframes capPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(110,231,183,0.45); }
+    50% { box-shadow: 0 0 0 6px rgba(110,231,183,0); }
+  }
+  .cap-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  @media (max-width: 720px) { .cap-stats { grid-template-columns: 1fr 1fr; } }
+  .cap-stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .cap-stat .n { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--good); }
+  .cap-stat .n.warn { color: var(--warn); }
+  .cap-stat .n.dim { color: var(--accent-2); }
+  .cap-stat .l { color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
+  td.url { color: var(--accent-2); white-space: normal; word-break: break-all; line-height: 1.35; max-width: 0; }
+  td.hash { color: var(--dim); font-size: 10.5px; }
+  td.size { color: var(--good); text-align: right; }
+  .cap-badge {
+    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line);
+    display: inline-block;
+  }
+  .cap-badge.capturing { color: var(--warn); border-color: rgba(251,191,36,0.45); background: rgba(251,191,36,0.1); }
+  .cap-badge.fetched { color: var(--good); border-color: rgba(110,231,183,0.4); background: rgba(110,231,183,0.08); }
+  .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: rgba(255,91,110,0.4); background: rgba(255,91,110,0.08); }
+  tr.cap-row-new td { animation: capFade 0.45s ease; }
+  @keyframes capFade { from { background: rgba(110,231,183,0.12); } to { background: transparent; } }
 </style>
 </head>
 <body>
@@ -105,7 +138,7 @@
   <header>
     <div>
       <h1>ShardLure Intel</h1>
-      <div class="sub">threat actors · commands · heatmap · playbooks</div>
+      <div class="sub">threat actors · commands · payload capture · heatmap</div>
     </div>
     <nav class="nav">
       <a href="/">Globe</a>
@@ -172,6 +205,35 @@
         </table>
       </div>
     </section>
+
+    <section class="panel full">
+      <div class="cap-head">
+        <h2>Payload capture (live)</h2>
+        <span class="cap-live" id="cap-live">idle</span>
+      </div>
+      <div class="cap-stats">
+        <div class="cap-stat"><div class="n" id="cap-total">0</div><div class="l">tracked URLs</div></div>
+        <div class="cap-stat"><div class="n" id="cap-fetched">0</div><div class="l">saved to evidence</div></div>
+        <div class="cap-stat"><div class="n warn" id="cap-active">0</div><div class="l">fetching now</div></div>
+        <div class="cap-stat"><div class="n dim" id="cap-bytes">0 B</div><div class="l">quarantine size</div></div>
+      </div>
+      <div class="scroll tall">
+        <table id="capture-table">
+          <thead>
+            <tr>
+              <th style="width:52px">Time</th>
+              <th style="width:72px">Status</th>
+              <th>URL / target</th>
+              <th style="width:72px" class="n">Size</th>
+              <th style="width:100px">SHA256</th>
+              <th style="width:110px">Source IP</th>
+              <th style="width:88px">Origin</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -179,6 +241,24 @@
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
 const fmt = function(n) { return Number(n || 0).toLocaleString(); };
+const fmtBytes = function(n) {
+  n = Number(n || 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(2) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+};
+const shortURL = function(u) {
+  u = String(u || '');
+  if (u.length <= 72) return u;
+  return u.slice(0, 36) + '…' + u.slice(-30);
+};
+const shortHash = function(h) {
+  h = String(h || '');
+  if (h.length <= 16) return h || '—';
+  return h.slice(0, 12) + '…';
+};
+let lastCaptureKey = '';
 const rel = function(ts) {
   const d = new Date(ts).getTime();
   if (!Number.isFinite(d)) return '-';
@@ -366,6 +446,50 @@ function renderCommands(cmds) {
   }).join('');
 }
 
+function renderCapture(d) {
+  const summary = d.summary || {};
+  const rows = d.artifacts || [];
+  const active = Number(summary.capturing || 0);
+  const live = document.getElementById('cap-live');
+  live.textContent = active > 0 ? 'capturing' : (summary.fetched > 0 ? 'live' : 'idle');
+  live.classList.toggle('active', active > 0);
+  document.getElementById('cap-total').textContent = fmt(summary.total || 0);
+  document.getElementById('cap-fetched').textContent = fmt(summary.fetched || 0);
+  document.getElementById('cap-active').textContent = fmt(active);
+  document.getElementById('cap-bytes').textContent = fmtBytes(summary.totalBytes || 0);
+
+  const tb = document.querySelector('#capture-table tbody');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="empty">No payloads captured yet — wget/curl from Cowrie sessions will appear here</td></tr>';
+    return;
+  }
+  const key = rows.map(function(a){ return a.url + '|' + a.status + '|' + a.sizeBytes; }).join(';');
+  const isNew = key !== lastCaptureKey;
+  lastCaptureKey = key;
+
+  tb.innerHTML = rows.slice(0, 40).map(function(a) {
+    const st = String(a.status || 'unknown').toLowerCase();
+    const badge = '<span class="cap-badge ' + esc(st) + '">' + esc(st) + '</span>';
+    const origin = String(a.origin || '').replace('quarantine_fetch', 'quarantine').replace('cowrie_', 'cowrie ');
+    return '<tr class="' + (isNew ? 'cap-row-new' : '') + '">' +
+      '<td>' + esc(rel(a.createdAt || a.ts)) + '</td>' +
+      '<td>' + badge + '</td>' +
+      '<td class="url" title="' + esc(a.url) + (a.detail ? '\n' + a.detail : '') + '">' + esc(shortURL(a.url)) + '</td>' +
+      '<td class="size n">' + (a.sizeBytes > 0 ? esc(fmtBytes(a.sizeBytes)) : '—') + '</td>' +
+      '<td class="hash" title="' + esc(a.sha256 || '') + '">' + esc(shortHash(a.sha256)) + '</td>' +
+      '<td class="ip">' + esc(a.srcIp || '—') + '</td>' +
+      '<td>' + esc(origin || '—') + '</td></tr>';
+  }).join('');
+}
+
+async function refreshCapture() {
+  try {
+    const r = await fetch('/api/capture?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderCapture(await r.json());
+  } catch (_) {}
+}
+
 async function refresh() {
   const r = await fetch('/api/intel?_=' + Date.now(), { cache: 'no-store' });
   if (!r.ok) return;
@@ -386,7 +510,9 @@ async function refresh() {
 }
 
 refresh();
+refreshCapture();
 setInterval(refresh, 5000);
+setInterval(refreshCapture, 2000);
 window.addEventListener('resize', function() {
   if (window._lastHeatmap) drawHeatmap(window._lastHeatmap);
 });

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ type cowrieLine struct {
 	Input       string `json:"input"`
 	Message     string `json:"message"`
 	URL         string `json:"url"`
+	Outfile     string `json:"outfile"`
 	Filename    string `json:"filename"`
 	DstPath     string `json:"destfile"`
 	SHA256      string `json:"shasum"`
@@ -81,6 +83,9 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 
 	// Reset offset if the file was rotated (different inode) or truncated.
 	startOffset := prev.Offset
+	if prev.Inode != 0 && prev.Inode != inode {
+		backfillRotatedLogs(st, path, adminIPs)
+	}
 	if prev.Inode != inode || fi.Size() < startOffset {
 		startOffset = 0
 	}
@@ -142,13 +147,34 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	return res, nil
 }
 
+// BackfillRotatedLogs ingests cowrie.json.* siblings (historical rotated logs).
+func BackfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string) {
+	backfillRotatedLogs(st, currentPath, adminIPs)
+}
+
+// backfillRotatedLogs ingests cowrie.json.YYYY-MM-DD siblings when the active log rotates.
+func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string) {
+	dir := filepath.Dir(currentPath)
+	base := filepath.Base(currentPath)
+	matches, err := filepath.Glob(filepath.Join(dir, base+".*"))
+	if err != nil {
+		return
+	}
+	for _, p := range matches {
+		if p == currentPath {
+			continue
+		}
+		_, _ = IngestFileAppend(st, p, adminIPs)
+	}
+}
+
 func syncCowrieActors(st *store.Store, all, fresh []*models.Event, adminIPs []string) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
 	actors := actor.BuildFromCowrie(all, admin)
 	if err := st.AppendEventsAndReplaceActors(models.SourceCowrie, fresh, all, actors); err != nil {
 		return nil, err
 	}
-	return &Result{Events: len(all), Actors: len(actors)}, nil
+	return &Result{Events: len(fresh), Actors: len(actors)}, nil
 }
 
 func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
@@ -229,7 +255,13 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 	if command == "" {
 		command = strings.TrimSpace(r.Message)
 	}
+	if command == "" && r.URL != "" {
+		command = strings.TrimSpace(r.URL)
+	}
 	filename := r.Filename
+	if filename == "" {
+		filename = r.Outfile
+	}
 	if filename == "" {
 		filename = r.DstPath
 	}

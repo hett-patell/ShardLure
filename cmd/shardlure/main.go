@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/capture"
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/ingest/cowrie"
 	"github.com/networkshard/shardlure/internal/ingest/journal"
@@ -130,7 +131,14 @@ func cmdIngest(st *store.Store, cfg config.Config, args []string) {
 		fmt.Printf("ingested %d events -> %d actors (skipped %d admin logins%s)\n",
 			res.Events, res.Actors, res.SkippedAdmin, extras)
 	case "cowrie":
-		res, err := cowrie.IngestFile(st, path, cfg.AdminIPs, replace)
+		var res *cowrie.Result
+		var err error
+		if replace {
+			res, err = cowrie.IngestFile(st, path, cfg.AdminIPs, true)
+		} else {
+			// Append + dedupe: safe for rotated logs (cowrie.json.YYYY-MM-DD).
+			res, err = cowrie.IngestFileAppend(st, path, cfg.AdminIPs)
+		}
 		if err != nil {
 			fatal(err)
 		}
@@ -188,8 +196,15 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 			fmt.Fprintf(os.Stderr, "journal seed warning: %v\n", err)
 		}
 	}
+	cowrie.BackfillRotatedLogs(st, cowriePath, cfg.AdminIPs)
 	if _, err := cowrie.IngestFileAppend(st, cowriePath, cfg.AdminIPs); err != nil {
 		fatal(fmt.Errorf("initial cowrie ingest: %w", err))
+	}
+	capRunner := capture.NewRunner(st, cfg)
+	if n, err := capRunner.Run(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "capture warning: %v\n", err)
+	} else if n > 0 {
+		fmt.Printf("captured %d payload artifact(s) -> %s\n", n, cfg.CaptureEvidenceDir())
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -212,6 +227,9 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 			case <-t.C:
 				if _, err := cowrie.IngestFileAppend(st, cowriePath, cfg.AdminIPs); err != nil {
 					fmt.Fprintf(os.Stderr, "live ingest warning: %v\n", err)
+				}
+				if _, err := capRunner.Run(ctx); err != nil {
+					fmt.Fprintf(os.Stderr, "capture warning: %v\n", err)
 				}
 			}
 		}

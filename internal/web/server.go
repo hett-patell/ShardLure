@@ -71,6 +71,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/actor", s.handleActorDetail)
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/dashboard", s.handleDashboard)
+	mux.HandleFunc("/api/capture", s.handleCapture)
 	srv := &http.Server{
 		Addr:         s.addr,
 		Handler:      mux,

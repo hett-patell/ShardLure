@@ -166,6 +166,41 @@
   .feed-row .meta { color: var(--dim); font-size: 10px; margin-top: 2px; }
   .empty { color: var(--dim); font-family: var(--mono); font-size: 11px; padding: 8px 0; }
 
+  .cap-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -2px 0 10px; }
+  .cap-head h2 { margin: 0; }
+  .cap-live {
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(110,231,183,0.35);
+    color: var(--good); background: rgba(110,231,183,0.08);
+  }
+  .cap-live.active { animation: capPulse 1.2s infinite; }
+  @keyframes capPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(110,231,183,0.45); }
+    50% { box-shadow: 0 0 0 6px rgba(110,231,183,0); }
+  }
+  .cap-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+  .cap-stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .cap-stat .n { font-family: var(--mono); font-size: 16px; font-weight: 600; color: var(--good); }
+  .cap-stat .n.warn { color: var(--warn); }
+  .cap-stat .n.dim { color: var(--accent-2); }
+  .cap-stat .l { color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
+  .cap-rows { max-height: 200px; min-height: 72px; overflow: auto; }
+  .cap-row {
+    padding: 7px 0; border-bottom: 1px dotted var(--line);
+    display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 6px 8px; align-items: start;
+  }
+  .cap-row.new { animation: fadein 0.45s ease; }
+  .cap-row .t { color: var(--dim); font-size: 10px; }
+  .cap-row .url { color: var(--accent-2); word-break: break-all; line-height: 1.35; font-size: 10.5px; }
+  .cap-row .meta { color: var(--dim); font-size: 10px; margin-top: 3px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .cap-badge {
+    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line);
+  }
+  .cap-badge.capturing { color: var(--warn); border-color: rgba(251,191,36,0.45); background: rgba(251,191,36,0.1); }
+  .cap-badge.fetched { color: var(--good); border-color: rgba(110,231,183,0.4); background: rgba(110,231,183,0.08); }
+  .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: rgba(255,91,110,0.4); background: rgba(255,91,110,0.08); }
+
   .users { display: flex; flex-wrap: wrap; gap: 6px; }
   .users .pill {
     background: var(--glass-2);
@@ -272,7 +307,20 @@
     <div class="rows cmd-rows" id="top-commands"></div>
   </section>
 
-  <section class="panel" style="flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; overflow: hidden;">
+  <section class="panel" style="flex: 0 0 auto; min-height: 0; display: flex; flex-direction: column;">
+    <div class="cap-head">
+      <h2>Payload capture</h2>
+      <span class="cap-live" id="cap-live">idle</span>
+    </div>
+    <div class="cap-stats">
+      <div class="cap-stat"><div class="n" id="cap-fetched">0</div><div class="l">saved</div></div>
+      <div class="cap-stat"><div class="n warn" id="cap-active">0</div><div class="l">fetching</div></div>
+      <div class="cap-stat"><div class="n dim" id="cap-bytes">0 B</div><div class="l">evidence</div></div>
+    </div>
+    <div class="rows cap-rows" id="capture-feed"></div>
+  </section>
+
+  <section class="panel" style="flex: 1 1 0; min-height: 140px; display: flex; flex-direction: column; overflow: hidden;">
     <h2>Live feed</h2>
     <div class="feed"><div class="feed-inner" id="feed"></div></div>
   </section>
@@ -295,6 +343,25 @@ const rel = function(ts) {
   if (s < 3600) return Math.floor(s / 60) + 'm';
   return Math.floor(s / 3600) + 'h';
 };
+const fmtBytes = function(n) {
+  n = Number(n || 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(2) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+};
+const shortURL = function(u) {
+  u = String(u || '');
+  if (u.length <= 56) return u;
+  return u.slice(0, 28) + '…' + u.slice(-22);
+};
+const shortHash = function(h) {
+  h = String(h || '');
+  if (h.length <= 14) return h;
+  return h.slice(0, 10) + '…';
+};
+let lastCaptureKey = '';
+
 const flag = function(cc) {
   if (!cc || cc === '??' || cc.length !== 2 || !/^[A-Za-z]{2}$/.test(cc)) return '??';
   return String.fromCodePoint.apply(String, cc.toUpperCase().split('').map(function(c){ return 0x1F1A5 + c.charCodeAt(0); }));
@@ -458,6 +525,57 @@ function renderFeed(rows) {
   });
 }
 
+function renderCapture(d) {
+  const summary = d.summary || {};
+  const rows = d.artifacts || [];
+  const active = Number(summary.capturing || 0);
+  const live = document.getElementById('cap-live');
+  live.textContent = active > 0 ? 'capturing' : (summary.fetched > 0 ? 'live' : 'idle');
+  live.classList.toggle('active', active > 0);
+  document.getElementById('cap-fetched').textContent = fmt(summary.fetched || 0);
+  document.getElementById('cap-active').textContent = fmt(active);
+  document.getElementById('cap-bytes').textContent = fmtBytes(summary.totalBytes || 0);
+
+  const root = document.getElementById('capture-feed');
+  root.innerHTML = '';
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty">Waiting for wget/curl payloads…</div>';
+    return;
+  }
+  const key = rows.map(function(a){ return a.url + '|' + a.status + '|' + a.sizeBytes; }).join(';');
+  const isNew = key !== lastCaptureKey;
+  lastCaptureKey = key;
+
+  rows.slice(0, 20).forEach(function(a) {
+    const row = document.createElement('div');
+    row.className = 'cap-row' + (isNew ? ' new' : '');
+    const st = String(a.status || 'unknown').toLowerCase();
+    const badge = '<span class="cap-badge ' + esc(st) + '">' + esc(st) + '</span>';
+    const size = a.sizeBytes > 0 ? fmtBytes(a.sizeBytes) : '';
+    const hash = a.sha256 ? ('sha ' + esc(shortHash(a.sha256))) : '';
+    const ip = a.srcIp ? ('from ' + esc(a.srcIp)) : '';
+    row.innerHTML =
+      '<span class="t">' + rel(a.createdAt || a.ts) + '</span>' +
+      '<div>' +
+        '<div class="url" title="' + esc(a.url) + '">' + esc(shortURL(a.url)) + '</div>' +
+        '<div class="meta">' + badge +
+          (size ? '<span>' + size + '</span>' : '') +
+          (hash ? '<span>' + hash + '</span>' : '') +
+          (ip ? '<span>' + ip + '</span>' : '') +
+        '</div>' +
+      '</div>';
+    root.appendChild(row);
+  });
+}
+
+async function refreshCapture() {
+  try {
+    const r = await fetch('/api/capture?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderCapture(await r.json());
+  } catch (_) {}
+}
+
 async function refresh() {
   const r = await fetch('/api/dashboard?_=' + Date.now(), { cache: 'no-store' });
   if (!r.ok) return;
@@ -513,7 +631,9 @@ async function refresh() {
 }
 
 refresh();
+refreshCapture();
 setInterval(refresh, 5000);
+setInterval(refreshCapture, 2000);
 window.addEventListener('resize', function() { drawSpark(sparkData); });
 </script>
 </body>

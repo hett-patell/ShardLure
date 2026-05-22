@@ -23,5 +23,13 @@ cowrie:
   home: /var/lib/shardlure/cowrie
   json_log: /var/lib/shardlure/cowrie/var/log/cowrie/cowrie.json
 
+# Quarantine-fetch URLs from attacker commands; archive Cowrie downloads.
+capture:
+  enabled: true
+  evidence_dir: /var/lib/shardlure/evidence
+  quarantine_fetch: true
+  max_bytes: 52428800
+  timeout_sec: 45
+
 geoip:
   mmdb: /var/lib/shardlure/GeoLite2-City.mmdb
