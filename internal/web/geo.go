@@ -31,12 +31,26 @@ type geoResolver struct {
 }
 
 func geoEnabled() bool {
-	v := strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP"))
-	if v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "off") || strings.EqualFold(v, "no") {
+	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) != "1" {
 		return false
 	}
-	// On by default so globe arcs, country breakdown, and LOC column work out of the box.
-	return true
+	// Free ip-api.com is HTTP-only; require a Pro key for HTTPS or explicit insecure opt-in.
+	if strings.TrimSpace(os.Getenv("SHARDLURE_IPAPI_KEY")) != "" {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1"
+}
+
+func geoLookupURL(ip string) string {
+	key := strings.TrimSpace(os.Getenv("SHARDLURE_IPAPI_KEY"))
+	fields := "status,country,countryCode,city,lat,lon"
+	if key != "" {
+		return fmt.Sprintf("https://pro.ip-api.com/json/%s?key=%s&fields=%s", ip, key, fields)
+	}
+	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1" {
+		return fmt.Sprintf("http://ip-api.com/json/%s?fields=%s", ip, fields)
+	}
+	return ""
 }
 
 func newGeoResolver() *geoResolver {
@@ -143,7 +157,13 @@ func (g *geoResolver) fetch(ip string) {
 	}
 	defer func() { <-g.sem }()
 
-	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,countryCode,city,lat,lon", ip)
+	url := geoLookupURL(ip)
+	if url == "" {
+		g.mu.Lock()
+		delete(g.inflight, ip)
+		g.mu.Unlock()
+		return
+	}
 	resp, err := g.http.Get(url)
 	if err != nil {
 		g.mu.Lock()

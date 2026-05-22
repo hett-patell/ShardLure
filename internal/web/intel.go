@@ -1,7 +1,9 @@
 package web
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
@@ -11,15 +13,15 @@ import (
 )
 
 type intelResponse struct {
-	GeneratedAt    string            `json:"generatedAt"`
-	Summary        summaryBlock      `json:"summary"`
-	KindCounts     []labelCountRow   `json:"kindCounts"`
-	IntentCounts   []labelCountRow   `json:"intentCounts"`
-	PlaybookCounts []labelCountRow   `json:"playbookCounts"`
-	SourceCounts   []labelCountRow   `json:"sourceCounts"`
-	Heatmap        []heatmapCell     `json:"heatmap"`
-	Actors         []intelActorRow   `json:"actors"`
-	RecentCommands []commandRow      `json:"recentCommands"`
+	GeneratedAt    string          `json:"generatedAt"`
+	Summary        summaryBlock    `json:"summary"`
+	KindCounts     []labelCountRow `json:"kindCounts"`
+	IntentCounts   []labelCountRow `json:"intentCounts"`
+	PlaybookCounts []labelCountRow `json:"playbookCounts"`
+	SourceCounts   []labelCountRow `json:"sourceCounts"`
+	Heatmap        []heatmapCell   `json:"heatmap"`
+	Actors         []intelActorRow `json:"actors"`
+	RecentCommands []commandRow    `json:"recentCommands"`
 }
 
 type labelCountRow struct {
@@ -34,38 +36,38 @@ type heatmapCell struct {
 }
 
 type intelActorRow struct {
-	ID            string        `json:"id"`
-	IP            string        `json:"ip"`
-	Source        string        `json:"source"`
-	Playbook      string        `json:"playbook"`
-	Intent        string        `json:"intent"`
-	Events        int           `json:"events"`
-	UniqueUsers   int           `json:"uniqueUsers"`
-	RateHour      float64       `json:"rateHour"`
-	ProbeScore    int           `json:"probeScore"`
-	Confidence    int           `json:"confidence"`
-	HASSH         string        `json:"hassh,omitempty"`
-	SSHClient     string        `json:"sshClient,omitempty"`
-	FirstSeen     string        `json:"firstSeen"`
-	LastSeen      string        `json:"lastSeen"`
-	Country       string        `json:"country,omitempty"`
-	City          string        `json:"city,omitempty"`
-	CC            string        `json:"cc,omitempty"`
-	TopUsers      []topUserRow  `json:"topUsers"`
-	LastCommand   string        `json:"lastCommand,omitempty"`
+	ID          string       `json:"id"`
+	IP          string       `json:"ip"`
+	Source      string       `json:"source"`
+	Playbook    string       `json:"playbook"`
+	Intent      string       `json:"intent"`
+	Events      int          `json:"events"`
+	UniqueUsers int          `json:"uniqueUsers"`
+	RateHour    float64      `json:"rateHour"`
+	ProbeScore  int          `json:"probeScore"`
+	Confidence  int          `json:"confidence"`
+	HASSH       string       `json:"hassh,omitempty"`
+	SSHClient   string       `json:"sshClient,omitempty"`
+	FirstSeen   string       `json:"firstSeen"`
+	LastSeen    string       `json:"lastSeen"`
+	Country     string       `json:"country,omitempty"`
+	City        string       `json:"city,omitempty"`
+	CC          string       `json:"cc,omitempty"`
+	TopUsers    []topUserRow `json:"topUsers"`
+	LastCommand string       `json:"lastCommand,omitempty"`
 }
 
 type commandRow struct {
-	TS        string `json:"ts"`
-	Kind      string `json:"kind"`
-	IP        string `json:"ip"`
-	User      string `json:"user"`
-	Actor     string `json:"actor"`
-	Command   string `json:"command"`
-	Session   string `json:"session,omitempty"`
-	SHA256    string `json:"sha256,omitempty"`
-	Filename  string `json:"filename,omitempty"`
-	Source    string `json:"source"`
+	TS       string `json:"ts"`
+	Kind     string `json:"kind"`
+	IP       string `json:"ip"`
+	User     string `json:"user"`
+	Actor    string `json:"actor"`
+	Command  string `json:"command"`
+	Session  string `json:"session,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	Source   string `json:"source"`
 }
 
 type actorDetailResponse struct {
@@ -88,9 +90,21 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	ec, _ := s.st.EventCount()
-	ac, _ := s.st.ActorCount()
-	uniqueIPs, _ := s.st.UniqueIPCount()
+	ec, err := s.st.EventCount()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ac, err := s.st.ActorCount()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	uniqueIPs, err := s.st.UniqueIPCount()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	resp := intelResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -101,24 +115,47 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	kinds, _ := s.st.CountsByKind()
+	kinds, err := s.st.CountsByKind()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	for _, k := range kinds {
 		resp.KindCounts = append(resp.KindCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
-	intents, _ := s.st.CountsByIntent()
+
+	intents, err := s.st.CountsByIntent()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	for _, k := range intents {
 		resp.IntentCounts = append(resp.IntentCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
-	playbooks, _ := s.st.CountsByPlaybook()
+
+	playbooks, err := s.st.CountsByPlaybook()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	for _, k := range playbooks {
 		resp.PlaybookCounts = append(resp.PlaybookCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
-	sources, _ := s.st.CountsBySource()
+
+	sources, err := s.st.CountsBySource()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	for _, k := range sources {
 		resp.SourceCounts = append(resp.SourceCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
-	cells, _ := s.st.HourlyEventCountsByKind(72)
+	cells, err := s.st.HourlyEventCountsByKind(72)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	for _, c := range cells {
 		resp.Heatmap = append(resp.Heatmap, heatmapCell{
 			T:    c.Hour.Unix(),
@@ -127,7 +164,11 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	actors, _ := s.st.ListActors(80)
+	actors, err := s.st.ListActors(80)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	geoIPs := make([]string, 0, len(actors))
 	for _, a := range actors {
 		geoIPs = append(geoIPs, a.PrimaryIP)
@@ -159,14 +200,22 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 				row.CC = g.CC
 			}
 		}
-		users, _ := s.st.ActorUsersLimit(a.ID, 8)
+		users, err := s.st.ActorUsersLimit(a.ID, 8)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		for _, u := range users {
 			row.TopUsers = append(row.TopUsers, topUserRow{User: u.Username, Hits: u.Count})
 		}
 		resp.Actors = append(resp.Actors, row)
 	}
 
-	cmds, _ := s.st.RecentCommands(120)
+	cmds, err := s.st.RecentCommands(120)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	for _, c := range cmds {
 		resp.RecentCommands = append(resp.RecentCommands, commandRowFromEvent(c))
 	}
@@ -215,15 +264,26 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 			row.CC = g.CC
 		}
 	}
-	users, _ := s.st.ActorUsersLimit(id, 20)
+	users, err := s.st.ActorUsersLimit(id, 20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	for _, u := range users {
 		row.TopUsers = append(row.TopUsers, topUserRow{User: u.Username, Hits: u.Count})
 	}
 	if cmd, err := s.st.LastCommandByActor(id); err == nil {
 		row.LastCommand = cmd
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	events, _ := s.st.EventsByActor(id, 150)
+	events, err := s.st.EventsByActor(id, 150)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var cmds []commandRow
 	var all []commandRow
 	for _, e := range events {

@@ -250,7 +250,7 @@ All credentials are intentionally fake. Regenerate bait values per deployment so
 - Verify `ssh -p 2222 user@host` in a second terminal **before** closing your original session. "I'll fix it in the morning" SSH stories never end well.
 - Keep the dashboard on Tailscale or another private network. Exposing the dashboard to the internet is what we call self-doxxing.
 - Set `SHARDLURE_DASH_TOKEN` for dashboard defense in depth (constant-time compared, sent as `Authorization: Bearer …` or `X-ShardLure-Token`).
-- External geolocation is opt-in. Set `SHARDLURE_GEO_HTTP=1` to allow ip-api.com lookups. Off by default because phoning home is not a feature.
+- External geolocation is opt-in (`SHARDLURE_GEO_HTTP=1`). Use `SHARDLURE_IPAPI_KEY` for HTTPS lookups via ip-api Pro (recommended). Plaintext `http://ip-api.com` only if you also set `SHARDLURE_GEO_INSECURE_HTTP=1` (leaks attacker IPs to the network path).
 - Cowrie SSH host keys are regenerated during install so you don't share a fingerprint with every other lazy honeypot on Shodan.
 - Keep bait credentials fake. Yes really. Do not get clever and put "almost real" creds in there.
 - The SQLite database is chmod'd to `0600` automatically — it can contain attacker-supplied passwords, which sometimes overlap with their *actually reused* real ones. Treat the file like a loaded gun.
