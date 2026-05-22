@@ -15,6 +15,7 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/payload"
 	"github.com/networkshard/shardlure/internal/intel/ttp"
 	"github.com/networkshard/shardlure/internal/intel/graph"
+	"github.com/networkshard/shardlure/internal/intel/replay"
 	"github.com/networkshard/shardlure/internal/intel/wordlist"
 )
 
@@ -294,6 +295,50 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		Rows:        rows,
 	})
+}
+
+// ==== /api/intel/replay ===========================================
+
+func (s *Server) handleIntelReplay(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	sid := strings.TrimSpace(r.URL.Query().Get("session"))
+	if sid == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
+	events, err := s.st.SessionEvents(sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	opts := replay.Options{
+		IncludeSleeps: r.URL.Query().Get("sleeps") != "0",
+		DryRun:        r.URL.Query().Get("dryrun") == "1",
+	}
+	script := replay.Render(sid, events, opts)
+
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "download" {
+		// Sanitise session id for filename use.
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, sid)
+		fname := "shardlure-replay-" + safe + ".sh"
+		w.Header().Set("Content-Type", "application/x-sh; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
+		_, _ = w.Write([]byte(script))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(struct {
+		Session string `json:"session"`
+		Script  string `json:"script"`
+	}{Session: sid, Script: script})
 }
 
 // ==== /api/intel/graph ============================================

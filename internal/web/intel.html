@@ -600,6 +600,29 @@
   .lg-user  { background: #81c784; }
   .graph-spacer { flex: 1; }
   .graph-stats { color: var(--dim-2); }
+
+  /* ==== Slice J: replay ==== */
+  .replay-toolbar {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .replay-select {
+    background: #021018; color: var(--text); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px;
+    padding: 5px 8px; border-radius: 6px; min-width: 260px;
+  }
+  .replay-toggle {
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  }
+  .replay-toggle input { accent-color: var(--accent); }
+  .replay-pre {
+    background: #021018; border: 1px solid var(--line); border-radius: 6px;
+    font-family: var(--mono); font-size: 11px; color: #b6d7e3;
+    padding: 12px 14px; margin: 0;
+    max-height: 480px; overflow: auto; white-space: pre;
+    line-height: 1.55;
+  }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
 </head>
@@ -887,13 +910,21 @@
       <section class="panel" id="panel-replay">
         <div class="panel-head">
           <h2>Attack replay / synthesis</h2>
-          <span class="meta">bash · ansible</span>
+          <span class="meta" id="replay-meta">bash · sandbox-only</span>
         </div>
-        <div class="coming-soon" id="replay-placeholder">
-          <div class="cs-title">Slice J</div>
-          Pick an actor, generate an Ansible/bash script that replicates their
-          full attack chain — for purple-team exercises against a target you own.
+        <div class="replay-toolbar">
+          <select id="replay-session" class="replay-select"></select>
+          <label class="replay-toggle">
+            <input type="checkbox" id="replay-sleeps" checked>
+            inter-cmd sleeps
+          </label>
+          <label class="replay-toggle">
+            <input type="checkbox" id="replay-dryrun">
+            dry-run (comment cmds)
+          </label>
+          <a class="ioc-dl" id="replay-dl" download>download .sh</a>
         </div>
+        <pre class="replay-pre" id="replay-pre"><div class="empty">select a session</div></pre>
       </section>
 
       <section class="panel" id="panel-deobf">
@@ -2019,6 +2050,72 @@ setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshGraph();
 }, 60000);
 if (readTabFromHash() === 'red') setTimeout(refreshGraph, 100);
+
+// ==== Slice J: replay script generator ============================
+async function loadReplaySessions() {
+  const sel = document.getElementById('replay-session');
+  try {
+    const r = await fetch('/api/intel/sessions?window=' +
+                         encodeURIComponent(Filters.window || '7d') +
+                         '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const data = await r.json();
+    const items = data.sessions || [];
+    if (items.length === 0) {
+      sel.innerHTML = '<option value="">no sessions in window</option>';
+      return;
+    }
+    sel.innerHTML = items.map(function(s) {
+      const cmds = s.commands || 0;
+      const label = s.id + ' · ' + (s.ip || '?') + ' · ' + cmds + ' cmds';
+      return '<option value="' + escAttr(s.id) + '">' + escHtml(label) + '</option>';
+    }).join('');
+    refreshReplay();
+  } catch (_) {}
+}
+
+async function refreshReplay() {
+  const sel = document.getElementById('replay-session');
+  const sid = sel.value;
+  const pre = document.getElementById('replay-pre');
+  const dl = document.getElementById('replay-dl');
+  if (!sid) {
+    pre.innerHTML = '<div class="empty">no session selected</div>';
+    return;
+  }
+  const sleeps = document.getElementById('replay-sleeps').checked ? '1' : '0';
+  const dryrun = document.getElementById('replay-dryrun').checked ? '1' : '0';
+  const qs = 'session=' + encodeURIComponent(sid) +
+             '&sleeps=' + sleeps + '&dryrun=' + dryrun;
+  dl.href = '/api/intel/replay?' + qs + '&format=download';
+  try {
+    const r = await fetch('/api/intel/replay?' + qs + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      pre.textContent = 'load failed: ' + r.status;
+      return;
+    }
+    const data = await r.json();
+    pre.textContent = data.script || '';
+  } catch (e) {
+    pre.textContent = 'error: ' + e.message;
+  }
+}
+
+document.getElementById('replay-session').addEventListener('change', refreshReplay);
+document.getElementById('replay-sleeps').addEventListener('change', refreshReplay);
+document.getElementById('replay-dryrun').addEventListener('change', refreshReplay);
+
+const _setActiveForReplay = setActiveView;
+setActiveView = function(name) {
+  _setActiveForReplay(name);
+  if (name === 'red') loadReplaySessions();
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', loadReplaySessions);
+});
+if (readTabFromHash() === 'red') loadReplaySessions();
+
+function escAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 </script>
 </body>
 </html>
