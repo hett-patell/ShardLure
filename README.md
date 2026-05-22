@@ -1,4 +1,10 @@
 # ShardLure
+
+[![Release](https://img.shields.io/github/v/release/hett-patell/ShardLure?color=blue)](https://github.com/hett-patell/ShardLure/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/networkshard/shardlure)](https://goreportcard.com/report/github.com/networkshard/shardlure)
+[![Stars](https://img.shields.io/github/stars/hett-patell/ShardLure?style=social)](https://github.com/hett-patell/ShardLure/stargazers)
+
 <img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/68c62b67-de22-48d8-8360-78c6e28d5640" />
 <br></br>
 
@@ -331,3 +337,16 @@ A: They're convincing to bots. A human auditing them for 30 seconds would clock 
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
+---
+
+## The Shard ecosystem
+
+| Repo | What it does |
+|---|---|
+| [ShardLure](https://github.com/hett-patell/ShardLure) | SSH honeypot + threat-intel dashboard |
+| [ShardC2](https://github.com/hett-patell/ShardC2) | Red-team C2 framework in Go |
+| [ShardFlow](https://github.com/hett-patell/ShardFlow) | Layer-2 LAN workbench (ARP, drop, throttle) |
+| [ShardShell](https://github.com/hett-patell/ShardShell) | PHP post-exploitation shell |
+| [ShardPass](https://github.com/hett-patell/ShardPass) | Minimal TOTP authenticator (Chrome MV3) |
+| [ShardPet](https://github.com/hett-patell/ShardPet) | Pixel-Pokémon browser extension |

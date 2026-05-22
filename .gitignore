@@ -8,4 +8,6 @@
 .ready-check.txt
 coverage.out
 .playwright-mcp/
+.shard-launch/
+agents
 
