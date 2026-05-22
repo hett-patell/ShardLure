@@ -92,6 +92,7 @@ lines += [
     "dashboard:", f"  port: {dash_port}",
     "journal:", "  unit: ssh",
     "cowrie:", f"  home: {COWRIE_HOME}", f"  json_log: {COWRIE_LOG}",
+    "geoip:", "  enabled: true", "  insecure_http: true",
     "capture:",
     "  enabled: true",
     f"  evidence_dir: {DATA / 'evidence'}",

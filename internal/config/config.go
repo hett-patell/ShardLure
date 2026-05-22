@@ -44,7 +44,9 @@ type Config struct {
 	} `yaml:"capture"`
 
 	GeoIP struct {
-		MMDB string `yaml:"mmdb"`
+		MMDB         string `yaml:"mmdb"`
+		Enabled      bool   `yaml:"enabled"`
+		InsecureHTTP bool   `yaml:"insecure_http"`
 	} `yaml:"geoip"`
 }
 

@@ -242,11 +242,13 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 
 func webOptions(cfg config.Config) web.Options {
 	return web.Options{
-		HomeLat:     cfg.Dashboard.HomeLat,
-		HomeLon:     cfg.Dashboard.HomeLon,
-		HomeCity:    cfg.Dashboard.HomeCity,
-		HomeCountry: cfg.Dashboard.HomeCountry,
-		HomeCC:      cfg.Dashboard.HomeCC,
+		HomeLat:         cfg.Dashboard.HomeLat,
+		HomeLon:         cfg.Dashboard.HomeLon,
+		HomeCity:        cfg.Dashboard.HomeCity,
+		HomeCountry:     cfg.Dashboard.HomeCountry,
+		HomeCC:          cfg.Dashboard.HomeCC,
+		GeoEnabled:      cfg.GeoIP.Enabled,
+		GeoInsecureHTTP: cfg.GeoIP.InsecureHTTP,
 	}
 }
 

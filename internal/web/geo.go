@@ -28,38 +28,54 @@ type geoResolver struct {
 	http     *http.Client
 	sem      chan struct{}
 	enabled  bool
+	cfg      geoConfig
 }
 
-func geoEnabled() bool {
-	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) != "1" {
+type geoConfig struct {
+	Enabled      bool
+	InsecureHTTP bool
+}
+
+func geoEnabled(cfg geoConfig) bool {
+	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) == "1" {
+		return geoHTTPAllowed(cfg)
+	}
+	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) == "0" {
 		return false
 	}
-	// Free ip-api.com is HTTP-only; require a Pro key for HTTPS or explicit insecure opt-in.
+	return cfg.Enabled && geoHTTPAllowed(cfg)
+}
+
+func geoHTTPAllowed(cfg geoConfig) bool {
 	if strings.TrimSpace(os.Getenv("SHARDLURE_IPAPI_KEY")) != "" {
 		return true
 	}
-	return strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1"
+	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1" {
+		return true
+	}
+	return cfg.InsecureHTTP
 }
 
-func geoLookupURL(ip string) string {
+func geoLookupURL(ip string, cfg geoConfig) string {
 	key := strings.TrimSpace(os.Getenv("SHARDLURE_IPAPI_KEY"))
 	fields := "status,country,countryCode,city,lat,lon"
 	if key != "" {
 		return fmt.Sprintf("https://pro.ip-api.com/json/%s?key=%s&fields=%s", ip, key, fields)
 	}
-	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1" {
+	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1" || cfg.InsecureHTTP {
 		return fmt.Sprintf("http://ip-api.com/json/%s?fields=%s", ip, fields)
 	}
 	return ""
 }
 
-func newGeoResolver() *geoResolver {
+func newGeoResolver(cfg geoConfig) *geoResolver {
 	return &geoResolver{
 		cache:    map[string]geoEntry{},
 		inflight: map[string]bool{},
 		http:     &http.Client{Timeout: 2500 * time.Millisecond},
 		sem:      make(chan struct{}, 6),
-		enabled:  geoEnabled(),
+		enabled:  geoEnabled(cfg),
+		cfg:      cfg,
 	}
 }
 
@@ -157,7 +173,7 @@ func (g *geoResolver) fetch(ip string) {
 	}
 	defer func() { <-g.sem }()
 
-	url := geoLookupURL(ip)
+	url := geoLookupURL(ip, g.cfg)
 	if url == "" {
 		g.mu.Lock()
 		delete(g.inflight, ip)

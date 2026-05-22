@@ -32,4 +32,7 @@ capture:
   timeout_sec: 45
 
 geoip:
+  # Required for globe arcs / country stats (resolves attacker IPs).
+  enabled: true
+  insecure_http: true
   mmdb: /var/lib/shardlure/GeoLite2-City.mmdb

@@ -173,7 +173,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	for _, a := range actors {
 		geoIPs = append(geoIPs, a.PrimaryIP)
 	}
-	s.geo.prefetch(geoIPs, 3*time.Second)
+	s.geo.prefetch(geoIPs, 5*time.Second)
 
 	for _, a := range actors {
 		row := intelActorRow{

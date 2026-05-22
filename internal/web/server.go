@@ -23,11 +23,13 @@ type Server struct {
 }
 
 type Options struct {
-	HomeLat     float64
-	HomeLon     float64
-	HomeCity    string
-	HomeCountry string
-	HomeCC      string
+	HomeLat        float64
+	HomeLon        float64
+	HomeCity       string
+	HomeCountry    string
+	HomeCC         string
+	GeoEnabled     bool
+	GeoInsecureHTTP bool
 }
 
 func New(st *store.Store, addr string, opts ...Options) *Server {
@@ -53,7 +55,7 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	return &Server{
 		st:            st,
 		addr:          addr,
-		geo:           newGeoResolver(),
+		geo: newGeoResolver(geoOpts(len(opts) > 0, opts[0])),
 		dashboardAuth: strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
 		home:          home,
 	}
@@ -207,6 +209,13 @@ type homePoint struct {
 	CC      string  `json:"cc"`
 }
 
+func geoOpts(has bool, o Options) geoConfig {
+	if !has {
+		return geoConfig{}
+	}
+	return geoConfig{Enabled: o.GeoEnabled, InsecureHTTP: o.GeoInsecureHTTP}
+}
+
 func defaultHomePoint() homePoint {
 	return homePoint{
 		Lat:     19.0760,
@@ -275,7 +284,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, row := range topIPs {
 		geoIPs = append(geoIPs, row.Key)
 	}
-	s.geo.prefetch(geoIPs, 3*time.Second)
+	s.geo.prefetch(geoIPs, 5*time.Second)
 
 	for _, a := range actors {
 		card := actorCard{
