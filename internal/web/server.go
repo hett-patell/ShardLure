@@ -5,13 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/store"
@@ -69,6 +66,9 @@ func (s *Server) Run() error {
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
 func (s *Server) RunContext(ctx context.Context) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/intel", s.handleIntelPage)
+	mux.HandleFunc("/api/intel", s.handleIntel)
+	mux.HandleFunc("/api/actor", s.handleActorDetail)
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/dashboard", s.handleDashboard)
 	srv := &http.Server{
@@ -161,11 +161,12 @@ type actorCard struct {
 }
 
 type recentRecord struct {
-	TS    string `json:"ts"`
-	Kind  string `json:"kind"`
-	IP    string `json:"ip"`
-	User  string `json:"user"`
-	Actor string `json:"actor"`
+	TS      string `json:"ts"`
+	Kind    string `json:"kind"`
+	IP      string `json:"ip"`
+	User    string `json:"user"`
+	Actor   string `json:"actor"`
+	Command string `json:"command,omitempty"`
 }
 
 type topIPRow struct {
@@ -266,6 +267,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	countryStats := map[string]*topCountryRow{}
 
+	geoIPs := make([]string, 0, len(actors)+len(topIPs))
+	for _, a := range actors {
+		geoIPs = append(geoIPs, a.PrimaryIP)
+	}
+	for _, row := range topIPs {
+		geoIPs = append(geoIPs, row.Key)
+	}
+	s.geo.prefetch(geoIPs, 3*time.Second)
+
 	for _, a := range actors {
 		card := actorCard{
 			ID:       a.ID,
@@ -277,7 +287,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			Conf:     a.Confidence,
 		}
 		if !isPrivateIP(a.PrimaryIP) {
-			g := s.geo.resolve(a.PrimaryIP)
+			g := s.geo.cached(a.PrimaryIP)
 			if g.OK {
 				card.Lat = g.Lat
 				card.Lon = g.Lon
@@ -291,7 +301,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, row := range topIPs {
 		var cc, country, city string
 		if !isPrivateIP(row.Key) {
-			g := s.geo.resolve(row.Key)
+			g := s.geo.cached(row.Key)
 			if g.OK {
 				cc = g.CC
 				country = g.Country
@@ -337,120 +347,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, e := range events {
+		actor := e.ActorID
+		if strings.HasPrefix(actor, "journal:") {
+			actor = strings.TrimPrefix(actor, "journal:")
+		} else if strings.HasPrefix(actor, "cowrie:") {
+			actor = strings.TrimPrefix(actor, "cowrie:")
+		}
 		resp.Recent = append(resp.Recent, recentRecord{
-			TS:    e.TS.UTC().Format(time.RFC3339),
-			Kind:  string(e.Kind),
-			IP:    e.SrcIP,
-			User:  e.Username,
-			Actor: strings.TrimPrefix(e.ActorID, "journal:"),
+			TS:      e.TS.UTC().Format(time.RFC3339),
+			Kind:    string(e.Kind),
+			IP:      e.SrcIP,
+			User:    e.Username,
+			Actor:   actor,
+			Command: strings.TrimSpace(e.Command),
 		})
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-type geoEntry struct {
-	OK      bool
-	Lat     float64
-	Lon     float64
-	Country string
-	City    string
-	CC      string
-	Expiry  time.Time
-}
-
-type geoResolver struct {
-	mu       sync.Mutex
-	cache    map[string]geoEntry
-	inflight map[string]bool
-	http     *http.Client
-	sem      chan struct{}
-	enabled  bool
-}
-
-func newGeoResolver() *geoResolver {
-	enabled := strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) == "1"
-	return &geoResolver{
-		cache:    map[string]geoEntry{},
-		inflight: map[string]bool{},
-		http:     &http.Client{Timeout: 1500 * time.Millisecond},
-		sem:      make(chan struct{}, 4),
-		enabled:  enabled,
-	}
-}
-
-func (g *geoResolver) resolve(ip string) geoEntry {
-	if !g.enabled {
-		return geoEntry{}
-	}
-	g.mu.Lock()
-	if v, ok := g.cache[ip]; ok && time.Now().Before(v.Expiry) {
-		g.mu.Unlock()
-		return v
-	}
-	if g.inflight[ip] {
-		g.mu.Unlock()
-		return geoEntry{}
-	}
-	select {
-	case g.sem <- struct{}{}:
-	default:
-		g.mu.Unlock()
-		return geoEntry{}
-	}
-	g.inflight[ip] = true
-	g.mu.Unlock()
-
-	go g.fetch(ip)
-	return geoEntry{}
-}
-
-func (g *geoResolver) fetch(ip string) {
-	defer func() { <-g.sem }()
-
-	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,countryCode,city,lat,lon", ip)
-	resp, err := g.http.Get(url)
-	if err != nil {
-		g.mu.Lock()
-		delete(g.inflight, ip)
-		g.cache[ip] = geoEntry{Expiry: time.Now().Add(30 * time.Minute)}
-		g.mu.Unlock()
-		return
-	}
-	defer resp.Body.Close()
-
-	var out struct {
-		Status  string  `json:"status"`
-		Country string  `json:"country"`
-		City    string  `json:"city"`
-		CC      string  `json:"countryCode"`
-		Lat     float64 `json:"lat"`
-		Lon     float64 `json:"lon"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		g.mu.Lock()
-		delete(g.inflight, ip)
-		g.cache[ip] = geoEntry{Expiry: time.Now().Add(30 * time.Minute)}
-		g.mu.Unlock()
-		return
-	}
-
-	ent := geoEntry{
-		OK:      out.Status == "success",
-		Lat:     out.Lat,
-		Lon:     out.Lon,
-		Country: out.Country,
-		City:    out.City,
-		CC:      out.CC,
-		Expiry:  time.Now().Add(24 * time.Hour),
-	}
-	g.mu.Lock()
-	delete(g.inflight, ip)
-	g.cache[ip] = ent
-	g.mu.Unlock()
-}
-
-func isPrivateIP(s string) bool {
-	ip := net.ParseIP(s)
-	return ip == nil || ip.IsLoopback() || ip.IsPrivate()
 }

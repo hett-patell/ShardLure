@@ -44,6 +44,7 @@
     position: fixed; top: 0; bottom: 0; z-index: 2;
     width: 320px; padding: 20px;
     display: flex; flex-direction: column; gap: 14px;
+    height: 100vh; overflow: hidden;
     pointer-events: none;
   }
   .rail.left  { left: 0; }
@@ -86,6 +87,14 @@
     line-height: 1.6;
   }
   .title .meta strong { color: var(--text); font-weight: 500; }
+  .nav { display: flex; gap: 8px; margin-top: 12px; }
+  .nav a {
+    font-size: 11px; font-family: var(--mono); text-decoration: none;
+    padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line);
+    color: var(--dim);
+  }
+  .nav a:hover { color: var(--text); border-color: var(--line-strong); }
+  .nav a.active { color: var(--accent); border-color: rgba(255,91,110,0.45); background: rgba(255,91,110,0.08); }
 
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
@@ -112,13 +121,19 @@
   #top-ips th:nth-child(3), #top-ips td:nth-child(3) { width: 20%; }
 
   .rows {
-    max-height: 230px; overflow: auto;
+    max-height: 200px; overflow: auto;
     font-family: var(--mono); font-size: 11px;
   }
+  .rows.cmd-rows { max-height: 180px; min-height: 80px; }
   .row {
     padding: 5px 0; border-bottom: 1px dotted var(--line);
     display: grid; grid-template-columns: 56px minmax(0,1fr) 72px; gap: 8px; align-items: baseline;
   }
+  .row.cmd-row {
+    grid-template-columns: minmax(0,1fr) 52px;
+    align-items: start;
+  }
+  .row.cmd-row .p { color: var(--good); white-space: normal; word-break: break-all; line-height: 1.35; }
   .row .t { color: var(--dim); }
   .row .ip { color: var(--accent-2); }
   .row .u { color: var(--warn); }
@@ -136,16 +151,20 @@
   .feed-inner::-webkit-scrollbar { width: 4px; }
   .feed-inner::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 2px; }
   .feed-row {
-    padding: 5px 0; border-bottom: 1px dotted var(--line);
-    display: grid; grid-template-columns: 58px minmax(0,1fr) 88px 72px; gap: 8px; align-items: baseline;
+    padding: 6px 0; border-bottom: 1px dotted var(--line);
+    display: grid; grid-template-columns: 52px minmax(0,1fr);
+    gap: 6px 10px; align-items: start;
     animation: fadein 0.4s ease;
   }
   @keyframes fadein { from { opacity: 0; transform: translateX(6px); } to { opacity: 1; transform: none; } }
-  .feed-row .t { color: var(--dim); }
-  .feed-row .ip { color: var(--accent-2); }
-  .feed-row .u { color: var(--warn); }
+  .feed-row .t { color: var(--dim); grid-row: 1 / span 2; }
+  .feed-row .body { min-width: 0; }
+  .feed-row .ip { color: var(--accent-2); margin-right: 6px; }
+  .feed-row .u { color: var(--warn); margin-right: 6px; }
   .feed-row .k { color: var(--text); }
-  .feed-row .a { color: var(--dim); text-align: right; }
+  .feed-row .cmd { color: var(--good); display: block; margin-top: 3px; word-break: break-all; line-height: 1.35; }
+  .feed-row .meta { color: var(--dim); font-size: 10px; margin-top: 2px; }
+  .empty { color: var(--dim); font-family: var(--mono); font-size: 11px; padding: 8px 0; }
 
   .users { display: flex; flex-wrap: wrap; gap: 6px; }
   .users .pill {
@@ -199,9 +218,13 @@
     <h1><span class="dot"></span>ShardLure telemetry</h1>
     <div class="meta">
       source <strong>journal + actors db</strong><br/>
-      origin <strong id="home-loc"> </strong><br/>
-      updated <strong id="gen-at"> </strong>
+      origin <strong id="home-loc">— </strong><br/>
+      updated <strong id="gen-at">— </strong>
     </div>
+    <nav class="nav">
+      <a href="/" class="active">Globe</a>
+      <a href="/intel">Intel</a>
+    </nav>
   </section>
 
   <section class="panel">
@@ -244,12 +267,12 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel" style="flex: 0 0 auto; min-height: 0;">
     <h2>Top commands</h2>
-    <div class="rows" id="top-commands"></div>
+    <div class="rows cmd-rows" id="top-commands"></div>
   </section>
 
-  <section class="panel" style="flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;">
+  <section class="panel" style="flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; overflow: hidden;">
     <h2>Live feed</h2>
     <div class="feed"><div class="feed-inner" id="feed"></div></div>
   </section>
@@ -342,6 +365,10 @@ function drawSpark(series) {
 function renderTopCountries(rows) {
   const body = document.querySelector('#top-countries tbody');
   body.innerHTML = '';
+  if (!rows || !rows.length) {
+    body.innerHTML = '<tr><td colspan="2" class="empty">Resolving geo… refresh in a few seconds</td></tr>';
+    return;
+  }
   (rows || []).slice(0, 10).forEach(function(r) {
     const tr = document.createElement('tr');
     tr.innerHTML =
@@ -356,10 +383,11 @@ function renderTopIPs(rows) {
   body.innerHTML = '';
   (rows || []).slice(0, 20).forEach(function(r) {
     const loc = [r.city, r.country].filter(Boolean).join(', ');
+    const locLabel = loc || (r.cc ? r.cc : 'resolving…');
     const tr = document.createElement('tr');
     tr.innerHTML =
       '<td><span class="ip">' + esc(r.ip) + '</span></td>' +
-      '<td>' + flag(r.cc) + ' ' + esc((loc || 'Unknown').slice(0, 15)) + '</td>' +
+      '<td>' + (r.cc ? flag(r.cc) + ' ' : '') + esc(String(locLabel).slice(0, 18)) + '</td>' +
       '<td class="n">' + fmt(r.hits) + '</td>';
     body.appendChild(tr);
   });
@@ -383,13 +411,15 @@ function renderTopUsers(rows) {
 function renderTopCommands(rows) {
   const root = document.getElementById('top-commands');
   root.innerHTML = '';
-  (rows || []).slice(0, 12).forEach(function(r) {
+  if (!rows || !rows.length) {
+    root.innerHTML = '<div class="empty">No shell commands yet (Cowrie input events)</div>';
+    return;
+  }
+  (rows || []).slice(0, 14).forEach(function(r) {
     const row = document.createElement('div');
-    row.className = 'row';
-    const shortCmd = String(r.command || '').length > 44 ? String(r.command || '').slice(0, 41) + '...' : String(r.command || '');
+    row.className = 'row cmd-row';
     row.innerHTML =
-      '<span class="t">cmd</span>' +
-      '<span class="p">' + esc(shortCmd) + '</span>' +
+      '<span class="p" title="' + esc(r.command) + '">' + esc(r.command || '') + '</span>' +
       '<span class="r">' + fmt(r.hits) + '</span>';
     root.appendChild(row);
   });
@@ -412,14 +442,18 @@ function renderActors(rows) {
 function renderFeed(rows) {
   const root = document.getElementById('feed');
   root.innerHTML = '';
-  (rows || []).slice(0, 48).forEach(function(e) {
+  (rows || []).slice(0, 50).forEach(function(e) {
     const row = document.createElement('div');
     row.className = 'feed-row';
+    const cmd = String(e.command || '').trim();
+    const cmdHtml = cmd ? '<span class="cmd">' + esc(cmd) + '</span>' : '';
     row.innerHTML =
       '<span class="t">' + rel(e.ts) + '</span>' +
-      '<span><span class="ip">' + esc(e.ip) + '</span> <span class="k">' + esc(e.kind || '-') + '</span></span>' +
-      '<span class="u">' + esc((e.user || '?').slice(0, 16)) + '</span>' +
-      '<span class="a">' + esc((e.actor || '-').slice(0, 14)) + '</span>';
+      '<div class="body">' +
+        '<div><span class="ip">' + esc(e.ip) + '</span><span class="u">' + esc((e.user || '?').slice(0, 20)) + '</span><span class="k">' + esc(e.kind || '-') + '</span></div>' +
+        cmdHtml +
+        '<span class="meta">actor ' + esc((e.actor || '-').slice(0, 24)) + '</span>' +
+      '</div>';
     root.appendChild(row);
   });
 }
@@ -467,16 +501,15 @@ async function refresh() {
     return { startLat: p.lat, startLng: p.lng, endLat: home.lat, endLng: home.lon, idx: idx, n: p.n };
   });
   const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2); }).join('|');
-  if (arcKey !== lastArcKey) {
-    lastArcKey = arcKey;
-    globe.arcsData(arcs)
-      .arcColor(function(){ return ['rgba(255,91,110,0.05)', 'rgba(255,91,110,0.85)']; })
-      .arcStroke(function(a){ return 0.3 + 0.6 * Math.sqrt((a.n || 0) / maxN); })
-      .arcDashLength(0.35)
-      .arcDashGap(1.4)
-      .arcDashAnimateTime(function(a){ return 1800 + (a.idx % 7) * 210; })
-      .arcAltitudeAutoScale(0.5);
-  }
+  globe.arcsData(arcs)
+    .arcColor(function(){ return ['rgba(255,91,110,0.12)', 'rgba(255,91,110,0.95)']; })
+    .arcStroke(function(a){ return Math.max(0.55, 0.55 + 1.1 * Math.sqrt((a.n || 0) / maxN)); })
+    .arcDashLength(0.42)
+    .arcDashGap(0.18)
+    .arcDashInitialGap(1)
+    .arcDashAnimateTime(function(a){ return 1400 + (a.idx % 9) * 180; })
+    .arcAltitude(function(a){ return 0.18 + 0.22 * Math.sqrt((a.n || 0) / maxN); });
+  lastArcKey = arcKey;
 }
 
 refresh();

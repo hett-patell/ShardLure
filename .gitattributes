@@ -1,6 +1,6 @@
 # Force LF + UTF-8 everywhere so editors/transfers can't silently re-encode
 # files into UTF-16LE. (See README troubleshooting; this was a repeat issue.)
-* text=auto eol=lf
+* text=auto eol=lf working-tree-encoding=UTF-8
 
 # Explicit overrides for clarity and editor hints.
 *.go        text eol=lf

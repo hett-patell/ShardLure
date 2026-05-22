@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ShardLure Intel</title>
+<style>
+  :root {
+    --bg: #02060d;
+    --glass: rgba(12, 18, 28, 0.55);
+    --glass-2: rgba(20, 28, 40, 0.55);
+    --line: rgba(120, 160, 200, 0.14);
+    --line-strong: rgba(120, 160, 200, 0.28);
+    --text: #dde6f2;
+    --dim: #7a8aa3;
+    --accent: #ff5b6e;
+    --accent-2: #4cc9f0;
+    --good: #6ee7b7;
+    --warn: #fbbf24;
+    --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: radial-gradient(circle at 50% 0%, #050b18 0%, #01030a 70%);
+    color: var(--text);
+    padding: 20px 24px 40px;
+  }
+  .wrap { max-width: 1400px; margin: 0 auto; }
+  .panel {
+    background: var(--glass);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    backdrop-filter: blur(14px) saturate(140%);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 24px rgba(0,0,0,0.35);
+  }
+  .panel h2 {
+    margin: 0 0 10px;
+    font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--dim);
+  }
+  header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header .sub { color: var(--dim); font-family: var(--mono); font-size: 11px; margin-top: 6px; }
+  .nav { display: flex; gap: 8px; }
+  .nav a {
+    font-size: 11px; font-family: var(--mono); text-decoration: none;
+    padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+    color: var(--dim);
+  }
+  .nav a:hover { color: var(--text); border-color: var(--line-strong); }
+  .nav a.active { color: var(--accent); border-color: rgba(255,91,110,0.45); background: rgba(255,91,110,0.08); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+  @media (max-width: 720px) { .stats { grid-template-columns: 1fr 1fr; } }
+  .stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .stat .num { font-family: var(--mono); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .num.accent { color: var(--accent); }
+  .stat .num.blue { color: var(--accent-2); }
+  .stat .label { color: var(--dim); font-size: 10px; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
+  .grid .full { grid-column: 1 / -1; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; table-layout: fixed; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  th { color: var(--dim); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+  td.n, th.n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
+  td.ip { color: var(--accent-2); }
+  td.cmd { color: var(--good); white-space: normal; word-break: break-all; line-height: 1.35; }
+  td.loc { color: var(--dim); }
+  .empty { color: var(--dim); font-family: var(--mono); font-size: 11px; padding: 8px 0; }
+  tr.actor-row { cursor: pointer; }
+  tr.actor-row:hover td { background: rgba(255,255,255,0.03); }
+  tr.actor-row.selected td { background: rgba(255,91,110,0.08); }
+  .bars { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; }
+  .bar-row { display: grid; grid-template-columns: 100px 1fr 48px; gap: 8px; align-items: center; font-family: var(--mono); font-size: 11px; }
+  .bar-row .lbl { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+  .bar-row .track { height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
+  .bar-row .fill { height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 3px; }
+  .bar-row .n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
+  #heatmap-wrap {
+    overflow-x: auto; overflow-y: hidden;
+    background: rgba(0,0,0,0.25); border-radius: 8px; padding: 8px;
+    min-height: 140px;
+  }
+  #heatmap { display: block; min-width: 100%; height: auto; }
+  .detail { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--dim); display: none; }
+  .detail.open { display: block; }
+  .detail h3 { margin: 0 0 8px; font-size: 12px; color: var(--text); font-weight: 600; }
+  .detail .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; margin-bottom: 12px; }
+  .detail .kv strong { color: var(--text); font-weight: 500; }
+  .cmd-list { max-height: 280px; overflow: auto; }
+  .cmd-line { padding: 5px 0; border-bottom: 1px dotted var(--line); }
+  .cmd-line .meta { color: var(--dim); margin-right: 8px; font-size: 10px; }
+  .cmd-line .txt { color: var(--good); word-break: break-all; line-height: 1.35; }
+  .cmd-line.event .txt { color: var(--text); }
+  .scroll { max-height: 420px; overflow: auto; }
+  .scroll.tall { max-height: 520px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>ShardLure Intel</h1>
+      <div class="sub">threat actors · commands · heatmap · playbooks</div>
+    </div>
+    <nav class="nav">
+      <a href="/">Globe</a>
+      <a href="/intel" class="active">Intel</a>
+    </nav>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="num accent" id="s-events">0</div><div class="label">events</div></div>
+    <div class="stat"><div class="num blue" id="s-actors">0</div><div class="label">actors</div></div>
+    <div class="stat"><div class="num accent" id="s-ips">0</div><div class="label">unique IPs</div></div>
+    <div class="stat"><div class="num blue" id="s-upd">—</div><div class="label">updated</div></div>
+  </div>
+
+  <div class="grid">
+    <section class="panel full">
+      <h2>Activity heatmap (72h · by event kind)</h2>
+      <div id="heatmap-wrap"><canvas id="heatmap" height="120"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <h2>Event kinds</h2>
+      <div class="bars" id="bars-kind"></div>
+    </section>
+    <section class="panel">
+      <h2>Playbooks</h2>
+      <div class="bars" id="bars-playbook"></div>
+    </section>
+    <section class="panel">
+      <h2>Intent</h2>
+      <div class="bars" id="bars-intent"></div>
+    </section>
+    <section class="panel">
+      <h2>Sources</h2>
+      <div class="bars" id="bars-source"></div>
+    </section>
+
+    <section class="panel full">
+      <h2>Threat actors</h2>
+      <div class="scroll">
+        <table id="actors-table">
+          <thead>
+            <tr>
+              <th>IP / ID</th><th>Location</th><th>Playbook</th><th>Intent</th>
+              <th class="n">Events</th><th class="n">Probe</th><th>Last cmd</th><th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="detail" id="actor-detail">
+        <h3 id="detail-title">Actor detail</h3>
+        <div class="kv" id="detail-kv"></div>
+        <div class="cmd-list" id="detail-cmds"></div>
+      </div>
+    </section>
+
+    <section class="panel full">
+      <h2>Recent commands executed</h2>
+      <div class="scroll tall">
+        <table id="cmds-table">
+          <thead><tr><th>Time</th><th>IP</th><th>User</th><th>Kind</th><th>Command</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
+const fmt = function(n) { return Number(n || 0).toLocaleString(); };
+const rel = function(ts) {
+  const d = new Date(ts).getTime();
+  if (!Number.isFinite(d)) return '-';
+  const s = Math.max(0, Math.floor((Date.now() - d) / 1000));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  return Math.floor(s / 3600) + 'h';
+};
+
+const kindColors = {
+  invalid_user: '#ff5b6e',
+  failed_password: '#ff5b6e',
+  failed_publickey: '#fb923c',
+  accepted: '#fbbf24',
+  connect: '#a78bfa',
+  command: '#6ee7b7',
+  file_upload: '#4cc9f0',
+  file_download: '#4cc9f0',
+  tunnel: '#c084fc',
+  auth_fail: '#ff5b6e',
+  input: '#6ee7b7',
+  default: '#7a8aa3'
+};
+const flag = function(cc) {
+  if (!cc || cc.length !== 2 || !/^[A-Za-z]{2}$/.test(cc)) return '';
+  return String.fromCodePoint.apply(String, cc.toUpperCase().split('').map(function(c){ return 0x1F1A5 + c.charCodeAt(0); }));
+};
+
+function renderBars(el, rows) {
+  if (!rows || !rows.length) { el.innerHTML = '<span style="color:var(--dim)">—</span>'; return; }
+  const max = Math.max.apply(null, rows.map(function(r){ return r.hits; })) || 1;
+  el.innerHTML = rows.slice(0, 12).map(function(r) {
+    const pct = Math.round((r.hits / max) * 100);
+    return '<div class="bar-row"><span class="lbl">' + esc(r.label || 'unknown') + '</span>' +
+      '<span class="track"><span class="fill" style="width:' + pct + '%"></span></span>' +
+      '<span class="n">' + fmt(r.hits) + '</span></div>';
+  }).join('');
+}
+
+function drawHeatmap(cells) {
+  const canvas = document.getElementById('heatmap');
+  const wrap = document.getElementById('heatmap-wrap');
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = canvas.getContext('2d');
+  if (!cells || !cells.length) {
+    const w = Math.max(400, wrap.clientWidth || 400);
+    canvas.style.width = w + 'px';
+    canvas.style.height = '48px';
+    canvas.width = w * dpr; canvas.height = 48 * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#7a8aa3';
+    ctx.font = '12px monospace';
+    ctx.fillText('No hourly data yet', 12, 28);
+    return;
+  }
+  const hours = [], kinds = new Set(), map = {};
+  cells.forEach(function(c) {
+    if (hours.indexOf(c.t) < 0) hours.push(c.t);
+    kinds.add(c.kind);
+    map[c.t + '|' + c.kind] = c.n;
+  });
+  hours.sort(function(a,b){ return a - b; });
+  const kindList = Array.from(kinds).sort();
+  const cellW = 16, cellH = 16, padL = 118, padT = 28, padB = 22;
+  const cssW = Math.max(wrap.clientWidth || 600, padL + hours.length * cellW + 24);
+  const cssH = padT + kindList.length * cellH + padB;
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.width = Math.floor(cssW * dpr);
+  canvas.height = Math.floor(cssH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0a1018';
+  ctx.fillRect(0, 0, cssW, cssH);
+  let maxN = 1;
+  cells.forEach(function(c){ if (c.n > maxN) maxN = c.n; });
+  kindList.forEach(function(kind, yi) {
+    ctx.fillStyle = '#9ab0c8';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(kind.slice(0, 16), padL - 10, padT + yi * cellH + 12);
+    hours.forEach(function(h, xi) {
+      const n = map[h + '|' + kind] || 0;
+      const col = kindColors[kind] || kindColors.default;
+      ctx.globalAlpha = n ? Math.max(0.35, n / maxN) : 0.08;
+      ctx.fillStyle = n ? col : '#3a4a5c';
+      ctx.fillRect(padL + xi * cellW, padT + yi * cellH, cellW - 3, cellH - 3);
+      ctx.globalAlpha = 1;
+    });
+  });
+  ctx.fillStyle = '#7a8aa3';
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  const step = Math.max(1, Math.floor(hours.length / 10));
+  hours.forEach(function(h, xi) {
+    if (xi % step !== 0 && xi !== hours.length - 1) return;
+    const d = new Date(h * 1000);
+    ctx.fillText((d.getUTCMonth()+1)+'/'+d.getUTCDate()+' '+d.getUTCHours()+'h', padL + xi * cellW + 7, cssH - 6);
+  });
+}
+
+let selectedActor = null;
+
+async function loadActorDetail(id) {
+  const r = await fetch('/api/actor?id=' + encodeURIComponent(id) + '&_=' + Date.now(), { cache: 'no-store' });
+  if (!r.ok) return;
+  const d = await r.json();
+  const a = d.actor;
+  const el = document.getElementById('actor-detail');
+  el.classList.add('open');
+  document.getElementById('detail-title').textContent = (a.ip || a.id) + ' · ' + (a.playbook || 'unknown');
+  const users = (a.topUsers || []).map(function(u){ return u.user + ' (' + u.hits + ')'; }).join(', ') || '—';
+  const loc = [a.city, a.country].filter(Boolean).join(', ') || '—';
+  document.getElementById('detail-kv').innerHTML =
+    '<span>Actor ID</span><strong>' + esc(a.id) + '</strong>' +
+    '<span>Location</span><strong>' + esc((flag(a.cc) ? flag(a.cc) + ' ' : '') + loc) + '</strong>' +
+    '<span>Source</span><strong>' + esc(a.source) + '</strong>' +
+    '<span>Intent</span><strong>' + esc(a.intent || '—') + '</strong>' +
+    '<span>Events</span><strong>' + fmt(a.events) + ' · ' + fmt(a.uniqueUsers) + ' users · ' + (a.rateHour ? a.rateHour.toFixed(1) : '0') + '/h</strong>' +
+    '<span>Probe score</span><strong>' + esc(a.probeScore) + ' · conf ' + esc(a.confidence) + '%</strong>' +
+    '<span>First / last</span><strong>' + esc(rel(a.firstSeen)) + ' ago → ' + esc(rel(a.lastSeen)) + ' ago</strong>' +
+    '<span>Top users</span><strong>' + esc(users) + '</strong>' +
+    (a.hassh ? '<span>HASSH</span><strong>' + esc(a.hassh) + '</strong>' : '') +
+    (a.sshClient ? '<span>SSH client</span><strong>' + esc(a.sshClient) + '</strong>' : '') +
+    (a.lastCommand ? '<span>Last command</span><strong style="color:var(--good)">' + esc(a.lastCommand) + '</strong>' : '');
+  const cmds = d.commands || [];
+  const events = d.events || [];
+  let html = '';
+  if (cmds.length) {
+    html += '<div style="color:var(--dim);margin:8px 0 4px;font-size:10px;text-transform:uppercase;letter-spacing:.08em">Commands executed (' + cmds.length + ')</div>';
+    html += cmds.map(function(c) {
+      return '<div class="cmd-line"><span class="meta">' + esc(rel(c.ts)) + ' · ' + esc(c.user) + ' · ' + esc(c.kind) + '</span><div class="txt">' + esc(c.command) + '</div></div>';
+    }).join('');
+  }
+  if (events.length) {
+    html += '<div style="color:var(--dim);margin:12px 0 4px;font-size:10px;text-transform:uppercase;letter-spacing:.08em">Recent activity (' + events.length + ')</div>';
+    html += events.slice(0, 40).map(function(c) {
+      const txt = c.command ? c.command : (c.kind + ' @ ' + c.ip);
+      const cls = c.command ? 'cmd-line' : 'cmd-line event';
+      return '<div class="' + cls + '"><span class="meta">' + esc(rel(c.ts)) + ' · ' + esc(c.kind) + ' · ' + esc(c.user) + '</span><div class="txt">' + esc(txt) + '</div></div>';
+    }).join('');
+  }
+  document.getElementById('detail-cmds').innerHTML = html || '<span class="empty">No activity recorded for this actor.</span>';
+}
+
+function renderActors(actors) {
+  const tb = document.querySelector('#actors-table tbody');
+  if (!actors || !actors.length) {
+    tb.innerHTML = '<tr><td colspan="8" class="empty">No actors yet</td></tr>';
+    return;
+  }
+  tb.innerHTML = actors.map(function(a) {
+    const label = a.ip || a.id;
+    const loc = [a.city, a.country].filter(Boolean).join(', ') || '—';
+    const lastCmd = a.lastCommand ? String(a.lastCommand).slice(0, 48) : '—';
+    return '<tr class="actor-row" data-id="' + esc(a.id) + '">' +
+      '<td class="ip" title="' + esc(a.id) + '">' + esc(label) + '</td>' +
+      '<td class="loc" title="' + esc(loc) + '">' + (a.cc ? flag(a.cc) + ' ' : '') + esc(loc.slice(0, 16)) + '</td>' +
+      '<td>' + esc(a.playbook || '—') + '</td>' +
+      '<td>' + esc(a.intent || '—') + '</td>' +
+      '<td class="n">' + fmt(a.events) + '</td>' +
+      '<td class="n">' + esc(a.probeScore) + '</td>' +
+      '<td class="cmd" title="' + esc(a.lastCommand || '') + '">' + esc(lastCmd) + '</td>' +
+      '<td>' + esc(rel(a.lastSeen)) + '</td></tr>';
+  }).join('');
+  tb.querySelectorAll('.actor-row').forEach(function(row) {
+    row.addEventListener('click', function() {
+      tb.querySelectorAll('.actor-row').forEach(function(r){ r.classList.remove('selected'); });
+      row.classList.add('selected');
+      selectedActor = row.getAttribute('data-id');
+      loadActorDetail(selectedActor);
+    });
+  });
+}
+
+function renderCommands(cmds) {
+  const tb = document.querySelector('#cmds-table tbody');
+  if (!cmds || !cmds.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty">No commands logged yet — need Cowrie session input events</td></tr>';
+    return;
+  }
+  tb.innerHTML = cmds.map(function(c) {
+    return '<tr><td>' + esc(rel(c.ts)) + '</td><td class="ip">' + esc(c.ip) + '</td>' +
+      '<td>' + esc(c.user || '—') + '</td><td>' + esc(c.kind) + '</td>' +
+      '<td class="cmd" title="' + esc(c.command) + '">' + esc(c.command) + '</td></tr>';
+  }).join('');
+}
+
+async function refresh() {
+  const r = await fetch('/api/intel?_=' + Date.now(), { cache: 'no-store' });
+  if (!r.ok) return;
+  const d = await r.json();
+  document.getElementById('s-events').textContent = fmt(d.summary && d.summary.eventCount);
+  document.getElementById('s-actors').textContent = fmt(d.summary && d.summary.actorCount);
+  document.getElementById('s-ips').textContent = fmt(d.summary && d.summary.uniqueIps);
+  document.getElementById('s-upd').textContent = d.generatedAt ? rel(d.generatedAt) + ' ago' : '—';
+  renderBars(document.getElementById('bars-kind'), d.kindCounts);
+  renderBars(document.getElementById('bars-playbook'), d.playbookCounts);
+  renderBars(document.getElementById('bars-intent'), d.intentCounts);
+  renderBars(document.getElementById('bars-source'), d.sourceCounts);
+  window._lastHeatmap = d.heatmap;
+  drawHeatmap(d.heatmap);
+  renderActors(d.actors);
+  renderCommands(d.recentCommands);
+  if (selectedActor) loadActorDetail(selectedActor);
+}
+
+refresh();
+setInterval(refresh, 5000);
+window.addEventListener('resize', function() {
+  if (window._lastHeatmap) drawHeatmap(window._lastHeatmap);
+});
+</script>
+</body>
+</html>
