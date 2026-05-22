@@ -504,6 +504,48 @@
   .ttp-table .ttp-actors-list {
     margin-top: 8px; font-family: var(--mono); font-size: 10px; color: var(--purple);
   }
+
+  /* ==== Slice G: payload library ==== */
+  #payloads-table { table-layout: fixed; }
+  #payloads-table td:nth-child(1) { font-family: var(--mono); font-size: 10px; color: var(--accent); cursor: pointer; word-break: break-all; }
+  #payloads-table td:nth-child(1):hover { color: var(--warn); }
+  #payloads-table td:nth-child(2) { font-family: var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+  #payloads-table td:nth-child(3) { font-family: var(--mono); font-size: 10px; color: var(--dim); word-break: break-all; }
+  #payloads-table td:nth-child(4) { font-family: var(--mono); font-size: 10px; color: var(--purple); }
+  #payloads-table td:nth-child(5) { font-family: var(--mono); font-size: 10px; }
+  #payloads-table .pl-fetched   { color: var(--good); }
+  #payloads-table .pl-failed,
+  #payloads-table .pl-blocked   { color: var(--accent); }
+  #payloads-table .pl-capturing { color: var(--warn); }
+
+  /* payload modal */
+  .pm-grid {
+    display: grid; grid-template-columns: 110px 1fr; gap: 4px 14px;
+    font-family: var(--mono); font-size: 11px; padding: 4px 0 12px 0;
+    border-bottom: 1px dotted var(--line); margin-bottom: 12px;
+  }
+  .pm-grid .pm-k { color: var(--dim-2); }
+  .pm-grid .pm-v { color: var(--text); word-break: break-all; }
+  .pm-grid .pm-v.magic { color: var(--warn); }
+  .pm-grid .pm-v.sha   { color: var(--accent); }
+
+  .pm-section-h {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
+    color: var(--dim); text-transform: uppercase; margin: 10px 0 6px 0;
+  }
+  .pm-strings {
+    font-family: var(--mono); font-size: 11px; color: var(--good);
+    background: #021018; border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; max-height: 260px; overflow: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .pm-hex {
+    font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+    background: #021018; border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; max-height: 260px; overflow: auto;
+    white-space: pre;
+  }
+  .pm-hex .ph-off { color: var(--dim-2); }
 </style>
 </head>
 <body>
@@ -737,11 +779,20 @@
           <h2>Payload library</h2>
           <span class="meta" id="payloads-meta">captured binaries / scripts</span>
         </div>
-        <div class="coming-soon" id="payloads-placeholder">
-          <div class="cs-title">Slice G</div>
-          Browseable index of every captured binary or script:
-          SHA-256, magic bytes, strings preview, decoded shell content.
-        </div>
+        <table class="dense" id="payloads-table">
+          <thead>
+            <tr>
+              <th>sha256</th>
+              <th class="num">size</th>
+              <th>url</th>
+              <th>actor</th>
+              <th>status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section class="panel" id="panel-wordlist">
@@ -793,6 +844,18 @@
       </section>
     </div>
   </section><!-- /view-red -->
+</div>
+
+<!-- Payload library inspector modal (slice G) -->
+<div class="sess-modal" id="payload-modal">
+  <div class="sm-card">
+    <div class="sm-head">
+      <div class="sm-title" id="pm-title">payload</div>
+      <div class="sm-sub" id="pm-sub"></div>
+      <button class="sm-close" id="pm-close">close (esc)</button>
+    </div>
+    <div class="sm-body" id="pm-body"></div>
+  </div>
 </div>
 
 <!-- Cowrie session play-by-play modal (slice C) -->
@@ -1618,6 +1681,130 @@ setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshTTP();
 }, 30000);
 if (readTabFromHash() === 'red') refreshTTP();
+
+// ==== Slice G: payload library ====================================
+function fmtSize(b) {
+  if (b == null || b === 0) return '—';
+  if (b < 1024) return b + 'B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + 'KB';
+  return (b/1024/1024).toFixed(2) + 'MB';
+}
+
+function renderPayloads(data) {
+  const tb = document.querySelector('#payloads-table tbody');
+  const meta = document.getElementById('payloads-meta');
+  meta.textContent = data.total + ' payloads · ' + data.windowHours + 'h window';
+
+  if (!data.rows || data.rows.length === 0) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no captured payloads in window</div></td></tr>';
+    return;
+  }
+  let html = '';
+  data.rows.forEach(function(p) {
+    const sha = p.sha256 || '—';
+    const shaShort = sha === '—' ? '—' : sha.slice(0, 16) + '…';
+    const url = p.url ? '<a href="' + escHtml(p.url) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + escHtml(p.url) + '</a>' : '—';
+    const status = p.status || 'unknown';
+    html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="' + (p.hasLocal ? '1' : '0') + '">' +
+      '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
+      '<td class="num">' + fmtSize(p.sizeBytes) + '</td>' +
+      '<td>' + url + '</td>' +
+      '<td>' + escHtml(p.actor || '—') + '</td>' +
+      '<td><span class="pl-' + escHtml(status) + '">' + escHtml(status) + '</span></td>' +
+      '</tr>';
+  });
+  tb.innerHTML = html;
+  tb.querySelectorAll('tr[data-sha]').forEach(function(row) {
+    row.querySelector('td').addEventListener('click', function() {
+      const sha = row.dataset.sha;
+      if (sha && sha !== '—') openPayload(sha);
+    });
+  });
+}
+
+async function refreshPayloads() {
+  const window = Filters.window || '7d';
+  try {
+    const r = await fetch('/api/intel/payloads?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderPayloads(await r.json());
+  } catch (_) {}
+}
+
+async function openPayload(sha) {
+  const modal = document.getElementById('payload-modal');
+  document.getElementById('pm-title').textContent = 'payload · ' + sha.slice(0, 24);
+  document.getElementById('pm-sub').textContent = '';
+  document.getElementById('pm-body').innerHTML = '<div class="empty">loading…</div>';
+  modal.classList.add('open');
+  try {
+    const r = await fetch('/api/intel/payload?sha=' + encodeURIComponent(sha) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      document.getElementById('pm-body').innerHTML = '<div class="empty">failed: ' + r.status + '</div>';
+      return;
+    }
+    renderPayloadDetail(await r.json());
+  } catch (e) {
+    document.getElementById('pm-body').innerHTML = '<div class="empty">error: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderPayloadDetail(d) {
+  document.getElementById('pm-sub').textContent = d.ts + ' · ' + (d.srcIp || '?') + (d.actor ? ' · ' + d.actor : '');
+
+  const insp = d.inspect || {};
+  const errBlock = insp.error
+    ? '<div class="empty">inspector error: ' + escHtml(insp.error) + '</div>'
+    : '';
+  const strs = (insp.strings || []).map(escHtml).join('\n');
+  const stringsBlock = insp.strings && insp.strings.length
+    ? '<div class="pm-section-h">printable strings (top ' + insp.strings.length + ')</div>' +
+      '<div class="pm-strings">' + (strs || '(none)') + '</div>'
+    : '';
+  const hexBlock = insp.hexPreview
+    ? '<div class="pm-section-h">hex preview (first 256 bytes)</div>' +
+      '<div class="pm-hex">' + escHtml(insp.hexPreview) + '</div>'
+    : '';
+
+  const grid = '<div class="pm-grid">' +
+    '<span class="pm-k">sha256</span>'   + '<span class="pm-v sha">'   + escHtml(d.sha256 || '—') + '</span>' +
+    '<span class="pm-k">size</span>'     + '<span class="pm-v">'       + fmtSize(d.sizeBytes) + '</span>' +
+    '<span class="pm-k">magic</span>'    + '<span class="pm-v magic">' + escHtml(insp.magic || '—') + '</span>' +
+    '<span class="pm-k">mime</span>'     + '<span class="pm-v">'       + escHtml(insp.mimeHint || '—') + '</span>' +
+    '<span class="pm-k">origin</span>'   + '<span class="pm-v">'       + escHtml(d.origin || '—') + '</span>' +
+    '<span class="pm-k">url</span>'      + '<span class="pm-v">'       + escHtml(d.url || '—') + '</span>' +
+    '<span class="pm-k">status</span>'   + '<span class="pm-v">'       + escHtml(d.status || '—') + '</span>' +
+    '<span class="pm-k">actor</span>'    + '<span class="pm-v">'       + escHtml(d.actor || '—') + '</span>' +
+    '<span class="pm-k">session</span>'  + '<span class="pm-v">'       + escHtml(d.session || '—') + '</span>' +
+    '<span class="pm-k">src ip</span>'   + '<span class="pm-v">'       + escHtml(d.srcIp || '—') + '</span>' +
+    '<span class="pm-k">captured</span>' + '<span class="pm-v">'       + escHtml(d.ts || '—') + '</span>' +
+    (insp.truncated ? '<span class="pm-k">scan</span><span class="pm-v">truncated at 64KB</span>' : '') +
+    '</div>';
+
+  document.getElementById('pm-body').innerHTML = grid + errBlock + stringsBlock + hexBlock;
+}
+
+function closePayload() { document.getElementById('payload-modal').classList.remove('open'); }
+document.getElementById('pm-close').addEventListener('click', closePayload);
+document.getElementById('payload-modal').addEventListener('click', function(e) {
+  if (e.target.id === 'payload-modal') closePayload();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closePayload();
+});
+
+const _setActiveForPayloads = setActiveView;
+setActiveView = function(name) {
+  _setActiveForPayloads(name);
+  if (name === 'red') refreshPayloads();
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', refreshPayloads);
+});
+setInterval(function() {
+  if (document.getElementById('view-red').classList.contains('active')) refreshPayloads();
+}, 30000);
+if (readTabFromHash() === 'red') refreshPayloads();
 </script>
 </body>
 </html>

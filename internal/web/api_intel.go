@@ -12,6 +12,7 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/enrich"
 	"github.com/networkshard/shardlure/internal/intel/ioc"
 	"github.com/networkshard/shardlure/internal/intel/mitre"
+	"github.com/networkshard/shardlure/internal/intel/payload"
 	"github.com/networkshard/shardlure/internal/intel/ttp"
 )
 
@@ -291,6 +292,111 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		Rows:        rows,
 	})
+}
+
+// ==== /api/intel/payloads and /api/intel/payload =================
+
+type payloadsResponse struct {
+	GeneratedAt string        `json:"generatedAt"`
+	WindowHours int           `json:"windowHours"`
+	Total       int           `json:"total"`
+	Rows        []payloadRow  `json:"rows"`
+}
+
+type payloadRow struct {
+	SHA256    string `json:"sha256"`
+	Origin    string `json:"origin,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Status    string `json:"status,omitempty"`
+	SizeBytes int64  `json:"sizeBytes"`
+	Actor     string `json:"actor,omitempty"`
+	Session   string `json:"session,omitempty"`
+	SrcIP     string `json:"srcIp,omitempty"`
+	TS        string `json:"ts"`
+	HasLocal  bool   `json:"hasLocal"`
+}
+
+func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	limit := 200
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
+		limit = n
+	}
+	arts, err := s.st.ListArtifactsSince(since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rows := make([]payloadRow, 0, len(arts))
+	for _, a := range arts {
+		rows = append(rows, payloadRow{
+			SHA256:    a.SHA256,
+			Origin:    a.Origin,
+			URL:       a.URL,
+			Status:    a.Status,
+			SizeBytes: a.SizeBytes,
+			Actor:     actor.TrimActorPrefix(a.ActorID),
+			Session:   a.SessionID,
+			SrcIP:     a.SrcIP,
+			TS:        a.TS.UTC().Format(time.RFC3339),
+			HasLocal:  a.LocalPath != "",
+		})
+	}
+	_ = json.NewEncoder(w).Encode(payloadsResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+		Total:       len(arts),
+		Rows:        rows,
+	})
+}
+
+type payloadDetailResponse struct {
+	SHA256    string             `json:"sha256"`
+	URL       string             `json:"url,omitempty"`
+	Origin    string             `json:"origin,omitempty"`
+	Status    string             `json:"status,omitempty"`
+	SizeBytes int64              `json:"sizeBytes"`
+	Actor     string             `json:"actor,omitempty"`
+	Session   string             `json:"session,omitempty"`
+	SrcIP     string             `json:"srcIp,omitempty"`
+	TS        string             `json:"ts,omitempty"`
+	Inspect   payload.Inspection `json:"inspect"`
+}
+
+func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	sha := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sha")))
+	if sha == "" {
+		http.Error(w, "missing sha", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	a, err := s.st.GetArtifactBySHA(sha)
+	if err != nil {
+		http.Error(w, "artifact not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	resp := payloadDetailResponse{
+		SHA256:    a.SHA256,
+		URL:       a.URL,
+		Origin:    a.Origin,
+		Status:    a.Status,
+		SizeBytes: a.SizeBytes,
+		Actor:     actor.TrimActorPrefix(a.ActorID),
+		Session:   a.SessionID,
+		SrcIP:     a.SrcIP,
+		TS:        a.TS.UTC().Format(time.RFC3339),
+		Inspect:   payload.File(a.LocalPath),
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // ==== /api/intel/enrich ===========================================

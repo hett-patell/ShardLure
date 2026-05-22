@@ -131,6 +131,72 @@ FROM artifacts`)
 	return out, nil
 }
 
+// ListArtifactsSince returns artifacts whose creation/touch timestamp
+// falls within the window. limit caps the rows; pass 0 for default.
+// Used by the payload library view to scope the UI to a meaningful
+// recent slice rather than the entire artifact history.
+func (s *Store) ListArtifactsSince(since time.Time, limit int) ([]Artifact, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+SELECT id, ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at
+FROM artifacts
+WHERE COALESCE(ts, created_at) >= ?
+ORDER BY COALESCE(ts, created_at) DESC
+LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Artifact
+	for rows.Next() {
+		var a Artifact
+		var ts, created string
+		if err := rows.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
+			&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+			return nil, err
+		}
+		a.TS, _ = time.Parse(time.RFC3339Nano, ts)
+		a.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		if a.CreatedAt.IsZero() {
+			a.CreatedAt = a.TS
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// GetArtifactBySHA returns the most recent artifact matching the SHA-256.
+// Multiple rows can share a hash if attackers re-host the same payload
+// at different URLs; we return the most recently captured row.
+func (s *Store) GetArtifactBySHA(sha256 string) (*Artifact, error) {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	row := s.db.QueryRow(`
+SELECT id, ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at
+FROM artifacts
+WHERE sha256=?
+ORDER BY COALESCE(ts, created_at) DESC
+LIMIT 1`, sha256)
+	var a Artifact
+	var ts, created string
+	if err := row.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
+		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		return nil, err
+	}
+	a.TS, _ = time.Parse(time.RFC3339Nano, ts)
+	a.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = a.TS
+	}
+	return &a, nil
+}
+
 func (s *Store) ListRecentArtifacts(limit int) ([]Artifact, error) {
 	if limit <= 0 {
 		limit = 40
