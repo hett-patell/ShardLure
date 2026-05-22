@@ -1,4 +1,5 @@
 /shardlure
+/_seed_demo
 *.db
 *.db-wal
 *.db-shm
