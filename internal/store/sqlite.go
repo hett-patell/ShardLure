@@ -183,9 +183,15 @@ CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_i
 	// rows; live ingest now refuses to set the column for those
 	// event kinds at all.
 	if current < 3 {
+		// Set the column to the empty string rather than NULL: the
+		// rest of the codebase scans events.command into a Go
+		// string, and modernc.org/sqlite refuses to coerce NULL
+		// into a non-nullable scan target. Empty string filters the
+		// same way for Top Commands and IOC harvest while staying
+		// compatible with existing scan sites.
 		if _, err := s.db.Exec(`
 UPDATE events
-SET command = NULL
+SET command = ''
 WHERE source = 'cowrie'
   AND command IS NOT NULL
   AND command != ''
