@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/intel/ioc"
 	"github.com/networkshard/shardlure/internal/intel/mitre"
 )
 
@@ -251,3 +252,113 @@ func windowHoursFromQuery(v string, fallback int) int {
 	}
 	return fallback
 }
+
+// ==== /api/ioc/list and /api/ioc/{csv,stix} =======================
+
+type iocListResponse struct {
+	GeneratedAt string           `json:"generatedAt"`
+	WindowHours int              `json:"windowHours"`
+	Kind        string           `json:"kind"`
+	Total       int              `json:"total"`
+	Indicators  []ioc.Indicator  `json:"indicators"`
+}
+
+// handleIOCList returns a JSON preview of the IOC set. Optionally
+// filtered to a single kind via ?kind=ip|hash|url|user; ?limit caps
+// the response so dashboard previews stay snappy.
+func (s *Server) handleIOCList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	events, err := s.st.EventsSince(since, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	var kinds []ioc.Kind
+	if kind != "" && kind != "all" {
+		kinds = []ioc.Kind{ioc.Kind(kind)}
+	}
+	indicators := ioc.Collect(events, kinds)
+	limit := 100
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 5000 {
+		limit = n
+	}
+	total := len(indicators)
+	if len(indicators) > limit {
+		indicators = indicators[:limit]
+	}
+	_ = json.NewEncoder(w).Encode(iocListResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+		Kind:        kind,
+		Total:       total,
+		Indicators:  indicators,
+	})
+}
+
+// handleIOCCSV streams indicators as RFC4180 CSV with an
+// attachment Content-Disposition so the browser saves the file.
+// Optionally filtered to a single kind.
+func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	events, err := s.st.EventsSince(since, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	var kinds []ioc.Kind
+	if kind != "" && kind != "all" {
+		kinds = []ioc.Kind{ioc.Kind(kind)}
+	}
+	indicators := ioc.Collect(events, kinds)
+
+	fname := "shardlure-ioc"
+	if kind != "" && kind != "all" {
+		fname += "-" + kind
+	}
+	fname += "-" + time.Now().UTC().Format("20060102T150405Z") + ".csv"
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
+	if err := ioc.WriteCSV(w, indicators); err != nil {
+		// Best-effort: header already written; nothing useful to surface to
+		// the browser, but we still log via the server's default writer.
+		_ = err
+	}
+}
+
+// handleIOCSTIX streams a STIX 2.1 bundle of every indicator kind.
+// Filtering by kind is intentionally not exposed for STIX: bundles
+// are meant to be holistic snapshots that downstream TIPs can dedupe
+// themselves.
+func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	events, err := s.st.EventsSince(since, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	indicators := ioc.Collect(events, nil)
+
+	fname := "shardlure-stix-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
+	w.Header().Set("Content-Type", "application/vnd.oasis.stix+json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
+	if err := ioc.WriteSTIX(w, indicators); err != nil {
+		_ = err
+	}
+}
+

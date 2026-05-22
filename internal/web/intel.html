@@ -370,6 +370,41 @@
     color: var(--blue-team); font-size: 9px; padding: 1px 5px; border-radius: 4px;
     letter-spacing: 0.04em;
   }
+
+  /* ==== Slice D: IOC export ==== */
+  .ioc-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px; gap: 12px; flex-wrap: wrap;
+  }
+  .ioc-kinds { display: flex; gap: 6px; }
+  .ioc-kind {
+    background: transparent; color: var(--dim); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; padding: 4px 10px; border-radius: 6px;
+    cursor: pointer; letter-spacing: 0.04em;
+  }
+  .ioc-kind:hover { color: var(--text); border-color: var(--line-strong); }
+  .ioc-kind.active {
+    color: var(--blue-team); border-color: rgba(76,201,240,0.5);
+    background: rgba(76,201,240,0.08);
+  }
+  .ioc-actions { display: flex; gap: 8px; }
+  .ioc-dl {
+    color: var(--text); background: transparent; border: 1px solid var(--line-strong);
+    font-family: var(--mono); font-size: 11px; padding: 5px 12px; border-radius: 6px;
+    text-decoration: none; transition: background 0.12s, border-color 0.12s;
+  }
+  .ioc-dl:hover {
+    color: var(--blue-team); border-color: rgba(76,201,240,0.6);
+    background: rgba(76,201,240,0.05);
+  }
+  #ioc-table { table-layout: fixed; }
+  #ioc-table td:nth-child(1) {
+    font-family: var(--mono); word-break: break-all; max-width: 360px;
+  }
+  #ioc-table td.num { color: var(--accent); font-variant-numeric: tabular-nums; }
+  #ioc-table .ioc-actors {
+    color: var(--purple); font-family: var(--mono); font-size: 10px;
+  }
 </style>
 </head>
 <body>
@@ -529,18 +564,28 @@
       <section class="panel" id="panel-ioc">
         <div class="panel-head">
           <h2>IOC export</h2>
-          <span class="meta">STIX 2.1 · CSV</span>
+          <span class="meta" id="ioc-meta">STIX 2.1 · CSV</span>
         </div>
-        <div class="coming-soon" id="ioc-placeholder">
-          <div class="cs-title">Slice D</div>
-          One-click STIX 2.1 bundles and CSV downloads:
-          <div class="cs-list">
-            <div><span class="k">IPs</span> &nbsp;all attacker source addresses</div>
-            <div><span class="k">hashes</span> &nbsp;every captured payload SHA-256</div>
-            <div><span class="k">URLs</span> &nbsp;C2 / payload-hosting URLs</div>
-            <div><span class="k">users</span> &nbsp;observed credential attempts</div>
+        <div class="ioc-toolbar">
+          <div class="ioc-kinds">
+            <button class="ioc-kind active" data-kind="ip">IP</button>
+            <button class="ioc-kind" data-kind="hash">hash</button>
+            <button class="ioc-kind" data-kind="url">URL</button>
+            <button class="ioc-kind" data-kind="user">user</button>
+          </div>
+          <div class="ioc-actions">
+            <a class="ioc-dl" id="ioc-dl-csv" download>download CSV</a>
+            <a class="ioc-dl" id="ioc-dl-stix" href="/api/ioc/stix?window=24h" download>download STIX bundle</a>
           </div>
         </div>
+        <table class="dense" id="ioc-table">
+          <thead>
+            <tr><th>value</th><th class="num">count</th><th>first</th><th>last</th><th>actors</th></tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section class="panel" id="panel-enrich">
@@ -1230,6 +1275,73 @@ setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshSessions();
 }, 30000);
 if (readTabFromHash() === 'blue') refreshSessions();
+
+// ==== Slice D: IOC export =========================================
+const IOC = { kind: 'ip' };
+
+function fmtShortTime(iso) {
+  const d = new Date(iso);
+  return d.toISOString().slice(5, 16).replace('T', ' '); // MM-DD HH:MM
+}
+
+function renderIOC(data) {
+  const tb = document.querySelector('#ioc-table tbody');
+  const meta = document.getElementById('ioc-meta');
+  meta.textContent = data.total + ' indicators · ' + IOC.kind + ' · ' + data.windowHours + 'h window';
+
+  if (!data.indicators || data.indicators.length === 0) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no indicators in window</div></td></tr>';
+    return;
+  }
+  let html = '';
+  data.indicators.forEach(function(ind) {
+    const actors = (ind.actors || []).slice(0, 3).join(', ');
+    html += '<tr>' +
+      '<td title="' + escHtml(ind.sample_command || '') + '">' + escHtml(ind.value) + '</td>' +
+      '<td class="num">' + ind.count + '</td>' +
+      '<td>' + fmtShortTime(ind.first_seen) + '</td>' +
+      '<td>' + fmtShortTime(ind.last_seen) + '</td>' +
+      '<td class="ioc-actors">' + escHtml(actors) + '</td>' +
+      '</tr>';
+  });
+  tb.innerHTML = html;
+}
+
+async function refreshIOC() {
+  const window = Filters.window || '24h';
+  const csvLink = document.getElementById('ioc-dl-csv');
+  const stixLink = document.getElementById('ioc-dl-stix');
+  csvLink.href = '/api/ioc/csv?kind=' + IOC.kind + '&window=' + encodeURIComponent(window);
+  stixLink.href = '/api/ioc/stix?window=' + encodeURIComponent(window);
+  try {
+    const r = await fetch('/api/ioc/list?kind=' + IOC.kind + '&window=' + encodeURIComponent(window) +
+                         '&limit=50&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderIOC(await r.json());
+  } catch (_) {}
+}
+
+document.querySelectorAll('.ioc-kind').forEach(function(b) {
+  b.addEventListener('click', function() {
+    document.querySelectorAll('.ioc-kind').forEach(function(x) { x.classList.remove('active'); });
+    b.classList.add('active');
+    IOC.kind = b.dataset.kind;
+    refreshIOC();
+  });
+});
+
+const _setActiveForIOC = setActiveView;
+setActiveView = function(name) {
+  _setActiveForIOC(name);
+  if (name === 'blue') refreshIOC();
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', refreshIOC);
+});
+setInterval(function() {
+  if (document.getElementById('view-blue').classList.contains('active')) refreshIOC();
+}, 30000);
+if (readTabFromHash() === 'blue') refreshIOC();
 </script>
 </body>
 </html>
