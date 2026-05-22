@@ -79,7 +79,11 @@ func main() {
 		fmt.Printf("serving live dashboard on http://127.0.0.1%s\n", addr)
 		if tailscaleHint {
 			if ip := tailscaleIPv4(); ip != "" {
-				fmt.Printf("tailscale url: http://%s:%d\n", ip, addrPort(addr))
+				if p := addrPort(addr); p > 0 {
+					fmt.Printf("tailscale url: http://%s:%d\n", ip, p)
+				} else {
+					fmt.Printf("tailscale url: http://%s%s (could not parse port from %q)\n", ip, addr, addr)
+				}
 			} else {
 				fmt.Println("tailscale ip not found on this host (interface tailscale0 missing)")
 			}
@@ -188,7 +192,11 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 	fmt.Printf("live wrapper: cowrie=%s journal=%v interval=%s dashboard=http://127.0.0.1%s\n", cowriePath, journalSSH, interval, addr)
 	if tailscaleHint {
 		if ip := tailscaleIPv4(); ip != "" {
-			fmt.Printf("tailscale url: http://%s:%d\n", ip, addrPort(addr))
+			if p := addrPort(addr); p > 0 {
+				fmt.Printf("tailscale url: http://%s:%d\n", ip, p)
+			} else {
+				fmt.Printf("tailscale url: http://%s%s (could not parse port from %q)\n", ip, addr, addr)
+			}
 		}
 	}
 
@@ -408,19 +416,32 @@ func tailscaleIPv4() string {
 	return ""
 }
 
+// addrPort extracts a TCP port from any listen address that
+// net.Listen("tcp", addr) would accept: ":8080", "0.0.0.0:8080",
+// "[::1]:8080", "host:8080". On malformed or zero-port input it
+// returns 0 so callers can detect the failure (we don't fall back
+// to a default because there's no honest default for "I don't know
+// what port you bound to").
 func addrPort(addr string) int {
-	if strings.HasPrefix(addr, ":") {
-		p, err := strconv.Atoi(strings.TrimPrefix(addr, ":"))
-		if err == nil {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return 0
+	}
+	// Bare ":N" form - net.SplitHostPort accepts this with empty host.
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Fall back to a permissive parse: if the whole input is a
+		// number, treat it as a port. Keeps `--addr=8080` working
+		// even though it's not a valid listen address.
+		if p, perr := strconv.Atoi(addr); perr == nil && p > 0 && p <= 65535 {
 			return p
 		}
+		return 0
 	}
-	_, port, err := net.SplitHostPort(addr)
-	if err == nil {
-		p, err := strconv.Atoi(port)
-		if err == nil {
-			return p
-		}
+	_ = host
+	p, err := strconv.Atoi(port)
+	if err != nil || p <= 0 || p > 65535 {
+		return 0
 	}
-	return 8080
+	return p
 }

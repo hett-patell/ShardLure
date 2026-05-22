@@ -48,8 +48,22 @@ func NewSafeFetcher(evidenceDir string, maxBytes int64, timeout time.Duration, a
 		Timeout:     timeout,
 		AdminIPs:    adminIPs,
 	}
+	// Custom transport: every TCP dial routes through safeDial, which
+	// re-resolves the hostname against the SSRF guard and connects
+	// directly to a validated IP. This closes the TOCTOU between
+	// assertSafeURL's lookup and the http.Client's own DNS resolution
+	// (DNS rebinding: first answer benign, second answer 169.254...).
+	transport := &http.Transport{
+		DialContext:           sf.safeDial,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
+		MaxIdleConns:          4,
+		DisableKeepAlives:     true,
+	}
 	sf.Client = &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("too many redirects")
@@ -58,6 +72,44 @@ func NewSafeFetcher(evidenceDir string, maxBytes int64, timeout time.Duration, a
 		},
 	}
 	return sf
+}
+
+// safeDial resolves the target host through the same allow-list that
+// assertSafeURL uses, picks the first non-blocked IP, and dials it
+// directly. The connection thus targets an IP we just inspected -
+// the runtime can't be tricked into connecting to a different
+// address than the one we approved.
+func (f *SafeFetcher) safeDial(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	// Literal IP: validate once, dial directly.
+	if ip := net.ParseIP(host); ip != nil {
+		if blockedIP(ip, f.AdminIPs, f.TestLoopback) {
+			return nil, fmt.Errorf("blocked target %s", ip)
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	// Hostname: resolve, filter, take the first survivor.
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("dns lookup %s: %w", host, err)
+	}
+	for _, ip := range ips {
+		if blockedIP(ip, f.AdminIPs, f.TestLoopback) {
+			// Any blocked answer in the set is fatal: an attacker
+			// who controls DNS could otherwise rotate through good
+			// and bad IPs and the runtime might pick a bad one.
+			return nil, fmt.Errorf("blocked resolved target %s for %s", ip, host)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses for %s", host)
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
 }
 
 func (f *SafeFetcher) assertSafeURL(raw string) error {

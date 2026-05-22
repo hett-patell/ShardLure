@@ -70,8 +70,9 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_ip ON events(src_ip);
-CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
-CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_ip, session_id, username, command);
+-- Indexes on columns added by the legacy-column backfill are created
+-- *after* ensureLegacyColumns runs (see migrate()). Putting them here
+-- would fail on databases that predate those columns.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
@@ -130,11 +131,62 @@ CREATE TABLE IF NOT EXISTS ingest_state (
 	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_events_raw`); err != nil {
 		return err
 	}
-	if err := s.ensureLegacyColumns(); err != nil {
+
+	// Migration ladder. Each step runs at most once per database
+	// lifetime - we check the recorded max version before executing
+	// it, then stamp the new version on success. Open() therefore
+	// becomes a cheap no-op on already-migrated stores instead of
+	// re-scanning PRAGMA table_info every startup.
+	current, err := s.currentSchemaVersion()
+	if err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)`, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// v1: base schema marker. Legacy installs may already have this.
+	if current < 1 {
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)`, now); err != nil {
+			return err
+		}
+	}
+
+	// v2: backfill columns added after the initial release. Fresh
+	// installs hit this with the base CREATE TABLE already containing
+	// every column, so ensureLegacyColumns is a no-op for them and
+	// only does meaningful work on databases predating those columns.
+	// Either way we record v2 so subsequent Opens skip the PRAGMA
+	// table_info scan entirely.
+	if current < 2 {
+		if err := s.ensureLegacyColumns(); err != nil {
+			return err
+		}
+		// Create indexes that touch backfilled columns now that the
+		// columns are guaranteed to exist on this database.
+		const postIdx = `
+CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
+CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_ip, session_id, username, command);
+`
+		if _, err := s.db.Exec(postIdx); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?)`, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// currentSchemaVersion returns the highest applied migration version
+// recorded in schema_migrations, or 0 if the table is empty (which
+// is the case on a brand-new database where CREATE TABLE IF NOT
+// EXISTS just ran for the first time).
+func (s *Store) currentSchemaVersion() (int, error) {
+	var v sql.NullInt64
+	row := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
+	if err := row.Scan(&v); err != nil {
+		return 0, err
+	}
+	return int(v.Int64), nil
 }
 
 func (s *Store) ensureLegacyColumns() error {
