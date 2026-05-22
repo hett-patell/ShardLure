@@ -338,11 +338,14 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 		return nil, false
 	}
 	srcPort := toInt(r.SrcPort)
+	// Command captures the actual shell input from `cowrie.command.input`
+	// events, or the fetched URL on `file_download`. We must NOT fall
+	// back to r.Message: that field carries human-readable banners like
+	// "Remote SSH version: ..." and "login attempt [...] failed" on
+	// connect / failed-password events, which would pollute Top
+	// Commands and any IOC extraction that walks the command column.
 	command := strings.TrimSpace(r.Input)
-	if command == "" {
-		command = strings.TrimSpace(r.Message)
-	}
-	if command == "" && r.URL != "" {
+	if command == "" && (kind == models.KindFileUp || kind == models.KindFileDown) && r.URL != "" {
 		command = strings.TrimSpace(r.URL)
 	}
 	filename := r.Filename

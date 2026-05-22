@@ -158,12 +158,34 @@ type dashboardResponse struct {
 	Summary      summaryBlock    `json:"summary"`
 	Actors       []actorCard     `json:"actors"`
 	Recent       []recentRecord  `json:"recent"`
+	Sessions     []shellSessionRow `json:"sessions"`
 	TopIPs       []topIPRow      `json:"topIps"`
 	TopUsers     []topUserRow    `json:"topUsers"`
 	TopCommands  []topCommandRow `json:"topCommands"`
 	TopCountries []topCountryRow `json:"topCountries"`
 	Hourly       []hourPoint     `json:"hourly"`
 	Home         homePoint       `json:"home"`
+}
+
+// shellSessionRow is a flattened cowrie session for the "Recent shell
+// sessions" dashboard panel. Only sessions that produced at least one
+// cowrie.command.input event are surfaced -- a bare connect / login
+// attempt is not worth a row of attention. Distinct from the intel API's
+// sessionRow which serves the broader timeline view.
+type shellSessionRow struct {
+	ID         string  `json:"id"`
+	IP         string  `json:"ip"`
+	Username   string  `json:"username,omitempty"`
+	StartTS    string  `json:"startTs"`
+	EndTS      string  `json:"endTs"`
+	CmdCount   int     `json:"cmdCount"`
+	EventCount int     `json:"eventCount"`
+	Sample     string  `json:"sample,omitempty"`
+	Country    string  `json:"country,omitempty"`
+	CC         string  `json:"cc,omitempty"`
+	City       string  `json:"city,omitempty"`
+	Lat        float64 `json:"lat,omitempty"`
+	Lon        float64 `json:"lon,omitempty"`
 }
 
 type summaryBlock struct {
@@ -286,6 +308,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	shellSessions, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	uniqueIPs, _ := s.st.UniqueIPCount()
 	ec, _ := s.st.EventCount()
 	ac, _ := s.st.ActorCount()
@@ -389,6 +416,30 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			Actor:   actor.TrimActorPrefix(e.ActorID),
 			Command: strings.TrimSpace(e.Command),
 		})
+	}
+
+	for _, sess := range shellSessions {
+		row := shellSessionRow{
+			ID:         sess.ID,
+			IP:         sess.SrcIP,
+			Username:   sess.Username,
+			StartTS:    sess.StartTS.UTC().Format(time.RFC3339),
+			EndTS:      sess.EndTS.UTC().Format(time.RFC3339),
+			CmdCount:   sess.CmdCount,
+			EventCount: sess.EventCount,
+			Sample:     strings.TrimSpace(sess.FirstCommand),
+		}
+		if !isPrivateIP(sess.SrcIP) {
+			g := s.geo.cached(sess.SrcIP)
+			if g.OK {
+				row.Country = g.Country
+				row.CC = g.CC
+				row.City = g.City
+				row.Lat = g.Lat
+				row.Lon = g.Lon
+			}
+		}
+		resp.Sessions = append(resp.Sessions, row)
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)

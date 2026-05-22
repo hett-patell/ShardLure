@@ -173,6 +173,30 @@ CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_i
 			return err
 		}
 	}
+
+	// v3: scrub the Command column on cowrie events that aren't shell
+	// input or file download. Earlier versions of the cowrie ingest
+	// fell back to r.Message when r.Input was empty, which pushed
+	// banner strings ("Remote SSH version: ...") and login-attempt
+	// summaries into the command column and poisoned the Top
+	// Commands widget. This is a one-shot fix-up of already-persisted
+	// rows; live ingest now refuses to set the column for those
+	// event kinds at all.
+	if current < 3 {
+		if _, err := s.db.Exec(`
+UPDATE events
+SET command = NULL
+WHERE source = 'cowrie'
+  AND command IS NOT NULL
+  AND command != ''
+  AND kind NOT IN ('command', 'file_upload', 'file_download')
+`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (3, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

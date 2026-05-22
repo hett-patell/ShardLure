@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -65,6 +66,70 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 		s.StartTS, _ = parseTime(startTS)
 		s.EndTS, _ = parseTime(endTS)
 		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ShellSessionSummary is a SessionSummary plus the first shell command
+// observed in that session. It surfaces the most interesting honeypot rows
+// -- sessions where an attacker actually executed something -- to the
+// landing dashboard.
+type ShellSessionSummary struct {
+	SessionSummary
+	FirstCommand string
+}
+
+// RecentShellSessions returns up to `limit` cowrie sessions whose latest
+// event is within `since`, restricted to sessions that produced at least
+// one cowrie.command.input event. Results are ordered most-recent first
+// and include the earliest command observed (for the dashboard sample
+// column).
+func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionSummary, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	rows, err := s.db.Query(`
+SELECT
+  s.session_id,
+  MAX(s.src_ip)                                            AS src_ip,
+  COALESCE(MAX(CASE WHEN s.username != '' THEN s.username END), '') AS username,
+  MAX(s.hassh)                                             AS hassh,
+  MAX(s.ssh_client)                                        AS ssh_client,
+  MIN(s.ts)                                                AS start_ts,
+  MAX(s.ts)                                                AS end_ts,
+  COUNT(*)                                                 AS n,
+  SUM(CASE WHEN s.kind='command' THEN 1 ELSE 0 END)        AS n_cmd,
+  COALESCE(MAX(s.actor_id), '')                            AS actor_id,
+  (
+    SELECT command FROM events
+    WHERE session_id = s.session_id AND kind = 'command' AND command != ''
+    ORDER BY ts ASC LIMIT 1
+  )                                                        AS first_cmd
+FROM events s
+WHERE s.source='cowrie' AND s.session_id != '' AND s.ts >= ?
+GROUP BY s.session_id
+HAVING n_cmd > 0
+ORDER BY end_ts DESC
+LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ShellSessionSummary
+	for rows.Next() {
+		var sum ShellSessionSummary
+		var startTS, endTS string
+		var firstCmd sql.NullString
+		if err := rows.Scan(&sum.ID, &sum.SrcIP, &sum.Username, &sum.HASSH, &sum.SSHClient,
+			&startTS, &endTS, &sum.EventCount, &sum.CmdCount, &sum.ActorID, &firstCmd); err != nil {
+			return nil, err
+		}
+		sum.StartTS, _ = parseTime(startTS)
+		sum.EndTS, _ = parseTime(endTS)
+		if firstCmd.Valid {
+			sum.FirstCommand = firstCmd.String
+		}
+		out = append(out, sum)
 	}
 	return out, rows.Err()
 }

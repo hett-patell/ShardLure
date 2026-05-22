@@ -302,6 +302,11 @@
     </div>
   </section>
 
+  <section class="panel" style="flex: 0 0 auto; min-height: 0; display: flex; flex-direction: column;">
+    <h2>Recent shell sessions <span id="sess-count" style="color: var(--muted); font-weight: 400; font-size: 0.85em;"></span></h2>
+    <div class="rows sess-rows" id="shell-sessions" style="max-height: 38vh; overflow:auto;"></div>
+  </section>
+
   <section class="panel" style="flex: 0 0 auto; min-height: 0;">
     <h2>Top commands</h2>
     <div class="rows cmd-rows" id="top-commands"></div>
@@ -492,6 +497,33 @@ function renderTopCommands(rows) {
   });
 }
 
+function renderShellSessions(rows) {
+  const root = document.getElementById('shell-sessions');
+  const count = document.getElementById('sess-count');
+  root.innerHTML = '';
+  if (!rows || !rows.length) {
+    count.textContent = '';
+    root.innerHTML = '<div class="empty">No sessions with shell access yet</div>';
+    return;
+  }
+  count.textContent = '(' + rows.length + ' in last 24h)';
+  rows.forEach(function(r) {
+    const row = document.createElement('a');
+    row.className = 'row sess-row';
+    row.href = '/intel#session=' + encodeURIComponent(r.id);
+    row.style.cssText = 'display: flex; gap: 10px; padding: 6px 10px; align-items: baseline; text-decoration: none; color: inherit; border-radius: 4px;';
+    const loc = (r.cc ? r.cc + ' ' : '') + (r.city || r.country || '');
+    const sample = r.sample ? r.sample : '(' + r.cmdCount + ' commands)';
+    row.innerHTML =
+      '<span style="font-family: monospace; color: var(--accent); min-width: 110px;">' + esc(r.ip) + '</span>' +
+      '<span style="color: var(--muted); min-width: 70px;">' + esc(loc) + '</span>' +
+      '<span style="color: var(--muted); min-width: 60px;">' + esc(r.username || '?') + '</span>' +
+      '<span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="' + esc(sample) + '">' + esc(sample) + '</span>' +
+      '<span style="color: var(--good); min-width: 36px; text-align: right;">' + fmt(r.cmdCount) + '</span>';
+    root.appendChild(row);
+  });
+}
+
 function renderActors(rows) {
   const root = document.getElementById('actors');
   root.innerHTML = '';
@@ -596,6 +628,7 @@ async function refresh() {
   renderTopIPs(d.topIps);
   renderTopUsers(d.topUsers);
   renderTopCommands(d.topCommands);
+  renderShellSessions(d.sessions);
   renderActors(actors);
   renderFeed(recent);
 

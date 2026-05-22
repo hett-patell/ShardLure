@@ -47,7 +47,7 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	if err := os.MkdirAll(r.fetch.EvidenceDir, 0o700); err != nil {
 		return 0, err
 	}
-	for _, sub := range []string{"quarantine", "cowrie", "meta"} {
+	for _, sub := range []string{"quarantine", "cowrie", "cowrie-tty", "meta"} {
 		if err := os.MkdirAll(filepath.Join(r.fetch.EvidenceDir, sub), 0o700); err != nil {
 			return 0, err
 		}
@@ -66,9 +66,105 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		return n, err
 	}
 	n += c
-	var c2 int
-	c2, err = r.archiveFileDownloadEvents()
-	return n + c2, err
+	c2, err := r.archiveFileDownloadEvents()
+	if err != nil {
+		return n + c2, err
+	}
+	n += c2
+	c3, err := r.syncCowrieTTY()
+	return n + c3, err
+}
+
+// syncCowrieTTY copies cowrie ttylog session recordings into the evidence
+// directory and decodes each into a plain-text transcript next to the raw
+// binary. Each session is registered once in the artifacts table keyed by
+// the ttylog filename (which Cowrie names by sha256 of the input stream).
+func (r *Runner) syncCowrieTTY() (int, error) {
+	src := r.cowrieTTYDir()
+	if src == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	dest := filepath.Join(r.fetch.EvidenceDir, "cowrie-tty")
+	var n int
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		// Cowrie renames closed ttylogs to <sha256>; in-progress logs
+		// have the form YYYYMMDD-HHMMSS-...-i.log. Skip the latter so
+		// we don't ingest a half-written file that will be renamed in
+		// a moment anyway.
+		if !looksLikeSHA256(name) {
+			continue
+		}
+		urlKey := "cowrie-tty:" + name
+		exists, err := r.st.ArtifactURLRecorded(urlKey)
+		if err != nil {
+			return n, err
+		}
+		if exists {
+			continue
+		}
+		srcPath := filepath.Join(src, name)
+		dstRaw := filepath.Join(dest, name)
+		sum, size, err := copyArtifact(srcPath, dstRaw)
+		if err != nil {
+			continue
+		}
+		// Best-effort transcript. A decode failure should not block
+		// recording the raw artifact -- the dashboard can still link
+		// to the binary file.
+		if frames, derr := DecodeTTYLog(srcPath); derr == nil {
+			transcript := RenderTranscript(frames, DefaultTranscriptOptions())
+			_ = os.WriteFile(dstRaw+".txt", []byte(transcript), 0o600)
+		}
+		if err := r.st.RecordArtifact(store.Artifact{
+			TS:        time.Now().UTC(),
+			URL:       urlKey,
+			LocalPath: dstRaw,
+			SHA256:    sum,
+			SizeBytes: size,
+			Origin:    "cowrie_tty",
+			Status:    "fetched",
+		}); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+func (r *Runner) cowrieTTYDir() string {
+	home := r.cfg.Cowrie.Home
+	if home == "" {
+		home = filepath.Join(r.cfg.DataDir, "cowrie")
+	}
+	return filepath.Join(home, "var", "lib", "cowrie", "tty")
+}
+
+// looksLikeSHA256 reports whether s is a 64-character hex string.
+func looksLikeSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Runner) fetchFromCommands(ctx context.Context) (int, error) {
