@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/capture"
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/ingest/cowrie"
@@ -306,12 +307,8 @@ func cmdActors(st *store.Store, args []string) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ACTOR\tIP\tPLAYBOOK\tEVENTS\tUSR\tRATE/h\tLAST\tCONF")
 	for _, a := range actors {
-		short := a.ID
-		if strings.HasPrefix(short, "journal:") {
-			short = strings.TrimPrefix(short, "journal:")
-		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f\t%s\t%d\n",
-			short, a.PrimaryIP, a.Playbook, a.EventCount, a.UniqueUsers,
+			actor.TrimActorPrefix(a.ID), a.PrimaryIP, a.Playbook, a.EventCount, a.UniqueUsers,
 			a.AttemptsPerHour, a.LastSeen.Format(time.RFC3339), a.Confidence)
 	}
 	w.Flush()

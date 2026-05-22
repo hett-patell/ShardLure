@@ -82,3 +82,19 @@ type ActorUser struct {
 	Username string
 	Count    int
 }
+
+// IPStat is a per-IP roll-up for one actor (count + observation window).
+// Produced by the actor builders so the persistence layer can avoid a
+// second O(N) walk over events.
+type IPStat struct {
+	Count       int
+	First, Last time.Time
+}
+
+// AggregatedActor pairs an Actor with the per-IP and per-username counts
+// the builder already computed. The store consumes these directly.
+type AggregatedActor struct {
+	Actor *Actor
+	IPs   map[string]IPStat
+	Users map[string]int
+}

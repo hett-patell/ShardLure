@@ -119,10 +119,16 @@ func (m *model) refreshPanels() error {
 	}
 	m.events.SetContent(eb.String())
 
-	list, _ := m.st.ListActors(30)
+	list, err := m.st.ListActors(30)
+	if err != nil {
+		return fmt.Errorf("list actors: %w", err)
+	}
 	if m.cursor < len(list) {
 		a := list[m.cursor]
-		users, _ := m.st.ActorUsers(a.ID)
+		users, err := m.st.ActorUsers(a.ID)
+		if err != nil {
+			return fmt.Errorf("actor users: %w", err)
+		}
 		var db strings.Builder
 		db.WriteString(titleStyle.Render("Actor ") + a.PrimaryIP + "\n\n")
 		db.WriteString(fmt.Sprintf("  id:       %s\n", a.ID))

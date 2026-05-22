@@ -79,26 +79,6 @@ func newGeoResolver(cfg geoConfig) *geoResolver {
 	}
 }
 
-func (g *geoResolver) resolve(ip string) geoEntry {
-	if !g.enabled || isPrivateIP(ip) {
-		return geoEntry{}
-	}
-	g.mu.Lock()
-	if v, ok := g.cache[ip]; ok && time.Now().Before(v.Expiry) {
-		g.mu.Unlock()
-		return v
-	}
-	if g.inflight[ip] {
-		g.mu.Unlock()
-		return geoEntry{}
-	}
-	g.inflight[ip] = true
-	g.mu.Unlock()
-
-	go g.fetch(ip)
-	return geoEntry{}
-}
-
 // cached returns geolocation only if already resolved (never blocks on HTTP).
 func (g *geoResolver) cached(ip string) geoEntry {
 	if !g.enabled || isPrivateIP(ip) {

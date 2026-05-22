@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -303,18 +304,12 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func commandRowFromEvent(e store.CommandEvent) commandRow {
-	actor := e.ActorID
-	if strings.HasPrefix(actor, "journal:") {
-		actor = strings.TrimPrefix(actor, "journal:")
-	} else if strings.HasPrefix(actor, "cowrie:") {
-		actor = strings.TrimPrefix(actor, "cowrie:")
-	}
 	return commandRow{
 		TS:       e.TS.UTC().Format(time.RFC3339),
 		Kind:     string(e.Kind),
 		IP:       e.SrcIP,
 		User:     e.Username,
-		Actor:    actor,
+		Actor:    actor.TrimActorPrefix(e.ActorID),
 		Command:  e.Command,
 		Session:  e.SessionID,
 		SHA256:   e.SHA256,

@@ -1,8 +1,6 @@
 package journal
 
 import (
-	"bufio"
-	"io"
 	"net"
 	"regexp"
 	"strconv"
@@ -114,14 +112,4 @@ func matchFromRegex(re *regexp.Regexp, line string, kind models.EventKind) match
 	}
 }
 
-func ParseReader(r io.Reader) ([]*models.Event, error) {
-	var events []*models.Event
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		if e, ok := ParseLine(sc.Text()); ok {
-			events = append(events, e)
-		}
-	}
-	return events, sc.Err()
-}
+

@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/config"
@@ -263,10 +262,4 @@ func copyArtifact(src, dest string) (sha string, size int64, err error) {
 	return sum, n, nil
 }
 
-// CowrieCaptureConfig returns suggested cowrie.cfg lines for download capture.
-func CowrieCaptureConfig() string {
-	return strings.TrimSpace(`
-# ShardLure: persist wget/curl malware samples (see internal/capture)
-download_limit_size = 52428800
-`) + "\n"
-}
+

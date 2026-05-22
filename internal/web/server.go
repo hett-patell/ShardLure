@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -52,10 +53,14 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 			home.CC = opts[0].HomeCC
 		}
 	}
+	var firstOpt Options
+	if len(opts) > 0 {
+		firstOpt = opts[0]
+	}
 	return &Server{
 		st:            st,
 		addr:          addr,
-		geo: newGeoResolver(geoOpts(len(opts) > 0, opts[0])),
+		geo:           newGeoResolver(geoOpts(len(opts) > 0, firstOpt)),
 		dashboardAuth: strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
 		home:          home,
 	}
@@ -357,18 +362,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, e := range events {
-		actor := e.ActorID
-		if strings.HasPrefix(actor, "journal:") {
-			actor = strings.TrimPrefix(actor, "journal:")
-		} else if strings.HasPrefix(actor, "cowrie:") {
-			actor = strings.TrimPrefix(actor, "cowrie:")
-		}
 		resp.Recent = append(resp.Recent, recentRecord{
 			TS:      e.TS.UTC().Format(time.RFC3339),
 			Kind:    string(e.Kind),
 			IP:      e.SrcIP,
 			User:    e.Username,
-			Actor:   actor,
+			Actor:   actor.TrimActorPrefix(e.ActorID),
 			Command: strings.TrimSpace(e.Command),
 		})
 	}

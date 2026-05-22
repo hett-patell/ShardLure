@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/store"
@@ -91,8 +93,8 @@ func indexOf(s, sub string) int {
 func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
 	skippedAdmin := 0
-	var stored []*models.Event
-	var attack []*models.Event
+	stored := make([]*models.Event, 0, len(events))
+	attack := make([]*models.Event, 0, len(events))
 	for _, e := range events {
 		if e.Kind == models.KindAccepted && admin[e.SrcIP] {
 			skippedAdmin++
@@ -106,53 +108,161 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 		attack = append(attack, e)
 		stored = append(stored, e)
 	}
+	actor.AssignJournalActorIDs(attack, admin)
 
-	var actors []*models.Actor
+	var aggActors []*models.AggregatedActor
 	var duplicates int
 	if replace {
-		actors = actor.BuildFromJournal(attack, admin)
-		if err := st.ReplaceSourceEventsAndActors(models.SourceJournal, stored, actors); err != nil {
+		aggActors = actor.BuildFromJournalAggregated(attack, admin)
+		if err := st.ReplaceSourceEventsAndActorsAgg(models.SourceJournal, stored, aggActors); err != nil {
 			return nil, err
 		}
 	} else {
-		// Dedup against what's already persisted before appending.
-		var fresh []*models.Event
-		for _, e := range stored {
-			exists, err := st.EventExists(e)
-			if err != nil {
-				return nil, err
-			}
-			if exists {
-				duplicates++
-				continue
-			}
-			fresh = append(fresh, e)
-		}
-		all, err := st.EventsBySource(models.SourceJournal)
+		// Batched dedup: build the set of identities already in the DB for
+		// this source in one query, then filter in memory. Previously this
+		// was an N+1 (one EventExists per candidate event).
+		freshStored, dupes, err := batchDedupJournal(st, stored)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, fresh...)
-		actors = actor.BuildFromJournal(filterAttackJournalEvents(all), admin)
-		if err := st.AppendEventsAndReplaceActors(models.SourceJournal, fresh, all, actors); err != nil {
+		duplicates = dupes
+		// Rebuild actors by streaming persisted journal events + the
+		// fresh attack subset; never materializes the full event set.
+		aggActors, err = buildJournalActorsFromDB(st, freshAttackOnly(freshStored), admin)
+		if err != nil {
+			return nil, err
+		}
+		if err := st.AppendEventsAndReplaceActorsAgg(models.SourceJournal, freshStored, aggActors); err != nil {
 			return nil, err
 		}
 	}
 
 	return &Result{
 		Events:       len(stored) - duplicates,
-		Actors:       len(actors),
+		Actors:       len(aggActors),
 		SkippedAdmin: skippedAdmin,
 		Duplicates:   duplicates,
 	}, nil
 }
 
-func filterAttackJournalEvents(events []*models.Event) []*models.Event {
-	var out []*models.Event
-	for _, e := range events {
-		if e.Kind != models.KindAccepted {
-			out = append(out, e)
+// buildJournalActorsFromDB streams persisted *attack* journal events past
+// the collector and folds in the fresh attack batch.
+func buildJournalActorsFromDB(st *store.Store, fresh []*models.Event, admin map[string]bool) ([]*models.AggregatedActor, error) {
+	jc := actor.NewJournalCollector(admin)
+	if err := st.IterateEventsBySource(models.SourceJournal, func(e *models.Event) error {
+		// Accepted/admin lines are stored but never form an actor.
+		if e.Kind == models.KindAccepted {
+			return nil
 		}
+		jc.Add(e)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	for _, e := range fresh {
+		jc.Add(e)
+	}
+	return jc.Finalize(), nil
+}
+
+// batchDedupJournal returns the subset of candidates that does NOT match an
+// existing row in the events table, along with the duplicate count. The
+// previous implementation issued one EventExists round-trip per candidate
+// (N+1 query). This batches by ts (the most selective column for journal
+// ingest because journalctl times are second-precision and unique per line)
+// and disambiguates the rest in Go.
+func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.Event, int, error) {
+	if len(candidates) == 0 {
+		return nil, 0, nil
+	}
+	// Collect unique ts values from the candidate set.
+	tsSet := make(map[string]struct{}, len(candidates))
+	for _, e := range candidates {
+		tsSet[e.TS.UTC().Format(time.RFC3339Nano)] = struct{}{}
+	}
+	if len(tsSet) == 0 {
+		return candidates, 0, nil
+	}
+	// SQLite limits IN-list size; chunk to be safe.
+	const chunk = 400
+	tsList := make([]string, 0, len(tsSet))
+	for t := range tsSet {
+		tsList = append(tsList, t)
+	}
+	existing := make(map[journalIdentity]struct{}, len(tsList))
+	for i := 0; i < len(tsList); i += chunk {
+		end := i + chunk
+		if end > len(tsList) {
+			end = len(tsList)
+		}
+		batch := tsList[i:end]
+		if err := loadExistingJournalIdentities(st, batch, existing); err != nil {
+			return nil, 0, err
+		}
+	}
+	fresh := make([]*models.Event, 0, len(candidates))
+	dupes := 0
+	for _, e := range candidates {
+		id := identityForEvent(e)
+		if _, ok := existing[id]; ok {
+			dupes++
+			continue
+		}
+		// Defensive: also dedupe within the candidate batch itself.
+		existing[id] = struct{}{}
+		fresh = append(fresh, e)
+	}
+	return fresh, dupes, nil
+}
+
+type journalIdentity struct {
+	TS       string
+	Kind     models.EventKind
+	IP       string
+	Username string
+	Command  string
+}
+
+func identityForEvent(e *models.Event) journalIdentity {
+	return journalIdentity{
+		TS:       e.TS.UTC().Format(time.RFC3339Nano),
+		Kind:     e.Kind,
+		IP:       e.SrcIP,
+		Username: e.Username,
+		Command:  e.Command,
+	}
+}
+
+func loadExistingJournalIdentities(st *store.Store, tsBatch []string, into map[journalIdentity]struct{}) error {
+	if len(tsBatch) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(tsBatch))
+	args := make([]any, 0, len(tsBatch)+1)
+	args = append(args, models.SourceJournal)
+	for i, t := range tsBatch {
+		placeholders[i] = "?"
+		args = append(args, t)
+	}
+	query := "SELECT ts, kind, src_ip, username, command FROM events WHERE source=? AND ts IN (" +
+		strings.Join(placeholders, ",") + ")"
+	return st.QueryRows(query, args, func(scan func(...any) error) error {
+		var id journalIdentity
+		if err := scan(&id.TS, &id.Kind, &id.IP, &id.Username, &id.Command); err != nil {
+			return err
+		}
+		into[id] = struct{}{}
+		return nil
+	})
+}
+
+func freshAttackOnly(events []*models.Event) []*models.Event {
+	out := make([]*models.Event, 0, len(events))
+	for _, e := range events {
+		if e.Kind == models.KindAccepted {
+			continue
+		}
+		out = append(out, e)
 	}
 	return out
 }

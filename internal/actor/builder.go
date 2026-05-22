@@ -12,8 +12,12 @@ import (
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
+// IPStats is the per-IP roll-up used during journal clustering. It used to
+// hold every event pointer for the IP; we now keep counts only, which is
+// what the classifier actually needs and avoids retaining O(N) event
+// pointers in memory during ingest.
 type IPStats struct {
-	Events      []*models.Event
+	Count       int
 	Users       map[string]int
 	First, Last time.Time
 }
@@ -23,7 +27,10 @@ type CowrieStats struct {
 	PrimaryIP string
 	HASSH     string
 	Client    string
-	Events    []*models.Event
+	// IPs maps src_ip to per-IP roll-up (cowrie actors are keyed by HASSH
+	// and can span multiple source IPs).
+	IPs       map[string]IPStat
+	Count     int
 	Users     map[string]int
 	First     time.Time
 	Last      time.Time
@@ -33,8 +40,62 @@ type CowrieStats struct {
 	DeployCmd bool
 }
 
+// AggregatedActor and IPStat live in pkg/models so the store package can
+// consume them without importing internal/actor (which would create a cycle:
+// actor/sync.go already imports store).
+type AggregatedActor = models.AggregatedActor
+type IPStat = models.IPStat
+
 func JournalActorID(ip string) string {
 	return fmt.Sprintf("journal:%s", ip)
+}
+
+// TrimActorPrefix strips the source prefix from an actor ID for display.
+// Both "journal:" and "cowrie:" prefixes are removed; unknown formats are
+// returned unchanged. Centralised here to avoid the same six lines being
+// repeated in main.go, web/server.go, web/intel.go.
+func TrimActorPrefix(id string) string {
+	if i := strings.IndexByte(id, ':'); i >= 0 {
+		switch id[:i] {
+		case "journal", "cowrie":
+			return id[i+1:]
+		}
+	}
+	return id
+}
+
+// CowrieActorID returns the actor ID a cowrie event would be assigned to,
+// without running the full builder. Used by the ingest path to stamp
+// e.ActorID on fresh events before INSERT (the streaming collector no
+// longer retains the event pointer, so it can't mutate it itself).
+func CowrieActorID(srcIP, hassh string) string {
+	suffix := srcIP
+	if hassh != "" {
+		suffix = hassh
+	}
+	return "cowrie:" + suffix
+}
+
+// AssignJournalActorIDs stamps ActorID on every non-admin journal event in
+// the slice. Admin events are intentionally left blank so the join in the
+// dashboard never associates real operators with an attacker actor.
+func AssignJournalActorIDs(events []*models.Event, adminIPs map[string]bool) {
+	for _, e := range events {
+		if e == nil || e.SrcIP == "" || adminIPs[e.SrcIP] {
+			continue
+		}
+		e.ActorID = JournalActorID(e.SrcIP)
+	}
+}
+
+// AssignCowrieActorIDs is the cowrie analogue of AssignJournalActorIDs.
+func AssignCowrieActorIDs(events []*models.Event, adminIPs map[string]bool) {
+	for _, e := range events {
+		if e == nil || e.SrcIP == "" || adminIPs[e.SrcIP] {
+			continue
+		}
+		e.ActorID = CowrieActorID(e.SrcIP, e.HASSH)
+	}
 }
 
 // Confidence scores are 0-100.
@@ -45,46 +106,112 @@ const (
 	ConfidenceCowriePayload  = 84
 )
 
+// minWindowHours floors the observation window when computing attempts/hour
+// so a single burst of activity inside one minute does not produce a divide
+// near zero (and a meaningless 100k/hour rate). 15 minutes is empirically
+// the smallest window where rate carries information for our classifier.
+const minWindowHours = 0.25
+
 // BuildFromJournal groups journal events into actors (1 IP = 1 actor for journal mode).
 func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) []*models.Actor {
-	byIP := map[string]*IPStats{}
-
-	for _, e := range events {
-		if adminIPs[e.SrcIP] {
-			// Never classify known admin sources as attackers.
-			continue
-		}
-		if e.SrcIP == "" {
-			continue
-		}
-		st, ok := byIP[e.SrcIP]
-		if !ok {
-			st = &IPStats{Users: map[string]int{}}
-			byIP[e.SrcIP] = st
-		}
-		st.Events = append(st.Events, e)
-		if e.Username != "" && e.Username != "?" {
-			st.Users[e.Username]++
-		}
-		if st.First.IsZero() || e.TS.Before(st.First) {
-			st.First = e.TS
-		}
-		if e.TS.After(st.Last) {
-			st.Last = e.TS
-		}
+	agg := BuildFromJournalAggregated(events, adminIPs)
+	out := make([]*models.Actor, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, a.Actor)
 	}
+	return out
+}
 
-	var actors []*models.Actor
-	for ip, st := range byIP {
-		if len(st.Events) == 0 {
+// BuildFromJournalAggregated returns actors with the per-IP and per-user
+// stats the builder already computed so the persistence layer does not need
+// to scan events a second time.
+func BuildFromJournalAggregated(events []*models.Event, adminIPs map[string]bool) []*AggregatedActor {
+	jc := newJournalCollector(adminIPs)
+	for _, e := range events {
+		jc.add(e)
+	}
+	return jc.finalize()
+}
+
+// BuildJournalActorsStreaming pushes journal events through the same logic
+// as BuildFromJournalAggregated without requiring them in a slice. The
+// caller passes a function that, when invoked, yields the next event or
+// (nil, io.EOF) when done. Used by the ingest path so we don't materialize
+// every persisted journal event in memory just to recompute actors.
+func BuildJournalActorsStreaming(next func() (*models.Event, error), adminIPs map[string]bool) ([]*AggregatedActor, error) {
+	jc := newJournalCollector(adminIPs)
+	for {
+		e, err := next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		if e == nil {
+			break
+		}
+		jc.add(e)
+	}
+	return jc.finalize(), nil
+}
+
+// JournalCollector is the streaming equivalent of BuildFromJournalAggregated.
+// See CowrieCollector for usage.
+type JournalCollector = journalCollector
+
+type journalCollector struct {
+	admin map[string]bool
+	byIP  map[string]*IPStats
+}
+
+func NewJournalCollector(adminIPs map[string]bool) *JournalCollector {
+	return newJournalCollector(adminIPs)
+}
+
+func newJournalCollector(adminIPs map[string]bool) *journalCollector {
+	return &journalCollector{admin: adminIPs, byIP: map[string]*IPStats{}}
+}
+
+// Add is the exported wrapper around add().
+func (c *journalCollector) Add(e *models.Event) { c.add(e) }
+
+// Finalize is the exported wrapper around finalize().
+func (c *journalCollector) Finalize() []*AggregatedActor { return c.finalize() }
+
+func (c *journalCollector) add(e *models.Event) {
+	if e == nil || e.SrcIP == "" || c.admin[e.SrcIP] {
+		return
+	}
+	st, ok := c.byIP[e.SrcIP]
+	if !ok {
+		st = &IPStats{Users: map[string]int{}}
+		c.byIP[e.SrcIP] = st
+	}
+	st.Count++
+	if e.Username != "" && e.Username != "?" {
+		st.Users[e.Username]++
+	}
+	if st.First.IsZero() || e.TS.Before(st.First) {
+		st.First = e.TS
+	}
+	if e.TS.After(st.Last) {
+		st.Last = e.TS
+	}
+}
+
+func (c *journalCollector) finalize() []*AggregatedActor {
+	var actors []*AggregatedActor
+	for ip, st := range c.byIP {
+		if st.Count == 0 {
 			continue
 		}
 		users := sortedKeys(st.Users)
 		hours := st.Last.Sub(st.First).Hours()
-		if hours < 0.25 {
-			hours = 0.25
+		if hours < minWindowHours {
+			hours = minWindowHours
 		}
-		aph := float64(len(st.Events)) / hours
+		aph := float64(st.Count) / hours
 
 		uhash := usernameSetHash(users)
 		id := JournalActorID(ip)
@@ -99,99 +226,175 @@ func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) []*model
 			Confidence:      ConfidenceJournalBase,
 			FirstSeen:       st.First,
 			LastSeen:        st.Last,
-			EventCount:      len(st.Events),
+			EventCount:      st.Count,
 			UniqueUsers:     len(st.Users),
 			AttemptsPerHour: aph,
 			UsernameHash:    uhash,
-			ProbeScore:      journalProbeScore(len(st.Events), aph, len(st.Users)),
+			ProbeScore:      journalProbeScore(st.Count, aph, len(st.Users)),
 			Notes:           fmt.Sprintf("%d distinct usernames", len(st.Users)),
 		}
-		if st.Last.Sub(st.First).Hours() >= 0.25 && aph > 100 {
+		if st.Last.Sub(st.First).Hours() >= minWindowHours && aph > 100 {
 			a.Confidence = ConfidenceJournalHighAPH
 		}
-		actors = append(actors, a)
-		for _, e := range st.Events {
-			e.ActorID = id
+		ips := map[string]IPStat{
+			ip: {Count: st.Count, First: st.First, Last: st.Last},
 		}
+		// st.Users is owned by this collector and never escapes; hand it
+		// off directly instead of copying.
+		actors = append(actors, &AggregatedActor{Actor: a, IPs: ips, Users: st.Users})
 	}
-
 	sort.Slice(actors, func(i, j int) bool {
-		return actors[i].LastSeen.After(actors[j].LastSeen)
+		return actors[i].Actor.LastSeen.After(actors[j].Actor.LastSeen)
 	})
 	return actors
 }
 
 // BuildFromCowrie groups events by HASSH (fallback: source IP).
 func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) []*models.Actor {
-	byKey := map[string]*CowrieStats{}
+	agg := BuildFromCowrieAggregated(events, adminIPs)
+	out := make([]*models.Actor, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, a.Actor)
+	}
+	return out
+}
 
+// BuildFromCowrieAggregated mirrors BuildFromCowrie but returns the per-IP
+// and per-user stats the builder already computed so the persistence layer
+// does not need to re-walk events. See writeActorsTx.
+func BuildFromCowrieAggregated(events []*models.Event, adminIPs map[string]bool) []*AggregatedActor {
+	cc := newCowrieCollector(adminIPs)
 	for _, e := range events {
-		if e.SrcIP == "" {
-			continue
-		}
-		if adminIPs[e.SrcIP] {
-			// Keep admin traffic out of attacker clustering in all cases.
-			continue
-		}
-		key := e.HASSH
-		if key == "" {
-			key = e.SrcIP
-		}
-		st, ok := byKey[key]
-		if !ok {
-			st = &CowrieStats{
-				Key:       key,
-				PrimaryIP: e.SrcIP,
-				HASSH:     e.HASSH,
-				Client:    e.SSHClient,
-				Users:     map[string]int{},
+		cc.add(e)
+	}
+	return cc.finalize()
+}
+
+// BuildCowrieActorsStreaming is the streaming analogue of
+// BuildFromCowrieAggregated. See BuildJournalActorsStreaming for the
+// memory rationale.
+func BuildCowrieActorsStreaming(next func() (*models.Event, error), adminIPs map[string]bool) ([]*AggregatedActor, error) {
+	cc := newCowrieCollector(adminIPs)
+	for {
+		e, err := next()
+		if err != nil {
+			if err == io.EOF {
+				break
 			}
-			byKey[key] = st
+			return nil, err
 		}
-		st.Events = append(st.Events, e)
-		if e.Username != "" && e.Username != "?" {
-			st.Users[e.Username]++
+		if e == nil {
+			break
 		}
-		if st.First.IsZero() || e.TS.Before(st.First) {
-			st.First = e.TS
+		cc.add(e)
+	}
+	return cc.finalize(), nil
+}
+
+// CowrieCollector incrementally feeds events into the cowrie clustering
+// logic. Use this to avoid materializing every persisted event in memory:
+//
+//	c := actor.NewCowrieCollector(admin)
+//	st.IterateEventsBySource(SourceCowrie, func(e *models.Event) error { c.Add(e); return nil })
+//	for _, e := range fresh { c.Add(e) }
+//	actors := c.Finalize()
+type CowrieCollector = cowrieCollector
+
+type cowrieCollector struct {
+	admin map[string]bool
+	byKey map[string]*CowrieStats
+}
+
+func NewCowrieCollector(adminIPs map[string]bool) *CowrieCollector {
+	return newCowrieCollector(adminIPs)
+}
+
+func newCowrieCollector(adminIPs map[string]bool) *cowrieCollector {
+	return &cowrieCollector{admin: adminIPs, byKey: map[string]*CowrieStats{}}
+}
+
+// Add is the exported wrapper around add().
+func (c *cowrieCollector) Add(e *models.Event) { c.add(e) }
+
+// Finalize is the exported wrapper around finalize().
+func (c *cowrieCollector) Finalize() []*AggregatedActor { return c.finalize() }
+
+func (c *cowrieCollector) add(e *models.Event) {
+	if e == nil || e.SrcIP == "" || c.admin[e.SrcIP] {
+		return
+	}
+	key := e.HASSH
+	if key == "" {
+		key = e.SrcIP
+	}
+	st, ok := c.byKey[key]
+	if !ok {
+		st = &CowrieStats{
+			Key:       key,
+			PrimaryIP: e.SrcIP,
+			HASSH:     e.HASSH,
+			Client:    e.SSHClient,
+			IPs:       map[string]IPStat{},
+			Users:     map[string]int{},
 		}
-		if e.TS.After(st.Last) {
-			st.Last = e.TS
-		}
-		if st.HASSH == "" {
-			st.HASSH = e.HASSH
-		}
-		if st.Client == "" {
-			st.Client = e.SSHClient
-		}
-		if e.Kind == models.KindTunnel {
-			st.Tunnel = true
-		}
-		if e.Kind == models.KindFileDown || e.Kind == models.KindFileUp || e.SHA256 != "" {
-			st.Payload = true
-		}
-		if e.Kind == models.KindConnect || e.Kind == models.KindInvalidUser || e.Kind == models.KindFailedPass || e.Kind == models.KindFailedKey {
-			st.Probe = true
-		}
-		if e.Kind == models.KindCommand {
-			lc := strings.ToLower(e.Command)
-			if strings.Contains(lc, "curl ") || strings.Contains(lc, "wget ") || strings.Contains(lc, "chmod +x") || strings.Contains(lc, "/tmp/") || strings.Contains(lc, "busybox") {
-				st.DeployCmd = true
-			}
+		c.byKey[key] = st
+	}
+	st.Count++
+	if e.Username != "" && e.Username != "?" {
+		st.Users[e.Username]++
+	}
+	if st.First.IsZero() || e.TS.Before(st.First) {
+		st.First = e.TS
+	}
+	if e.TS.After(st.Last) {
+		st.Last = e.TS
+	}
+	// Per-IP roll-up.
+	ip := st.IPs[e.SrcIP]
+	ip.Count++
+	if ip.First.IsZero() || e.TS.Before(ip.First) {
+		ip.First = e.TS
+	}
+	if e.TS.After(ip.Last) {
+		ip.Last = e.TS
+	}
+	st.IPs[e.SrcIP] = ip
+
+	if st.HASSH == "" {
+		st.HASSH = e.HASSH
+	}
+	if st.Client == "" {
+		st.Client = e.SSHClient
+	}
+	if e.Kind == models.KindTunnel {
+		st.Tunnel = true
+	}
+	if e.Kind == models.KindFileDown || e.Kind == models.KindFileUp || e.SHA256 != "" {
+		st.Payload = true
+	}
+	if e.Kind == models.KindConnect || e.Kind == models.KindInvalidUser || e.Kind == models.KindFailedPass || e.Kind == models.KindFailedKey {
+		st.Probe = true
+	}
+	if e.Kind == models.KindCommand {
+		lc := strings.ToLower(e.Command)
+		if strings.Contains(lc, "curl ") || strings.Contains(lc, "wget ") || strings.Contains(lc, "chmod +x") || strings.Contains(lc, "/tmp/") || strings.Contains(lc, "busybox") {
+			st.DeployCmd = true
 		}
 	}
+}
 
-	var actors []*models.Actor
-	for _, st := range byKey {
-		if len(st.Events) == 0 {
+func (c *cowrieCollector) finalize() []*AggregatedActor {
+	var actors []*AggregatedActor
+	for _, st := range c.byKey {
+		if st.Count == 0 {
 			continue
 		}
 		users := sortedKeys(st.Users)
 		hours := st.Last.Sub(st.First).Hours()
-		if hours < 0.25 {
-			hours = 0.25
+		if hours < minWindowHours {
+			hours = minWindowHours
 		}
-		aph := float64(len(st.Events)) / hours
+		aph := float64(st.Count) / hours
 		uhash := usernameSetHash(users)
 		intent := ClassifyIntent(st.Tunnel, st.Payload, st.Probe, st.DeployCmd)
 		playbook := ClassifyPlaybook(users, aph)
@@ -210,26 +413,22 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) []*models
 			Confidence:      ConfidenceCowrieBase,
 			FirstSeen:       st.First,
 			LastSeen:        st.Last,
-			EventCount:      len(st.Events),
+			EventCount:      st.Count,
 			UniqueUsers:     len(st.Users),
 			AttemptsPerHour: aph,
 			HASSH:           st.HASSH,
 			SSHClient:       st.Client,
 			UsernameHash:    uhash,
 			ProbeScore:      cowrieProbeScore(st, aph),
-			Notes:           fmt.Sprintf("%d events, %d usernames", len(st.Events), len(st.Users)),
+			Notes:           fmt.Sprintf("%d events, %d usernames", st.Count, len(st.Users)),
 		}
 		if st.Payload || st.DeployCmd {
 			a.Confidence = ConfidenceCowriePayload
 		}
-		actors = append(actors, a)
-		for _, e := range st.Events {
-			e.ActorID = id
-		}
+		actors = append(actors, &AggregatedActor{Actor: a, IPs: st.IPs, Users: st.Users})
 	}
-
 	sort.Slice(actors, func(i, j int) bool {
-		return actors[i].LastSeen.After(actors[j].LastSeen)
+		return actors[i].Actor.LastSeen.After(actors[j].Actor.LastSeen)
 	})
 	return actors
 }

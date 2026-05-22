@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -44,15 +45,31 @@ type Config struct {
 	} `yaml:"capture"`
 
 	GeoIP struct {
+		// MMDB is parsed for forward-compat but not yet read by the
+		// geo resolver (only ip-api.com HTTP lookups are wired up).
+		// See README roadmap: "GeoLite2 MMDB enrichment".
 		MMDB         string `yaml:"mmdb"`
 		Enabled      bool   `yaml:"enabled"`
 		InsecureHTTP bool   `yaml:"insecure_http"`
 	} `yaml:"geoip"`
 }
 
+// fallbackDataDir is used when the user has no resolvable HOME (e.g. running
+// under a service account without HOME set). Without this guard, Default()
+// produced "/.local/share/shardlure" because os.UserHomeDir returned "" and
+// the empty string silently joined to "/".
+const fallbackDataDir = "/var/lib/shardlure"
+
+func userDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return fallbackDataDir
+	}
+	return filepath.Join(home, ".local", "share", "shardlure")
+}
+
 func Default() Config {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".local", "share", "shardlure")
+	dir := userDataDir()
 	c := Config{DataDir: dir}
 	c.AdminIPs = []string{}
 	c.Journal.Unit = "ssh"
@@ -98,8 +115,7 @@ func Load(path string) (Config, error) {
 }
 
 func DefaultConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "shardlure", "shardlure.yaml")
+	return filepath.Join(userDataDir(), "shardlure.yaml")
 }
 
 func (c Config) Save(path string) error {

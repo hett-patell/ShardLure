@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -183,6 +184,23 @@ func (s *Store) ensureLegacyColumns() error {
 	return nil
 }
 
+// QueryRows runs a parameterized query and invokes scan on each row.
+// It is exposed so ingest helpers (e.g. batchDedupJournal) can issue
+// ad-hoc IN-list queries without re-implementing rows.Close handling.
+func (s *Store) QueryRows(query string, args []any, scan func(scan func(...any) error) error) error {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := scan(rows.Scan); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func (s *Store) InsertEvent(e *models.Event) error {
 	return insertEvent(s.db, e)
 }
@@ -251,8 +269,51 @@ ON CONFLICT(actor_id, username) DO UPDATE SET count=excluded.count`,
 	return err
 }
 
+// actorColumns is the canonical SELECT list for an actors row. Kept in
+// one place so ListActors / GetActor / GetActorByPrimaryIP stay in sync
+// with scanActorRow below.
+const actorColumns = `id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes`
+
+// rowScan is satisfied by both *sql.Row and *sql.Rows so the same
+// scan code can be used for single-row QueryRow and Query iteration.
+// (Different from rowScanner in dashboard.go which models the full
+// *sql.Rows iterator surface.)
+type rowScan interface {
+	Scan(dest ...any) error
+}
+
+// scanActorRow populates a models.Actor from a single sql row in the
+// order defined by actorColumns. Timestamps stored as RFC3339Nano text
+// are decoded via parseTime so a malformed value is surfaced rather
+// than silently zeroed (fix #13).
+func scanActorRow(r rowScan, a *models.Actor) error {
+	var fs, ls string
+	if err := r.Scan(&a.ID, &a.Source, &a.PrimaryIP, &a.Playbook, &a.Intent, &a.Confidence,
+		&fs, &ls, &a.EventCount, &a.UniqueUsers, &a.AttemptsPerHour, &a.HASSH, &a.SSHClient,
+		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes); err != nil {
+		return err
+	}
+	var err error
+	if a.FirstSeen, err = parseTime(fs); err != nil {
+		return fmt.Errorf("actor %s first_seen: %w", a.ID, err)
+	}
+	if a.LastSeen, err = parseTime(ls); err != nil {
+		return fmt.Errorf("actor %s last_seen: %w", a.ID, err)
+	}
+	return nil
+}
+
+// parseTime decodes a RFC3339Nano timestamp from the DB. An empty string
+// is treated as the zero time (legacy rows may have NULL first/last seen).
+func parseTime(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339Nano, s)
+}
+
 func (s *Store) ListActors(limit int) ([]models.Actor, error) {
-	q := `SELECT id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes FROM actors ORDER BY last_seen DESC`
+	q := `SELECT ` + actorColumns + ` FROM actors ORDER BY last_seen DESC`
 	var rows *sql.Rows
 	var err error
 	if limit > 0 {
@@ -267,32 +328,20 @@ func (s *Store) ListActors(limit int) ([]models.Actor, error) {
 	var out []models.Actor
 	for rows.Next() {
 		var a models.Actor
-		var fs, ls string
-		if err := rows.Scan(&a.ID, &a.Source, &a.PrimaryIP, &a.Playbook, &a.Intent, &a.Confidence,
-			&fs, &ls, &a.EventCount, &a.UniqueUsers, &a.AttemptsPerHour, &a.HASSH, &a.SSHClient,
-			&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes); err != nil {
+		if err := scanActorRow(rows, &a); err != nil {
 			return nil, err
 		}
-		a.FirstSeen, _ = time.Parse(time.RFC3339Nano, fs)
-		a.LastSeen, _ = time.Parse(time.RFC3339Nano, ls)
 		out = append(out, a)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetActor(id string) (*models.Actor, error) {
-	row := s.db.QueryRow(`
-SELECT id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes
-FROM actors WHERE id=?`, id)
+	row := s.db.QueryRow(`SELECT `+actorColumns+` FROM actors WHERE id=?`, id)
 	var a models.Actor
-	var fs, ls string
-	if err := row.Scan(&a.ID, &a.Source, &a.PrimaryIP, &a.Playbook, &a.Intent, &a.Confidence,
-		&fs, &ls, &a.EventCount, &a.UniqueUsers, &a.AttemptsPerHour, &a.HASSH, &a.SSHClient,
-		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes); err != nil {
+	if err := scanActorRow(row, &a); err != nil {
 		return nil, err
 	}
-	a.FirstSeen, _ = time.Parse(time.RFC3339Nano, fs)
-	a.LastSeen, _ = time.Parse(time.RFC3339Nano, ls)
 	return &a, nil
 }
 
@@ -344,25 +393,20 @@ SELECT id, ts, source, kind, src_ip, username, command, actor_id, raw FROM event
 		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.SrcIP, &e.Username, &e.Command, &e.ActorID, &e.Raw); err != nil {
 			return nil, err
 		}
-		e.TS, _ = time.Parse(time.RFC3339Nano, ts)
+		if e.TS, err = parseTime(ts); err != nil {
+			return nil, fmt.Errorf("event %d ts: %w", e.ID, err)
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetActorByPrimaryIP(ip string) (*models.Actor, error) {
-	row := s.db.QueryRow(`
-SELECT id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes
-FROM actors WHERE primary_ip=? ORDER BY last_seen DESC LIMIT 1`, ip)
+	row := s.db.QueryRow(`SELECT `+actorColumns+` FROM actors WHERE primary_ip=? ORDER BY last_seen DESC LIMIT 1`, ip)
 	var a models.Actor
-	var fs, ls string
-	if err := row.Scan(&a.ID, &a.Source, &a.PrimaryIP, &a.Playbook, &a.Intent, &a.Confidence,
-		&fs, &ls, &a.EventCount, &a.UniqueUsers, &a.AttemptsPerHour, &a.HASSH, &a.SSHClient,
-		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes); err != nil {
+	if err := scanActorRow(row, &a); err != nil {
 		return nil, err
 	}
-	a.FirstSeen, _ = time.Parse(time.RFC3339Nano, fs)
-	a.LastSeen, _ = time.Parse(time.RFC3339Nano, ls)
 	return &a, nil
 }
 

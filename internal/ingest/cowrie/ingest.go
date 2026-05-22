@@ -112,16 +112,9 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		Offset: newOffset,
 	}
 
-	var fresh []*models.Event
-	for _, e := range events {
-		exists, err := st.EventExists(e)
-		if err != nil {
-			return nil, err
-		}
-		if exists {
-			continue
-		}
-		fresh = append(fresh, e)
+	fresh, err := batchDedupCowrie(st, events)
+	if err != nil {
+		return nil, err
 	}
 	if len(fresh) == 0 {
 		if err := st.SetIngestState(newState); err != nil {
@@ -129,12 +122,7 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		}
 		return &Result{Skipped: skipped}, nil
 	}
-	all, err := st.EventsBySource(models.SourceCowrie)
-	if err != nil {
-		return nil, err
-	}
-	all = append(all, fresh...)
-	res, err := syncCowrieActors(st, all, fresh, adminIPs)
+	res, err := syncCowrieActors(st, fresh, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
 	}
@@ -145,6 +133,78 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		return res, err
 	}
 	return res, nil
+}
+
+// batchDedupCowrie filters events that already exist in the DB. Identity
+// matches store.EventExists (source, kind, ts, src_ip, session_id,
+// username, command). Uses a single IN-list query over ts to avoid the
+// previous N+1 EventExists pattern.
+func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Event, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	tsSet := make(map[string]struct{}, len(candidates))
+	for _, e := range candidates {
+		tsSet[e.TS.UTC().Format(time.RFC3339Nano)] = struct{}{}
+	}
+	tsList := make([]string, 0, len(tsSet))
+	for t := range tsSet {
+		tsList = append(tsList, t)
+	}
+	existing := make(map[cowrieIdentity]struct{}, len(tsList))
+	const chunk = 400
+	for i := 0; i < len(tsList); i += chunk {
+		end := i + chunk
+		if end > len(tsList) {
+			end = len(tsList)
+		}
+		batch := tsList[i:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, models.SourceCowrie)
+		for j, t := range batch {
+			placeholders[j] = "?"
+			args = append(args, t)
+		}
+		query := "SELECT ts, kind, src_ip, session_id, username, command FROM events WHERE source=? AND ts IN (" +
+			strings.Join(placeholders, ",") + ")"
+		if err := st.QueryRows(query, args, func(scan func(...any) error) error {
+			var id cowrieIdentity
+			if err := scan(&id.TS, &id.Kind, &id.IP, &id.Session, &id.Username, &id.Command); err != nil {
+				return err
+			}
+			existing[id] = struct{}{}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]*models.Event, 0, len(candidates))
+	for _, e := range candidates {
+		id := cowrieIdentity{
+			TS:       e.TS.UTC().Format(time.RFC3339Nano),
+			Kind:     e.Kind,
+			IP:       e.SrcIP,
+			Session:  e.SessionID,
+			Username: e.Username,
+			Command:  e.Command,
+		}
+		if _, ok := existing[id]; ok {
+			continue
+		}
+		existing[id] = struct{}{}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+type cowrieIdentity struct {
+	TS       string
+	Kind     models.EventKind
+	IP       string
+	Session  string
+	Username string
+	Command  string
 }
 
 // BackfillRotatedLogs ingests cowrie.json.* siblings (historical rotated logs).
@@ -168,34 +228,61 @@ func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string)
 	}
 }
 
-func syncCowrieActors(st *store.Store, all, fresh []*models.Event, adminIPs []string) (*Result, error) {
+// syncCowrieActors rebuilds the full cowrie actor set by streaming every
+// persisted cowrie event past a streaming builder, then folding in the
+// fresh batch. Memory peak is O(actors + unique usernames), NOT O(events).
+//
+// Note: the rebuild is still O(N) in CPU per ingest tick — see the
+// follow-up "incremental rebuild for touched keys only" work item.
+func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
-	actors := actor.BuildFromCowrie(all, admin)
-	if err := st.AppendEventsAndReplaceActors(models.SourceCowrie, fresh, all, actors); err != nil {
+	actor.AssignCowrieActorIDs(fresh, admin)
+	actors, err := buildCowrieActorsFromDB(st, fresh, admin)
+	if err != nil {
+		return nil, err
+	}
+	if err := st.AppendEventsAndReplaceActorsAgg(models.SourceCowrie, fresh, actors); err != nil {
 		return nil, err
 	}
 	return &Result{Events: len(fresh), Actors: len(actors)}, nil
 }
 
+// buildCowrieActorsFromDB streams persisted cowrie events past the actor
+// collector (so the full event set never lives in memory) and folds in the
+// fresh batch before producing aggregated actors.
+func buildCowrieActorsFromDB(st *store.Store, fresh []*models.Event, admin map[string]bool) ([]*models.AggregatedActor, error) {
+	cc := actor.NewCowrieCollector(admin)
+	if err := st.IterateEventsBySource(models.SourceCowrie, func(e *models.Event) error {
+		cc.Add(e)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	for _, e := range fresh {
+		cc.Add(e)
+	}
+	return cc.Finalize(), nil
+}
+
 func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
+	actor.AssignCowrieActorIDs(events, admin)
 	if replace {
-		actors := actor.BuildFromCowrie(events, admin)
-		if err := st.ReplaceSourceEventsAndActors(models.SourceCowrie, events, actors); err != nil {
+		// Replace: events slice IS the universe. No DB scan needed.
+		actors := actor.BuildFromCowrieAggregated(events, admin)
+		if err := st.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, events, actors); err != nil {
 			return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
 		}
 		return &Result{Events: len(events), Actors: len(actors)}, nil
 	}
-	all, err := st.EventsBySource(models.SourceCowrie)
+	actors, err := buildCowrieActorsFromDB(st, events, admin)
 	if err != nil {
 		return nil, err
 	}
-	all = append(all, events...)
-	actors := actor.BuildFromCowrie(all, admin)
-	if err := st.AppendEventsAndReplaceActors(models.SourceCowrie, events, all, actors); err != nil {
+	if err := st.AppendEventsAndReplaceActorsAgg(models.SourceCowrie, events, actors); err != nil {
 		return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
 	}
-	return &Result{Events: len(all), Actors: len(actors)}, nil
+	return &Result{Events: len(events), Actors: len(actors)}, nil
 }
 
 // parseReader returns parsed events, the count of skipped/malformed lines,

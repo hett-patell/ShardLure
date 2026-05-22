@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -19,7 +18,11 @@ func (s *Store) WithTx(fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
-func (s *Store) ReplaceSourceEventsAndActors(source models.Source, events []*models.Event, actors []*models.Actor) error {
+// ReplaceSourceEventsAndActorsAgg is the aggregate-aware replacement for the
+// older ReplaceSourceEventsAndActors. It accepts pre-computed per-IP and
+// per-user roll-ups from the builder so persistence does NOT scan events a
+// second time (was O(N) per actor in addition to the builder's O(N)).
+func (s *Store) ReplaceSourceEventsAndActorsAgg(source models.Source, events []*models.Event, actors []*models.AggregatedActor) error {
 	return s.WithTx(func(tx *sql.Tx) error {
 		if err := clearSourceTx(tx, source); err != nil {
 			return err
@@ -29,82 +32,43 @@ func (s *Store) ReplaceSourceEventsAndActors(source models.Source, events []*mod
 				return err
 			}
 		}
-		return replaceActorsTx(tx, source, events, actors)
+		return writeActorsTx(tx, actors)
 	})
 }
 
-func (s *Store) AppendEventsAndReplaceActors(source models.Source, fresh []*models.Event, all []*models.Event, actors []*models.Actor) error {
+// AppendEventsAndReplaceActorsAgg inserts fresh events and rewrites all
+// per-source actor rows using aggregate stats from the builder.
+func (s *Store) AppendEventsAndReplaceActorsAgg(source models.Source, fresh []*models.Event, actors []*models.AggregatedActor) error {
 	return s.WithTx(func(tx *sql.Tx) error {
 		for _, e := range fresh {
 			if err := insertEvent(tx, e); err != nil {
 				return err
 			}
 		}
-		return replaceActorsTx(tx, source, all, actors)
+		if err := deleteActorsTx(tx, source); err != nil {
+			return err
+		}
+		return writeActorsTx(tx, actors)
 	})
 }
 
-func replaceActorsTx(tx *sql.Tx, source models.Source, events []*models.Event, actors []*models.Actor) error {
-	if err := deleteActorsTx(tx, source); err != nil {
-		return err
-	}
-
-	// Single pass over events: bucket by actor_id so the outer loop over
-	// actors is O(M) lookup instead of O(N) per actor.
-	byActor := make(map[string][]*models.Event, len(actors))
-	for _, e := range events {
-		if e.ActorID == "" {
-			continue
-		}
-		byActor[e.ActorID] = append(byActor[e.ActorID], e)
-	}
-
-	for _, a := range actors {
+func writeActorsTx(tx *sql.Tx, actors []*models.AggregatedActor) error {
+	for _, agg := range actors {
+		a := agg.Actor
 		if err := upsertActor(tx, a); err != nil {
 			return err
 		}
-
-		ipStats := map[string]struct {
-			count int
-			first time.Time
-			last  time.Time
-		}{}
-		userStats := map[string]int{}
-
-		for _, e := range byActor[a.ID] {
-			if e.ID != 0 {
-				if err := updateEventActor(tx, e.ID, a.ID); err != nil {
-					return err
-				}
-			}
-			if e.SrcIP != "" {
-				st := ipStats[e.SrcIP]
-				st.count++
-				if st.first.IsZero() || e.TS.Before(st.first) {
-					st.first = e.TS
-				}
-				if e.TS.After(st.last) {
-					st.last = e.TS
-				}
-				ipStats[e.SrcIP] = st
-			}
-			if e.Username != "" {
-				userStats[e.Username]++
-			}
-		}
-
-		for ip, st := range ipStats {
-			if err := upsertActorIP(tx, a.ID, ip, st.first, st.last, st.count); err != nil {
+		for ip, st := range agg.IPs {
+			if err := upsertActorIP(tx, a.ID, ip, st.First, st.Last, st.Count); err != nil {
 				return err
 			}
 		}
-		for username, count := range userStats {
+		for username, count := range agg.Users {
 			if err := upsertActorUser(tx, a.ID, username, count); err != nil {
 				return err
 			}
 		}
 	}
-
 	return nil
 }
 

@@ -8,7 +8,11 @@ import (
 
 var (
 	reHTTP = regexp.MustCompile(`https?://[^\s"'<>]+`)
-	reCurl = regexp.MustCompile(`(?i)-[oO]\s+(\S+)|curl\s+[^\s;|&]*\s+(https?://\S+)`)
+	// curl ... <url>  — leading flags chunk matches non-greedy because curl
+	// commonly has -o/--output flags before the URL. We don't actually need
+	// to capture the local file path: reHTTP picks the URL up regardless,
+	// and the URL-prefix gate below filters anything that's not a URL.
+	reCurl = regexp.MustCompile(`(?i)curl\s+[^\s;|&]*\s+(https?://\S+)`)
 	reWget = regexp.MustCompile(`(?i)wget\s+(?:[^\s;|&]*\s+)*?(https?://\S+)`)
 	reDevTCP = regexp.MustCompile(`(?i)/dev/tcp/([^/\s]+)/(\d+)`)
 )
