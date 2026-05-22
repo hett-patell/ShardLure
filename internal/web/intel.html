@@ -623,6 +623,53 @@
     max-height: 480px; overflow: auto; white-space: pre;
     line-height: 1.55;
   }
+
+  /* ==== Slice K: deobfuscation ==== */
+  .deobf-tester {
+    display: flex; gap: 8px; margin-bottom: 8px;
+  }
+  .deobf-input {
+    flex: 1;
+    background: #021018; color: var(--text); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px;
+    padding: 7px 10px; border-radius: 6px;
+  }
+  .deobf-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .deobf-btn {
+    background: transparent; color: var(--dim); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; padding: 5px 12px; border-radius: 6px;
+    cursor: pointer;
+  }
+  .deobf-btn:hover { color: var(--text); border-color: var(--line-strong); }
+  .deobf-tester-out { margin-bottom: 12px; }
+  .deobf-divider {
+    font-family: var(--mono); font-size: 10px; color: var(--dim-2);
+    letter-spacing: 0.08em; text-transform: uppercase;
+    border-top: 1px solid var(--line); padding-top: 10px; margin-top: 8px; margin-bottom: 8px;
+  }
+  .deobf-rows {
+    max-height: 480px; overflow: auto;
+    font-family: var(--mono); font-size: 11px;
+  }
+  .deobf-row {
+    border: 1px solid var(--line); border-radius: 6px;
+    background: #021018; padding: 8px 10px; margin-bottom: 8px;
+  }
+  .deobf-row-meta {
+    color: var(--dim-2); font-size: 10px; margin-bottom: 4px;
+    display: flex; gap: 12px; flex-wrap: wrap;
+  }
+  .deobf-row-meta strong { color: var(--text); font-weight: 600; }
+  .deobf-orig { color: #cdd6da; word-break: break-all; }
+  .deobf-arrow { color: var(--accent); padding: 0 6px; }
+  .deobf-final { color: #81c784; word-break: break-all; }
+  .deobf-layer-pill {
+    display: inline-block;
+    background: rgba(255,91,110,0.15); color: var(--accent);
+    border: 1px solid rgba(255,91,110,0.35);
+    border-radius: 3px; padding: 0 5px; font-size: 9px; margin-right: 4px;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
 </head>
@@ -930,12 +977,18 @@
       <section class="panel" id="panel-deobf">
         <div class="panel-head">
           <h2>Obfuscation analysis</h2>
-          <span class="meta">base64 · hex · eval</span>
+          <span class="meta" id="deobf-meta">base64 · hex · eval · urlencoded</span>
         </div>
-        <div class="coming-soon" id="deobf-placeholder">
-          <div class="cs-title">Slice K</div>
-          Automatically decodes base64 / hex / eval-piped payloads and shows
-          plaintext alongside the original obfuscated form.
+        <div class="deobf-tester">
+          <input type="text" id="deobf-input" class="deobf-input"
+                 placeholder="Paste a suspicious command - decoded live"
+                 spellcheck="false" autocomplete="off">
+          <button id="deobf-clear" class="deobf-btn">clear</button>
+        </div>
+        <div id="deobf-tester-out" class="deobf-tester-out"></div>
+        <div class="deobf-divider">recent obfuscated commands</div>
+        <div id="deobf-rows" class="deobf-rows">
+          <div class="empty">loading…</div>
         </div>
       </section>
     </div>
@@ -2116,6 +2169,93 @@ document.querySelectorAll('.chip[data-window]').forEach(function(c) {
 if (readTabFromHash() === 'red') loadReplaySessions();
 
 function escAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+
+// ==== Slice K: deobfuscation ======================================
+function renderDeobfRow(row) {
+  const layers = (row.layers || []).map(function(l) {
+    return '<span class="deobf-layer-pill">' + escHtml(l.kind) + '</span>';
+  }).join('');
+  const meta =
+    '<strong>' + escHtml(row.ts || '') + '</strong>' +
+    (row.srcIp ? ' · src ' + escHtml(row.srcIp) : '') +
+    (row.session ? ' · session ' + escHtml(row.session) : '') +
+    (row.actor ? ' · actor ' + escHtml(row.actor) : '');
+  return '<div class="deobf-row">' +
+    '<div class="deobf-row-meta">' + meta + '</div>' +
+    '<div>' + layers + '</div>' +
+    '<div class="deobf-orig">' + escHtml(row.original) + '</div>' +
+    '<div><span class="deobf-arrow">→</span>' +
+    '<span class="deobf-final">' + escHtml(row.final) + '</span></div>' +
+    '</div>';
+}
+
+async function refreshDeobf() {
+  const window = Filters.window || '7d';
+  const rowsEl = document.getElementById('deobf-rows');
+  const metaEl = document.getElementById('deobf-meta');
+  try {
+    const r = await fetch('/api/intel/deobf?window=' + encodeURIComponent(window) +
+                         '&limit=200&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      rowsEl.innerHTML = '<div class="empty">load failed</div>';
+      return;
+    }
+    const data = await r.json();
+    metaEl.textContent = data.matched + ' / ' + data.scanned + ' commands · ' +
+                         data.windowHours + 'h window';
+    if (!data.rows || data.rows.length === 0) {
+      rowsEl.innerHTML = '<div class="empty">no obfuscated commands in window</div>';
+      return;
+    }
+    rowsEl.innerHTML = data.rows.map(renderDeobfRow).join('');
+  } catch (e) {
+    rowsEl.innerHTML = '<div class="empty">error: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+let deobfDebounce = null;
+async function deobfTest() {
+  const input = document.getElementById('deobf-input').value.trim();
+  const out = document.getElementById('deobf-tester-out');
+  if (!input) { out.innerHTML = ''; return; }
+  try {
+    const r = await fetch('/api/intel/deobf?cmd=' + encodeURIComponent(input) +
+                         '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) { out.innerHTML = '<div class="empty">decode failed</div>'; return; }
+    const res = await r.json();
+    if (!res.layers || res.layers.length === 0) {
+      out.innerHTML = '<div class="empty">no obfuscation detected</div>';
+      return;
+    }
+    out.innerHTML = renderDeobfRow({
+      ts: '(live)', original: res.original, final: res.final, layers: res.layers,
+    });
+  } catch (e) {
+    out.innerHTML = '<div class="empty">error: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+document.getElementById('deobf-input').addEventListener('input', function() {
+  clearTimeout(deobfDebounce);
+  deobfDebounce = setTimeout(deobfTest, 250);
+});
+document.getElementById('deobf-clear').addEventListener('click', function() {
+  document.getElementById('deobf-input').value = '';
+  document.getElementById('deobf-tester-out').innerHTML = '';
+});
+
+const _setActiveForDeobf = setActiveView;
+setActiveView = function(name) {
+  _setActiveForDeobf(name);
+  if (name === 'red') refreshDeobf();
+};
+document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+  c.addEventListener('click', refreshDeobf);
+});
+setInterval(function() {
+  if (document.getElementById('view-red').classList.contains('active')) refreshDeobf();
+}, 60000);
+if (readTabFromHash() === 'red') refreshDeobf();
 </script>
 </body>
 </html>

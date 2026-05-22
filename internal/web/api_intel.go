@@ -14,9 +14,11 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/mitre"
 	"github.com/networkshard/shardlure/internal/intel/payload"
 	"github.com/networkshard/shardlure/internal/intel/ttp"
+	"github.com/networkshard/shardlure/internal/intel/deobf"
 	"github.com/networkshard/shardlure/internal/intel/graph"
 	"github.com/networkshard/shardlure/internal/intel/replay"
 	"github.com/networkshard/shardlure/internal/intel/wordlist"
+	"github.com/networkshard/shardlure/pkg/models"
 )
 
 // ==== /api/intel/mitre ============================================
@@ -295,6 +297,87 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		Rows:        rows,
 	})
+}
+
+// ==== /api/intel/deobf ============================================
+
+type deobfRow struct {
+	TS       string         `json:"ts"`
+	SrcIP    string         `json:"srcIp,omitempty"`
+	Session  string         `json:"session,omitempty"`
+	Actor    string         `json:"actor,omitempty"`
+	Original string         `json:"original"`
+	Final    string         `json:"final"`
+	Layers   []deobf.Layer  `json:"layers"`
+}
+
+type deobfResponse struct {
+	GeneratedAt string     `json:"generatedAt"`
+	WindowHours int        `json:"windowHours"`
+	Scanned     int        `json:"scanned"`
+	Matched     int        `json:"matched"`
+	Rows        []deobfRow `json:"rows"`
+}
+
+func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+
+	// Ad-hoc one-shot mode: POST/GET ?cmd=… decodes a single input.
+	if cmd := r.URL.Query().Get("cmd"); cmd != "" {
+		res := deobf.Decode(cmd)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(res)
+		return
+	}
+
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	events, err := s.st.EventsSince(since, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := deobfResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+	}
+	limit := 200
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 2000 {
+		limit = n
+	}
+
+	for _, e := range events {
+		if e == nil || e.Kind != models.KindCommand {
+			continue
+		}
+		cmd := strings.TrimSpace(e.Command)
+		if cmd == "" {
+			continue
+		}
+		resp.Scanned++
+		res := deobf.Decode(cmd)
+		if len(res.Layers) == 0 {
+			continue
+		}
+		resp.Matched++
+		if len(resp.Rows) < limit {
+			resp.Rows = append(resp.Rows, deobfRow{
+				TS:       e.TS.UTC().Format(time.RFC3339),
+				SrcIP:    e.SrcIP,
+				Session:  e.SessionID,
+				Actor:    actor.TrimActorPrefix(e.ActorID),
+				Original: res.Original,
+				Final:    res.Final,
+				Layers:   res.Layers,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // ==== /api/intel/replay ===========================================
