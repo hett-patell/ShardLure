@@ -4,11 +4,13 @@ name: CI
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
 
 jobs:
   test:
-    name: Go test
+    name: Go test (amd64)
     runs-on: ubuntu-latest
 
     steps:
@@ -38,5 +40,104 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out
 
-      - name: Build
+      - name: Build (native amd64)
         run: go build -o shardlure ./cmd/shardlure
+
+      - name: Smoke - version
+        run: ./shardlure version
+
+      - name: Smoke - web server boots and serves dashboard
+        run: bash scripts/ci-web-smoke.sh
+
+  cross-build:
+    name: Cross-build ${{ matrix.target.label }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { label: "linux-amd64", goos: linux, goarch: amd64, goarm: "", qemu: amd64 }
+          - { label: "linux-arm64", goos: linux, goarch: arm64, goarm: "", qemu: arm64 }
+          - { label: "linux-armv7", goos: linux, goarch: arm, goarm: "7", qemu: arm }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          GOARM: ${{ matrix.target.goarm }}
+        run: |
+          go build -trimpath -ldflags='-s -w' \
+            -o dist/shardlure-${{ matrix.target.label }} \
+            ./cmd/shardlure
+          file dist/shardlure-${{ matrix.target.label }}
+          ls -lh dist/shardlure-${{ matrix.target.label }}
+
+      - name: Register binfmt (QEMU user-mode for foreign arch)
+        if: matrix.target.qemu != 'amd64'
+        run: |
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+      - name: Smoke - run version under QEMU (foreign arch)
+        if: matrix.target.qemu != 'amd64'
+        run: |
+          # Use a minimal arch-matched base image so the dynamic loader path matches.
+          # The binary is statically linked (CGO_ENABLED=0) so any image works.
+          docker run --rm --platform linux/${{ matrix.target.qemu }} \
+            -v "$PWD/dist:/dist:ro" \
+            alpine:3.20 /dist/shardlure-${{ matrix.target.label }} version
+
+      - name: Smoke - run version (native amd64)
+        if: matrix.target.qemu == 'amd64'
+        run: ./dist/shardlure-${{ matrix.target.label }} version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shardlure-${{ matrix.target.label }}
+          path: dist/shardlure-${{ matrix.target.label }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Attach binaries to release
+    runs-on: ubuntu-latest
+    needs: cross-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          # actions/download-artifact unpacks each artifact into its own dir
+          find artifacts -type f -name 'shardlure-linux-*' -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Attach (or replace) all built binaries on the existing release.
+          # The release itself is created manually with curated notes; this
+          # job just keeps the binary set in sync with the tag.
+          gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
