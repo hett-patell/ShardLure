@@ -10,7 +10,8 @@ set -euo pipefail
 # Options:
 #   --tag v1            Release tag (default: latest, detected via GitHub API)
 #   --no-cowrie         Skip cowrie honeypot installation
-#   --cowrie-branch master  Branch/tag to clone cowrie from (default: master)
+#   --cowrie-branch BR  Branch/tag to clone cowrie from (default: auto-detect
+#                       remote HEAD, falling back to main then master)
 #   --honeypot-port 22  SSH port for the honeypot listener (default: 2222, admin SSH stays on 22)
 #   --dash-port 8080    Dashboard port (default: 8080)
 #   --data-dir /var/lib/shardlure  Data directory (default: /var/lib/shardlure)
@@ -19,7 +20,7 @@ set -euo pipefail
 REPO="hett-patell/ShardLure"
 TAG="${TAG:-}"
 COWRIE="${COWRIE:-1}"
-COWRIE_BRANCH="${COWRIE_BRANCH:-master}"
+COWRIE_BRANCH="${COWRIE_BRANCH:-}"
 HONEYPOT_PORT="${HONEYPOT_PORT:-2222}"
 ADMIN_PORT="${ADMIN_PORT:-22}"
 DASH_PORT="${DASH_PORT:-8080}"
@@ -137,31 +138,31 @@ log "config written to $DATA_DIR/shardlure.yaml"
 COWRIE_HOME="$DATA_DIR/cowrie"
 COWRIE_LOG="$COWRIE_HOME/var/log/cowrie/cowrie.json"
 
-cat > /etc/systemd/system/cowrie.service <<SVC
-[Unit]
-Description=Cowrie SSH honeypot (ShardLure)
-After=network.target
-[Service]
-Type=simple
-User=cowrie
-WorkingDirectory=$COWRIE_HOME
-ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/python3 $COWRIE_HOME/bin/cowrie start -n
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-SVC
+# The cowrie.service unit is written AFTER cowrie itself is installed, since
+# the ExecStart path depends on the cowrie layout (old: bin/cowrie shell
+# script, new: venv/bin/cowrie console_script created by 'pip install -e .').
+# The shardlure-live unit can be written now since it doesn't depend on cowrie's
+# internal layout.
 
 ENV=""
 if [[ -n "$DASH_TOKEN" ]]; then
   ENV="Environment=SHARDLURE_DASH_TOKEN=$DASH_TOKEN"
 fi
 
+# Only depend on cowrie.service when we'll actually install cowrie. Otherwise
+# systemd emits 'Failed to add dependency' warnings for a unit that doesn't
+# exist.
+if [[ "$COWRIE" -eq 1 ]]; then
+  COWRIE_DEP="After=network.target cowrie.service
+Wants=cowrie.service"
+else
+  COWRIE_DEP="After=network.target"
+fi
+
 cat > /etc/systemd/system/shardlure-live.service <<SVC
 [Unit]
 Description=ShardLure live dashboard + telemetry ingest
-After=network.target cowrie.service
-Wants=cowrie.service
+$COWRIE_DEP
 [Service]
 Type=simple
 $ENV
@@ -172,14 +173,13 @@ RestartSec=5
 WantedBy=multi-user.target
 SVC
 
-log "systemd units written"
+log "shardlure-live systemd unit written (cowrie unit deferred until cowrie install completes)"
 
 # -- cowrie installation ---------------------------------------------------
 if [[ "$COWRIE" -eq 1 ]]; then
   if [[ -d "$COWRIE_HOME/.git" ]]; then
     log "cowrie already present at $COWRIE_HOME, skipping clone"
   else
-    log "installing cowrie (branch: $COWRIE_BRANCH)…"
     if ! id cowrie &>/dev/null; then
       useradd -r -s /bin/false -d "$COWRIE_HOME" cowrie
     fi
@@ -192,9 +192,49 @@ if [[ "$COWRIE" -eq 1 ]]; then
       dnf install -y python3 python3-devel gcc openssl-devel libffi-devel authbind git 2>/dev/null
     fi
 
-    git clone --depth 1 --branch "$COWRIE_BRANCH" https://github.com/cowrie/cowrie.git "$COWRIE_HOME"
+    # Resolve cowrie branch. Upstream renamed master -> main in 2024, and
+    # forks may still ship master. Try in order:
+    #   1. user override via --cowrie-branch / $COWRIE_BRANCH
+    #   2. remote HEAD (via ls-remote --symref)
+    #   3. main
+    #   4. master
+    COWRIE_REPO="https://github.com/cowrie/cowrie.git"
+    if [[ -z "$COWRIE_BRANCH" ]]; then
+      COWRIE_BRANCH=$(git ls-remote --symref "$COWRIE_REPO" HEAD 2>/dev/null \
+                      | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')
+    fi
+    CANDIDATES=()
+    [[ -n "$COWRIE_BRANCH" ]] && CANDIDATES+=("$COWRIE_BRANCH")
+    CANDIDATES+=(main master)
+
+    cloned=0
+    for br in "${CANDIDATES[@]}"; do
+      log "installing cowrie (trying branch: $br)…"
+      if git clone --depth 1 --branch "$br" "$COWRIE_REPO" "$COWRIE_HOME" 2>/dev/null; then
+        COWRIE_BRANCH="$br"
+        cloned=1
+        break
+      fi
+      # Clean up partial clone before retrying with the next candidate.
+      rm -rf "$COWRIE_HOME"
+    done
+    if [[ $cloned -ne 1 ]]; then
+      err "could not clone cowrie from $COWRIE_REPO (tried: ${CANDIDATES[*]}). Pass --cowrie-branch explicitly or --no-cowrie to skip."
+    fi
     python3 -m venv "$COWRIE_HOME/venv"
-    "$COWRIE_HOME/venv/bin/pip" install -q -r "$COWRIE_HOME/requirements.txt"
+    "$COWRIE_HOME/venv/bin/pip" install -q --upgrade pip setuptools wheel
+
+    # Cowrie's install model changed: the modern (post-2024) layout uses
+    # 'pip install -e .' (creates a console_script at venv/bin/cowrie),
+    # while older tags ship a bin/cowrie launcher driven by
+    # 'pip install -r requirements.txt'. Prefer the modern path, fall back
+    # to the legacy one.
+    if [[ -f "$COWRIE_HOME/pyproject.toml" ]]; then
+      "$COWRIE_HOME/venv/bin/pip" install -q -e "$COWRIE_HOME" \
+        || "$COWRIE_HOME/venv/bin/pip" install -q -r "$COWRIE_HOME/requirements.txt"
+    else
+      "$COWRIE_HOME/venv/bin/pip" install -q -r "$COWRIE_HOME/requirements.txt"
+    fi
 
     # Authbind — allow cowrie user to bind to low ports
     touch /etc/authbind/byport/"$HONEYPOT_PORT"
@@ -206,16 +246,49 @@ if [[ "$COWRIE" -eq 1 ]]; then
   fi
 fi
 
+# -- write cowrie.service now that we know the entry-point layout ----------
+# Probe order:
+#   1. venv/bin/cowrie  (modern: console_script from 'pip install -e .')
+#   2. bin/cowrie       (legacy: shell wrapper invoking twistd)
+# In legacy mode, twistd needs PYTHONPATH and an explicit python interpreter,
+# matching the previous behavior of the script.
+COWRIE_EXEC=""
+if [[ -x "$COWRIE_HOME/venv/bin/cowrie" ]]; then
+  # Modern layout. AUTHBIND_ENABLED=yes is read by the cowrie launcher and
+  # tells it to invoke twistd via authbind when binding low ports.
+  COWRIE_EXEC="Environment=AUTHBIND_ENABLED=yes
+ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/cowrie start -n"
+elif [[ -x "$COWRIE_HOME/bin/cowrie" ]]; then
+  # Legacy layout.
+  COWRIE_EXEC="ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/python3 $COWRIE_HOME/bin/cowrie start -n"
+fi
+
+if [[ "$COWRIE" -eq 1 ]]; then
+  if [[ -z "$COWRIE_EXEC" ]]; then
+    err "could not locate cowrie entry point at $COWRIE_HOME/venv/bin/cowrie or $COWRIE_HOME/bin/cowrie. The clone may have failed or upstream layout changed again."
+  fi
+  cat > /etc/systemd/system/cowrie.service <<SVC
+[Unit]
+Description=Cowrie SSH honeypot (ShardLure)
+After=network.target
+[Service]
+Type=simple
+User=cowrie
+WorkingDirectory=$COWRIE_HOME
+$COWRIE_EXEC
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+SVC
+  log "cowrie systemd unit written"
+fi
+
 # -- start services --------------------------------------------------------
 systemctl daemon-reload
-systemctl enable cowrie.service shardlure-live.service 2>/dev/null || true
-if systemctl is-active --quiet shardlure-live.service; then
-  log "restarting shardlure-live.service…"
-  systemctl restart shardlure-live.service
-else
-  log "starting shardlure-live.service…"
-  systemctl start shardlure-live.service
-fi
+UNITS=("shardlure-live.service")
+[[ "$COWRIE" -eq 1 ]] && UNITS+=("cowrie.service")
+systemctl enable "${UNITS[@]}" 2>/dev/null || true
 if [[ "$COWRIE" -eq 1 ]]; then
   if systemctl is-active --quiet cowrie.service; then
     systemctl restart cowrie.service
@@ -223,10 +296,17 @@ if [[ "$COWRIE" -eq 1 ]]; then
     systemctl start cowrie.service
   fi
 fi
+if systemctl is-active --quiet shardlure-live.service; then
+  log "restarting shardlure-live.service…"
+  systemctl restart shardlure-live.service
+else
+  log "starting shardlure-live.service…"
+  systemctl start shardlure-live.service
+fi
 
 sleep 2
 echo
-systemctl is-active cowrie.service shardlure-live.service 2>&1 || true
+systemctl is-active "${UNITS[@]}" 2>&1 || true
 echo
 log "dashboard: http://$ADMIN_IPS:$DASH_PORT"
 if [[ -n "$DASH_TOKEN" ]]; then
