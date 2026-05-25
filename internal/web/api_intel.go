@@ -133,7 +133,17 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	sessions, err := s.st.ListSessions(since, 200)
+	// Default 200; clients can request up to 2000. Values above the
+	// ceiling clamp rather than silently fall back so paginators see
+	// a predictable maximum.
+	limit := 200
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		if n > 2000 {
+			n = 2000
+		}
+		limit = n
+	}
+	sessions, err := s.st.ListSessions(since, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -607,17 +617,26 @@ type payloadsResponse struct {
 	Rows        []payloadRow  `json:"rows"`
 }
 
+// payloadRow is one unique payload (grouped by sha256). URL/Actor/
+// Session/SrcIP/TS describe the most-recent capture and the *Count
+// fields surface delivery breadth across the window.
 type payloadRow struct {
-	SHA256    string `json:"sha256"`
-	Origin    string `json:"origin,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Status    string `json:"status,omitempty"`
-	SizeBytes int64  `json:"sizeBytes"`
-	Actor     string `json:"actor,omitempty"`
-	Session   string `json:"session,omitempty"`
-	SrcIP     string `json:"srcIp,omitempty"`
-	TS        string `json:"ts"`
-	HasLocal  bool   `json:"hasLocal"`
+	SHA256       string `json:"sha256"`
+	Origin       string `json:"origin,omitempty"`
+	URL          string `json:"url,omitempty"`           // last-seen URL
+	Status       string `json:"status,omitempty"`        // last-seen status
+	SizeBytes    int64  `json:"sizeBytes"`
+	Actor        string `json:"actor,omitempty"`         // last-seen actor
+	Session      string `json:"session,omitempty"`       // last-seen session
+	SrcIP        string `json:"srcIp,omitempty"`         // last-seen src IP
+	TS           string `json:"ts"`                      // last-seen timestamp
+	FirstTS      string `json:"firstTs,omitempty"`       // first-seen timestamp
+	Occurrences  int    `json:"occurrences"`             // total captures of this sha
+	URLCount     int    `json:"urlCount"`                // distinct URLs
+	IPCount      int    `json:"ipCount"`                 // distinct source IPs
+	ActorCount   int    `json:"actorCount"`              // distinct actors
+	SessionCount int    `json:"sessionCount"`            // distinct sessions
+	HasLocal     bool   `json:"hasLocal"`
 }
 
 func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
@@ -627,11 +646,16 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	// Default 200, accept 1..1000; values above 1000 clamp to 1000
+	// rather than silently falling back to the default.
 	limit := 200
-	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		if n > 1000 {
+			n = 1000
+		}
 		limit = n
 	}
-	arts, err := s.st.ListArtifactsSince(since, limit)
+	arts, err := s.st.ListArtifactsAggregatedSince(since, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -639,16 +663,22 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 	rows := make([]payloadRow, 0, len(arts))
 	for _, a := range arts {
 		rows = append(rows, payloadRow{
-			SHA256:    a.SHA256,
-			Origin:    a.Origin,
-			URL:       a.URL,
-			Status:    a.Status,
-			SizeBytes: a.SizeBytes,
-			Actor:     actor.TrimActorPrefix(a.ActorID),
-			Session:   a.SessionID,
-			SrcIP:     a.SrcIP,
-			TS:        a.TS.UTC().Format(time.RFC3339),
-			HasLocal:  a.LocalPath != "",
+			SHA256:       a.SHA256,
+			Origin:       a.Origin,
+			URL:          a.LastURL,
+			Status:       a.Status,
+			SizeBytes:    a.SizeBytes,
+			Actor:        actor.TrimActorPrefix(a.LastActor),
+			Session:      a.LastSession,
+			SrcIP:        a.LastSrcIP,
+			TS:           a.LastTS.UTC().Format(time.RFC3339),
+			FirstTS:      a.FirstTS.UTC().Format(time.RFC3339),
+			Occurrences:  a.Occurrences,
+			URLCount:     a.URLCount,
+			IPCount:      a.IPCount,
+			ActorCount:   a.ActorCount,
+			SessionCount: a.SessionCount,
+			HasLocal:     a.HasLocal,
 		})
 	}
 	_ = json.NewEncoder(w).Encode(payloadsResponse{

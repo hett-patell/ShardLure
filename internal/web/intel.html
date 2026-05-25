@@ -528,9 +528,12 @@
   #payloads-table td:nth-child(1) { font-family: var(--mono); font-size: 10px; color: var(--accent); cursor: pointer; word-break: break-all; }
   #payloads-table td:nth-child(1):hover { color: var(--warn); }
   #payloads-table td:nth-child(2) { font-family: var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
-  #payloads-table td:nth-child(3) { font-family: var(--mono); font-size: 10px; color: var(--dim); word-break: break-all; }
-  #payloads-table td:nth-child(4) { font-family: var(--mono); font-size: 10px; color: var(--purple); }
-  #payloads-table td:nth-child(5) { font-family: var(--mono); font-size: 10px; }
+  #payloads-table td:nth-child(3) { font-family: var(--mono); font-size: 10px; color: var(--blue-team); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #payloads-table td:nth-child(4) { font-family: var(--mono); font-size: 10px; color: var(--dim); word-break: break-all; }
+  #payloads-table td:nth-child(5) { font-family: var(--mono); font-size: 10px; color: var(--purple); }
+  #payloads-table td:nth-child(6) { font-family: var(--mono); font-size: 10px; }
+  #payloads-table .pl-fan { color: var(--warn); }
+  #payloads-table .pl-fan.pl-fan-1 { color: var(--dim); }
   #payloads-table .pl-fetched   { color: var(--good); }
   #payloads-table .pl-failed,
   #payloads-table .pl-blocked   { color: var(--accent); }
@@ -927,13 +930,14 @@
             <tr>
               <th>sha256</th>
               <th class="num">size</th>
-              <th>url</th>
-              <th>actor</th>
+              <th class="num" title="distinct delivery URLs · distinct source IPs · distinct actors">delivery</th>
+              <th>last url</th>
+              <th>last actor</th>
               <th>status</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+            <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
           </tbody>
         </table>
       </section>
@@ -1880,10 +1884,13 @@ function fmtSize(b) {
 function renderPayloads(data) {
   const tb = document.querySelector('#payloads-table tbody');
   const meta = document.getElementById('payloads-meta');
-  meta.textContent = data.total + ' payloads · ' + data.windowHours + 'h window';
+  const unique = data.total || 0;
+  let totalCaptures = 0;
+  (data.rows || []).forEach(function(p) { totalCaptures += (p.occurrences || 1); });
+  meta.textContent = unique + ' unique · ' + totalCaptures + ' captures · ' + data.windowHours + 'h window';
 
   if (!data.rows || data.rows.length === 0) {
-    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no captured payloads in window</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">no captured payloads in window</div></td></tr>';
     return;
   }
   let html = '';
@@ -1892,9 +1899,16 @@ function renderPayloads(data) {
     const shaShort = sha === '—' ? '—' : sha.slice(0, 16) + '…';
     const url = p.url ? '<a href="' + escHtml(p.url) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + escHtml(p.url) + '</a>' : '—';
     const status = p.status || 'unknown';
+    const occ = p.occurrences || 1;
+    const ips = p.ipCount || 0;
+    const actors = p.actorCount || 0;
+    const fanClass = occ === 1 ? 'pl-fan pl-fan-1' : 'pl-fan';
+    const fanTitle = occ + 'x captured · ' + (p.urlCount || 0) + ' urls · ' + ips + ' ips · ' + actors + ' actors · ' + (p.sessionCount || 0) + ' sessions';
+    const fan = '<span class="' + fanClass + '" title="' + escHtml(fanTitle) + '">' + occ + 'x · ' + ips + 'ip</span>';
     html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="' + (p.hasLocal ? '1' : '0') + '">' +
       '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
       '<td class="num">' + fmtSize(p.sizeBytes) + '</td>' +
+      '<td class="num">' + fan + '</td>' +
       '<td>' + url + '</td>' +
       '<td>' + escHtml(p.actor || '—') + '</td>' +
       '<td><span class="pl-' + escHtml(status) + '">' + escHtml(status) + '</span></td>' +

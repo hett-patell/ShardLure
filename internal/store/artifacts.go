@@ -172,6 +172,104 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 	return out, rows.Err()
 }
 
+// ArtifactAggregate is one row of the payload library after collapsing
+// duplicate captures by sha256. A single binary frequently arrives via
+// many distinct URLs / IPs / sessions (attackers rotate CDNs and
+// botnets); the UI is more useful when the operator sees one row per
+// unique payload with delivery breadth surfaced as counters.
+type ArtifactAggregate struct {
+	SHA256       string
+	SizeBytes    int64
+	Origin       string // last-seen origin (kinds rarely mix per sha)
+	Status       string // last-seen status
+	FirstTS      time.Time
+	LastTS       time.Time
+	Occurrences  int    // total rows for this sha
+	URLCount     int    // distinct URLs
+	IPCount      int    // distinct src IPs
+	ActorCount   int    // distinct actor_ids
+	SessionCount int    // distinct sessions
+	LastURL      string // most-recent URL
+	LastSrcIP    string // most-recent src IP
+	LastActor    string // most-recent actor_id
+	LastSession  string // most-recent session_id
+	HasLocal     bool   // at least one row has a local_path
+}
+
+// ListArtifactsAggregatedSince returns at most `limit` unique payloads
+// (grouped by sha256) ingested since the given time. Rows with empty
+// sha256 are skipped (they cannot be deduped meaningfully). Results
+// are ordered by most-recent capture timestamp DESC.
+func (s *Store) ListArtifactsAggregatedSince(since time.Time, limit int) ([]ArtifactAggregate, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	// Window predicate uses COALESCE(ts, created_at) like ListArtifactsSince.
+	// The outer query groups by sha256; the correlated subqueries pick the
+	// "last seen" attribution row. SQLite supports this without window
+	// functions (we keep it portable for the bundled sqlite build).
+	rows, err := s.db.Query(`
+WITH win AS (
+  SELECT id, ts, src_ip, session_id, actor_id, url, local_path,
+         sha256, size_bytes, origin, status,
+         COALESCE(ts, created_at) AS effective_ts
+  FROM artifacts
+  WHERE COALESCE(ts, created_at) >= ?
+    AND sha256 IS NOT NULL AND sha256 != ''
+)
+SELECT
+  w.sha256,
+  MAX(w.size_bytes)                                              AS size_bytes,
+  (SELECT origin   FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_origin,
+  (SELECT status   FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_status,
+  MIN(w.effective_ts)                                            AS first_ts,
+  MAX(w.effective_ts)                                            AS last_ts,
+  COUNT(*)                                                       AS occurrences,
+  COUNT(DISTINCT w.url)                                          AS url_count,
+  COUNT(DISTINCT NULLIF(w.src_ip, ''))                           AS ip_count,
+  COUNT(DISTINCT NULLIF(w.actor_id, ''))                         AS actor_count,
+  COUNT(DISTINCT NULLIF(w.session_id, ''))                       AS session_count,
+  (SELECT url        FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_url,
+  (SELECT src_ip     FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_src_ip,
+  (SELECT actor_id   FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_actor,
+  (SELECT session_id FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_session,
+  MAX(CASE WHEN COALESCE(w.local_path, '') != '' THEN 1 ELSE 0 END) AS has_local
+FROM win w
+GROUP BY w.sha256
+ORDER BY last_ts DESC
+LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArtifactAggregate
+	for rows.Next() {
+		var a ArtifactAggregate
+		var firstTS, lastTS string
+		var hasLocal int
+		var lastOrigin, lastStatus, lastURL, lastSrcIP, lastActor, lastSession sql.NullString
+		if err := rows.Scan(&a.SHA256, &a.SizeBytes, &lastOrigin, &lastStatus,
+			&firstTS, &lastTS, &a.Occurrences, &a.URLCount, &a.IPCount, &a.ActorCount,
+			&a.SessionCount, &lastURL, &lastSrcIP, &lastActor, &lastSession, &hasLocal); err != nil {
+			return nil, err
+		}
+		a.Origin = lastOrigin.String
+		a.Status = lastStatus.String
+		a.LastURL = lastURL.String
+		a.LastSrcIP = lastSrcIP.String
+		a.LastActor = lastActor.String
+		a.LastSession = lastSession.String
+		a.FirstTS, _ = parseTime(firstTS)
+		a.LastTS, _ = parseTime(lastTS)
+		a.HasLocal = hasLocal == 1
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // GetArtifactBySHA returns the most recent artifact matching the SHA-256.
 // Multiple rows can share a hash if attackers re-host the same payload
 // at different URLs; we return the most recently captured row.
