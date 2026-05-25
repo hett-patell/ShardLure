@@ -6,46 +6,40 @@ import (
 	"testing"
 )
 
-// TestMigrationIdempotent confirms a fresh Open stamps both
-// schema_migrations rows and that reopening the same database
-// leaves the migration record untouched - i.e. ensureLegacyColumns
-// no longer runs every startup.
+// TestMigrationIdempotent confirms a fresh Open stamps schema_migrations
+// rows for every ladder step and that reopening the same database leaves
+// the migration record untouched.
 func TestMigrationIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 
-	// First open: creates schema and records v1+v2.
 	s1, err := Open(path)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	v1, err := s1.currentSchemaVersion()
+	v, err := s1.currentSchemaVersion()
 	if err != nil {
 		t.Fatalf("currentSchemaVersion: %v", err)
 	}
-	if v1 < 2 {
-		t.Fatalf("expected version >= 2 after fresh open, got %d", v1)
+	if v < 3 {
+		t.Fatalf("expected version >= 3 after fresh open, got %d", v)
 	}
 	if err := s1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	// Capture the applied_at timestamps to prove migrate() didn't
-	// rewrite them on the second open (INSERT OR IGNORE is no-op).
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("raw open: %v", err)
 	}
 	defer db.Close()
-	var ts1v1, ts1v2 string
-	if err := db.QueryRow(`SELECT applied_at FROM schema_migrations WHERE version=1`).Scan(&ts1v1); err != nil {
-		t.Fatalf("scan v1: %v", err)
-	}
-	if err := db.QueryRow(`SELECT applied_at FROM schema_migrations WHERE version=2`).Scan(&ts1v2); err != nil {
-		t.Fatalf("scan v2: %v", err)
+	first := map[int]string{}
+	for ver := 1; ver <= 4; ver++ {
+		var ts string
+		db.QueryRow(`SELECT applied_at FROM schema_migrations WHERE version=?`, ver).Scan(&ts)
+		first[ver] = ts
 	}
 	db.Close()
 
-	// Second open: should not advance the ladder or re-stamp rows.
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
@@ -57,16 +51,13 @@ func TestMigrationIdempotent(t *testing.T) {
 		t.Fatalf("raw open 2: %v", err)
 	}
 	defer db2.Close()
-	var ts2v1, ts2v2 string
-	if err := db2.QueryRow(`SELECT applied_at FROM schema_migrations WHERE version=1`).Scan(&ts2v1); err != nil {
-		t.Fatalf("scan v1 (2nd): %v", err)
-	}
-	if err := db2.QueryRow(`SELECT applied_at FROM schema_migrations WHERE version=2`).Scan(&ts2v2); err != nil {
-		t.Fatalf("scan v2 (2nd): %v", err)
-	}
-	if ts2v1 != ts1v1 || ts2v2 != ts1v2 {
-		t.Errorf("migrate() rewrote schema_migrations on reopen: v1 %q->%q, v2 %q->%q",
-			ts1v1, ts2v1, ts1v2, ts2v2)
+	for ver := 1; ver <= 4; ver++ {
+		var ts string
+		db2.QueryRow(`SELECT applied_at FROM schema_migrations WHERE version=?`, ver).Scan(&ts)
+		if ts != first[ver] {
+			t.Errorf("migrate() rewrote v%d on reopen: %q -> %q",
+				ver, first[ver], ts)
+		}
 	}
 }
 

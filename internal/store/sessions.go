@@ -89,6 +89,12 @@ func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionS
 		limit = 30
 	}
 	rows, err := s.db.Query(`
+WITH first_cmds AS (
+  SELECT session_id, command,
+    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts ASC) AS rn
+  FROM events
+  WHERE source = 'cowrie' AND kind = 'command' AND command != ''
+)
 SELECT
   s.session_id,
   MAX(s.src_ip)                                            AS src_ip,
@@ -100,12 +106,9 @@ SELECT
   COUNT(*)                                                 AS n,
   SUM(CASE WHEN s.kind='command' THEN 1 ELSE 0 END)        AS n_cmd,
   COALESCE(MAX(s.actor_id), '')                            AS actor_id,
-  (
-    SELECT command FROM events
-    WHERE session_id = s.session_id AND kind = 'command' AND command != ''
-    ORDER BY ts ASC LIMIT 1
-  )                                                        AS first_cmd
+  COALESCE(MAX(fc.command), '')                            AS first_cmd
 FROM events s
+LEFT JOIN first_cmds fc ON fc.session_id = s.session_id AND fc.rn = 1
 WHERE s.source='cowrie' AND s.session_id != '' AND s.ts >= ?
 GROUP BY s.session_id
 HAVING n_cmd > 0

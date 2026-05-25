@@ -52,6 +52,12 @@ type Config struct {
 		Enabled      bool   `yaml:"enabled"`
 		InsecureHTTP bool   `yaml:"insecure_http"`
 	} `yaml:"geoip"`
+
+	// RetentionDays controls how long events, enrichment cache entries,
+	// artifacts, and TTY transcripts are kept before they are pruned.
+	// Set to 0 to disable periodic purging (not recommended for production
+	// honeypots). Defaults to 90 days.
+	RetentionDays int `yaml:"retention_days"`
 }
 
 // fallbackDataDir is used when the user has no resolvable HOME (e.g. running
@@ -87,6 +93,7 @@ func Default() Config {
 	c.Capture.QuarantineFetch = true
 	c.Capture.MaxBytes = 50 << 20
 	c.Capture.TimeoutSec = 45
+	c.RetentionDays = 90
 	return c
 }
 

@@ -203,6 +203,24 @@ WHERE source = 'cowrie'
 			return err
 		}
 	}
+
+	// v4: index additions that were overlooked in earlier schema
+	// revisions — session_id-leading index for SessionEvents /
+	// shell-session lookups and a standalone ip index for the
+	// actor_ips table (the compound PK starts with actor_id, which
+	// is useless for ip-only scans such as LoadJournalIPStats).
+	if current < 4 {
+		const v4Idx = `
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(source, session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_actor_ips_ip ON actor_ips(ip);
+`
+		if _, err := s.db.Exec(v4Idx); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (4, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -502,4 +520,48 @@ func (s *Store) ActorCount() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM actors`).Scan(&n)
 	return n, err
+}
+
+// MaintenancePurge deletes rows older than retentionDays from the
+// four unbounded-growth tables: events, artifacts, ip_enrichment,
+// and cowrie_tty_index. Actor identity tables (actors, actor_ips,
+// actor_users) are not pruned — their upper bound is the distinct
+// attacker set, not time. Runs as a single quick transaction so a
+// crash mid-purge won't leave partial state. Pass 0 to skip.
+func (s *Store) MaintenancePurge(retentionDays int) error {
+	if retentionDays <= 0 {
+		return nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Order: children first so foreign-key or application-level
+	// references don't dangle. Each DELETE is bounded by the
+	// cutoff; none of these scan the full table.
+
+	// 1. Enrichment cache — references IPs that appear in events.
+	if _, err := tx.Exec(`DELETE FROM ip_enrichment WHERE queried_at < ?`, cutoff); err != nil {
+		return err
+	}
+
+	// 2. TTY transcript index — references sessions from events.
+	if _, err := tx.Exec(`DELETE FROM cowrie_tty_index WHERE ts < ?`, cutoff); err != nil {
+		return err
+	}
+
+	// 3. Artifact rows — independent time-based cutoff.
+	if _, err := tx.Exec(`DELETE FROM artifacts WHERE COALESCE(ts, created_at) < ?`, cutoff); err != nil {
+		return err
+	}
+
+	// 4. Events — the root table and typically the largest.
+	if _, err := tx.Exec(`DELETE FROM events WHERE ts < ?`, cutoff); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }

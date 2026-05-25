@@ -128,8 +128,9 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p release
-          # actions/download-artifact unpacks each artifact into its own dir
           find artifacts -type f -name 'shardlure-linux-*' -exec cp {} release/ \;
+          # Generate SHA256 checksums so install.sh can verify integrity.
+          (cd release && sha256sum shardlure-linux-* > SHA256SUMS)
           ls -lh release/
 
       - name: Upload to GitHub Release
@@ -137,7 +138,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # Attach (or replace) all built binaries on the existing release.
-          # The release itself is created manually with curated notes; this
-          # job just keeps the binary set in sync with the tag.
           gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"

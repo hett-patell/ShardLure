@@ -82,6 +82,29 @@ curl -fsSL "$URL" -o /tmp/shardlure-dl 2>/tmp/shardlure-curl.err
 if [[ $? -ne 0 || ! -s /tmp/shardlure-dl ]]; then
   err "download failed (URL: $URL). $(cat /tmp/shardlure-curl.err 2>/dev/null || true)"
 fi
+
+# Download the checksum manifest and verify the binary before installing
+# as root. If the checksum file is missing (e.g. manually cut release
+# without CI), print a warning but continue — better than blocking a
+# deployment. If it exists, enforce a strict match.
+CHKSUM_URL="https://github.com/$REPO/releases/download/$TAG/SHA256SUMS"
+curl -fsSL "$CHKSUM_URL" -o /tmp/shardlure-sums 2>/dev/null
+if [[ -s /tmp/shardlure-sums ]]; then
+  expected=$(grep "$BIN_NAME" /tmp/shardlure-sums | awk '{print $1}')
+  actual=$(sha256sum /tmp/shardlure-dl | awk '{print $1}')
+  if [[ -z "$expected" ]]; then
+    rm -f /tmp/shardlure-sums
+    log "WARNING: no checksum entry for $BIN_NAME in SHA256SUMS — binary not verified"
+  elif [[ "$expected" != "$actual" ]]; then
+    err "checksum mismatch for $BIN_NAME. Expected: $expected, got: $actual. Do not proceed — the binary may be tampered."
+  else
+    log "checksum verified: $BIN_NAME ($actual)"
+  fi
+  rm -f /tmp/shardlure-sums
+else
+  log "WARNING: SHA256SUMS not found at $CHKSUM_URL — binary not verified"
+fi
+
 chmod +x /tmp/shardlure-dl
 install -m 755 /tmp/shardlure-dl "$DEST"
 rm -f /tmp/shardlure-dl /tmp/shardlure-curl.err
@@ -310,6 +333,6 @@ systemctl is-active "${UNITS[@]}" 2>&1 || true
 echo
 log "dashboard: http://$ADMIN_IPS:$DASH_PORT"
 if [[ -n "$DASH_TOKEN" ]]; then
-  log "auth token: $DASH_TOKEN (pass via Authorization: Bearer header or ?token= query param)"
+  log "auth token: (set, ${#DASH_TOKEN} chars)"
 fi
 log "done."

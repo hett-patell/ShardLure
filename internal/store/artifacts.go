@@ -207,10 +207,6 @@ func (s *Store) ListArtifactsAggregatedSince(since time.Time, limit int) ([]Arti
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
-	// Window predicate uses COALESCE(ts, created_at) like ListArtifactsSince.
-	// The outer query groups by sha256; the correlated subqueries pick the
-	// "last seen" attribution row. SQLite supports this without window
-	// functions (we keep it portable for the bundled sqlite build).
 	rows, err := s.db.Query(`
 WITH win AS (
   SELECT id, ts, src_ip, session_id, actor_id, url, local_path,
@@ -219,27 +215,35 @@ WITH win AS (
   FROM artifacts
   WHERE COALESCE(ts, created_at) >= ?
     AND sha256 IS NOT NULL AND sha256 != ''
+),
+grp AS (
+  SELECT sha256,
+    MAX(size_bytes) AS max_size,
+    MIN(effective_ts) AS first_ts,
+    MAX(effective_ts) AS last_ts,
+    COUNT(*) AS occurrences,
+    COUNT(DISTINCT url) AS url_count,
+    COUNT(DISTINCT NULLIF(src_ip, '')) AS ip_count,
+    COUNT(DISTINCT NULLIF(actor_id, '')) AS actor_count,
+    COUNT(DISTINCT NULLIF(session_id, '')) AS session_count,
+    MAX(CASE WHEN COALESCE(local_path, '') != '' THEN 1 ELSE 0 END) AS has_local
+  FROM win
+  GROUP BY sha256
+),
+ranked AS (
+  SELECT w.*,
+    ROW_NUMBER() OVER (PARTITION BY w.sha256 ORDER BY w.effective_ts DESC) AS rn
+  FROM win w
 )
 SELECT
-  w.sha256,
-  MAX(w.size_bytes)                                              AS size_bytes,
-  (SELECT origin   FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_origin,
-  (SELECT status   FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_status,
-  MIN(w.effective_ts)                                            AS first_ts,
-  MAX(w.effective_ts)                                            AS last_ts,
-  COUNT(*)                                                       AS occurrences,
-  COUNT(DISTINCT w.url)                                          AS url_count,
-  COUNT(DISTINCT NULLIF(w.src_ip, ''))                           AS ip_count,
-  COUNT(DISTINCT NULLIF(w.actor_id, ''))                         AS actor_count,
-  COUNT(DISTINCT NULLIF(w.session_id, ''))                       AS session_count,
-  (SELECT url        FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_url,
-  (SELECT src_ip     FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_src_ip,
-  (SELECT actor_id   FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_actor,
-  (SELECT session_id FROM win x WHERE x.sha256 = w.sha256 ORDER BY effective_ts DESC LIMIT 1) AS last_session,
-  MAX(CASE WHEN COALESCE(w.local_path, '') != '' THEN 1 ELSE 0 END) AS has_local
-FROM win w
-GROUP BY w.sha256
-ORDER BY last_ts DESC
+  g.sha256, g.max_size,
+  r.origin, r.status, r.url, r.src_ip, r.actor_id, r.session_id,
+  g.first_ts, g.last_ts, g.occurrences,
+  g.url_count, g.ip_count, g.actor_count, g.session_count,
+  g.has_local
+FROM grp g
+JOIN ranked r ON r.sha256 = g.sha256 AND r.rn = 1
+ORDER BY g.last_ts DESC
 LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err
@@ -251,9 +255,11 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 		var firstTS, lastTS string
 		var hasLocal int
 		var lastOrigin, lastStatus, lastURL, lastSrcIP, lastActor, lastSession sql.NullString
-		if err := rows.Scan(&a.SHA256, &a.SizeBytes, &lastOrigin, &lastStatus,
-			&firstTS, &lastTS, &a.Occurrences, &a.URLCount, &a.IPCount, &a.ActorCount,
-			&a.SessionCount, &lastURL, &lastSrcIP, &lastActor, &lastSession, &hasLocal); err != nil {
+		if err := rows.Scan(&a.SHA256, &a.SizeBytes,
+			&lastOrigin, &lastStatus, &lastURL, &lastSrcIP, &lastActor, &lastSession,
+			&firstTS, &lastTS, &a.Occurrences,
+			&a.URLCount, &a.IPCount, &a.ActorCount, &a.SessionCount,
+			&hasLocal); err != nil {
 			return nil, err
 		}
 		a.Origin = lastOrigin.String

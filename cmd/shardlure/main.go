@@ -243,6 +243,28 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 			}
 		}
 	}()
+	// Periodic data retention purge — deletes old events,
+	// enrichments, artifacts, and TTY transcripts past the
+	// configured retention window. Fires once at startup
+	// and then every 24h.
+	go func() {
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		runPurge := func() {
+			if err := st.MaintenancePurge(cfg.RetentionDays); err != nil {
+				fmt.Fprintf(os.Stderr, "maintenance purge: %v\n", err)
+			}
+		}
+		runPurge()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				runPurge()
+			}
+		}
+	}()
 
 	if err := web.New(st, addr, webOptions(cfg)).RunContext(ctx); err != nil {
 		fatal(err)

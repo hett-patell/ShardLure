@@ -61,8 +61,10 @@ func fetchAbuseIPDB(ctx context.Context, hc *http.Client, ip string) (Result, er
 	}
 
 	summary := fmt.Sprintf("%d reports in 90d, score=%d/100", d.TotalReports, score)
-	if d.LastReportedAt != "" {
+	if n := len(d.LastReportedAt); n >= 10 {
 		summary += ", last " + d.LastReportedAt[:10]
+	} else if n > 0 {
+		summary += ", last " + d.LastReportedAt
 	}
 
 	return Result{
