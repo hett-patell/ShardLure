@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/pprof"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -98,11 +100,30 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/dashboard", s.handleDashboard)
 	mux.HandleFunc("/api/capture", s.handleCapture)
+
+	// Diagnostic endpoints: net/http/pprof + a small RSS/cache
+	// stats handler. All gated behind the same dashboard token used
+	// by the rest of /api/* so the profile data isn't world-readable.
+	// pprof imports register on http.DefaultServeMux as a side
+	// effect; we re-register the handlers explicitly on our own mux
+	// to avoid leaking them on the unauthenticated path.
+	mux.HandleFunc("/debug/pprof/", s.guard(pprof.Index))
+	mux.HandleFunc("/debug/pprof/cmdline", s.guard(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/profile", s.guard(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/symbol", s.guard(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", s.guard(pprof.Trace))
+	mux.HandleFunc("/debug/runtime", s.guard(s.handleRuntimeStats))
+
 	srv := &http.Server{
-		Addr:         s.addr,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 20 * time.Second,
+		Addr:        s.addr,
+		Handler:     mux,
+		ReadTimeout: 10 * time.Second,
+		// 60s rather than 20s so /debug/pprof/profile?seconds=30 can
+		// complete. No handler is supposed to take longer than a few
+		// seconds; if one does, the longer timeout means we can use
+		// pprof to find out why instead of just getting a generic
+		// upstream truncation.
+		WriteTimeout: 60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -442,5 +463,70 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		resp.Sessions = append(resp.Sessions, row)
 	}
 
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// guard wraps an HTTP handler with the dashboard auth check. Used
+// for diagnostic endpoints (pprof, runtime stats) so they share the
+// exact same token check as /api/* without each handler having to
+// re-implement the auth boilerplate.
+func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireDashboardAuth(w, r) {
+			return
+		}
+		h(w, r)
+	}
+}
+
+// handleRuntimeStats returns a tiny JSON snapshot of process memory
+// and bounded-cache sizes. Useful for "is the leak fix actually
+// holding?" smoke checks without grabbing a full pprof heap dump.
+//
+// Fields:
+//   - heapAlloc / heapInuse / sys: from runtime.MemStats. heapAlloc
+//     is live objects; heapInuse is the resident heap span; sys is
+//     total OS-reserved bytes (≈ RSS modulo unmapping).
+//   - numGoroutines / numGC: classic Go runtime counters.
+//   - liveJournalCollectorIPs / liveJournalCollectorLRU: the size of
+//     the bounded journal collector. Should plateau near the cap on
+//     a busy host; previously this grew without bound.
+//   - geoCacheEntries / geoCacheLRU / geoCacheMax: same for the IP
+//     geo cache. Reads geoResolver.cache via its mutex so the
+//     snapshot is consistent.
+func (s *Server) handleRuntimeStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+
+	geoEntries, geoLRU, geoMax := 0, 0, 0
+	if s.geo != nil {
+		s.geo.mu.Lock()
+		geoEntries = len(s.geo.cache)
+		if s.geo.lru != nil {
+			geoLRU = s.geo.lru.Len()
+		}
+		geoMax = s.geo.maxSize
+		s.geo.mu.Unlock()
+	}
+
+	liveIPs, liveLRU, liveMax, liveUsersCap := actor.LiveJournalCollectorStats()
+
+	resp := map[string]any{
+		"generatedAt":               time.Now().UTC().Format(time.RFC3339Nano),
+		"heapAlloc":                 ms.HeapAlloc,
+		"heapInuse":                 ms.HeapInuse,
+		"sys":                       ms.Sys,
+		"numGoroutines":             runtime.NumGoroutine(),
+		"numGC":                     ms.NumGC,
+		"pauseTotalNs":              ms.PauseTotalNs,
+		"liveJournalCollectorIPs":   liveIPs,
+		"liveJournalCollectorLRU":   liveLRU,
+		"liveJournalCollectorMax":   liveMax,
+		"liveJournalUsersPerIPMax":  liveUsersCap,
+		"geoCacheEntries":           geoEntries,
+		"geoCacheLRU":               geoLRU,
+		"geoCacheMax":               geoMax,
+	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
