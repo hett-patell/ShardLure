@@ -90,7 +90,10 @@ fi
 CHKSUM_URL="https://github.com/$REPO/releases/download/$TAG/SHA256SUMS"
 curl -fsSL "$CHKSUM_URL" -o /tmp/shardlure-sums 2>/dev/null
 if [[ -s /tmp/shardlure-sums ]]; then
-  expected=$(grep "$BIN_NAME" /tmp/shardlure-sums | awk '{print $1}')
+  # Anchor the match: line must END with two spaces + exact BIN_NAME so a
+  # release that ships e.g. shardlure-linux-arm64 alongside
+  # shardlure-linux-arm64-musl can't accidentally match the wrong row.
+  expected=$(grep -F "  $BIN_NAME" /tmp/shardlure-sums | awk -v b="$BIN_NAME" '$2==b {print $1}' | head -1)
   actual=$(sha256sum /tmp/shardlure-dl | awk '{print $1}')
   if [[ -z "$expected" ]]; then
     rm -f /tmp/shardlure-sums

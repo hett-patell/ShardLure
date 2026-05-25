@@ -528,9 +528,25 @@ func (s *Store) ActorCount() (int, error) {
 // actor_users) are not pruned — their upper bound is the distinct
 // attacker set, not time. Runs as a single quick transaction so a
 // crash mid-purge won't leave partial state. Pass 0 to skip.
+//
+// artifacts, ip_enrichment and cowrie_tty_index are all created
+// lazily by their respective writers (ensureArtifactsTable etc.)
+// so a brand-new install would fail this purge with "no such
+// table" until the first artifact/enrichment/cowrie download
+// happens. Pre-create them here so the very first purge call
+// against a fresh DB is a clean no-op rather than an error.
 func (s *Store) MaintenancePurge(retentionDays int) error {
 	if retentionDays <= 0 {
 		return nil
+	}
+	if err := s.ensureEnrichmentTable(); err != nil {
+		return err
+	}
+	if err := s.ensureCowrieTTYIndex(); err != nil {
+		return err
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return err
 	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
 	tx, err := s.db.Begin()
@@ -544,7 +560,10 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	// cutoff; none of these scan the full table.
 
 	// 1. Enrichment cache — references IPs that appear in events.
-	if _, err := tx.Exec(`DELETE FROM ip_enrichment WHERE queried_at < ?`, cutoff); err != nil {
+	//    Column is fetched_at (see enrichment.go); the earlier
+	//    queried_at name was wrong and made this DELETE fail every
+	//    24h on the live system.
+	if _, err := tx.Exec(`DELETE FROM ip_enrichment WHERE fetched_at < ?`, cutoff); err != nil {
 		return err
 	}
 
