@@ -20,8 +20,8 @@ func TestMigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("currentSchemaVersion: %v", err)
 	}
-	if v < 4 {
-		t.Fatalf("expected version >= 4 after fresh open, got %d", v)
+	if v < 5 {
+		t.Fatalf("expected version >= 5 after fresh open, got %d", v)
 	}
 	if err := s1.Close(); err != nil {
 		t.Fatalf("close: %v", err)

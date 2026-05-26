@@ -221,6 +221,34 @@ CREATE INDEX IF NOT EXISTS idx_actor_ips_ip ON actor_ips(ip);
 			return err
 		}
 	}
+
+	// v5: bazaar_uploads. Tracks which captured artifacts have been
+	// submitted to abuse.ch/MalwareBazaar. sha256 is the natural key
+	// because that's what MalwareBazaar dedupes on server-side; we
+	// store it as the primary key so re-submission is a no-op on the
+	// client too. uploaded_at lets us answer "what did we ship this
+	// week" without re-querying the API. response_status carries the
+	// abuse.ch query_status (e.g. "inserted", "file_already_known").
+	// uploaded_at uses the same RFC3339 TEXT format as every other
+	// timestamp column in this schema so dashboard queries can join
+	// on it without coercion.
+	if current < 5 {
+		const v5Schema = `
+CREATE TABLE IF NOT EXISTS bazaar_uploads (
+  sha256          TEXT PRIMARY KEY,
+  uploaded_at     TEXT NOT NULL,
+  response_status TEXT NOT NULL,
+  mb_url          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bazaar_uploads_ts ON bazaar_uploads(uploaded_at);
+`
+		if _, err := s.db.Exec(v5Schema); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

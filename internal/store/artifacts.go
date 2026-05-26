@@ -276,6 +276,68 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 	return out, rows.Err()
 }
 
+// ArtifactsForShare returns artifacts eligible for outbound sharing
+// (currently to abuse.ch MalwareBazaar). Eligibility is intentionally
+// strict — sharing leaks data publicly so we don't want to be loose:
+//
+//   - status='fetched'           (we actually have the bytes on disk)
+//   - size_bytes > 1024          (skip empty + 1-byte SFTP sentinel
+//     files that cowrie produces for some failed transfers)
+//   - sha256 IS NOT NULL/empty   (needed for downstream dedup against
+//     the bazaar_uploads table)
+//   - origin LIKE '%download%'   (exclude cowrie-tty transcripts and
+//     quarantine_fetch URLs that didn't resolve to a binary)
+//   - created_at >= since        (abuse.ch fair-use: fresh samples only)
+//
+// Returns newest-first. The caller (share subcommand) bounds the
+// result with --limit if needed. Duplicate sha256 across multiple URL
+// rows is fine — the bazaar uploader dedupes on sha256 itself.
+func (s *Store) ArtifactsForShare(since time.Time) ([]Artifact, error) {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	cutoff := since.UTC().Format(time.RFC3339Nano)
+	rows, err := s.db.Query(`
+SELECT id, COALESCE(ts, ''), COALESCE(src_ip, ''), COALESCE(session_id, ''), COALESCE(actor_id, ''),
+       url, COALESCE(local_path, ''), COALESCE(sha256, ''), COALESCE(size_bytes, 0),
+       origin, status, COALESCE(detail, ''), created_at
+FROM artifacts
+WHERE status='fetched'
+  AND size_bytes > 1024
+  AND sha256 IS NOT NULL AND sha256 != ''
+  AND origin LIKE '%download%'
+  AND COALESCE(created_at, ts) >= ?
+ORDER BY COALESCE(created_at, ts) DESC`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Dedup on sha256 — multiple URL rows can point at the same
+	// payload after attackers re-host. Keep the most-recent.
+	seen := map[string]bool{}
+	var out []Artifact
+	for rows.Next() {
+		var a Artifact
+		var ts, created string
+		if err := rows.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
+			&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+			return nil, err
+		}
+		if seen[a.SHA256] {
+			continue
+		}
+		seen[a.SHA256] = true
+		a.TS, _ = parseTime(ts)
+		a.CreatedAt, _ = parseTime(created)
+		if a.CreatedAt.IsZero() {
+			a.CreatedAt = a.TS
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // GetArtifactBySHA returns the most recent artifact matching the SHA-256.
 // Multiple rows can share a hash if attackers re-host the same payload
 // at different URLs; we return the most recently captured row.

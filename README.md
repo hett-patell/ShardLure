@@ -135,6 +135,7 @@ sudo ./shardlure run
 | `run` | Start the VPS wrapper |
 | `status` | Print event and actor counts |
 | `ioc` | Export a small IOC slice |
+| `share bazaar [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]` | Upload captured payloads to MalwareBazaar (abuse.ch) |
 | `version` | Print version |
 
 ### Installer
@@ -234,6 +235,51 @@ shardlure ingest journal ~/journal-ssh-30d.log --replace
 | `/var/backups/nightly/db_credentials.txt` | Fake backup credentials |
 
 All credentials are intentionally fake. Regenerate bait values per deployment so multiple honeypots are not fingerprinted by identical decoys.
+
+## Threat Intel Sharing (MalwareBazaar)
+
+`shardlure share bazaar` submits captured payloads to [abuse.ch MalwareBazaar](https://bazaar.abuse.ch/). Each upload is automatically classified (ELF arch, static-vs-dynamic linkage, scripting language, and a short list of well-known family fingerprints — RedTail, Mirai, Komari, Traffmonetizer, XMRig, c3pool) and tagged. abuse.ch's server-side analysis (YARA, ClamAV, telfhash) then bolts on the heavy-duty signatures.
+
+**Setup**
+
+1. Sign up at <https://auth.abuse.ch/> and copy your Auth-Key.
+2. Edit `shardlure.yaml`:
+
+    ```yaml
+    intel:
+      bazaar:
+        api_key: "your-auth-key-here"
+        tags: ["shardlure", "honeypot"]
+        max_bytes: 33554432       # 32 MiB
+        freshness_days: 10        # abuse.ch fair-use: fresh samples only
+    ```
+
+3. Dry-run first to inspect what would ship:
+
+    ```bash
+    shardlure share bazaar --dry-run --limit 10
+    ```
+
+4. When the output looks right, drop `--dry-run`:
+
+    ```bash
+    shardlure share bazaar --limit 10
+    ```
+
+Re-running is safe: every sha256 we successfully submit (including `file_already_known` responses) is recorded in `bazaar_uploads` and skipped on the next run.
+
+**Flags**
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--dry-run` | false | print classification + destination without POSTing |
+| `--limit N` | 10 | cap per-run uploads (0 = unbounded) |
+| `--sha SHA` | – | upload only this specific sample (bypasses freshness) |
+| `--since DUR` | 240h | only consider artifacts captured within this window |
+| `--anonymous` | false | submit without attribution to your account |
+| `--status` | – | list past uploads from `bazaar_uploads` instead of uploading |
+
+**Why MalwareBazaar?** It's the de-facto sharing hub for honeypot-captured Linux malware. Their submission policy (no PUPs/adware, no file infectors, samples must be <10 days old) is enforced both client-side (the share subcommand respects `freshness_days`) and server-side. Repeated violations get accounts banned — see `internal/intel/bazaar/client.go` for the fatal-status handling that halts the run on `user_blacklisted`.
 
 ## Architecture
 

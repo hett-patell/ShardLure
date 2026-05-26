@@ -36,3 +36,22 @@ geoip:
   enabled: true
   insecure_http: true
   mmdb: /var/lib/shardlure/GeoLite2-City.mmdb
+
+# Outbound threat-intel sharing. Each destination is opt-in; leaving
+# api_key empty disables it. See the "Threat Intel Sharing" README
+# section for the full submission policy and dry-run workflow.
+intel:
+  bazaar:
+    # Sign up at https://auth.abuse.ch/ and paste your Auth-Key here.
+    api_key: ""
+    # Tags appended to every uploaded sample (in addition to the
+    # per-sample auto-tags from the classifier).
+    tags: ["shardlure", "honeypot"]
+    # Hard client-side size cap. abuse.ch enforces its own server
+    # cap; this is a safety rail against accidentally uploading a
+    # cowrie SFTP capture that turns out to be a 4 GiB dump.
+    max_bytes: 33554432   # 32 MiB
+    # Abuse.ch fair-use: do not upload samples older than 10 days.
+    # The share subcommand filters artifacts by this window unless
+    # --since or --sha overrides it.
+    freshness_days: 10

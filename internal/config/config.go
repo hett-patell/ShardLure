@@ -58,6 +58,33 @@ type Config struct {
 	// Set to 0 to disable periodic purging (not recommended for production
 	// honeypots). Defaults to 90 days.
 	RetentionDays int `yaml:"retention_days"`
+
+	// Intel groups outbound threat-intel sharing destinations. Each
+	// destination is opt-in; an empty api_key disables it. Currently
+	// only MalwareBazaar (abuse.ch) is wired up.
+	Intel struct {
+		Bazaar struct {
+			// APIKey is the abuse.ch Auth-Key obtained from
+			// https://auth.abuse.ch/. Required.
+			APIKey string `yaml:"api_key"`
+			// Endpoint overrides the upload URL. Defaults to
+			// https://mb-api.abuse.ch/api/v1/. Useful for tests.
+			Endpoint string `yaml:"endpoint"`
+			// Tags are appended to every uploaded sample's tag
+			// list (in addition to the per-sample auto-tags).
+			// Recommended: ["shardlure", "honeypot"].
+			Tags []string `yaml:"tags"`
+			// MaxBytes is the upper file-size limit for a single
+			// upload. Files larger than this are skipped. Defaults
+			// to 32 MiB (MalwareBazaar enforces its own cap server
+			// side; this is a client-side safety rail).
+			MaxBytes int64 `yaml:"max_bytes"`
+			// FreshnessDays bounds how recently the artifact must
+			// have been captured. Defaults to 10 (matches abuse.ch
+			// submission policy).
+			FreshnessDays int `yaml:"freshness_days"`
+		} `yaml:"bazaar"`
+	} `yaml:"intel"`
 }
 
 // fallbackDataDir is used when the user has no resolvable HOME (e.g. running
@@ -94,6 +121,10 @@ func Default() Config {
 	c.Capture.MaxBytes = 50 << 20
 	c.Capture.TimeoutSec = 45
 	c.RetentionDays = 90
+	c.Intel.Bazaar.Endpoint = "https://mb-api.abuse.ch/api/v1/"
+	c.Intel.Bazaar.Tags = []string{"shardlure", "honeypot"}
+	c.Intel.Bazaar.MaxBytes = 32 << 20
+	c.Intel.Bazaar.FreshnessDays = 10
 	return c
 }
 

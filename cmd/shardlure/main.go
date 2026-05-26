@@ -101,6 +101,8 @@ func main() {
 		cmdStatus(st)
 	case "ioc":
 		cmdIOC(st)
+	case "share":
+		cmdShare(st, cfg, args[1:])
 	case "version":
 		fmt.Println("shardlure 0.1.0")
 	default:
@@ -400,6 +402,7 @@ Usage:
   shardlure run
   shardlure status
   shardlure ioc
+  shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 10d] [--anonymous] [--status]
 
 Config: ~/.local/share/shardlure/ or -config shardlure.yaml
 `)
