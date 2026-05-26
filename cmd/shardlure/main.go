@@ -25,6 +25,13 @@ import (
 	"github.com/networkshard/shardlure/tui"
 )
 
+// Build-time injected via -ldflags "-X main.version=... -X main.commit=...".
+// Defaults reflect a dev build from an untagged checkout.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 func main() {
 	cfgPath := flag.String("config", "", "path to shardlure.yaml")
 	flag.Parse()
@@ -104,7 +111,7 @@ func main() {
 	case "share":
 		cmdShare(st, cfg, args[1:])
 	case "version":
-		fmt.Println("shardlure 0.1.0")
+		fmt.Printf("shardlure %s (commit %s)\n", version, commit)
 	default:
 		usage()
 		os.Exit(1)
