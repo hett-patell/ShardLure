@@ -80,6 +80,45 @@ ON CONFLICT(sha256) DO UPDATE SET
 	return err
 }
 
+// BazaarStats holds aggregate counts for the bazaar sharing widget.
+type BazaarStats struct {
+	TotalUploaded int
+	Duplicates    int
+	Pending       int
+	LastUploadAt  time.Time
+}
+
+// BazaarUploadStats returns aggregate sharing metrics.
+func (s *Store) BazaarUploadStats() (BazaarStats, error) {
+	if err := s.ensureBazaarUploadsTable(); err != nil {
+		return BazaarStats{}, err
+	}
+	var st BazaarStats
+	var lastTS sql.NullString
+	err := s.db.QueryRow(`
+SELECT COUNT(*),
+       COUNT(CASE WHEN response_status='file_already_known' THEN 1 END),
+       MAX(uploaded_at)
+FROM bazaar_uploads`).Scan(&st.TotalUploaded, &st.Duplicates, &lastTS)
+	if err != nil {
+		return st, err
+	}
+	if lastTS.Valid {
+		if t, perr := time.Parse(time.RFC3339Nano, lastTS.String); perr == nil {
+			st.LastUploadAt = t
+		}
+	}
+	err = s.db.QueryRow(`
+SELECT COUNT(DISTINCT a.sha256)
+FROM artifacts a
+WHERE a.status='fetched'
+  AND a.sha256 IS NOT NULL AND a.sha256 != ''
+  AND a.size_bytes > 1024
+  AND a.origin LIKE '%download%'
+  AND a.sha256 NOT IN (SELECT sha256 FROM bazaar_uploads)`).Scan(&st.Pending)
+	return st, err
+}
+
 // ListBazaarUploads returns every recorded submission, newest first.
 // Used by the share subcommand's --status flag and (eventually) the
 // dashboard's intel-sharing view. Bounded by limit; pass 0 for no cap.

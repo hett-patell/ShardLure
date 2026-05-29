@@ -18,7 +18,9 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/deobf"
 	"github.com/networkshard/shardlure/internal/intel/graph"
 	"github.com/networkshard/shardlure/internal/intel/replay"
+	"github.com/networkshard/shardlure/internal/intel/bazaar"
 	"github.com/networkshard/shardlure/internal/intel/wordlist"
+	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
@@ -896,5 +898,219 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 	if err := ioc.WriteSTIX(w, indicators); err != nil {
 		_ = err
 	}
+}
+
+// handleIntelBazaar returns MalwareBazaar sharing stats and recent uploads.
+func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	limit := 50
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 200 {
+		limit = v
+	}
+
+	stats, err := s.st.BazaarUploadStats()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	uploads, err := s.st.ListBazaarUploads(limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	type bazaarUploadRow struct {
+		SHA256     string   `json:"sha256"`
+		UploadedAt string   `json:"uploadedAt"`
+		Status     string   `json:"status"`
+		MBURL      string   `json:"mbUrl,omitempty"`
+		SizeBytes  int64    `json:"sizeBytes,omitempty"`
+		Family     string   `json:"family,omitempty"`
+		FileKind   string   `json:"fileKind,omitempty"`
+		SrcIP      string   `json:"srcIp,omitempty"`
+		Tags       []string `json:"tags,omitempty"`
+	}
+
+	rows := make([]bazaarUploadRow, 0, len(uploads))
+	for _, u := range uploads {
+		row := bazaarUploadRow{
+			SHA256:     u.SHA256,
+			UploadedAt: u.UploadedAt.UTC().Format(time.RFC3339),
+			Status:     u.ResponseStatus,
+			MBURL:      u.MBURL,
+		}
+		if art, err := s.st.GetArtifactBySHA(u.SHA256); err == nil && art != nil {
+			row.SizeBytes = art.SizeBytes
+			row.SrcIP = art.SrcIP
+			if art.LocalPath != "" {
+				if _, serr := os.Stat(art.LocalPath); serr == nil {
+					if cls, cerr := bazaar.Classify(art.LocalPath); cerr == nil {
+						row.Family = cls.Family
+						row.FileKind = cls.FileKind
+						row.Tags = cls.Tags
+					}
+				}
+			}
+		}
+		rows = append(rows, row)
+	}
+
+	type statsBlock struct {
+		TotalUploaded int    `json:"totalUploaded"`
+		Duplicates    int    `json:"duplicates"`
+		Pending       int    `json:"pending"`
+		LastUploadAt  string `json:"lastUploadAt,omitempty"`
+	}
+	sb := statsBlock{
+		TotalUploaded: stats.TotalUploaded,
+		Duplicates:    stats.Duplicates,
+		Pending:       stats.Pending,
+	}
+	if !stats.LastUploadAt.IsZero() {
+		sb.LastUploadAt = stats.LastUploadAt.UTC().Format(time.RFC3339)
+	}
+
+	resp := struct {
+		GeneratedAt string            `json:"generatedAt"`
+		Stats       statsBlock        `json:"stats"`
+		Uploads     []bazaarUploadRow `json:"uploads"`
+	}{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Stats:       sb,
+		Uploads:     rows,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// bazaarRecorderAdapter bridges store.BazaarUpload struct to the
+// bazaar.UploadRecorder interface.
+type bazaarRecorderAdapter struct{ st *store.Store }
+
+func (a *bazaarRecorderAdapter) BazaarUploadRecorded(sha string) (bool, error) {
+	return a.st.BazaarUploadRecorded(sha)
+}
+func (a *bazaarRecorderAdapter) RecordBazaarUpload(sha, status, mbURL string, at time.Time) error {
+	return a.st.RecordBazaarUpload(store.BazaarUpload{
+		SHA256: sha, UploadedAt: at, ResponseStatus: status, MBURL: mbURL,
+	})
+}
+
+// handleBazaarUpload triggers a single-payload upload to MalwareBazaar.
+func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	sha := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sha")))
+	if sha == "" {
+		http.Error(w, "missing sha", http.StatusBadRequest)
+		return
+	}
+	apiKey := os.Getenv("SHARDLURE_BAZAAR_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("SHARDLURE_BAZAAR_API_KEY")
+	}
+	if apiKey == "" {
+		http.Error(w, `{"status":"error","error":"bazaar API key not configured (set SHARDLURE_BAZAAR_KEY)"}`, http.StatusBadRequest)
+		return
+	}
+
+	art, err := s.st.GetArtifactBySHA(sha)
+	if err != nil || art == nil {
+		http.Error(w, `{"status":"error","error":"artifact not found"}`, http.StatusNotFound)
+		return
+	}
+
+	cand := bazaar.Candidate{
+		SHA256: art.SHA256, LocalPath: art.LocalPath, SizeBytes: art.SizeBytes,
+		URL: art.URL, SrcIP: art.SrcIP, SessionID: art.SessionID, CreatedAt: art.CreatedAt,
+	}
+	rec := &bazaarRecorderAdapter{st: s.st}
+	var result *bazaar.Result
+	opts := bazaar.Options{
+		APIKey:    apiKey,
+		Endpoint:  "https://mb-api.abuse.ch/api/v1/",
+		ExtraTags: []string{"shardlure", "honeypot"},
+		MaxBytes:  33 << 20,
+		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, _ error) {
+			result = r
+		},
+	}
+
+	_, _, shareErr := bazaar.Share(r.Context(), rec, []bazaar.Candidate{cand}, opts)
+
+	resp := struct {
+		Status string `json:"status"`
+		MBURL  string `json:"mbUrl,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}{}
+	if result != nil {
+		resp.Status = result.Status
+		resp.MBURL = result.SampleURL
+	} else if shareErr != nil {
+		resp.Status = "error"
+		resp.Error = shareErr.Error()
+	} else {
+		resp.Status = "skipped"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleIntelTimeline returns recent events for the live timeline widget.
+func (s *Server) handleIntelTimeline(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	limit := 50
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 200 {
+		limit = v
+	}
+	since := time.Now().Add(-1 * time.Hour)
+	events, err := s.st.EventsSince(since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	type timelineEvent struct {
+		TS       string `json:"ts"`
+		Kind     string `json:"kind"`
+		SrcIP    string `json:"srcIp"`
+		Username string `json:"username,omitempty"`
+		Command  string `json:"command,omitempty"`
+		Session  string `json:"session,omitempty"`
+		Actor    string `json:"actor,omitempty"`
+		Source   string `json:"source"`
+	}
+	rows := make([]timelineEvent, 0, len(events))
+	for _, e := range events {
+		rows = append(rows, timelineEvent{
+			TS:       e.TS.UTC().Format(time.RFC3339),
+			Kind:     string(e.Kind),
+			SrcIP:    e.SrcIP,
+			Username: e.Username,
+			Command:  e.Command,
+			Session:  e.SessionID,
+			Actor:    actor.TrimActorPrefix(e.ActorID),
+			Source:   string(e.Source),
+		})
+	}
+	resp := struct {
+		GeneratedAt string          `json:"generatedAt"`
+		Events      []timelineEvent `json:"events"`
+	}{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Events:      rows,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
