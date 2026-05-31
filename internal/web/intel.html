@@ -121,8 +121,8 @@
   }
   .cap-live.active { animation: capPulse 1.2s infinite; }
   @keyframes capPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(208,40,40,0.45); }
-    50% { box-shadow: 0 0 0 6px rgba(208,40,40,0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(72,184,120,0.45); }
+    50% { box-shadow: 0 0 0 6px rgba(72,184,120,0); }
   }
   .cap-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
   @media (max-width: 720px) { .cap-stats { grid-template-columns: 1fr 1fr; } }
@@ -143,7 +143,7 @@
   .cap-badge.fetched { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
   .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: rgba(208,40,40,0.4); background: rgba(208,40,40,0.08); }
   tr.cap-row-new td { animation: capFade 0.45s ease; }
-  @keyframes capFade { from { background: rgba(208,40,40,0.12); } to { background: transparent; } }
+  @keyframes capFade { from { background: rgba(72,184,120,0.12); } to { background: transparent; } }
 
   /* ==== SOC console v2: sidebar + topbar + denser data ==== */
   html, body { height: 100%; overflow: hidden; }
@@ -520,7 +520,7 @@
   .enrich-card.verdict-malicious  { border-left-color: var(--accent); }
   .enrich-card.verdict-malicious  .ec-verdict { background: rgba(208,40,40,0.12); color: var(--accent); }
   .enrich-card.verdict-suspicious { border-left-color: var(--warn); }
-  .enrich-card.verdict-suspicious .ec-verdict { background: rgba(255,196,87,0.12); color: var(--warn); }
+  .enrich-card.verdict-suspicious .ec-verdict { background: rgba(200,152,40,0.12); color: var(--warn); }
   .enrich-card.verdict-benign     { border-left-color: var(--good); }
   .enrich-card.verdict-benign     .ec-verdict { background: rgba(72,219,156,0.12); color: var(--good); }
   .enrich-card.verdict-unknown    .ec-verdict { background: rgba(255,255,255,0.04); color: var(--dim); }
@@ -758,9 +758,9 @@
 
   /* ── Widget: geography ── */
   .geo-bars { display: flex; flex-direction: column; gap: 4px; }
-  .geo-row { display: grid; grid-template-columns: 24px minmax(0,1fr) 42px; gap: 4px; align-items: center; font: 11px var(--mono); }
+  .geo-row { display: grid; grid-template-columns: 24px minmax(0,80px) 1fr 42px; gap: 4px; align-items: center; font: 11px var(--mono); }
   .geo-flag { text-align: center; }
-  .geo-track { height: 4px; background: rgba(255,255,255,0.04); border-radius: 2px; overflow: hidden; grid-column: 2; }
+  .geo-track { height: 4px; background: rgba(255,255,255,0.04); border-radius: 2px; overflow: hidden; }
   .geo-fill { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
   .geo-n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; font-size: 10px; }
 
@@ -2163,7 +2163,8 @@ function renderPayloadDetail(d) {
     (insp.truncated ? '<span class="pm-k">scan</span><span class="pm-v">truncated at 64KB</span>' : '') +
     '</div>';
 
-  document.getElementById('pm-body').innerHTML = grid + errBlock + stringsBlock + hexBlock;
+  var bzBtn = d.sha256 ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><button class="bz-btn" onclick="uploadToBazaar(\''+escHtml(d.sha256)+'\',this)">▲ Share to MalwareBazaar</button></div>' : '';
+  document.getElementById('pm-body').innerHTML = grid + errBlock + stringsBlock + hexBlock + bzBtn;
 }
 
 function closePayload() { document.getElementById('payload-modal').classList.remove('open'); }
@@ -2568,7 +2569,7 @@ function renderGeo(actors) {
   var mx = rows[0].ev || 1;
   el.innerHTML = rows.map(function(r) {
     var p = Math.round(r.ev/mx*100);
-    return '<div class="geo-row"><span class="geo-flag">'+flag(r.cc)+'</span><span style="color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(r.country.slice(0,16))+'</span><span class="geo-n">'+fmt(r.ev)+'</span><div class="geo-track"><span class="geo-fill" style="width:'+p+'%"></span></div></div>';
+    return '<div class="geo-row"><span class="geo-flag">'+flag(r.cc)+'</span><span style="color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(r.country.slice(0,16))+'</span><div class="geo-track"><span class="geo-fill" style="width:'+p+'%"></span></div><span class="geo-n">'+fmt(r.ev)+'</span></div>';
   }).join('');
 }
 
@@ -2661,6 +2662,8 @@ async function uploadToBazaar(sha,btn) {
     var d=await r.json();
     if(d.status==='inserted'||d.status==='file_already_known'){
       btn.className='bz-btn ok';btn.textContent='✓ '+d.status;refreshBazaar();
+    } else if(d.status==='skipped'){
+      btn.disabled=false;btn.style.color='var(--warn)';btn.style.borderColor='var(--warn)';btn.textContent='skipped';
     } else {
       btn.className='bz-btn err';btn.textContent='✗ '+(d.error||d.status);
     }
@@ -2670,7 +2673,7 @@ async function uploadToBazaar(sha,btn) {
 refreshCreds();
 refreshTimeline();
 setInterval(function(){if(document.getElementById('view-overview').classList.contains('active'))refreshCreds()},30000);
-setInterval(refreshTimeline, 3000);
+setInterval(function(){if(document.getElementById('view-overview').classList.contains('active'))refreshTimeline()},3000);
 </script>
 </div><!-- /shell-main -->
 </div><!-- /shell -->

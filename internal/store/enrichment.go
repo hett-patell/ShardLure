@@ -17,7 +17,7 @@ type EnrichmentRecord struct {
 	FetchedAt time.Time
 }
 
-func (s *Store) ensureEnrichmentTable() error {
+func (s *Store) EnsureEnrichmentTable() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS ip_enrichment (
   ip TEXT NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS ip_enrichment (
 // FetchedAt timestamp; the store doesn't enforce TTL so analysts can
 // see stale-but-known data while a refresh is in flight.
 func (s *Store) GetEnrichment(ip, source string) (*EnrichmentRecord, bool, error) {
-	if err := s.ensureEnrichmentTable(); err != nil {
+	if err := s.EnsureEnrichmentTable(); err != nil {
 		return nil, false, err
 	}
 	row := s.db.QueryRow(`SELECT ip, source, payload, fetched_at FROM ip_enrichment WHERE ip=? AND source=?`, ip, source)
@@ -57,7 +57,7 @@ func (s *Store) GetEnrichment(ip, source string) (*EnrichmentRecord, bool, error
 // negative cache entry (provider returned nothing useful); the
 // fetched_at still gates re-querying so we don't hammer rate limits.
 func (s *Store) PutEnrichment(ip, source, payload string) error {
-	if err := s.ensureEnrichmentTable(); err != nil {
+	if err := s.EnsureEnrichmentTable(); err != nil {
 		return err
 	}
 	_, err := s.db.Exec(`

@@ -43,6 +43,10 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Deploy-safe sync:** tar-over-SSH because `scp` of Go/Python sources mysteriously turns them into UTF-16. We do not gaslight you about this — see Troubleshooting.
 - **Incremental Cowrie ingest:** tracks file offset + inode, so a 100MB cowrie.json doesn't get re-scanned every 5 seconds. Your I/O thanks us.
 - **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
+- **Dragon theme:** purpose-built SOC dashboard with sidebar navigation, Chakra Petch typography, blood-red/molten-gold palette, flat panels, sharp geometry. No glass-morphism — this is a wartime console.
+- **Dashboard widgets:** threat-level gauge, attack geography, brute-force radar, top credentials, live attack timeline. All fed by real-time API polling.
+- **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
+- **Persistent geo cache:** IP geolocation results are stored in SQLite and survive restarts. No more "resolving…" on every page load.
 
 ## Quick Start
 
@@ -268,6 +272,8 @@ All credentials are intentionally fake. Regenerate bait values per deployment so
 
 Re-running is safe: every sha256 we successfully submit (including `file_already_known` responses) is recorded in `bazaar_uploads` and skipped on the next run.
 
+You can also share payloads from the web dashboard: open the payload inspector modal on any captured artifact and click **Share to MalwareBazaar**. Set `SHARDLURE_BAZAAR_KEY` in your environment or systemd unit for this to work. The Red Team tab's MalwareBazaar panel shows upload history, family classification, and pending counts.
+
 **Flags**
 
 | Flag | Default | Meaning |
@@ -360,6 +366,11 @@ ls /var/lib/shardlure/cowrie/honeyfs/opt/app/
 - [x] Idempotent journal append (dedup against existing events)
 - [x] Graceful shutdown on SIGINT/SIGTERM (so Ctrl-C is no longer a war crime)
 - [x] DB chmod 0600 + sshd-config auto-rollback on failed reload
+- [x] MalwareBazaar payload sharing (CLI + one-click dashboard upload)
+- [x] Dragon theme — full SOC dashboard redesign with sidebar nav
+- [x] Dashboard widgets: threat gauge, geography, credentials, brute-force radar, live timeline
+- [x] Persistent geo cache (SQLite-backed, survives restarts)
+- [x] MalwareBazaar dashboard widget (stats + upload history + family classification)
 - [ ] GeoLite2 MMDB enrichment (escape the ip-api.com rate limits arc)
 - [ ] Real-time WebSocket feed (current dashboard polls every 5s, which is fine but mid)
 
@@ -369,7 +380,7 @@ ls /var/lib/shardlure/cowrie/honeyfs/opt/app/
 A: Marginally. It moves real SSH to a private port (good) and runs a fake one (interesting). The main value is *intel*: you learn what botnets are doing to boxes that look like yours.
 
 **Q: Will I get cool maps?**
-A: Yes. There is a globe. It rotates. Red arcs converge on your home point like you're in a 2007 hacker movie.
+A: Yes. There is a globe. It rotates. Blood-red arcs converge on your home point like you're in a 2007 hacker movie. The intel console has a threat gauge, brute-force radar, and attack geography panel.
 
 **Q: Is this production-ready?**
 A: It's "single-VPS, one-operator, runs-on-my-laptop" ready. If you want a fleet, you'll want to front the SQLite with something less single-writer. PRs welcome.

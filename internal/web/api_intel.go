@@ -18,11 +18,15 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/deobf"
 	"github.com/networkshard/shardlure/internal/intel/graph"
 	"github.com/networkshard/shardlure/internal/intel/replay"
+	"sync"
+
 	"github.com/networkshard/shardlure/internal/intel/bazaar"
 	"github.com/networkshard/shardlure/internal/intel/wordlist"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+var classifyCache sync.Map // sha256 → bazaar.Classification
 
 // ==== /api/intel/mitre ============================================
 
@@ -945,9 +949,15 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		if art, err := s.st.GetArtifactBySHA(u.SHA256); err == nil && art != nil {
 			row.SizeBytes = art.SizeBytes
 			row.SrcIP = art.SrcIP
-			if art.LocalPath != "" {
+			if cached, ok := classifyCache.Load(u.SHA256); ok {
+				cls := cached.(bazaar.Classification)
+				row.Family = cls.Family
+				row.FileKind = cls.FileKind
+				row.Tags = cls.Tags
+			} else if art.LocalPath != "" {
 				if _, serr := os.Stat(art.LocalPath); serr == nil {
 					if cls, cerr := bazaar.Classify(art.LocalPath); cerr == nil {
+						classifyCache.Store(u.SHA256, cls)
 						row.Family = cls.Family
 						row.FileKind = cls.FileKind
 						row.Tags = cls.Tags
@@ -1018,13 +1028,17 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		apiKey = os.Getenv("SHARDLURE_BAZAAR_API_KEY")
 	}
 	if apiKey == "" {
-		http.Error(w, `{"status":"error","error":"bazaar API key not configured (set SHARDLURE_BAZAAR_KEY)"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "bazaar API key not configured (set SHARDLURE_BAZAAR_KEY)"})
 		return
 	}
 
 	art, err := s.st.GetArtifactBySHA(sha)
 	if err != nil || art == nil {
-		http.Error(w, `{"status":"error","error":"artifact not found"}`, http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "artifact not found"})
 		return
 	}
 
@@ -1092,6 +1106,9 @@ func (s *Server) handleIntelTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]timelineEvent, 0, len(events))
 	for _, e := range events {
+		if e == nil {
+			continue
+		}
 		rows = append(rows, timelineEvent{
 			TS:       e.TS.UTC().Format(time.RFC3339),
 			Kind:     string(e.Kind),

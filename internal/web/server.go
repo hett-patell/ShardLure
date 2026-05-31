@@ -62,7 +62,7 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	return &Server{
 		st:            st,
 		addr:          addr,
-		geo:           newGeoResolver(geoOpts(len(opts) > 0, firstOpt)),
+		geo:           newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st),
 		dashboardAuth: strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
 		home:          home,
 	}

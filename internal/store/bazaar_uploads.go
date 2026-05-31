@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"log"
 	"time"
 )
 
@@ -108,15 +109,17 @@ FROM bazaar_uploads`).Scan(&st.TotalUploaded, &st.Duplicates, &lastTS)
 			st.LastUploadAt = t
 		}
 	}
-	err = s.db.QueryRow(`
+	if err := s.db.QueryRow(`
 SELECT COUNT(DISTINCT a.sha256)
 FROM artifacts a
 WHERE a.status='fetched'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
   AND a.size_bytes > 1024
   AND a.origin LIKE '%download%'
-  AND a.sha256 NOT IN (SELECT sha256 FROM bazaar_uploads)`).Scan(&st.Pending)
-	return st, err
+  AND a.sha256 NOT IN (SELECT sha256 FROM bazaar_uploads)`).Scan(&st.Pending); err != nil {
+		log.Printf("bazaar pending count: %v (defaulting to 0)", err)
+	}
+	return st, nil
 }
 
 // ListBazaarUploads returns every recorded submission, newest first.

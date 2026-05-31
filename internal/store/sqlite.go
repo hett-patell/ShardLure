@@ -567,7 +567,7 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	if retentionDays <= 0 {
 		return nil
 	}
-	if err := s.ensureEnrichmentTable(); err != nil {
+	if err := s.EnsureEnrichmentTable(); err != nil {
 		return err
 	}
 	if err := s.ensureCowrieTTYIndex(); err != nil {

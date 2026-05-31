@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/store"
 )
 
 // geoCacheMaxEntries caps the IP→geo cache. The previous map was
@@ -52,6 +54,7 @@ type geoResolver struct {
 	cfg      geoConfig
 	maxSize  int
 	now      func() time.Time // injectable for tests
+	st       *store.Store     // persists geo lookups across restarts
 }
 
 type geoConfig struct {
@@ -91,7 +94,10 @@ func geoLookupURL(ip string, cfg geoConfig) string {
 	return ""
 }
 
-func newGeoResolver(cfg geoConfig) *geoResolver {
+func newGeoResolver(cfg geoConfig, st *store.Store) *geoResolver {
+	if st != nil {
+		_ = st.EnsureEnrichmentTable()
+	}
 	return &geoResolver{
 		cache:    map[string]*geoEntry{},
 		lru:      list.New(),
@@ -102,6 +108,7 @@ func newGeoResolver(cfg geoConfig) *geoResolver {
 		cfg:      cfg,
 		maxSize:  geoCacheMaxEntries,
 		now:      time.Now,
+		st:       st,
 	}
 }
 
@@ -114,13 +121,41 @@ func (g *geoResolver) cached(ip string) geoEntry {
 		return geoEntry{}
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if v, ok := g.cache[ip]; ok && g.now().Before(v.Expiry) {
-		// Promote to MRU so the LRU eviction prefers IPs the
-		// dashboard hasn't asked about in a while.
 		g.lru.MoveToFront(v.elem)
+		g.mu.Unlock()
 		return *v
 	}
+	g.mu.Unlock()
+
+	if g.st != nil {
+		if rec, found, _ := g.st.GetEnrichment(ip, "geo"); found && rec.Payload != "" {
+			if g.now().Sub(rec.FetchedAt) < 7*24*time.Hour {
+				var parsed struct {
+					OK      bool    `json:"ok"`
+					Lat     float64 `json:"lat"`
+					Lon     float64 `json:"lon"`
+					Country string  `json:"country"`
+					City    string  `json:"city"`
+					CC      string  `json:"cc"`
+				}
+				if json.Unmarshal([]byte(rec.Payload), &parsed) == nil && parsed.OK {
+					ent := geoEntry{
+						OK: true, Lat: parsed.Lat, Lon: parsed.Lon,
+						Country: parsed.Country, City: parsed.City, CC: parsed.CC,
+						Expiry: rec.FetchedAt.Add(7 * 24 * time.Hour),
+					}
+					g.mu.Lock()
+					g.putLocked(ip, ent)
+					g.mu.Unlock()
+					return ent
+				}
+			}
+		}
+	}
+	g.mu.Lock()
+	g.putLocked(ip, geoEntry{Expiry: g.now().Add(5 * time.Minute)})
+	g.mu.Unlock()
 	return geoEntry{}
 }
 
@@ -283,6 +318,18 @@ func (g *geoResolver) fetch(ip string) {
 	delete(g.inflight, ip)
 	g.putLocked(ip, ent)
 	g.mu.Unlock()
+
+	if ent.OK && g.st != nil {
+		payload, _ := json.Marshal(struct {
+			OK      bool    `json:"ok"`
+			Lat     float64 `json:"lat"`
+			Lon     float64 `json:"lon"`
+			Country string  `json:"country"`
+			City    string  `json:"city"`
+			CC      string  `json:"cc"`
+		}{true, ent.Lat, ent.Lon, ent.Country, ent.City, ent.CC})
+		_ = g.st.PutEnrichment(ip, "geo", string(payload))
+	}
 }
 
 func isPrivateIP(s string) bool {
