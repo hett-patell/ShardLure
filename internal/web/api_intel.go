@@ -26,7 +26,10 @@ import (
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
-var classifyCache sync.Map // sha256 → bazaar.Classification
+var (
+	classifyMu    sync.Mutex
+	classifyCache = make(map[string]bazaar.Classification, 256)
+)
 
 // ==== /api/intel/mitre ============================================
 
@@ -949,15 +952,22 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		if art, err := s.st.GetArtifactBySHA(u.SHA256); err == nil && art != nil {
 			row.SizeBytes = art.SizeBytes
 			row.SrcIP = art.SrcIP
-			if cached, ok := classifyCache.Load(u.SHA256); ok {
-				cls := cached.(bazaar.Classification)
+			classifyMu.Lock()
+			cls, cached := classifyCache[u.SHA256]
+			classifyMu.Unlock()
+			if cached {
 				row.Family = cls.Family
 				row.FileKind = cls.FileKind
 				row.Tags = cls.Tags
 			} else if art.LocalPath != "" {
 				if _, serr := os.Stat(art.LocalPath); serr == nil {
 					if cls, cerr := bazaar.Classify(art.LocalPath); cerr == nil {
-						classifyCache.Store(u.SHA256, cls)
+						classifyMu.Lock()
+						if len(classifyCache) >= 500 {
+							for k := range classifyCache { delete(classifyCache, k); break }
+						}
+						classifyCache[u.SHA256] = cls
+						classifyMu.Unlock()
 						row.Family = cls.Family
 						row.FileKind = cls.FileKind
 						row.Tags = cls.Tags

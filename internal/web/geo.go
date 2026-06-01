@@ -154,7 +154,9 @@ func (g *geoResolver) cached(ip string) geoEntry {
 		}
 	}
 	g.mu.Lock()
-	g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Second)})
+	if existing, ok := g.cache[ip]; !ok || !existing.OK {
+		g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Second)})
+	}
 	g.mu.Unlock()
 	return geoEntry{}
 }
@@ -230,7 +232,7 @@ func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
 		g.mu.Lock()
 		cached, ok := g.cache[ip]
 		g.mu.Unlock()
-		if ok && cached.OK && time.Now().Before(cached.Expiry) {
+		if ok && time.Now().Before(cached.Expiry) {
 			continue
 		}
 		need = append(need, ip)

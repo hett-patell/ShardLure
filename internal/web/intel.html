@@ -811,7 +811,7 @@
     transition: transform 0.2s;
   }
   .panel-collapse.collapsed .panel-head::after { transform: rotate(-90deg); }
-  .panel-collapse .panel-body { max-height: 320px; overflow: auto; transition: max-height 0.25s ease, opacity 0.2s; }
+  .panel-collapse .panel-body { max-height: 2000px; overflow: auto; transition: max-height 0.3s ease, opacity 0.2s; }
   .panel-collapse.collapsed .panel-body { max-height: 0; overflow: hidden; opacity: 0; padding: 0; }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
@@ -2158,10 +2158,11 @@ async function refreshPayloads() {
     ]);
     if (!pr.ok) return;
     var pd = await pr.json();
-    _bazaarSharedSet = {};
     if (br.ok) {
+      var freshSet = {};
       var bd = await br.json();
-      (bd.uploads || []).forEach(function(u) { _bazaarSharedSet[u.sha256] = u.mbUrl || true; });
+      (bd.uploads || []).forEach(function(u) { freshSet[u.sha256] = u.mbUrl || true; });
+      _bazaarSharedSet = freshSet;
     }
     renderPayloads(pd);
   } catch (_) {}
@@ -2239,6 +2240,7 @@ document.querySelectorAll('.chip[data-window]').forEach(function(c) {
   c.addEventListener('click', refreshPayloads);
 });
 setInterval(function() {
+  if (_uploadAllRunning) return;
   if (document.getElementById('view-red').classList.contains('active')) refreshPayloads();
 }, 30000);
 if (readTabFromHash() === 'red') refreshPayloads();
@@ -2733,47 +2735,47 @@ function renderTimeline(events) {
   }).join('');
 }
 
+var _uploadAllRunning = false;
 async function uploadAllToBazaar(masterBtn) {
   var rows = document.querySelectorAll('#payloads-table tbody tr[data-sha][data-has-local="1"]');
   if (!rows.length) { masterBtn.textContent = 'no local payloads'; return; }
-  var pending = [];
+  var shas = [];
   for (var i = 0; i < rows.length; i++) {
     var sha = rows[i].dataset.sha;
-    if (!sha || sha === '—') continue;
-    if (_bazaarSharedSet[sha]) continue;
-    var btn = rows[i].querySelector('.bz-btn');
-    if (btn && btn.classList.contains('ok')) continue;
-    pending.push({sha: sha, row: rows[i], btn: btn});
+    if (!sha || sha === '—' || _bazaarSharedSet[sha]) continue;
+    shas.push(sha);
   }
-  if (!pending.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ all shared'; return; }
+  if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ all shared'; return; }
+  _uploadAllRunning = true;
   masterBtn.disabled = true;
-  var total = pending.length, done = 0, ok = 0, skip = 0, fail = 0;
+  var total = shas.length, done = 0, ok = 0, skip = 0, fail = 0;
   masterBtn.textContent = '0/' + total + ' uploading…';
-  for (var j = 0; j < pending.length; j++) {
-    var p = pending[j];
-    if (p.btn) { p.btn.disabled = true; p.btn.textContent = 'uploading…'; }
+  for (var j = 0; j < shas.length; j++) {
+    var sha = shas[j];
+    var liveBtn = document.querySelector('#payloads-table tr[data-sha="'+sha+'"] .bz-btn');
+    if (liveBtn) { liveBtn.disabled = true; liveBtn.textContent = 'uploading…'; }
     try {
-      var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(p.sha), {method:'POST'});
+      var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(sha), {method:'POST'});
       var d = await r.json();
+      liveBtn = document.querySelector('#payloads-table tr[data-sha="'+sha+'"] .bz-btn');
       if (d.status === 'inserted' || d.status === 'file_already_known') {
-        ok++; _bazaarSharedSet[p.sha] = d.mbUrl || true;
-        if (p.btn) { p.btn.className = 'bz-btn ok'; p.btn.textContent = '✓ ' + d.status; }
+        ok++; _bazaarSharedSet[sha] = d.mbUrl || true;
+        if (liveBtn) { liveBtn.className = 'bz-btn ok'; liveBtn.textContent = '✓ ' + d.status; }
       } else if (d.status === 'already_shared') {
-        skip++; _bazaarSharedSet[p.sha] = d.mbUrl || true;
-        if (p.btn) { p.btn.className = 'bz-btn ok'; p.btn.textContent = '✓ shared'; }
+        skip++; _bazaarSharedSet[sha] = d.mbUrl || true;
+        if (liveBtn) { liveBtn.className = 'bz-btn ok'; liveBtn.textContent = '✓ shared'; }
       } else {
         fail++;
-        if (p.btn) { p.btn.className = 'bz-btn err'; p.btn.textContent = '✗ ' + (d.error || d.status); }
+        if (liveBtn) { liveBtn.className = 'bz-btn err'; liveBtn.textContent = '✗ ' + (d.error || d.status); }
       }
     } catch(e) {
       fail++;
-      if (p.btn) { p.btn.className = 'bz-btn err'; p.btn.textContent = '✗ error'; }
     }
     done++;
     masterBtn.textContent = done + '/' + total + (fail ? ' (' + fail + ' err)' : '');
-    // rate-limit: 2.5s between uploads (abuse.ch fair use)
-    if (j < pending.length - 1) await new Promise(function(ok){ setTimeout(ok, 2500); });
+    if (j < shas.length - 1) await new Promise(function(resolve){ setTimeout(resolve, 2500); });
   }
+  _uploadAllRunning = false;
   masterBtn.className = fail ? 'bz-btn err' : 'bz-btn ok';
   var msg = ok + ' new';
   if (skip) msg += ', ' + skip + ' known';
