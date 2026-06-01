@@ -2111,7 +2111,15 @@ function renderPayloads(data) {
     const fanClass = occ === 1 ? 'pl-fan pl-fan-1' : 'pl-fan';
     const fanTitle = occ + 'x captured · ' + (p.urlCount || 0) + ' urls · ' + ips + ' ips · ' + actors + ' actors · ' + (p.sessionCount || 0) + ' sessions';
     const fan = '<span class="' + fanClass + '" title="' + escHtml(fanTitle) + '">' + occ + 'x · ' + ips + 'ip</span>';
-    const shareBtn = (sha !== '—' && p.hasLocal) ? '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>' : '<span style="color:var(--dim-2)">—</span>';
+    var shareBtn;
+    if (sha === '—' || !p.hasLocal) {
+      shareBtn = '<span style="color:var(--dim-2)">—</span>';
+    } else if (_bazaarSharedSet[sha]) {
+      var mbLink = typeof _bazaarSharedSet[sha] === 'string' ? _bazaarSharedSet[sha] : '';
+      shareBtn = mbLink ? '<a href="' + escHtml(mbLink) + '" target="_blank" rel="noopener" class="bz-btn ok" style="text-decoration:none" onclick="event.stopPropagation()">✓ shared</a>' : '<span class="bz-btn ok">✓ shared</span>';
+    } else {
+      shareBtn = '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>';
+    }
     html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="' + (p.hasLocal ? '1' : '0') + '">' +
       '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
       '<td class="num">' + fmtSize(p.sizeBytes) + '</td>' +
@@ -2131,12 +2139,22 @@ function renderPayloads(data) {
   });
 }
 
+var _bazaarSharedSet = {};
 async function refreshPayloads() {
-  const window = Filters.window || '7d';
+  const win = Filters.window || '7d';
   try {
-    const r = await fetch('/api/intel/payloads?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return;
-    renderPayloads(await r.json());
+    var [pr, br] = await Promise.all([
+      fetch('/api/intel/payloads?window=' + encodeURIComponent(win) + '&_=' + Date.now(), {cache:'no-store'}),
+      fetch('/api/intel/bazaar?limit=200&_=' + Date.now(), {cache:'no-store'})
+    ]);
+    if (!pr.ok) return;
+    var pd = await pr.json();
+    _bazaarSharedSet = {};
+    if (br.ok) {
+      var bd = await br.json();
+      (bd.uploads || []).forEach(function(u) { _bazaarSharedSet[u.sha256] = u.mbUrl || true; });
+    }
+    renderPayloads(pd);
   } catch (_) {}
 }
 
@@ -2684,13 +2702,14 @@ function renderTimeline(events) {
 async function uploadAllToBazaar(masterBtn) {
   var rows = document.querySelectorAll('#payloads-table tbody tr[data-sha][data-has-local="1"]');
   if (!rows.length) { masterBtn.textContent = 'no local payloads'; return; }
-  // filter out rows whose button already shows success
   var pending = [];
   for (var i = 0; i < rows.length; i++) {
+    var sha = rows[i].dataset.sha;
+    if (!sha || sha === '—') continue;
+    if (_bazaarSharedSet[sha]) continue;
     var btn = rows[i].querySelector('.bz-btn');
     if (btn && btn.classList.contains('ok')) continue;
-    var sha = rows[i].dataset.sha;
-    if (sha && sha !== '—') pending.push({sha: sha, row: rows[i], btn: btn});
+    pending.push({sha: sha, row: rows[i], btn: btn});
   }
   if (!pending.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ all shared'; return; }
   masterBtn.disabled = true;
@@ -2703,10 +2722,10 @@ async function uploadAllToBazaar(masterBtn) {
       var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(p.sha), {method:'POST'});
       var d = await r.json();
       if (d.status === 'inserted' || d.status === 'file_already_known') {
-        ok++;
+        ok++; _bazaarSharedSet[p.sha] = d.mbUrl || true;
         if (p.btn) { p.btn.className = 'bz-btn ok'; p.btn.textContent = '✓ ' + d.status; }
       } else if (d.status === 'already_shared') {
-        skip++;
+        skip++; _bazaarSharedSet[p.sha] = d.mbUrl || true;
         if (p.btn) { p.btn.className = 'bz-btn ok'; p.btn.textContent = '✓ shared'; }
       } else {
         fail++;
@@ -2737,9 +2756,11 @@ async function uploadToBazaar(sha,btn) {
     var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(sha), {method:'POST'});
     var d = await r.json();
     if (d.status === 'inserted' || d.status === 'file_already_known') {
-      btn.className = 'bz-btn ok'; btn.textContent = '✓ ' + d.status; refreshBazaar();
+      btn.className = 'bz-btn ok'; btn.textContent = '✓ ' + d.status;
+      _bazaarSharedSet[sha] = d.mbUrl || true; refreshBazaar();
     } else if (d.status === 'already_shared') {
       btn.className = 'bz-btn ok'; btn.textContent = '✓ shared';
+      _bazaarSharedSet[sha] = d.mbUrl || true;
     } else if (d.status === 'skipped') {
       btn.disabled = false; btn.textContent = 'skipped'; btn.style.color = 'var(--warn)';
     } else {
