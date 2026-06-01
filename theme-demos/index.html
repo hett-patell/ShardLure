@@ -1,0 +1,109 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ShardLure — Theme Demos</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:"Inter Tight",system-ui,sans-serif;
+  background:#08090e;color:#c8d0e0;
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:40px 20px;-webkit-font-smoothing:antialiased;
+}
+h1{font-size:28px;font-weight:700;letter-spacing:-0.03em;margin-bottom:6px;color:#f0f2f8}
+.sub{font:500 12px "JetBrains Mono",monospace;color:#5a6478;margin-bottom:40px;letter-spacing:0.06em;text-transform:uppercase}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;max-width:900px;width:100%}
+a.card{
+  display:block;text-decoration:none;
+  background:#10121a;border:1px solid #1a1e2e;border-radius:8px;
+  padding:24px;transition:all .2s;position:relative;overflow:hidden;
+}
+a.card:hover{border-color:#3a4060;transform:translateY(-2px);box-shadow:0 8px 30px rgba(0,0,0,0.4)}
+a.card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  opacity:0;transition:opacity .2s;
+}
+a.card:hover::before{opacity:1}
+.card-name{font:700 18px "Inter Tight",sans-serif;color:#f0f2f8;margin-bottom:4px;letter-spacing:-0.02em}
+.card-desc{font:12px/1.5 "JetBrains Mono",monospace;color:#5a6478}
+.card-palette{display:flex;gap:4px;margin-top:12px}
+.card-palette span{width:20px;height:20px;border-radius:3px;border:1px solid rgba(255,255,255,0.06)}
+
+a.card:nth-child(1)::before{background:linear-gradient(90deg,#38d9a0,#b8f230)}
+a.card:nth-child(2)::before{background:linear-gradient(90deg,#4a8ec0,#e8a000)}
+a.card:nth-child(3)::before{background:linear-gradient(90deg,#c070ff,#ff6030)}
+a.card:nth-child(4)::before{background:linear-gradient(90deg,#78b0d0,#00c8f0)}
+a.card:nth-child(5)::before{background:linear-gradient(90deg,#40d0d8,#7060f0)}
+a.card:nth-child(6)::before{background:linear-gradient(90deg,#c89828,#d02828)}
+</style></head><body>
+<h1>ShardLure Themes</h1>
+<p class="sub">Intel Dashboard — Pick a direction</p>
+<div class="grid">
+  <a class="card" href="01-venom.html">
+    <div class="card-name">Venom</div>
+    <div class="card-desc">Toxic honeypot. Dark jungle, chartreuse lure, bioluminescent teal.</div>
+    <div class="card-palette">
+      <span style="background:#030907"></span>
+      <span style="background:#b8f230"></span>
+      <span style="background:#38d9a0"></span>
+      <span style="background:#f0c830"></span>
+      <span style="background:#b09afe"></span>
+    </div>
+  </a>
+  <a class="card" href="02-signal.html">
+    <div class="card-name">Signal</div>
+    <div class="card-desc">Military SIGINT. Navy-steel, radar amber, institutional authority.</div>
+    <div class="card-palette">
+      <span style="background:#080b11"></span>
+      <span style="background:#e8a000"></span>
+      <span style="background:#4a8ec0"></span>
+      <span style="background:#48a070"></span>
+      <span style="background:#807aac"></span>
+    </div>
+  </a>
+  <a class="card" href="03-ember.html">
+    <div class="card-name">Ember</div>
+    <div class="card-desc">Infrared thermal. Deep char, hot orange, ultraviolet undertones.</div>
+    <div class="card-palette">
+      <span style="background:#0a0610"></span>
+      <span style="background:#ff6030"></span>
+      <span style="background:#c070ff"></span>
+      <span style="background:#ffb020"></span>
+      <span style="background:#60e898"></span>
+    </div>
+  </a>
+  <a class="card" href="04-glacier.html">
+    <div class="card-name">Glacier</div>
+    <div class="card-desc">Arctic minimal. Polar night, electric cyan, clean and precise.</div>
+    <div class="card-palette">
+      <span style="background:#050910"></span>
+      <span style="background:#00c8f0"></span>
+      <span style="background:#78b0d0"></span>
+      <span style="background:#f0c050"></span>
+      <span style="background:#a0b0f0"></span>
+    </div>
+  </a>
+  <a class="card" href="05-shard.html">
+    <div class="card-name">Shard</div>
+    <div class="card-desc">Brand identity. Obsidian crystal, prismatic violet, refracted cyan.</div>
+    <div class="card-palette">
+      <span style="background:#050610"></span>
+      <span style="background:#7060f0"></span>
+      <span style="background:#40d0d8"></span>
+      <span style="background:#f0c048"></span>
+      <span style="background:#a080f8"></span>
+    </div>
+  </a>
+  <a class="card" href="06-dragon.html">
+    <div class="card-name">Dragon</div>
+    <div class="card-desc">Draconic fire. Charred obsidian, blood red, molten gold scales.</div>
+    <div class="card-palette">
+      <span style="background:#0a0608"></span>
+      <span style="background:#d02828"></span>
+      <span style="background:#c89828"></span>
+      <span style="background:#d87030"></span>
+      <span style="background:#a878c0"></span>
+    </div>
+  </a>
+</div>
+</body></html>

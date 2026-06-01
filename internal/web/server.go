@@ -23,6 +23,10 @@ type Server struct {
 	geo           *geoResolver
 	dashboardAuth string
 	home          homePoint
+	bazaarKey     string
+	bazaarEndpoint string
+	bazaarTags    []string
+	bazaarMaxBytes int64
 }
 
 type Options struct {
@@ -33,6 +37,10 @@ type Options struct {
 	HomeCC         string
 	GeoEnabled     bool
 	GeoInsecureHTTP bool
+	BazaarAPIKey   string
+	BazaarEndpoint string
+	BazaarTags     []string
+	BazaarMaxBytes int64
 }
 
 func New(st *store.Store, addr string, opts ...Options) *Server {
@@ -59,12 +67,35 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	if len(opts) > 0 {
 		firstOpt = opts[0]
 	}
+	bzKey := strings.TrimSpace(os.Getenv("SHARDLURE_BAZAAR_KEY"))
+	if bzKey == "" {
+		bzKey = strings.TrimSpace(os.Getenv("SHARDLURE_BAZAAR_API_KEY"))
+	}
+	if bzKey == "" {
+		bzKey = firstOpt.BazaarAPIKey
+	}
+	bzEndpoint := firstOpt.BazaarEndpoint
+	if bzEndpoint == "" {
+		bzEndpoint = "https://mb-api.abuse.ch/api/v1/"
+	}
+	bzTags := firstOpt.BazaarTags
+	if len(bzTags) == 0 {
+		bzTags = []string{"shardlure", "honeypot"}
+	}
+	bzMax := firstOpt.BazaarMaxBytes
+	if bzMax <= 0 {
+		bzMax = 33 << 20
+	}
 	return &Server{
-		st:            st,
-		addr:          addr,
-		geo:           newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st),
-		dashboardAuth: strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
-		home:          home,
+		st:             st,
+		addr:           addr,
+		geo:            newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st),
+		dashboardAuth:  strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
+		home:           home,
+		bazaarKey:      bzKey,
+		bazaarEndpoint: bzEndpoint,
+		bazaarTags:     bzTags,
+		bazaarMaxBytes: bzMax,
 	}
 }
 

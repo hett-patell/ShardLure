@@ -796,10 +796,20 @@
   .radar-row:first-child .radar-ip { color: var(--accent); }
 
   /* ── Bazaar upload button ── */
-  .bz-btn { background: transparent; color: var(--accent-2); border: 1px solid var(--line); font: 10px var(--mono); padding: 2px 8px; border-radius: 3px; cursor: pointer; }
-  .bz-btn:hover { color: var(--accent); border-color: var(--accent); }
-  .bz-btn.ok { color: var(--good); border-color: var(--good); cursor: default; }
-  .bz-btn.err { color: var(--accent); }
+  .bz-btn { background: rgba(200,152,40,0.08); color: var(--accent-2); border: 1px solid rgba(200,152,40,0.30); font: 600 9px var(--mono); padding: 3px 10px; border-radius: 3px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.06em; }
+  .bz-btn:hover { color: var(--text); border-color: var(--accent-2); background: rgba(200,152,40,0.14); }
+  .bz-btn.ok { color: var(--good); border-color: rgba(72,184,120,0.30); background: rgba(72,184,120,0.08); cursor: default; }
+  .bz-btn.err { color: var(--accent); border-color: rgba(208,40,40,0.30); background: rgba(208,40,40,0.08); }
+
+  /* ── Collapsible panels ── */
+  .panel-collapse .panel-head { cursor: pointer; user-select: none; }
+  .panel-collapse .panel-head::after {
+    content: '▾'; font: 10px var(--mono); color: var(--dim); margin-left: 8px;
+    transition: transform 0.2s;
+  }
+  .panel-collapse.collapsed .panel-head::after { transform: rotate(-90deg); }
+  .panel-collapse .panel-body { max-height: 320px; overflow: auto; transition: max-height 0.25s ease, opacity 0.2s; }
+  .panel-collapse.collapsed .panel-body { max-height: 0; overflow: hidden; opacity: 0; padding: 0; }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
 </head>
@@ -1057,11 +1067,12 @@
     </div>
 
     <div class="grid">
-      <section class="panel full" id="panel-ttp">
-        <div class="panel-head">
+      <section class="panel full panel-collapse" id="panel-ttp">
+        <div class="panel-head" onclick="this.parentElement.classList.toggle('collapsed')">
           <h2>TTP harvesting</h2>
           <span class="meta" id="ttp-meta">clustered command sequences</span>
         </div>
+        <div class="panel-body">
         <table class="dense ttp-table" id="ttp-table">
           <thead>
             <tr>
@@ -1076,13 +1087,16 @@
             <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
           </tbody>
         </table>
+        </div>
       </section>
 
-      <section class="panel" id="panel-payloads">
-        <div class="panel-head">
+      <section class="panel panel-collapse" id="panel-payloads">
+        <div class="panel-head" onclick="this.parentElement.classList.toggle('collapsed')">
           <h2>Payload library</h2>
           <span class="meta" id="payloads-meta">captured binaries / scripts</span>
+          <button class="bz-btn" id="upload-all-btn" onclick="event.stopPropagation();uploadAllToBazaar(this)" style="margin-left:auto">▲ Upload All to MalwareBazaar</button>
         </div>
+        <div class="panel-body">
         <table class="dense" id="payloads-table">
           <thead>
             <tr>
@@ -1092,12 +1106,14 @@
               <th>last url</th>
               <th>last actor</th>
               <th>status</th>
+              <th style="width:78px">bazaar</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
+            <tr><td colspan="7"><div class="empty">loading…</div></td></tr>
           </tbody>
         </table>
+        </div>
       </section>
 
       <section class="panel" id="panel-wordlist">
@@ -1568,8 +1584,17 @@ function applyClientSearch() {
     if (!q) return true;
     return (row.textContent || '').toLowerCase().indexOf(q) >= 0;
   };
-  document.querySelectorAll('#actors-table tbody tr, #cmds-table tbody tr, #capture-table tbody tr').forEach(function(tr) {
-    tr.style.display = matches(tr) ? '' : 'none';
+  document.querySelectorAll(
+    '#actors-table tbody tr, #cmds-table tbody tr, #capture-table tbody tr,' +
+    '#sessions-list .sess-row,' +
+    '#ioc-table tbody tr,' +
+    '#ttp-table tbody tr, .ttp-row,' +
+    '#payloads-table tbody tr,' +
+    '#bazaar-table tbody tr,' +
+    '#deobf-rows .deobf-row,' +
+    '.tl-feed .tl-row'
+  ).forEach(function(el) {
+    el.style.display = matches(el) ? '' : 'none';
   });
 }
 
@@ -2071,7 +2096,7 @@ function renderPayloads(data) {
   meta.textContent = unique + ' unique · ' + totalCaptures + ' captures · ' + data.windowHours + 'h window';
 
   if (!data.rows || data.rows.length === 0) {
-    tb.innerHTML = '<tr><td colspan="6"><div class="empty">no captured payloads in window</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="7"><div class="empty">no captured payloads in window</div></td></tr>';
     return;
   }
   let html = '';
@@ -2086,6 +2111,7 @@ function renderPayloads(data) {
     const fanClass = occ === 1 ? 'pl-fan pl-fan-1' : 'pl-fan';
     const fanTitle = occ + 'x captured · ' + (p.urlCount || 0) + ' urls · ' + ips + ' ips · ' + actors + ' actors · ' + (p.sessionCount || 0) + ' sessions';
     const fan = '<span class="' + fanClass + '" title="' + escHtml(fanTitle) + '">' + occ + 'x · ' + ips + 'ip</span>';
+    const shareBtn = (sha !== '—' && p.hasLocal) ? '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>' : '<span style="color:var(--dim-2)">—</span>';
     html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="' + (p.hasLocal ? '1' : '0') + '">' +
       '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
       '<td class="num">' + fmtSize(p.sizeBytes) + '</td>' +
@@ -2093,6 +2119,7 @@ function renderPayloads(data) {
       '<td>' + url + '</td>' +
       '<td>' + escHtml(p.actor || '—') + '</td>' +
       '<td><span class="pl-' + escHtml(status) + '">' + escHtml(status) + '</span></td>' +
+      '<td>' + shareBtn + '</td>' +
       '</tr>';
   });
   tb.innerHTML = html;
@@ -2654,20 +2681,71 @@ function renderTimeline(events) {
   }).join('');
 }
 
-async function uploadToBazaar(sha,btn) {
-  if(!sha||btn.disabled)return;
-  btn.disabled=true;btn.textContent='uploading…';
-  try {
-    var r=await fetch('/api/intel/bazaar/upload?sha='+encodeURIComponent(sha),{method:'POST'});
-    var d=await r.json();
-    if(d.status==='inserted'||d.status==='file_already_known'){
-      btn.className='bz-btn ok';btn.textContent='✓ '+d.status;refreshBazaar();
-    } else if(d.status==='skipped'){
-      btn.disabled=false;btn.style.color='var(--warn)';btn.style.borderColor='var(--warn)';btn.textContent='skipped';
-    } else {
-      btn.className='bz-btn err';btn.textContent='✗ '+(d.error||d.status);
+async function uploadAllToBazaar(masterBtn) {
+  var rows = document.querySelectorAll('#payloads-table tbody tr[data-sha][data-has-local="1"]');
+  if (!rows.length) { masterBtn.textContent = 'no local payloads'; return; }
+  // filter out rows whose button already shows success
+  var pending = [];
+  for (var i = 0; i < rows.length; i++) {
+    var btn = rows[i].querySelector('.bz-btn');
+    if (btn && btn.classList.contains('ok')) continue;
+    var sha = rows[i].dataset.sha;
+    if (sha && sha !== '—') pending.push({sha: sha, row: rows[i], btn: btn});
+  }
+  if (!pending.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ all shared'; return; }
+  masterBtn.disabled = true;
+  var total = pending.length, done = 0, ok = 0, skip = 0, fail = 0;
+  masterBtn.textContent = '0/' + total + ' uploading…';
+  for (var j = 0; j < pending.length; j++) {
+    var p = pending[j];
+    if (p.btn) { p.btn.disabled = true; p.btn.textContent = 'uploading…'; }
+    try {
+      var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(p.sha), {method:'POST'});
+      var d = await r.json();
+      if (d.status === 'inserted' || d.status === 'file_already_known') {
+        ok++;
+        if (p.btn) { p.btn.className = 'bz-btn ok'; p.btn.textContent = '✓ ' + d.status; }
+      } else if (d.status === 'already_shared') {
+        skip++;
+        if (p.btn) { p.btn.className = 'bz-btn ok'; p.btn.textContent = '✓ shared'; }
+      } else {
+        fail++;
+        if (p.btn) { p.btn.className = 'bz-btn err'; p.btn.textContent = '✗ ' + (d.error || d.status); }
+      }
+    } catch(e) {
+      fail++;
+      if (p.btn) { p.btn.className = 'bz-btn err'; p.btn.textContent = '✗ error'; }
     }
-  }catch(e){btn.className='bz-btn err';btn.textContent='✗ error'}
+    done++;
+    masterBtn.textContent = done + '/' + total + (fail ? ' (' + fail + ' err)' : '');
+    // rate-limit: 2.5s between uploads (abuse.ch fair use)
+    if (j < pending.length - 1) await new Promise(function(ok){ setTimeout(ok, 2500); });
+  }
+  masterBtn.className = fail ? 'bz-btn err' : 'bz-btn ok';
+  var msg = ok + ' new';
+  if (skip) msg += ', ' + skip + ' known';
+  if (fail) msg += ', ' + fail + ' failed';
+  masterBtn.textContent = '✓ ' + msg;
+  masterBtn.disabled = false;
+  refreshBazaar();
+}
+
+async function uploadToBazaar(sha,btn) {
+  if (!sha || btn.disabled) return;
+  btn.disabled = true; btn.textContent = 'uploading…';
+  try {
+    var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(sha), {method:'POST'});
+    var d = await r.json();
+    if (d.status === 'inserted' || d.status === 'file_already_known') {
+      btn.className = 'bz-btn ok'; btn.textContent = '✓ ' + d.status; refreshBazaar();
+    } else if (d.status === 'already_shared') {
+      btn.className = 'bz-btn ok'; btn.textContent = '✓ shared';
+    } else if (d.status === 'skipped') {
+      btn.disabled = false; btn.textContent = 'skipped'; btn.style.color = 'var(--warn)';
+    } else {
+      btn.className = 'bz-btn err'; btn.textContent = '✗ ' + (d.error || d.status);
+    }
+  } catch(e) { btn.className = 'bz-btn err'; btn.textContent = '✗ error'; }
 }
 
 refreshCreds();

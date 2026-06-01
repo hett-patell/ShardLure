@@ -1023,20 +1023,22 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing sha", http.StatusBadRequest)
 		return
 	}
-	apiKey := os.Getenv("SHARDLURE_BAZAAR_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("SHARDLURE_BAZAAR_API_KEY")
-	}
-	if apiKey == "" {
-		w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json")
+
+	if s.bazaarKey == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "bazaar API key not configured (set SHARDLURE_BAZAAR_KEY)"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "bazaar API key not configured"})
+		return
+	}
+
+	already, _ := s.st.BazaarUploadRecorded(sha)
+	if already {
+		json.NewEncoder(w).Encode(map[string]string{"status": "already_shared", "mbUrl": "https://bazaar.abuse.ch/sample/" + sha + "/"})
 		return
 	}
 
 	art, err := s.st.GetArtifactBySHA(sha)
 	if err != nil || art == nil {
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "artifact not found"})
 		return
@@ -1049,10 +1051,10 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	rec := &bazaarRecorderAdapter{st: s.st}
 	var result *bazaar.Result
 	opts := bazaar.Options{
-		APIKey:    apiKey,
-		Endpoint:  "https://mb-api.abuse.ch/api/v1/",
-		ExtraTags: []string{"shardlure", "honeypot"},
-		MaxBytes:  33 << 20,
+		APIKey:    s.bazaarKey,
+		Endpoint:  s.bazaarEndpoint,
+		ExtraTags: s.bazaarTags,
+		MaxBytes:  s.bazaarMaxBytes,
 		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, _ error) {
 			result = r
 		},
@@ -1074,7 +1076,6 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp.Status = "skipped"
 	}
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
