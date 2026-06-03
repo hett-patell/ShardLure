@@ -29,6 +29,14 @@ type Classification struct {
 // tags poison MalwareBazaar's signature index and embarrass the
 // uploader. When in doubt, omit the family tag and let the abuse.ch
 // pipeline (YARA, ClamAV, telfhash lookup) classify it server side.
+// classifyScanBytes bounds the single up-front read. 256 KiB covers the ELF
+// header + the data-section window where family strings live, every shebang,
+// and the script-dropper fingerprints near the top of a file. Reading it once
+// and reusing the buffer for magic + arch + family avoids the previous 3-4
+// os.Open/io.ReadFull round-trips per sample (head sniff, elf.Open, family
+// scan, script re-read).
+const classifyScanBytes = 256 * 1024
+
 func Classify(path string) (Classification, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -36,42 +44,38 @@ func Classify(path string) (Classification, error) {
 	}
 	defer f.Close()
 
-	// 4 KiB is enough for ELF EI_NIDENT + arch fields, every shebang
-	// we care about, and the early-script signature strings we look
-	// for (RedTail's "redtail" sentinel sits on line ~30, etc.). For
-	// longer evidence we read further below.
-	head := make([]byte, 4096)
-	n, _ := io.ReadFull(f, head)
-	head = head[:n]
+	buf := make([]byte, classifyScanBytes)
+	n, _ := io.ReadFull(f, buf)
+	buf = buf[:n]
 
 	c := Classification{}
 
 	switch {
-	case bytes.HasPrefix(head, []byte{0x7f, 'E', 'L', 'F'}):
-		classifyELF(path, &c)
-	case bytes.HasPrefix(head, []byte("MZ")):
+	case bytes.HasPrefix(buf, []byte{0x7f, 'E', 'L', 'F'}):
+		classifyELF(buf, &c)
+	case bytes.HasPrefix(buf, []byte("MZ")):
 		c.FileKind = "PE executable"
 		c.Tags = append(c.Tags, "exe")
-	case bytes.HasPrefix(head, []byte("#!")):
-		classifyScript(path, head, &c)
+	case bytes.HasPrefix(buf, []byte("#!")):
+		classifyScript(buf, &c)
 	default:
 		// No shebang and no ELF/PE magic — but cowrie often captures
 		// Python tooling that's just been `cat >` into a file without
 		// the shebang line. Sniff for Python-shaped content before
 		// giving up and tagging "unknown".
 		switch {
-		case looksLikePython(head):
+		case looksLikePython(buf):
 			c.FileKind = "Python (no shebang)"
 			c.Tags = append(c.Tags, "python", "script")
-			classifyScriptFamily(path, head, &c)
-		case looksLikeShellWithSCPHeader(head):
+			classifyScriptFamily(buf, &c)
+		case looksLikeShellWithSCPHeader(buf):
 			// Cowrie captured an scp transfer; the upstream "C0755
 			// 4745 ..." line is scp wire framing prepended to the
 			// real payload. Treat the file as the shell script it
 			// almost is.
 			c.FileKind = "Shell script (scp-framed)"
 			c.Tags = append(c.Tags, "bash", "script")
-			classifyScriptFamily(path, head, &c)
+			classifyScriptFamily(buf, &c)
 		default:
 			c.FileKind = "unknown"
 			c.Tags = append(c.Tags, "unknown")
@@ -90,10 +94,13 @@ func Classify(path string) (Classification, error) {
 // We open with debug/elf rather than parsing by hand because the
 // e_machine field encoding is annoyingly broad (EM_ARM, EM_AARCH64,
 // EM_X86_64, EM_386, EM_MIPS, EM_MIPSEL, EM_PPC, EM_PPC64, ...).
-func classifyELF(path string, c *Classification) {
+func classifyELF(buf []byte, c *Classification) {
 	c.FileKind = "ELF"
 	c.Tags = append(c.Tags, "elf")
-	ef, err := elf.Open(path)
+	// Parse from the already-read buffer. elf.NewFile reads the header and
+	// program headers from the ReaderAt; the 256 KiB buffer comfortably
+	// covers both for any real-world dropper.
+	ef, err := elf.NewFile(bytes.NewReader(buf))
 	if err != nil {
 		return
 	}
@@ -123,7 +130,7 @@ func classifyELF(path string, c *Classification) {
 	// head sweep: bigger scans cost real wall-clock time and the
 	// distinctive strings live in the data section near the top of
 	// the binary in practice.
-	if fam, famTags := matchELFFamily(path); fam != "" {
+	if fam, famTags := matchELFFamily(buf); fam != "" {
 		c.Family = fam
 		c.Tags = append(c.Tags, famTags...)
 	}
@@ -142,15 +149,7 @@ func isStaticELF(ef *elf.File) bool {
 // indicators. Returns (signature, extra-tags). The signature is the
 // abuse.ch family slug; the tags are descriptive ones we want on the
 // upload even if the family guess is wrong.
-func matchELFFamily(path string) (string, []string) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", nil
-	}
-	defer f.Close()
-	buf := make([]byte, 256*1024)
-	n, _ := io.ReadFull(f, buf)
-	buf = buf[:n]
+func matchELFFamily(buf []byte) (string, []string) {
 	low := bytes.ToLower(buf)
 	switch {
 	case bytes.Contains(low, []byte("redtail")):
@@ -181,8 +180,8 @@ func matchELFFamily(path string) (string, []string) {
 // honeypot droppers identify themselves loudly in their first few
 // hundred bytes ("# RedTail loader", URLs containing "/c3pool/", the
 // telltale traffmonetizer Docker pull, ...).
-func classifyScript(path string, head []byte, c *Classification) {
-	shebang := firstLine(head)
+func classifyScript(buf []byte, c *Classification) {
+	shebang := firstLine(buf)
 	low := strings.ToLower(shebang)
 	switch {
 	case strings.Contains(low, "python"):
@@ -201,20 +200,17 @@ func classifyScript(path string, head []byte, c *Classification) {
 		c.FileKind = "Script"
 		c.Tags = append(c.Tags, "script")
 	}
-	classifyScriptFamily(path, head, c)
+	classifyScriptFamily(buf, c)
 }
 
 // classifyScriptFamily inspects the body of a script for known
 // family fingerprints. Split out so both the shebang path and the
 // "headerless Python" path can use it without duplication.
-func classifyScriptFamily(path string, head []byte, c *Classification) {
-	// Read up to 32 KiB to scan for family fingerprints — script
-	// droppers vary in size but the fingerprint sits near the top
-	// (config block, URLs, comments).
-	if extra := readMore(path, head, 32*1024); extra != nil {
-		head = extra
-	}
-	low2 := strings.ToLower(string(head))
+func classifyScriptFamily(buf []byte, c *Classification) {
+	// Script droppers carry their fingerprint near the top (config block,
+	// URLs, comments). buf already holds up to classifyScanBytes, so scan it
+	// directly instead of re-reading the file.
+	low2 := strings.ToLower(string(buf))
 	switch {
 	case strings.Contains(low2, "redtail"):
 		c.Family = "RedTail"
@@ -313,19 +309,6 @@ func firstLine(b []byte) string {
 		return sc.Text()
 	}
 	return ""
-}
-
-// readMore returns up to max bytes of path. Falls back to head if the
-// file can't be re-opened (caller already has at least head bytes).
-func readMore(path string, head []byte, max int) []byte {
-	f, err := os.Open(path)
-	if err != nil {
-		return head
-	}
-	defer f.Close()
-	buf := make([]byte, max)
-	n, _ := io.ReadFull(f, buf)
-	return buf[:n]
 }
 
 func containsTag(tags []string, want string) bool {

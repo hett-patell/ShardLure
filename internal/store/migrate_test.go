@@ -145,3 +145,48 @@ func tableColumns(s *Store, name string) (map[string]bool, error) {
 	}
 	return out, rows.Err()
 }
+
+// indexNames returns the set of index names defined on the database.
+func indexNames(s *Store) (map[string]bool, error) {
+	rows, err := s.db.Query(`SELECT name FROM sqlite_master WHERE type='index'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out[n] = true
+	}
+	return out, rows.Err()
+}
+
+// TestPerformanceIndexesPresent locks in the v6 + artifact indexes added to
+// avoid full-table scans on the dashboard aggregation and artifact queries.
+func TestPerformanceIndexesPresent(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "idx.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	// Force lazy artifact table (and its indexes) into existence.
+	if err := s.ensureArtifactsTable(); err != nil {
+		t.Fatalf("ensureArtifactsTable: %v", err)
+	}
+	idx, err := indexNames(s)
+	if err != nil {
+		t.Fatalf("indexNames: %v", err)
+	}
+	want := []string{
+		"idx_events_username", "idx_events_command", "idx_actors_last_seen",
+		"idx_artifacts_sha256", "idx_artifacts_session", "idx_artifacts_created",
+	}
+	for _, w := range want {
+		if !idx[w] {
+			t.Errorf("missing index %q", w)
+		}
+	}
+}

@@ -7,13 +7,14 @@ import (
 )
 
 var (
+	// reHTTP matches any http(s) URL token. It supersedes the old curl/wget
+	// helpers: those only ever captured `https?://\S+`, which this already
+	// matches (and more tightly — it also stops at quotes/angle brackets), so
+	// the dedup map dropped every curl/wget hit as a duplicate. Dropping the
+	// extra passes removes two full-text regex scans per command.
 	reHTTP = regexp.MustCompile(`https?://[^\s"'<>]+`)
-	// curl ... <url>  — leading flags chunk matches non-greedy because curl
-	// commonly has -o/--output flags before the URL. We don't actually need
-	// to capture the local file path: reHTTP picks the URL up regardless,
-	// and the URL-prefix gate below filters anything that's not a URL.
-	reCurl = regexp.MustCompile(`(?i)curl\s+[^\s;|&]*\s+(https?://\S+)`)
-	reWget = regexp.MustCompile(`(?i)wget\s+(?:[^\s;|&]*\s+)*?(https?://\S+)`)
+	// reDevTCP catches bash's /dev/tcp/<host>/<port> reverse-shell form, which
+	// reHTTP genuinely does not cover.
 	reDevTCP = regexp.MustCompile(`(?i)/dev/tcp/([^/\s]+)/(\d+)`)
 )
 
@@ -40,18 +41,6 @@ func ExtractURLs(command string) []string {
 
 	for _, m := range reHTTP.FindAllString(command, -1) {
 		add(m)
-	}
-	for _, m := range reWget.FindAllStringSubmatch(command, -1) {
-		if len(m) > 1 {
-			add(m[1])
-		}
-	}
-	for _, m := range reCurl.FindAllStringSubmatch(command, -1) {
-		for i := 1; i < len(m); i++ {
-			if strings.HasPrefix(m[i], "http://") || strings.HasPrefix(m[i], "https://") {
-				add(m[i])
-			}
-		}
 	}
 	for _, m := range reDevTCP.FindAllStringSubmatch(command, -1) {
 		if len(m) >= 3 {

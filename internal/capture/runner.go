@@ -274,14 +274,17 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 		if ent.IsDir() {
 			continue
 		}
-		src := filepath.Join(dl, ent.Name())
-		sum, size, err := copyArtifact(src, filepath.Join(dest, ent.Name()))
-		if err != nil {
-			continue
-		}
+		// Dedup BEFORE the expensive copy+hash: urlKey is derived from the
+		// filename, which we already have, so an already-archived download
+		// can be skipped without re-reading and re-hashing it every tick.
 		urlKey := "cowrie-download:" + ent.Name()
 		exists, err := r.st.ArtifactURLRecorded(urlKey)
 		if err != nil || exists {
+			continue
+		}
+		src := filepath.Join(dl, ent.Name())
+		sum, size, err := copyArtifact(src, filepath.Join(dest, ent.Name()))
+		if err != nil {
 			continue
 		}
 		if err := r.st.RecordArtifact(store.Artifact{

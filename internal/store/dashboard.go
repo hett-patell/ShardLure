@@ -39,15 +39,26 @@ func (s *Store) UniqueIPCount() (int, error) {
 }
 
 func (s *Store) HourlyEventCounts(limit int) ([]HourCount, error) {
-	// events.ts is stored as RFC3339Nano UTC text, so the first 13 bytes are YYYY-MM-DDTHH.
+	if limit <= 0 {
+		limit = 72
+	}
+	// events.ts is stored as RFC3339Nano UTC text, so the first 13 bytes are
+	// YYYY-MM-DDTHH. Bound the scan to the requested window (limit hours back,
+	// +1h margin so the partial current hour is included) so idx_events_ts
+	// restricts the rows instead of grouping the entire events table on every
+	// dashboard render. The dashboard asks for "the last N hours", so a time
+	// bound also matches intent better than an all-time top-N which could
+	// surface stale hours when recent traffic is sparse.
+	cutoff := time.Now().UTC().Add(-time.Duration(limit+1) * time.Hour).Format(time.RFC3339Nano)
 	rows, err := s.db.Query(`
 SELECT hour, hits FROM (
   SELECT substr(ts, 1, 13) AS hour, COUNT(*) AS hits
   FROM events
+  WHERE ts >= ?
   GROUP BY hour
   ORDER BY hour DESC
   LIMIT ?
-) ORDER BY hour ASC`, limit)
+) ORDER BY hour ASC`, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}

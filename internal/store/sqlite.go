@@ -260,6 +260,29 @@ CREATE INDEX IF NOT EXISTS idx_bazaar_uploads_ts ON bazaar_uploads(uploaded_at);
 			return err
 		}
 	}
+
+	// v6: indexes for dashboard aggregation queries that previously
+	// full-scanned the events/actors tables on every render:
+	//   - TopUsernames GROUP BY username  -> idx_events_username
+	//   - TopCommands  GROUP BY command   -> idx_events_command
+	//   - ListActors / actor retention ORDER BY last_seen -> idx_actors_last_seen
+	// (TopSourceIPs already had idx_events_ip.) These touch tables created
+	// in the base schema, so they belong in the migration ladder; the
+	// artifacts indexes live in ensureArtifactsTable since that table is
+	// created lazily.
+	if current < 6 {
+		const v6Idx = `
+CREATE INDEX IF NOT EXISTS idx_events_username ON events(username);
+CREATE INDEX IF NOT EXISTS idx_events_command ON events(command);
+CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
+`
+		if _, err := s.db.Exec(v6Idx); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
