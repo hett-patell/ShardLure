@@ -240,6 +240,30 @@ shardlure ingest journal ~/journal-ssh-30d.log --replace
 
 All credentials are intentionally fake. Regenerate bait values per deployment so multiple honeypots are not fingerprinted by identical decoys.
 
+## IP Reputation Enrichment
+
+The intel console's enrichment panel looks up any attacker IP against multiple
+threat-intel providers in parallel, normalizes each into a verdict
+(malicious / suspicious / benign / unknown) + score + tags, and caches results
+for 24h in SQLite so you don't burn free-tier rate limits. Every provider is
+opt-in via an environment variable; missing keys render as "not configured"
+rather than failing the panel. Two providers are keyless and work out of the
+box.
+
+| Provider | Env var | Key? | Signal |
+| --- | --- | --- | --- |
+| AbuseIPDB | `SHARDLURE_ABUSEIPDB_KEY` | yes | Abuse-confidence score + report history |
+| VirusTotal | `SHARDLURE_VT_KEY` | yes | Multi-engine detections |
+| GreyNoise (community) | `SHARDLURE_GREYNOISE_KEY` | no (optional) | Internet-noise classification |
+| Shodan InternetDB | — | no | Open ports, CPEs, known CVEs, host tags |
+| AlienVault OTX | `SHARDLURE_OTX_KEY` | yes | Community pulse reputation + campaign tags |
+| IPQualityScore | `SHARDLURE_IPQS_KEY` | yes | Fraud score + proxy / VPN / TOR / bot flags |
+| IPinfo | `SHARDLURE_IPINFO_KEY` | yes | ASN / org / geo + privacy (hosting/proxy/vpn/tor) flags |
+
+Set whichever keys you have (in your shell or the systemd unit) before running
+`web` or `live`. Results are fail-open: a provider that errors or lacks a key
+never blocks the others.
+
 ## Threat Intel Sharing (MalwareBazaar)
 
 `shardlure share bazaar` submits captured payloads to [abuse.ch MalwareBazaar](https://bazaar.abuse.ch/). Each upload is automatically classified (ELF arch, static-vs-dynamic linkage, scripting language, and a short list of well-known family fingerprints — RedTail, Mirai, Komari, Traffmonetizer, XMRig, c3pool) and tagged. abuse.ch's server-side analysis (YARA, ClamAV, telfhash) then bolts on the heavy-duty signatures.

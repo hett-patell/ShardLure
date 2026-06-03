@@ -1,10 +1,14 @@
 // Package enrich provides cached threat-intelligence lookups for IPv4
-// addresses observed in the honeypot. Three providers are supported:
+// addresses observed in the honeypot. Seven providers are supported:
 //
 //   - AbuseIPDB (key required: SHARDLURE_ABUSEIPDB_KEY)
 //   - VirusTotal (key required: SHARDLURE_VT_KEY)
 //   - GreyNoise community (no key needed; SHARDLURE_GREYNOISE_KEY may
 //     be set to use the paid endpoint instead)
+//   - Shodan InternetDB (no key needed; open ports / CPEs / vulns / tags)
+//   - AlienVault OTX (key required: SHARDLURE_OTX_KEY; pulse reputation)
+//   - IPQualityScore (key required: SHARDLURE_IPQS_KEY; fraud score + proxy/VPN/TOR)
+//   - IPinfo (key required: SHARDLURE_IPINFO_KEY; ASN/geo + privacy flags)
 //
 // All keys are read from environment variables. The package is
 // fail-open: missing keys, network errors and non-2xx responses
@@ -60,6 +64,10 @@ const (
 	ProviderAbuseIPDB  = "abuseipdb"
 	ProviderVirusTotal = "virustotal"
 	ProviderGreyNoise  = "greynoise"
+	ProviderShodan     = "shodan"
+	ProviderOTX        = "otx"
+	ProviderIPQS       = "ipqualityscore"
+	ProviderIPinfo     = "ipinfo"
 )
 
 // Resolver coordinates cached lookups across all providers.
@@ -90,6 +98,10 @@ func (r *Resolver) LookupAll(ctx context.Context, ip string) []Result {
 		r.lookup(ctx, ip, ProviderAbuseIPDB, fetchAbuseIPDB),
 		r.lookup(ctx, ip, ProviderVirusTotal, fetchVirusTotal),
 		r.lookup(ctx, ip, ProviderGreyNoise, fetchGreyNoise),
+		r.lookup(ctx, ip, ProviderShodan, fetchShodan),
+		r.lookup(ctx, ip, ProviderOTX, fetchOTX),
+		r.lookup(ctx, ip, ProviderIPQS, fetchIPQualityScore),
+		r.lookup(ctx, ip, ProviderIPinfo, fetchIPinfo),
 	}
 }
 

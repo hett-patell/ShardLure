@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,9 @@ func newTestStore(t *testing.T) *store.Store {
 func TestLookupNoKeysIsFastAndFailOpen(t *testing.T) {
 	t.Setenv("SHARDLURE_ABUSEIPDB_KEY", "")
 	t.Setenv("SHARDLURE_VT_KEY", "")
+	t.Setenv("SHARDLURE_OTX_KEY", "")
+	t.Setenv("SHARDLURE_IPQS_KEY", "")
+	t.Setenv("SHARDLURE_IPINFO_KEY", "")
 
 	st := newTestStore(t)
 	r := &Resolver{St: st, HTTP: &http.Client{Timeout: 1 * time.Second}, Now: time.Now}
@@ -48,17 +52,29 @@ func TestLookupNoKeysIsFastAndFailOpen(t *testing.T) {
 	results := r.LookupAll(context.Background(), "1.2.3.4")
 	elapsed := time.Since(start)
 
-	if len(results) != 3 {
-		t.Fatalf("want 3 results, got %d", len(results))
+	if len(results) != 7 {
+		t.Fatalf("want 7 results, got %d", len(results))
 	}
-	if results[0].Source != ProviderAbuseIPDB || results[0].Configured {
-		t.Errorf("AbuseIPDB should be unconfigured: %+v", results[0])
+	// Index into the stable fan-out order from LookupAll.
+	bySource := map[string]Result{}
+	for _, r := range results {
+		bySource[r.Source] = r
 	}
-	if results[1].Source != ProviderVirusTotal || results[1].Configured {
-		t.Errorf("VirusTotal should be unconfigured: %+v", results[1])
+	// Keyed providers must report unconfigured when their env key is unset.
+	for _, p := range []string{ProviderAbuseIPDB, ProviderVirusTotal, ProviderOTX, ProviderIPQS, ProviderIPinfo} {
+		if r, ok := bySource[p]; !ok {
+			t.Errorf("missing result for %s", p)
+		} else if r.Configured {
+			t.Errorf("%s should be unconfigured without a key: %+v", p, r)
+		}
 	}
-	if results[2].Source != ProviderGreyNoise || !results[2].Configured {
-		t.Errorf("GreyNoise should be configured (keyless): %+v", results[2])
+	// Keyless providers (community/free endpoints) are always "configured".
+	for _, p := range []string{ProviderGreyNoise, ProviderShodan} {
+		if r, ok := bySource[p]; !ok {
+			t.Errorf("missing result for %s", p)
+		} else if !r.Configured {
+			t.Errorf("%s should be configured (keyless): %+v", p, r)
+		}
 	}
 	// AbuseIPDB+VT should be near-instant since they never touch the
 	// network when unconfigured. GreyNoise may take up to its timeout.
@@ -126,4 +142,101 @@ func TestStaleFallback(t *testing.T) {
 	if res.Error == "" {
 		t.Errorf("expected error to be propagated for ops visibility")
 	}
+}
+
+// --- Hermetic parser tests for the added providers (no network). ---
+
+func TestParseShodan(t *testing.T) {
+	raw := []byte(`{"ip":"1.2.3.4","ports":[22,80,2222],"cpes":["cpe:/a:openbsd:openssh"],"tags":["scanner","compromised"],"vulns":["CVE-2021-44228"]}`)
+	r := parseShodan(raw, "1.2.3.4")
+	if !r.Configured {
+		t.Error("shodan should be configured (keyless)")
+	}
+	if r.Verdict != "suspicious" {
+		t.Errorf("vuln+suspicious-tag should yield suspicious, got %q", r.Verdict)
+	}
+	if !containsStr(r.Tags, "port:22") || !containsStr(r.Tags, "scanner") {
+		t.Errorf("expected port + tag entries, got %v", r.Tags)
+	}
+	if !strings.Contains(r.Summary, "CVE-2021-44228") {
+		t.Errorf("summary should mention the CVE, got %q", r.Summary)
+	}
+
+	// Benign host: ports but no vulns/suspicious tags.
+	r2 := parseShodan([]byte(`{"ports":[443]}`), "5.6.7.8")
+	if r2.Verdict != "benign" {
+		t.Errorf("ports-only host should be benign, got %q", r2.Verdict)
+	}
+}
+
+func TestParseOTX(t *testing.T) {
+	raw := []byte(`{"pulse_info":{"count":6,"pulses":[{"name":"Mirai C2","tags":["mirai","botnet"]}]},"asn":"AS12345 Evil ISP","country_name":"Nowhere"}`)
+	r := parseOTX(raw, "1.2.3.4")
+	if r.Verdict != "malicious" {
+		t.Errorf("6 pulses should be malicious, got %q", r.Verdict)
+	}
+	if r.ASN != "AS12345" || r.ASOwner != "Evil ISP" {
+		t.Errorf("ASN split wrong: asn=%q owner=%q", r.ASN, r.ASOwner)
+	}
+	if !containsStr(r.Tags, "mirai") {
+		t.Errorf("expected pulse tags, got %v", r.Tags)
+	}
+	if r.Score == nil || *r.Score != 100 { // 6*20 capped at 100
+		t.Errorf("score should cap at 100, got %v", r.Score)
+	}
+
+	// Zero pulses = benign.
+	if parseOTX([]byte(`{"pulse_info":{"count":0}}`), "9.9.9.9").Verdict != "benign" {
+		t.Error("0 pulses should be benign")
+	}
+}
+
+func TestParseIPQS(t *testing.T) {
+	raw := []byte(`{"success":true,"fraud_score":90,"country_code":"US","ISP":"Acme","ASN":15169,"proxy":true,"vpn":true,"tor":false,"recent_abuse":true}`)
+	r := parseIPQS(raw, "1.2.3.4")
+	if r.Verdict != "malicious" {
+		t.Errorf("score 90 should be malicious, got %q", r.Verdict)
+	}
+	if r.Score == nil || *r.Score != 90 {
+		t.Errorf("score not mapped: %v", r.Score)
+	}
+	if r.ASN != "AS15169" {
+		t.Errorf("ASN format wrong: %q", r.ASN)
+	}
+	for _, want := range []string{"proxy", "vpn", "recent-abuse"} {
+		if !containsStr(r.Tags, want) {
+			t.Errorf("missing tag %q in %v", want, r.Tags)
+		}
+	}
+
+	// Unsuccessful response surfaces an error.
+	if parseIPQS([]byte(`{"success":false,"message":"Invalid key"}`), "9.9.9.9").Error == "" {
+		t.Error("unsuccessful IPQS response should set Error")
+	}
+}
+
+func TestParseIPinfo(t *testing.T) {
+	raw := []byte(`{"ip":"1.2.3.4","city":"Ashburn","region":"Virginia","country":"US","org":"AS14618 Amazon","privacy":{"hosting":true,"vpn":true}}`)
+	r := parseIPinfo(raw, "1.2.3.4")
+	if r.ASN != "AS14618" || r.ASOwner != "Amazon" {
+		t.Errorf("org->ASN split wrong: asn=%q owner=%q", r.ASN, r.ASOwner)
+	}
+	if r.Verdict != "suspicious" { // vpn flag
+		t.Errorf("vpn flag should make it suspicious, got %q", r.Verdict)
+	}
+	if !containsStr(r.Tags, "hosting") || !containsStr(r.Tags, "vpn") {
+		t.Errorf("missing privacy tags: %v", r.Tags)
+	}
+	if !strings.Contains(r.Summary, "Ashburn") {
+		t.Errorf("summary should include geo, got %q", r.Summary)
+	}
+}
+
+func containsStr(s []string, want string) bool {
+	for _, v := range s {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
