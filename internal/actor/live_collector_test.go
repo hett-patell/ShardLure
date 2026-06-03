@@ -29,7 +29,7 @@ func TestLiveCollectorEvictsByLRU(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	admin := map[string]bool{}
+	admin := AdminSet(nil)
 
 	// 32 distinct IPs > cap of 8.
 	for i := 0; i < 32; i++ {
@@ -84,7 +84,7 @@ func TestLiveCollectorHydratesEvictedIP(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	admin := map[string]bool{}
+	admin := AdminSet(nil)
 
 	// Burn 5 events into target IP, then push 4 different IPs to
 	// guarantee eviction (cap is 2).
@@ -174,7 +174,7 @@ func TestLiveCollectorPerIPUserCap(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	admin := map[string]bool{}
+	admin := AdminSet(nil)
 
 	ip := "192.0.2.99"
 	// 20 distinct usernames > cap of 4.

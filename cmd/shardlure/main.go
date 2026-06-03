@@ -20,6 +20,7 @@ import (
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/ingest/cowrie"
 	"github.com/networkshard/shardlure/internal/ingest/journal"
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/internal/web"
 	"github.com/networkshard/shardlure/tui"
@@ -48,6 +49,13 @@ func main() {
 	cfg, err := config.Load(path)
 	if err != nil {
 		fatal(err)
+	}
+	// admin_ips entries may be bare IPs or CIDR ranges. Anything that parses
+	// as neither would silently match no traffic (and previously did so with
+	// no signal), so warn loudly rather than treat the operator's own
+	// addresses as attacker telemetry.
+	if bad := netmatch.Invalid(cfg.AdminIPs); len(bad) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: ignoring unparseable admin_ips entries (not an IP or CIDR): %s\n", strings.Join(bad, ", "))
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		fatal(err)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
@@ -79,9 +80,9 @@ func CowrieActorID(srcIP, hassh string) string {
 // AssignJournalActorIDs stamps ActorID on every non-admin journal event in
 // the slice. Admin events are intentionally left blank so the join in the
 // dashboard never associates real operators with an attacker actor.
-func AssignJournalActorIDs(events []*models.Event, adminIPs map[string]bool) {
+func AssignJournalActorIDs(events []*models.Event, adminIPs *netmatch.Set) {
 	for _, e := range events {
-		if e == nil || e.SrcIP == "" || adminIPs[e.SrcIP] {
+		if e == nil || e.SrcIP == "" || adminIPs.Has(e.SrcIP) {
 			continue
 		}
 		e.ActorID = JournalActorID(e.SrcIP)
@@ -89,9 +90,9 @@ func AssignJournalActorIDs(events []*models.Event, adminIPs map[string]bool) {
 }
 
 // AssignCowrieActorIDs is the cowrie analogue of AssignJournalActorIDs.
-func AssignCowrieActorIDs(events []*models.Event, adminIPs map[string]bool) {
+func AssignCowrieActorIDs(events []*models.Event, adminIPs *netmatch.Set) {
 	for _, e := range events {
-		if e == nil || e.SrcIP == "" || adminIPs[e.SrcIP] {
+		if e == nil || e.SrcIP == "" || adminIPs.Has(e.SrcIP) {
 			continue
 		}
 		e.ActorID = CowrieActorID(e.SrcIP, e.HASSH)
@@ -113,7 +114,7 @@ const (
 const minWindowHours = 0.25
 
 // BuildFromJournal groups journal events into actors (1 IP = 1 actor for journal mode).
-func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) []*models.Actor {
+func BuildFromJournal(events []*models.Event, adminIPs *netmatch.Set) []*models.Actor {
 	agg := BuildFromJournalAggregated(events, adminIPs)
 	out := make([]*models.Actor, 0, len(agg))
 	for _, a := range agg {
@@ -125,7 +126,7 @@ func BuildFromJournal(events []*models.Event, adminIPs map[string]bool) []*model
 // BuildFromJournalAggregated returns actors with the per-IP and per-user
 // stats the builder already computed so the persistence layer does not need
 // to scan events a second time.
-func BuildFromJournalAggregated(events []*models.Event, adminIPs map[string]bool) []*AggregatedActor {
+func BuildFromJournalAggregated(events []*models.Event, adminIPs *netmatch.Set) []*AggregatedActor {
 	jc := newJournalCollector(adminIPs)
 	for _, e := range events {
 		jc.add(e)
@@ -138,7 +139,7 @@ func BuildFromJournalAggregated(events []*models.Event, adminIPs map[string]bool
 // caller passes a function that, when invoked, yields the next event or
 // (nil, io.EOF) when done. Used by the ingest path so we don't materialize
 // every persisted journal event in memory just to recompute actors.
-func BuildJournalActorsStreaming(next func() (*models.Event, error), adminIPs map[string]bool) ([]*AggregatedActor, error) {
+func BuildJournalActorsStreaming(next func() (*models.Event, error), adminIPs *netmatch.Set) ([]*AggregatedActor, error) {
 	jc := newJournalCollector(adminIPs)
 	for {
 		e, err := next()
@@ -161,15 +162,15 @@ func BuildJournalActorsStreaming(next func() (*models.Event, error), adminIPs ma
 type JournalCollector = journalCollector
 
 type journalCollector struct {
-	admin map[string]bool
+	admin *netmatch.Set
 	byIP  map[string]*IPStats
 }
 
-func NewJournalCollector(adminIPs map[string]bool) *JournalCollector {
+func NewJournalCollector(adminIPs *netmatch.Set) *JournalCollector {
 	return newJournalCollector(adminIPs)
 }
 
-func newJournalCollector(adminIPs map[string]bool) *journalCollector {
+func newJournalCollector(adminIPs *netmatch.Set) *journalCollector {
 	return &journalCollector{admin: adminIPs, byIP: map[string]*IPStats{}}
 }
 
@@ -203,7 +204,7 @@ func (c *journalCollector) FinalizeIP(ip string) *AggregatedActor {
 }
 
 func (c *journalCollector) add(e *models.Event) {
-	if e == nil || e.SrcIP == "" || c.admin[e.SrcIP] {
+	if e == nil || e.SrcIP == "" || c.admin.Has(e.SrcIP) {
 		return
 	}
 	st, ok := c.byIP[e.SrcIP]
@@ -290,7 +291,7 @@ func buildJournalActor(ip string, st *IPStats, copyUsers bool) *AggregatedActor 
 }
 
 // BuildFromCowrie groups events by HASSH (fallback: source IP).
-func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) []*models.Actor {
+func BuildFromCowrie(events []*models.Event, adminIPs *netmatch.Set) []*models.Actor {
 	agg := BuildFromCowrieAggregated(events, adminIPs)
 	out := make([]*models.Actor, 0, len(agg))
 	for _, a := range agg {
@@ -302,7 +303,7 @@ func BuildFromCowrie(events []*models.Event, adminIPs map[string]bool) []*models
 // BuildFromCowrieAggregated mirrors BuildFromCowrie but returns the per-IP
 // and per-user stats the builder already computed so the persistence layer
 // does not need to re-walk events. See writeActorsTx.
-func BuildFromCowrieAggregated(events []*models.Event, adminIPs map[string]bool) []*AggregatedActor {
+func BuildFromCowrieAggregated(events []*models.Event, adminIPs *netmatch.Set) []*AggregatedActor {
 	cc := newCowrieCollector(adminIPs)
 	for _, e := range events {
 		cc.add(e)
@@ -313,7 +314,7 @@ func BuildFromCowrieAggregated(events []*models.Event, adminIPs map[string]bool)
 // BuildCowrieActorsStreaming is the streaming analogue of
 // BuildFromCowrieAggregated. See BuildJournalActorsStreaming for the
 // memory rationale.
-func BuildCowrieActorsStreaming(next func() (*models.Event, error), adminIPs map[string]bool) ([]*AggregatedActor, error) {
+func BuildCowrieActorsStreaming(next func() (*models.Event, error), adminIPs *netmatch.Set) ([]*AggregatedActor, error) {
 	cc := newCowrieCollector(adminIPs)
 	for {
 		e, err := next()
@@ -341,15 +342,15 @@ func BuildCowrieActorsStreaming(next func() (*models.Event, error), adminIPs map
 type CowrieCollector = cowrieCollector
 
 type cowrieCollector struct {
-	admin map[string]bool
+	admin *netmatch.Set
 	byKey map[string]*CowrieStats
 }
 
-func NewCowrieCollector(adminIPs map[string]bool) *CowrieCollector {
+func NewCowrieCollector(adminIPs *netmatch.Set) *CowrieCollector {
 	return newCowrieCollector(adminIPs)
 }
 
-func newCowrieCollector(adminIPs map[string]bool) *cowrieCollector {
+func newCowrieCollector(adminIPs *netmatch.Set) *cowrieCollector {
 	return &cowrieCollector{admin: adminIPs, byKey: map[string]*CowrieStats{}}
 }
 
@@ -360,7 +361,7 @@ func (c *cowrieCollector) Add(e *models.Event) { c.add(e) }
 func (c *cowrieCollector) Finalize() []*AggregatedActor { return c.finalize() }
 
 func (c *cowrieCollector) add(e *models.Event) {
-	if e == nil || e.SrcIP == "" || c.admin[e.SrcIP] {
+	if e == nil || e.SrcIP == "" || c.admin.Has(e.SrcIP) {
 		return
 	}
 	key := e.HASSH
@@ -416,8 +417,7 @@ func (c *cowrieCollector) add(e *models.Event) {
 		st.Probe = true
 	}
 	if e.Kind == models.KindCommand {
-		lc := strings.ToLower(e.Command)
-		if strings.Contains(lc, "curl ") || strings.Contains(lc, "wget ") || strings.Contains(lc, "chmod +x") || strings.Contains(lc, "/tmp/") || strings.Contains(lc, "busybox") {
+		if looksLikeDeployCmd(e.Command) {
 			st.DeployCmd = true
 		}
 	}
@@ -497,12 +497,57 @@ func usernameSetHash(users []string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func AdminSet(ips []string) map[string]bool {
-	m := map[string]bool{}
-	for _, ip := range ips {
-		m[ip] = true
+// AdminSet builds the matcher used to exempt operator/trusted addresses from
+// actor clustering. Entries may be bare IPs or CIDR ranges (e.g. a Tailscale
+// CGNAT range "100.64.0.0/10"); see internal/netmatch.
+func AdminSet(ips []string) *netmatch.Set {
+	return netmatch.New(ips)
+}
+
+// looksLikeDeployCmd reports whether a shell command shows "curl-bash-into-tmp"
+// deploy energy: a fetch-and-stage pattern, not merely a passing mention of a
+// downloader word or /tmp. The previous heuristic flagged any command
+// containing "/tmp/" (so a benign `ls /tmp/` scored as deploy) or a bare
+// "curl " substring. We now require either:
+//   - a downloader (curl/wget/tftp/fetch) AND a sink (pipe to a shell, a write
+//     redirect, an -O/-o output file, or a /tmp path), or
+//   - an explicit make-executable / run-from-tmp action (chmod +x, ./payload,
+//     busybox wget, sh /tmp/...).
+// This is heuristic confidence scoring only, so over- vs under-matching just
+// nudges ProbeScore — but tightening it keeps recon sessions from masquerading
+// as deploys in the dashboard's "spicy ones" view.
+func looksLikeDeployCmd(cmd string) bool {
+	lc := strings.ToLower(cmd)
+	hasDownloader := strings.Contains(lc, "curl ") ||
+		strings.Contains(lc, "wget ") ||
+		strings.Contains(lc, "wget;") ||
+		strings.Contains(lc, "tftp ") ||
+		strings.Contains(lc, "busybox wget") ||
+		strings.Contains(lc, "busybox tftp")
+	hasSink := strings.Contains(lc, "|sh") || strings.Contains(lc, "| sh") ||
+		strings.Contains(lc, "|bash") || strings.Contains(lc, "| bash") ||
+		strings.Contains(lc, "-o") || // wget -O / curl -o output file
+		strings.Contains(lc, ">") || // redirect to a file
+		strings.Contains(lc, "/tmp/")
+	if hasDownloader && hasSink {
+		return true
 	}
-	return m
+	// Stage/execute signatures that imply a payload is being run regardless
+	// of how it arrived (e.g. dropped via SFTP, then executed).
+	if strings.Contains(lc, "chmod +x") || strings.Contains(lc, "chmod 777") {
+		return true
+	}
+	// Running a dropped binary: "./payload", "sh /tmp/x", "bash /tmp/x",
+	// "exec /tmp/x". "./" specifically is execute-from-cwd, which recon
+	// sessions don't do but droppers do.
+	if strings.Contains(lc, "./") {
+		return true
+	}
+	if strings.Contains(lc, "/tmp/") &&
+		(strings.Contains(lc, "sh ") || strings.Contains(lc, "bash ") || strings.Contains(lc, "exec ")) {
+		return true
+	}
+	return false
 }
 
 // cowrieProbeScore returns a 0-100 score combining the boolean event-type

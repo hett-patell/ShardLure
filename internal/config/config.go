@@ -167,7 +167,9 @@ func (c Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// 0600: the config can carry the abuse.ch Auth-Key (intel.bazaar.api_key)
+	// and admin_ips that reveal private network topology. Owner-only.
+	return os.WriteFile(path, b, 0o600)
 }
 
 func (c Config) DBPath() string {

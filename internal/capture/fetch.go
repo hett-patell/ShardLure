@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/netmatch"
 )
 
 // FetchResult holds a quarantined download.
@@ -159,15 +161,11 @@ func blockedIP(ip net.IP, adminIPs []string, allowLoopback bool) bool {
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
 		return true
 	}
-	for _, a := range adminIPs {
-		if a == "" {
-			continue
-		}
-		if ip.Equal(net.ParseIP(a)) {
-			return true
-		}
-	}
-	return false
+	// adminIPs entries may be bare IPs or CIDR ranges. The old loop compared
+	// only ip.Equal(net.ParseIP(a)), so a CIDR entry parsed to nil and matched
+	// nothing — meaning an admin range was NOT exempted from being a fetch
+	// target. netmatch handles both forms.
+	return netmatch.New(adminIPs).HasIP(ip)
 }
 
 // Fetch downloads url into evidence/quarantine/<sha256> (mode 0600). Never executes content.

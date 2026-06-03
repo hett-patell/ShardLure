@@ -22,7 +22,7 @@ func TestSyncJournalEventIncremental(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
-	admin := map[string]bool{}
+	admin := AdminSet(nil)
 
 	ip := "203.0.113.7"
 	t0 := time.Now().Add(-30 * time.Minute)
@@ -73,7 +73,7 @@ func TestSyncJournalEventSkipsAdmin(t *testing.T) {
 	}
 	defer st.Close()
 
-	admin := map[string]bool{"10.0.0.5": true}
+	admin := AdminSet([]string{"10.0.0.5"})
 	e := &models.Event{
 		TS: time.Now(), Source: models.SourceJournal, Kind: models.KindAccepted,
 		SrcIP: "10.0.0.5", Username: "ops", ActorID: JournalActorID("10.0.0.5"),
@@ -113,10 +113,10 @@ func TestSyncJournalEventRejectsAdminMismatch(t *testing.T) {
 	if err := st.InsertEvent(e); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := SyncJournalEvent(st, e, map[string]bool{"10.0.0.1": true}); err != nil {
+	if err := SyncJournalEvent(st, e, AdminSet([]string{"10.0.0.1"})); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
-	err = SyncJournalEvent(st, e, map[string]bool{"10.0.0.2": true})
+	err = SyncJournalEvent(st, e, AdminSet([]string{"10.0.0.2"}))
 	if err == nil {
 		t.Fatal("expected mismatch error, got nil")
 	}
@@ -127,18 +127,20 @@ func TestSyncJournalEventRejectsAdminMismatch(t *testing.T) {
 func TestAdminSetsEqual(t *testing.T) {
 	cases := []struct {
 		name string
-		a, b map[string]bool
+		a, b []string
 		want bool
 	}{
 		{"both nil", nil, nil, true},
-		{"empty vs nil", map[string]bool{}, nil, true},
-		{"same one", map[string]bool{"x": true}, map[string]bool{"x": true}, true},
-		{"different size", map[string]bool{"x": true}, map[string]bool{"x": true, "y": true}, false},
-		{"different value", map[string]bool{"x": true}, map[string]bool{"x": false}, false},
-		{"different key", map[string]bool{"x": true}, map[string]bool{"y": true}, false},
+		{"empty vs nil", []string{}, nil, true},
+		{"same one", []string{"10.0.0.1"}, []string{"10.0.0.1"}, true},
+		{"order independent", []string{"10.0.0.1", "10.0.0.2"}, []string{"10.0.0.2", "10.0.0.1"}, true},
+		{"different size", []string{"10.0.0.1"}, []string{"10.0.0.1", "10.0.0.2"}, false},
+		{"different key", []string{"10.0.0.1"}, []string{"10.0.0.2"}, false},
+		{"same cidr", []string{"192.168.0.0/16"}, []string{"192.168.0.0/16"}, true},
+		{"ip vs cidr", []string{"192.168.0.1"}, []string{"192.168.0.0/16"}, false},
 	}
 	for _, c := range cases {
-		if got := adminSetsEqual(c.a, c.b); got != c.want {
+		if got := adminSetsEqual(AdminSet(c.a), AdminSet(c.b)); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
 	}

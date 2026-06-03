@@ -27,6 +27,17 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite permits only one writer at a time. Live mode runs several
+	// writer goroutines (journal tail, cowrie ingest ticker, retention
+	// purge) plus the web server against this one *sql.DB. With the
+	// default unbounded pool those writers open multiple connections and
+	// race for the write lock; under contention the loser hits a
+	// busy_timeout error that callers only log-and-continue, silently
+	// dropping an ingest batch. Capping the pool at a single connection
+	// serializes every statement through one writer, which is exactly
+	// SQLite's own model — no lock contention, no dropped writes, and
+	// negligible cost on a single-VPS honeypot.
+	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()

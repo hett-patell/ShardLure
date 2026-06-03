@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -262,7 +263,7 @@ func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string)
 // buildCowrieActorsFromDB streams persisted cowrie events past the actor
 // collector (so the full event set never lives in memory) and folds in the
 // fresh batch before producing aggregated actors.
-func buildCowrieActorsFromDB(st *store.Store, fresh []*models.Event, admin map[string]bool) ([]*models.AggregatedActor, error) {
+func buildCowrieActorsFromDB(st *store.Store, fresh []*models.Event, admin *netmatch.Set) ([]*models.AggregatedActor, error) {
 	cc := actor.NewCowrieCollector(admin)
 	if err := st.IterateEventsBySource(models.SourceCowrie, func(e *models.Event) error {
 		cc.Add(e)

@@ -231,8 +231,18 @@ func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
 		seen[ip] = struct{}{}
 		g.mu.Lock()
 		cached, ok := g.cache[ip]
+		fresh := ok && g.now().Before(cached.Expiry)
+		// Claim the IP for this prefetch under the same lock that read
+		// the cache: if a concurrent prefetch (e.g. the dashboard poll
+		// overlapping an actor-detail poll) already has it in flight,
+		// skip it here rather than issuing a duplicate HTTP lookup.
+		// fetch() clears the inflight mark on every exit path.
+		claim := !fresh && !g.inflight[ip]
+		if claim {
+			g.inflight[ip] = true
+		}
 		g.mu.Unlock()
-		if ok && time.Now().Before(cached.Expiry) {
+		if !claim {
 			continue
 		}
 		need = append(need, ip)
@@ -240,13 +250,29 @@ func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
 	if len(need) == 0 {
 		return
 	}
+	// releaseClaims clears inflight marks for IPs we claimed above but
+	// will not actually fetch (over the per-call cap, or past the
+	// deadline). Without this they'd stay marked in-flight forever and
+	// block future prefetches of those IPs.
+	releaseClaims := func(ips []string) {
+		if len(ips) == 0 {
+			return
+		}
+		g.mu.Lock()
+		for _, ip := range ips {
+			delete(g.inflight, ip)
+		}
+		g.mu.Unlock()
+	}
 	if len(need) > 48 {
+		releaseClaims(need[48:])
 		need = need[:48]
 	}
 	deadline := time.Now().Add(budget)
 	var wg sync.WaitGroup
-	for _, ip := range need {
+	for i, ip := range need {
 		if time.Now().After(deadline) {
+			releaseClaims(need[i:])
 			break
 		}
 		wg.Add(1)

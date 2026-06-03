@@ -38,7 +38,7 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 		if !ok {
 			continue
 		}
-		if e.Kind == models.KindAccepted && admin[e.SrcIP] {
+		if e.Kind == models.KindAccepted && admin.Has(e.SrcIP) {
 			continue
 		}
 		e.ActorID = actor.JournalActorID(e.SrcIP)

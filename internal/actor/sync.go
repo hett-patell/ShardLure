@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -56,7 +57,7 @@ var (
 // pprof/test-introspection paths.
 type liveJournalCollector struct {
 	mu       sync.Mutex
-	admin    map[string]bool
+	admin    *netmatch.Set
 	byIP     map[string]*liveIPEntry
 	lru      *list.List // front = most recently touched, back = eviction candidate
 	maxIPs   int
@@ -75,7 +76,7 @@ type liveIPEntry struct {
 	touched time.Time
 }
 
-func newLiveJournalCollector(admin map[string]bool) *liveJournalCollector {
+func newLiveJournalCollector(admin *netmatch.Set) *liveJournalCollector {
 	return &liveJournalCollector{
 		admin:    admin,
 		byIP:     map[string]*liveIPEntry{},
@@ -90,7 +91,7 @@ func newLiveJournalCollector(admin map[string]bool) *liveJournalCollector {
 var (
 	liveCollectorMu    sync.Mutex
 	liveCollector      *liveJournalCollector
-	liveCollectorAdmin map[string]bool
+	liveCollectorAdmin *netmatch.Set
 )
 
 // resetLiveCollectorForTest clears process-wide state. Lowercase by
@@ -127,17 +128,11 @@ func LiveJournalCollectorStats() (ips, lru, max, users int) {
 }
 
 // adminSetsEqual is a cheap structural comparison used to detect the
-// "different admin map across goroutines" misuse.
-func adminSetsEqual(a, b map[string]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
+// "different admin set across goroutines" misuse. It compares by canonical
+// content (Key) rather than pointer identity, so two AdminSet() results built
+// from the same config entries are treated as equal.
+func adminSetsEqual(a, b *netmatch.Set) bool {
+	return a.Key() == b.Key()
 }
 
 // SyncJournalEvent updates the actor row for a single freshly-
@@ -149,8 +144,8 @@ func adminSetsEqual(a, b map[string]bool) bool {
 // for this IP. On an evicted-then-returning IP, plus a single
 // indexed SELECT to re-hydrate counters from the DB. Bounded RSS in
 // either case.
-func SyncJournalEvent(st *store.Store, e *models.Event, admin map[string]bool) error {
-	if e == nil || e.SrcIP == "" || admin[e.SrcIP] {
+func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) error {
+	if e == nil || e.SrcIP == "" || admin.Has(e.SrcIP) {
 		return nil
 	}
 	liveCollectorMu.Lock()
@@ -203,7 +198,7 @@ func (c *liveJournalCollector) has(ip string) bool {
 // values win — they were just hydrated too and any subsequent add()
 // from the racing event will roll forward correctly.
 func (c *liveJournalCollector) hydrate(ip string, stored store.JournalIPStats) {
-	if c.admin[ip] {
+	if c.admin.Has(ip) {
 		return
 	}
 	c.mu.Lock()
@@ -245,7 +240,7 @@ func (c *liveJournalCollector) hydrate(ip string, stored store.JournalIPStats) {
 func (c *liveJournalCollector) addAndFinalize(e *models.Event) (*AggregatedActor, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.admin[e.SrcIP] {
+	if c.admin.Has(e.SrcIP) {
 		return nil, 0
 	}
 	now := c.now()
@@ -383,7 +378,7 @@ func capUsersMap(in map[string]int, n int) map[string]int {
 // SyncJournalEvent instead.
 //
 // Deprecated: prefer SyncJournalEvent for streaming ingest.
-func SyncJournalIP(st *store.Store, ip string, admin map[string]bool) error {
+func SyncJournalIP(st *store.Store, ip string, admin *netmatch.Set) error {
 	events, err := st.EventsByIP(ip, 0)
 	if err != nil {
 		return err

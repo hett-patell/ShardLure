@@ -1776,6 +1776,27 @@ function escHtml(s) {
   });
 }
 
+// safeUrl gates a URL before it lands in an href. escHtml stops attribute
+// break-out but does NOT neutralise a javascript:/data:/vbscript: scheme —
+// such a link still executes script on click. Captured download URLs are
+// attacker-influenced, so anything that isn't a plain http(s)/ftp link (or a
+// relative path) is replaced with a harmless placeholder. Returns an
+// already-escaped string safe to drop straight into href="...".
+function safeUrl(u) {
+  var s = String(u == null ? '' : u).trim();
+  if (s === '') return '';
+  // Reject any scheme that isn't an allow-listed safe one. A leading
+  // scheme looks like "word:" before the first slash/?/#.
+  var m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(s);
+  if (m) {
+    var scheme = m[1].toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https' && scheme !== 'ftp') {
+      return '#blocked';
+    }
+  }
+  return escHtml(s);
+}
+
 function renderSessionDetail(d) {
   document.getElementById('sm-title').textContent = 'session ' + d.id + ' · ' + d.ip + (d.user ? ' · ' + d.user : '');
   const dur = new Date(d.end).getTime() - new Date(d.start).getTime();
@@ -1791,7 +1812,7 @@ function renderSessionDetail(d) {
     else if (ln.kind === 'disconnect') txt = '-- session closed --';
     else if (ln.sha256) txt = 'download ' + escHtml(ln.filename || '') + ' [' + ln.sha256.slice(0, 12) + ']';
     else txt = escHtml(ln.kind);
-    const techs = (ln.techs || []).map(function(t) { return '<span class="tt">' + t + '</span>'; }).join('');
+    const techs = (ln.techs || []).map(function(t) { return '<span class="tt">' + escHtml(t) + '</span>'; }).join('');
     html += '<div class="sm-line kind-' + escHtml(ln.kind) + '">' +
       '<span class="ln-off">' + fmtOffset(ln.offsetMs) + '</span>' +
       '<span class="ln-kind">' + escHtml(ln.kind) + '</span>' +
@@ -1944,7 +1965,7 @@ function renderEnrichCard(r) {
     }).join('') + '</div>';
   }
 
-  const link = r.url ? '<a class="ec-link" href="' + escHtml(r.url) + '" target="_blank" rel="noopener">open ↗</a>' : '';
+  const link = r.url ? '<a class="ec-link" href="' + safeUrl(r.url) + '" target="_blank" rel="noopener">open ↗</a>' : '';
   const summary = r.summary || (r.error ? 'error: ' + escHtml(r.error)
                               : (r.configured ? 'no data' : 'set API key in env'));
 
@@ -2112,7 +2133,7 @@ function renderPayloads(data) {
   data.rows.forEach(function(p) {
     const sha = p.sha256 || '—';
     const shaShort = sha === '—' ? '—' : sha.slice(0, 16) + '…';
-    const url = p.url ? '<a href="' + escHtml(p.url) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + escHtml(p.url) + '</a>' : '—';
+    const url = p.url ? '<a href="' + safeUrl(p.url) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + escHtml(p.url) + '</a>' : '—';
     const status = p.status || 'unknown';
     const occ = p.occurrences || 1;
     const ips = p.ipCount || 0;
@@ -2125,7 +2146,7 @@ function renderPayloads(data) {
       shareBtn = '<span style="color:var(--dim-2)">—</span>';
     } else if (_bazaarSharedSet[sha]) {
       var mbLink = typeof _bazaarSharedSet[sha] === 'string' ? _bazaarSharedSet[sha] : '';
-      shareBtn = mbLink ? '<a href="' + escHtml(mbLink) + '" target="_blank" rel="noopener" class="bz-btn ok" style="text-decoration:none" onclick="event.stopPropagation()">✓ shared</a>' : '<span class="bz-btn ok">✓ shared</span>';
+      shareBtn = mbLink ? '<a href="' + safeUrl(mbLink) + '" target="_blank" rel="noopener" class="bz-btn ok" style="text-decoration:none" onclick="event.stopPropagation()">✓ shared</a>' : '<span class="bz-btn ok">✓ shared</span>';
     } else {
       shareBtn = '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>';
     }

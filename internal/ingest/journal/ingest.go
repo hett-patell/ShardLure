@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -96,7 +97,7 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 	stored := make([]*models.Event, 0, len(events))
 	attack := make([]*models.Event, 0, len(events))
 	for _, e := range events {
-		if e.Kind == models.KindAccepted && admin[e.SrcIP] {
+		if e.Kind == models.KindAccepted && admin.Has(e.SrcIP) {
 			skippedAdmin++
 			continue
 		}
@@ -147,7 +148,7 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 
 // buildJournalActorsFromDB streams persisted *attack* journal events past
 // the collector and folds in the fresh attack batch.
-func buildJournalActorsFromDB(st *store.Store, fresh []*models.Event, admin map[string]bool) ([]*models.AggregatedActor, error) {
+func buildJournalActorsFromDB(st *store.Store, fresh []*models.Event, admin *netmatch.Set) ([]*models.AggregatedActor, error) {
 	jc := actor.NewJournalCollector(admin)
 	if err := st.IterateEventsBySource(models.SourceJournal, func(e *models.Event) error {
 		// Accepted/admin lines are stored but never form an actor.
