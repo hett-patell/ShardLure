@@ -161,3 +161,36 @@ func TestSafeDialRejectsUnresolvable(t *testing.T) {
 		t.Errorf("error should mention dns lookup, got %v", err)
 	}
 }
+
+// TestBlockedIPReservedRanges locks in the SSRF guard's coverage of ranges the
+// net.IP predicates miss: unspecified (0.0.0.0/::), CGNAT 100.64/10, and
+// benchmarking 198.18/15. Cloud metadata 169.254.169.254 is covered via
+// link-local. Public IPs must pass.
+func TestBlockedIPReservedRanges(t *testing.T) {
+	blocked := []string{
+		"0.0.0.0", "::", // unspecified -> localhost on Linux
+		"100.64.1.1",      // CGNAT
+		"198.18.0.1",      // benchmarking
+		"169.254.169.254", // cloud metadata (link-local)
+		"127.0.0.1",       // loopback
+		"10.0.0.1",        // private
+		"192.168.1.1",     // private
+		"224.0.0.1",       // multicast
+		"192.0.0.1",       // IETF protocol assignments
+	}
+	for _, s := range blocked {
+		if !blockedIP(net.ParseIP(s), nil, false) {
+			t.Errorf("blockedIP(%s) = false, want true (must be blocked)", s)
+		}
+	}
+	allowed := []string{"8.8.8.8", "1.1.1.1", "203.0.113.10"}
+	for _, s := range allowed {
+		if blockedIP(net.ParseIP(s), nil, false) {
+			t.Errorf("blockedIP(%s) = true, want false (public, should pass)", s)
+		}
+	}
+	// adminIPs CIDR is also blocked (operator range must not be fetched).
+	if !blockedIP(net.ParseIP("203.0.113.10"), []string{"203.0.113.0/24"}, false) {
+		t.Error("blockedIP should block an IP inside an admin CIDR range")
+	}
+}

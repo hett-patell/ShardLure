@@ -154,12 +154,42 @@ func assertSafeURL(raw string, adminIPs []string) error {
 	return (&SafeFetcher{AdminIPs: adminIPs}).assertSafeURL(raw)
 }
 
+// reservedRanges are address blocks the SSRF guard must reject but that the
+// net.IP predicates below do NOT cover:
+//   - 100.64.0.0/10  CGNAT (RFC 6598) — routable internal range on many cloud
+//     hosts; IsPrivate() is false for it.
+//   - 198.18.0.0/15  benchmarking (RFC 2544) — IsPrivate() false.
+//   - 192.0.0.0/24   IETF protocol assignments.
+// (169.254.169.254 cloud metadata is already caught by IsLinkLocalUnicast.)
+var reservedRanges = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{"100.64.0.0/10", "198.18.0.0/15", "192.0.0.0/24"} {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
 func blockedIP(ip net.IP, adminIPs []string, allowLoopback bool) bool {
+	// Unspecified (0.0.0.0 / ::) connects to localhost on Linux, so it must be
+	// blocked unless loopback is explicitly allowed (tests only).
+	if ip.IsUnspecified() {
+		return !allowLoopback
+	}
 	if ip.IsLoopback() {
 		return !allowLoopback
 	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+	// IsPrivate covers 10/8, 172.16/12, 192.168/16, fc00::/7 only — the
+	// reservedRanges and multicast checks fill the gaps.
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() ||
+		ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
 		return true
+	}
+	for _, n := range reservedRanges {
+		if n.Contains(ip) {
+			return true
+		}
 	}
 	// adminIPs entries may be bare IPs or CIDR ranges. The old loop compared
 	// only ip.Equal(net.ParseIP(a)), so a CIDR entry parsed to nil and matched

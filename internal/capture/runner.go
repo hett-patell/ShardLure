@@ -310,10 +310,12 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		if e.Filename == "" {
 			continue
 		}
-		src := e.Filename
-		if !filepath.IsAbs(src) {
-			src = filepath.Join(r.cowrieDownloadsDir(), filepath.Base(src))
-		}
+		// e.Filename comes from cowrie JSON (attacker-influenced telemetry).
+		// Always resolve it relative to the cowrie downloads dir using only
+		// the basename, even when the recorded value is absolute — otherwise a
+		// crafted absolute path (e.g. /etc/shadow) would be copied into the
+		// evidence dir and could later be shipped to MalwareBazaar.
+		src := filepath.Join(r.cowrieDownloadsDir(), filepath.Base(e.Filename))
 		if _, err := os.Stat(src); err != nil {
 			continue
 		}
