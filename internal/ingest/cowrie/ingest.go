@@ -241,23 +241,74 @@ func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string)
 	}
 }
 
-// syncCowrieActors rebuilds the full cowrie actor set by streaming every
-// persisted cowrie event past a streaming builder, then folding in the
-// fresh batch. Memory peak is O(actors + unique usernames), NOT O(events).
+// syncCowrieActors re-aggregates only the cowrie actors the fresh batch
+// touched, instead of streaming the entire cowrie event history every tick.
+// For each touched actor ID it streams just that actor's persisted events
+// (served by idx_events_actor), folds in the fresh in-memory events, and
+// upserts the result — leaving every untouched actor exactly as it was. A live
+// ingest tick is now O(events-for-touched-actors) rather than O(all history).
 //
-// Note: the rebuild is still O(N) in CPU per ingest tick — see the
-// follow-up "incremental rebuild for touched keys only" work item.
+// Correctness: a cowrie actor's aggregate depends only on its own events, and
+// AssignCowrieActorIDs stamps each fresh event with its actor ID, so the
+// touched-ID set is exactly the actors whose aggregate can change. Admin
+// events get a blank ActorID and are excluded.
 func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
 	actor.AssignCowrieActorIDs(fresh, admin)
-	actors, err := buildCowrieActorsFromDB(st, fresh, admin)
+
+	touched := touchedActorIDs(fresh)
+	if len(touched) == 0 {
+		// Only admin/skipped events in this batch — persist them but touch no
+		// actors. (Events are still recorded for telemetry completeness.)
+		if err := st.AppendEventsAndUpsertActorsAgg(fresh, nil); err != nil {
+			return nil, err
+		}
+		return &Result{Events: len(fresh), Actors: 0}, nil
+	}
+
+	actors, err := buildCowrieActorsForIDs(st, fresh, touched, admin)
 	if err != nil {
 		return nil, err
 	}
-	if err := st.AppendEventsAndReplaceActorsAgg(models.SourceCowrie, fresh, actors); err != nil {
+	if err := st.AppendEventsAndUpsertActorsAgg(fresh, actors); err != nil {
 		return nil, err
 	}
 	return &Result{Events: len(fresh), Actors: len(actors)}, nil
+}
+
+// touchedActorIDs returns the distinct non-empty actor IDs stamped on the
+// fresh events (admin events have a blank ID and are skipped).
+func touchedActorIDs(fresh []*models.Event) []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, e := range fresh {
+		if e == nil || e.ActorID == "" {
+			continue
+		}
+		if _, ok := seen[e.ActorID]; ok {
+			continue
+		}
+		seen[e.ActorID] = struct{}{}
+		ids = append(ids, e.ActorID)
+	}
+	return ids
+}
+
+// buildCowrieActorsForIDs streams the persisted events for just the touched
+// actor IDs past the collector, folds in the fresh batch, and returns the
+// aggregated actors for those IDs only.
+func buildCowrieActorsForIDs(st *store.Store, fresh []*models.Event, ids []string, admin *netmatch.Set) ([]*models.AggregatedActor, error) {
+	cc := actor.NewCowrieCollector(admin)
+	if err := st.IterateEventsByActorIDs(ids, func(e *models.Event) error {
+		cc.Add(e)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	for _, e := range fresh {
+		cc.Add(e)
+	}
+	return cc.Finalize(), nil
 }
 
 // buildCowrieActorsFromDB streams persisted cowrie events past the actor
