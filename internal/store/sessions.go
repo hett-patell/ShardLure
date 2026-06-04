@@ -13,7 +13,7 @@ import (
 type SessionSummary struct {
 	ID         string
 	SrcIP      string
-	Username   string // most-recent non-empty username on the session
+	Username   string // a non-empty username on the session (alphabetical-max; the detail modal resolves the true chronological one)
 	HASSH      string
 	SSHClient  string
 	StartTS    time.Time
@@ -51,11 +51,13 @@ func (s *Store) ListSessions(since time.Time, limit int) ([]SessionSummary, erro
 SELECT
   session_id,
   MAX(src_ip)                                       AS src_ip,
-  -- most-recent non-empty username (chronological), matching the detail view;
-  -- MAX(username) would be alphabetical and could disagree with the modal.
-  COALESCE((SELECT e2.username FROM events e2
-            WHERE e2.session_id = events.session_id AND e2.username != ''
-            ORDER BY e2.ts DESC LIMIT 1), '')       AS username,
+  -- Alphabetical-max non-empty username. NOT chronologically "most recent" —
+  -- a correlated per-session ORDER BY ts subquery here made this endpoint take
+  -- ~110s over a 30d window (tens of thousands of session groups). In practice
+  -- a session re-authing to a *different* username is vanishingly rare (zero on
+  -- live data), so MAX is a safe, fast approximation; the detail modal shows
+  -- the true chronological user.
+  COALESCE(MAX(CASE WHEN username != '' THEN username END), '') AS username,
   MAX(hassh)                                        AS hassh,
   MAX(ssh_client)                                   AS ssh_client,
   MIN(ts)                                           AS start_ts,
