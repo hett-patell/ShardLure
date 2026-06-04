@@ -34,7 +34,7 @@ func (s *Store) GetIngestState(source models.Source, path string) (IngestState, 
 }
 
 func (s *Store) SetIngestState(st IngestState) error {
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 INSERT INTO ingest_state (source, path, inode, offset, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(source, path) DO UPDATE SET inode=excluded.inode, offset=excluded.offset, updated_at=excluded.updated_at`,

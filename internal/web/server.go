@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
@@ -32,6 +33,37 @@ type Server struct {
 	// dashboard "uptime" so the operator can tell at a glance how long the
 	// live process has been running (and spot an unexpected restart).
 	startedAt time.Time
+
+	// countriesCache memoizes the (relatively expensive) full-table
+	// hits-by-country aggregation, which both /api/dashboard and /api/intel
+	// render on every poll. The result changes slowly, so a few-second TTL
+	// removes the duplicate per-page full scans without staleness anyone notices.
+	countriesMu     sync.Mutex
+	countriesCached []topCountryRow
+	countriesAt     time.Time
+}
+
+// topCountriesCached returns the hits-by-country aggregation, recomputing at
+// most once per countriesTTL. Shared by the dashboard and intel handlers.
+const countriesTTL = 10 * time.Second
+
+func (s *Server) topCountriesCached() []topCountryRow {
+	s.countriesMu.Lock()
+	defer s.countriesMu.Unlock()
+	if s.countriesCached != nil && time.Since(s.countriesAt) < countriesTTL {
+		return s.countriesCached
+	}
+	cph, err := s.st.TopCountriesByHits(12)
+	if err != nil {
+		return s.countriesCached // serve last-good (possibly nil) on error
+	}
+	rows := make([]topCountryRow, 0, len(cph))
+	for _, c := range cph {
+		rows = append(rows, topCountryRow{CC: c.CC, Country: c.Country, Hits: c.Hits})
+	}
+	s.countriesCached = rows
+	s.countriesAt = time.Now()
+	return rows
 }
 
 type Options struct {
@@ -504,15 +536,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		resp.TopCommands = append(resp.TopCommands, topCommandRow{Command: row.Key, Hits: row.Hits})
 	}
 
-	// Prefer the authoritative all-events hits-by-country aggregation so the
-	// globe's "By country" matches the intel page's Attack Geography and isn't
-	// limited to the top-25 IPs. Fall back to the top-25-derived countryStats
-	// if the geo-join query fails.
-	if cph, err := s.st.TopCountriesByHits(12); err == nil && len(cph) > 0 {
-		resp.TopCountries = resp.TopCountries[:0]
-		for _, c := range cph {
-			resp.TopCountries = append(resp.TopCountries, topCountryRow{CC: c.CC, Country: c.Country, Hits: c.Hits})
-		}
+	// Prefer the authoritative all-events hits-by-country aggregation (cached,
+	// shared with /api/intel) so the globe's "By country" matches the intel
+	// page's Attack Geography and isn't limited to the top-25 IPs. Fall back to
+	// the top-25-derived countryStats if the cache/query yielded nothing.
+	if cached := s.topCountriesCached(); len(cached) > 0 {
+		resp.TopCountries = append(resp.TopCountries[:0], cached...)
 	} else {
 		for _, c := range countryStats {
 			resp.TopCountries = append(resp.TopCountries, *c)

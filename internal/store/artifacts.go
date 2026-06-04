@@ -24,7 +24,7 @@ type Artifact struct {
 }
 
 func (s *Store) ensureArtifactsTable() error {
-	if _, err := s.db.Exec(`
+	if _, err := s.execWrite(`
 CREATE TABLE IF NOT EXISTS artifacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 	// ListRecentArtifacts / ArtifactsForShare (ORDER BY created_at) all
 	// full-scanned the table. This function owns the table (lazily created),
 	// so the indexes live here rather than in the migration ladder.
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 CREATE INDEX IF NOT EXISTS idx_artifacts_sha256 ON artifacts(sha256);
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at);
@@ -75,7 +75,7 @@ func (s *Store) UpsertArtifact(a Artifact) error {
 		ts = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 INSERT INTO artifacts (ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(url) DO UPDATE SET
@@ -104,7 +104,7 @@ func (s *Store) RecordArtifact(a Artifact) error {
 	if a.TS.IsZero() {
 		ts = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 INSERT OR IGNORE INTO artifacts (ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, a.SrcIP, a.SessionID, a.ActorID, a.URL, a.LocalPath, a.SHA256, a.SizeBytes,
@@ -403,7 +403,7 @@ LIMIT 1`, sha256)
 // ingest from `cowrie.log.closed` events; the capture pass uses it to
 // stamp session_id onto the resulting artifact row.
 func (s *Store) ensureCowrieTTYIndex() error {
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 CREATE TABLE IF NOT EXISTS cowrie_tty_index (
   sha256     TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -427,7 +427,7 @@ func (s *Store) RecordCowrieTTYBinding(sha, sessionID string, ts time.Time) erro
 	if ts.IsZero() {
 		ts = time.Now().UTC()
 	}
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 INSERT INTO cowrie_tty_index (sha256, session_id, ts)
 VALUES (?, ?, ?)
 ON CONFLICT(sha256) DO UPDATE SET
@@ -467,7 +467,7 @@ func (s *Store) SetArtifactSessionByURL(url, sessionID string) error {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE artifacts SET session_id=? WHERE url=? AND (session_id IS NULL OR session_id='')`, sessionID, url)
+	_, err := s.execWrite(`UPDATE artifacts SET session_id=? WHERE url=? AND (session_id IS NULL OR session_id='')`, sessionID, url)
 	return err
 }
 

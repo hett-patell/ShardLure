@@ -137,12 +137,9 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// Attack Geography: true hits-by-country over ALL events (was recomputed
 	// client-side over only the recent-N actor slice, so a dominant high-volume
 	// IP outside that slice — e.g. 64k hits from Brazil — vanished from the
-	// chart). Authoritative SQL aggregation joined to the geo cache.
-	if cph, err := s.st.TopCountriesByHits(12); err == nil {
-		for _, c := range cph {
-			resp.TopCountries = append(resp.TopCountries, topCountryRow{CC: c.CC, Country: c.Country, Hits: c.Hits})
-		}
-	}
+	// chart). Authoritative SQL aggregation joined to the geo cache, cached and
+	// shared with /api/dashboard so it isn't run twice per page load.
+	resp.TopCountries = append(resp.TopCountries, s.topCountriesCached()...)
 	// Brute-Force Radar: the most aggressive actors by attempts/hour across ALL
 	// actors (was derived client-side from the recent-80 actor slice, so it
 	// showed ~171/h when the true peak was 3000+/h).

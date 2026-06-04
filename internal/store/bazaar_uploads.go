@@ -24,7 +24,7 @@ type BazaarUpload struct {
 // pattern for artifacts/ip_enrichment/cowrie_tty_index after the
 // same class of bug, so this brings v5 in line.
 func (s *Store) ensureBazaarUploadsTable() error {
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 CREATE TABLE IF NOT EXISTS bazaar_uploads (
   sha256          TEXT PRIMARY KEY,
   uploaded_at     TEXT NOT NULL,
@@ -70,7 +70,7 @@ func (s *Store) RecordBazaarUpload(u BazaarUpload) error {
 	if u.UploadedAt.IsZero() {
 		ts = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 INSERT INTO bazaar_uploads (sha256, uploaded_at, response_status, mb_url)
 VALUES (?, ?, ?, ?)
 ON CONFLICT(sha256) DO UPDATE SET

@@ -8,6 +8,11 @@ import (
 )
 
 func (s *Store) WithTx(fn func(*sql.Tx) error) error {
+	// Serialize write transactions (single SQLite writer) while leaving reads
+	// concurrent. Held for the whole tx so the begin→commit window can't race
+	// another writer's lock acquisition.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -13,6 +14,15 @@ import (
 
 type Store struct {
 	db *sql.DB
+	// writeMu serializes WRITES at the application layer. SQLite allows only
+	// one writer, and live mode has several writer goroutines (journal tail,
+	// cowrie ticker, retention purge) plus the web server sharing this db; with
+	// the default pool they'd race the write lock and the loser would hit a
+	// busy_timeout error that callers only log-and-continue (a silently dropped
+	// batch). Serializing writes here avoids that WITHOUT capping the pool to a
+	// single connection — so concurrent READS still run in parallel under WAL
+	// (a 1-connection pool would make a slow analytics query block ingest).
+	writeMu sync.Mutex
 }
 
 type sqlExecer interface {
@@ -27,17 +37,11 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// SQLite permits only one writer at a time. Live mode runs several
-	// writer goroutines (journal tail, cowrie ingest ticker, retention
-	// purge) plus the web server against this one *sql.DB. With the
-	// default unbounded pool those writers open multiple connections and
-	// race for the write lock; under contention the loser hits a
-	// busy_timeout error that callers only log-and-continue, silently
-	// dropping an ingest batch. Capping the pool at a single connection
-	// serializes every statement through one writer, which is exactly
-	// SQLite's own model — no lock contention, no dropped writes, and
-	// negligible cost on a single-VPS honeypot.
-	db.SetMaxOpenConns(1)
+	// Allow a few connections so WAL readers run concurrently with the single
+	// writer (writes are serialized by writeMu, not by the pool size). A 1-conn
+	// pool would throw away WAL's reader/writer concurrency and let one slow
+	// dashboard query stall live ingest.
+	db.SetMaxOpenConns(8)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -54,6 +58,14 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// execWrite runs a write statement under the write mutex, so all writes are
+// serialized (SQLite's single-writer model) while reads stay concurrent.
+func (s *Store) execWrite(query string, args ...any) (sql.Result, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.db.Exec(query, args...)
 }
 
 func (s *Store) migrate() error {
@@ -364,6 +376,8 @@ func (s *Store) QueryRows(query string, args []any, scan func(scan func(...any) 
 }
 
 func (s *Store) InsertEvent(e *models.Event) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return insertEvent(s.db, e)
 }
 
@@ -384,6 +398,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 }
 
 func (s *Store) UpsertActor(a *models.Actor) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return upsertActor(s.db, a)
 }
 
@@ -406,6 +422,8 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 func (s *Store) UpsertActorIP(actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return upsertActorIP(s.db, actorID, ip, firstSeen, lastSeen, count)
 }
 
@@ -421,6 +439,8 @@ ON CONFLICT(actor_id, ip) DO UPDATE SET
 }
 
 func (s *Store) UpsertActorUser(actorID, user string, count int) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return upsertActorUser(s.db, actorID, user, count)
 }
 
@@ -665,6 +685,11 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		return err
 	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
+	// Serialize the purge transaction with all other writers (ensure* calls
+	// above already took/released writeMu via execWrite; lock here, not earlier,
+	// because writeMu is not reentrant).
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err

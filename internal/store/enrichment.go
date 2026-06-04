@@ -18,7 +18,7 @@ type EnrichmentRecord struct {
 }
 
 func (s *Store) EnsureEnrichmentTable() error {
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 CREATE TABLE IF NOT EXISTS ip_enrichment (
   ip TEXT NOT NULL,
   source TEXT NOT NULL,
@@ -80,7 +80,7 @@ func (s *Store) PutEnrichment(ip, source, payload string) error {
 	if err := s.EnsureEnrichmentTable(); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`
+	_, err := s.execWrite(`
 INSERT INTO ip_enrichment (ip, source, payload, fetched_at)
 VALUES (?, ?, ?, ?)
 ON CONFLICT(ip, source) DO UPDATE SET

@@ -10,20 +10,19 @@ import (
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
-// TestWritePoolIsSerialized asserts the connection pool is pinned to a single
-// connection. This is the deterministic guard for the SetMaxOpenConns(1) fix:
-// SQLite is single-writer, and capping the pool serializes every statement
-// through one connection so the live-mode writer goroutines never race for the
-// write lock (which under the default unbounded pool surfaces as intermittent
-// "database is locked" after busy_timeout, silently dropping ingest batches).
-func TestWritePoolIsSerialized(t *testing.T) {
+// TestReadPoolAllowsConcurrency asserts the connection pool is NOT capped at 1.
+// Writes are serialized by Store.writeMu (not by a 1-connection pool), so WAL
+// readers can run concurrently with the single writer — a 1-conn pool would let
+// one slow analytics query stall live ingest. The behavioral guarantee (no
+// dropped writes under concurrency) is covered by TestConcurrentWritersNoLockErrors.
+func TestReadPoolAllowsConcurrency(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "pool.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	if got := st.db.Stats().MaxOpenConnections; got != 1 {
-		t.Fatalf("MaxOpenConnections = %d, want 1 (writes must be serialized)", got)
+	if got := st.db.Stats().MaxOpenConnections; got <= 1 {
+		t.Fatalf("MaxOpenConnections = %d, want >1 (reads must run concurrently with the serialized writer)", got)
 	}
 }
 
@@ -100,5 +99,51 @@ func TestConcurrentWritersNoLockErrors(t *testing.T) {
 	}
 	if len(errs) > 0 {
 		t.Fatalf("%d concurrent write error(s); first: %v", len(errs), errs[0])
+	}
+}
+
+// TestSlowReadDoesNotBlockWrites is the regression guard for the review's HIGH
+// finding: with SetMaxOpenConns(1) a long-running analytics read held the only
+// connection and stalled live ingest. With a multi-conn pool + writeMu, a read
+// in flight must NOT block a concurrent write.
+func TestSlowReadDoesNotBlockWrites(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "slowread.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	// Seed some events so a read has rows to iterate.
+	for i := 0; i < 500; i++ {
+		if err := st.InsertEvent(&models.Event{
+			TS: time.Now().Add(time.Duration(i) * time.Second), Source: models.SourceCowrie,
+			Kind: models.KindFailedPass, SrcIP: "1.2.3.4", Raw: "{}",
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	// Open a read and hold its rows open (simulating a slow streaming scan that
+	// keeps a connection checked out).
+	rows, err := st.db.Query(`SELECT id FROM events`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	rows.Next() // hold the connection mid-iteration
+	defer rows.Close()
+
+	// A write must complete promptly despite the read holding a connection.
+	done := make(chan error, 1)
+	go func() {
+		done <- st.InsertEvent(&models.Event{
+			TS: time.Now(), Source: models.SourceCowrie, Kind: models.KindCommand,
+			SrcIP: "5.6.7.8", Command: "id", Raw: "{}",
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("write during slow read failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("write blocked by an in-flight read (pool starvation regression)")
 	}
 }

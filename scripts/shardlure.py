@@ -526,6 +526,41 @@ def load_finish_ports() -> tuple[int, int, int]:
     return honeypot, admin, dash
 
 
+def load_ports_from_config() -> tuple[int, int, int]:
+    """Read the honeypot/admin/dashboard ports from the persisted
+    shardlure.yaml so teardown reverses the firewall/authbind for the ports
+    that were ACTUALLY used, not the env defaults. Falls back to
+    load_finish_ports() (env/defaults) when the config is missing or a value
+    can't be parsed. The installer writes this file by hand, so we parse the
+    three known lines directly rather than pull in a YAML dependency."""
+    honeypot, admin, dash = load_finish_ports()
+    if not CONFIG_FILE.is_file():
+        return honeypot, admin, dash
+    section = ""
+    for raw in CONFIG_FILE.read_text().splitlines():
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")) and line.rstrip().endswith(":"):
+            section = line.strip().rstrip(":")
+            continue
+        kv = line.strip()
+        if ":" not in kv:
+            continue
+        key, _, val = kv.partition(":")
+        key, val = key.strip(), val.strip()
+        try:
+            if section == "ssh" and key == "honeypot_port":
+                honeypot = int(val)
+            elif section == "ssh" and key == "admin_port":
+                admin = int(val)
+            elif section == "dashboard" and key == "port":
+                dash = int(val)
+        except ValueError:
+            pass  # keep the fallback for an unparseable value
+    return honeypot, admin, dash
+
+
 def collect_admin_ips_quiet() -> list[str]:
     ips: list[str] = []
     extra = os.environ.get("SHARDLURE_ADMIN_IPS", "")
@@ -654,7 +689,11 @@ def cmd_uninstall() -> None:
     later step fails."""
     need_root()
     purge = "--purge" in sys.argv[2:]
-    honeypot, admin, dash = load_finish_ports()
+    # Use the persisted install config so firewall/authbind cleanup and the
+    # lockout-verification hint target the ports this install ACTUALLY used,
+    # not the env defaults (env vars/SHARDLURE_*_PORT still override).
+    honeypot, admin, dash = load_ports_from_config()
+    log(f"uninstall: honeypot={honeypot} admin={admin} dashboard={dash} (from {CONFIG_FILE} if present)")
 
     log("ShardLure uninstall starting")
     log("step 1/5: restore real SSH (before anything else, to avoid lockout)")
