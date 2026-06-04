@@ -49,6 +49,7 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Dragon theme:** purpose-built SOC dashboard with sidebar navigation, Chakra Petch typography, blood-red/molten-gold palette, flat panels, sharp geometry. No glass-morphism — this is a wartime console.
 - **Dashboard widgets:** threat-level gauge, attack geography, brute-force radar, top credentials, live attack timeline. All fed by real-time API polling.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
+- **Seven-provider IP enrichment:** look up any attacker IP against AbuseIPDB, VirusTotal, GreyNoise, Shodan, AlienVault OTX, IPQualityScore, and IPinfo in parallel — normalized verdict + score + tags, cached 24h. Two work with no API key.
 - **Persistent geo cache:** IP geolocation results are stored in SQLite and survive restarts. No more "resolving…" on every page load.
 
 ## Setup Guide
@@ -577,6 +578,11 @@ sudo userdel -r cowrie
 - [x] Dashboard widgets: threat gauge, geography, credentials, brute-force radar, live timeline
 - [x] Persistent geo cache (SQLite-backed, survives restarts)
 - [x] MalwareBazaar dashboard widget (stats + upload history + family classification)
+- [x] Incremental cowrie actor rebuild (per-tick cost is O(touched), not O(all history))
+- [x] Seven IP-reputation providers (AbuseIPDB, VirusTotal, GreyNoise, Shodan, OTX, IPQualityScore, IPinfo)
+- [x] Dashboard auth token forwarded on every request + cross-page navigation
+- [x] One-command uninstall (`uninstall [--purge]`) with SSH-restore-first safety
+- [x] Full-window analytics — MITRE/TTP/IOC/graph/deobf cover the whole selected window (not a recent sample), with capped widgets disclosing "N of M"
 - [ ] GeoLite2 MMDB enrichment (escape the ip-api.com rate limits arc)
 - [ ] Real-time WebSocket feed (current dashboard polls every 5s, which is fine but mid)
 

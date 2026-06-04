@@ -77,7 +77,14 @@ jobs:
           GOARCH: ${{ matrix.target.goarch }}
           GOARM: ${{ matrix.target.goarm }}
         run: |
-          go build -trimpath -ldflags='-s -w' \
+          # Stamp version (from the tag, or short SHA on untagged builds) and
+          # commit so `shardlure version` / the dashboard report the real build
+          # instead of dev/unknown.
+          VERSION="${GITHUB_REF_NAME}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) VERSION="$(git rev-parse --short HEAD)" ;; esac
+          COMMIT="$(git rev-parse --short HEAD)"
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
             -o dist/shardlure-${{ matrix.target.label }} \
             ./cmd/shardlure
           file dist/shardlure-${{ matrix.target.label }}
