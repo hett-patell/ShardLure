@@ -1056,7 +1056,7 @@
       <section class="panel" id="panel-enrich">
         <div class="panel-head">
           <h2>Threat intel enrichment</h2>
-          <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise</span>
+          <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo</span>
         </div>
         <div class="enrich-toolbar">
           <input id="enrich-ip" class="enrich-input" placeholder="lookup an IP (1.2.3.4)…" />
@@ -1834,12 +1834,22 @@ function relTime(iso) {
 function renderSessions(data) {
   const list = document.getElementById('sessions-list');
   const meta = document.getElementById('sessions-meta');
+  var win = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
   if (!data.sessions || data.sessions.length === 0) {
     list.innerHTML = '<div class="empty">no cowrie sessions in window</div>';
-    meta.textContent = '0 sessions · ' + data.windowHours + 'h window';
+    meta.textContent = '0 sessions · ' + win + ' window';
     return;
   }
-  meta.textContent = data.sessions.length + ' sessions · ' + data.windowHours + 'h window';
+  // data.total is the true distinct-session count in the window; the list is
+  // capped to the newest `returned`. Show "newest N of M" when capped so the
+  // count isn't read as the window total (and so widening the window — which
+  // grows M but not the newest-N rows — visibly changes the number).
+  var shown = (data.returned != null) ? data.returned : data.sessions.length;
+  var totalSess = (data.total != null) ? data.total : shown;
+  var label = totalSess > shown
+    ? ('newest ' + shown + ' of ' + fmt(totalSess) + ' sessions')
+    : (fmt(totalSess) + ' sessions');
+  meta.textContent = label + ' · ' + win + ' window';
   let html = '';
   data.sessions.forEach(function(s, i) {
     // s.id / s.ip / s.user are attacker-influenced (cowrie session id, source
@@ -1987,7 +1997,8 @@ function fmtShortTime(iso) {
 function renderIOC(data) {
   const tb = document.querySelector('#ioc-table tbody');
   const meta = document.getElementById('ioc-meta');
-  meta.textContent = data.total + ' indicators · ' + IOC.kind + ' · ' + data.windowHours + 'h window';
+  var iwin = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
+  meta.textContent = fmt(data.total) + ' indicators · ' + IOC.kind + ' · ' + iwin + ' window';
 
   if (!data.indicators || data.indicators.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no indicators in window</div></td></tr>';
@@ -2090,7 +2101,7 @@ async function runEnrich(ip) {
     const r = await fetch('/api/intel/enrich?ip=' + encodeURIComponent(ip), { cache: 'no-store' });
     if (!r.ok) {
       box.innerHTML = '<div class="empty">lookup failed (' + r.status + ')</div>';
-      meta.textContent = 'AbuseIPDB · VirusTotal · GreyNoise';
+      meta.textContent = 'AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo';
       return;
     }
     const d = await r.json();
@@ -2221,9 +2232,16 @@ function renderPayloads(data) {
   const tb = document.querySelector('#payloads-table tbody');
   const meta = document.getElementById('payloads-meta');
   const unique = data.total || 0;
-  let totalCaptures = 0;
-  (data.rows || []).forEach(function(p) { totalCaptures += (p.occurrences || 1); });
-  meta.textContent = unique + ' unique · ' + totalCaptures + ' captures · ' + data.windowHours + 'h window';
+  const returned = (data.returned != null) ? data.returned : (data.rows || []).length;
+  let shownCaptures = 0;
+  (data.rows || []).forEach(function(p) { shownCaptures += (p.occurrences || 1); });
+  // `unique` is the full-window distinct-payload count; the captures sum is only
+  // over the rows actually returned (page-capped). Label honestly so the two
+  // figures aren't read as describing the same population.
+  const capturesLabel = returned < unique
+    ? (fmt(shownCaptures) + ' captures in top ' + returned)
+    : (fmt(shownCaptures) + ' captures');
+  meta.textContent = fmt(unique) + ' unique · ' + capturesLabel + ' · ' + data.windowHours + 'h window';
 
   if (!data.rows || data.rows.length === 0) {
     tb.innerHTML = '<tr><td colspan="7"><div class="empty">no captured payloads in window</div></td></tr>';
@@ -2385,6 +2403,15 @@ function renderPayloadDetail(d) {
   const errBlock = insp.error
     ? '<div class="empty">inspector error: ' + escHtml(insp.error) + '</div>'
     : '';
+  // When the on-disk file no longer matches the recorded sha256 (a cowrie SFTP
+  // race where the file kept being written after the shasum was logged), the
+  // magic/strings/hex below describe the on-disk bytes, NOT this sha. Warn.
+  const mismatchBlock = d.sizeMismatch
+    ? '<div class="empty" style="color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:8px;margin-bottom:8px">'
+      + '⚠ on-disk file (' + fmtSize(d.diskSizeBytes) + ') does not match the recorded sha256/size ('
+      + fmtSize(d.sizeBytes) + '). The magic/strings/hex below describe the file currently on disk, '
+      + 'not necessarily this sha256 (known cowrie SFTP capture race).</div>'
+    : '';
   const strs = (insp.strings || []).map(escHtml).join('\n');
   const stringsBlock = insp.strings && insp.strings.length
     ? '<div class="pm-section-h">printable strings (top ' + insp.strings.length + ')</div>' +
@@ -2397,7 +2424,7 @@ function renderPayloadDetail(d) {
 
   const grid = '<div class="pm-grid">' +
     '<span class="pm-k">sha256</span>'   + '<span class="pm-v sha">'   + escHtml(d.sha256 || '—') + '</span>' +
-    '<span class="pm-k">size</span>'     + '<span class="pm-v">'       + fmtSize(d.sizeBytes) + '</span>' +
+    '<span class="pm-k">size</span>'     + '<span class="pm-v">'       + fmtSize(d.sizeBytes) + (d.sizeMismatch ? ' <span style="color:var(--warn)">(disk: ' + fmtSize(d.diskSizeBytes) + ')</span>' : '') + '</span>' +
     '<span class="pm-k">magic</span>'    + '<span class="pm-v magic">' + escHtml(insp.magic || '—') + '</span>' +
     '<span class="pm-k">mime</span>'     + '<span class="pm-v">'       + escHtml(insp.mimeHint || '—') + '</span>' +
     '<span class="pm-k">origin</span>'   + '<span class="pm-v">'       + escHtml(d.origin || '—') + '</span>' +
@@ -2411,7 +2438,7 @@ function renderPayloadDetail(d) {
     '</div>';
 
   var bzBtn = d.sha256 ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><button class="bz-btn" onclick="uploadToBazaar(\''+escHtml(d.sha256)+'\',this)">▲ Share to MalwareBazaar</button></div>' : '';
-  document.getElementById('pm-body').innerHTML = grid + errBlock + stringsBlock + hexBlock + bzBtn;
+  document.getElementById('pm-body').innerHTML = mismatchBlock + grid + errBlock + stringsBlock + hexBlock + bzBtn;
 }
 
 function closePayload() { document.getElementById('payload-modal').classList.remove('open'); }
@@ -2519,7 +2546,14 @@ async function refreshGraph() {
     }
     const data = await r.json();
     renderGraph(data);
-    stats.textContent = data.nodes.length + ' nodes · ' + data.edges.length + ' edges · ' +
+    // Disclose the top-N-per-kind sampling so "240 nodes" doesn't read as the
+    // whole population (the graph is intentionally capped to stay renderable).
+    var shown = data.nodes.length;
+    var totalNodes = data.totalNodes || shown;
+    var nodeLabel = totalNodes > shown
+      ? (shown + ' of ' + fmt(totalNodes) + ' nodes (top ' + (data.cap || 80) + '/kind)')
+      : (shown + ' nodes');
+    stats.textContent = nodeLabel + ' · ' + data.edges.length + ' edges · ' +
                         data.windowHours + 'h window';
   } catch (e) {
     stats.textContent = 'load failed: ' + e.message;

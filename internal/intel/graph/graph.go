@@ -46,6 +46,11 @@ type Edge struct {
 type Graph struct {
 	Nodes []Node `json:"nodes"`
 	Edges []Edge `json:"edges"`
+	// Totals is the true distinct-node count per kind BEFORE the top-N cap, so
+	// the UI can disclose that the rendered graph is a sample (e.g. "240 of
+	// 4597 nodes"). Cap is the per-kind limit applied.
+	Totals map[NodeKind]int `json:"totals"`
+	Cap    int              `json:"cap"`
 }
 
 // Build aggregates an event slice into a pivot graph, keeping only
@@ -143,7 +148,18 @@ func Build(events []*models.Event, topN int) Graph {
 	pickTop(hasshes, NodeHASSH, &nodes)
 	pickTop(users, NodeUser, &nodes)
 
-	out := Graph{Nodes: nodes}
+	// True distinct counts per kind (before the cap) so the UI can disclose
+	// that the graph is a top-N-per-kind sample, not the whole population.
+	out := Graph{
+		Nodes: nodes,
+		Cap:   topN,
+		Totals: map[NodeKind]int{
+			NodeActor: len(actors),
+			NodeIP:    len(ips),
+			NodeHASSH: len(hasshes),
+			NodeUser:  len(users),
+		},
+	}
 	for p, w := range edges {
 		if !keep[p.a] || !keep[p.b] {
 			continue

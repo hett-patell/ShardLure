@@ -29,17 +29,34 @@ func WriteCSV(w io.Writer, indicators []Indicator) error {
 	for _, ind := range indicators {
 		row := []string{
 			string(ind.Kind),
-			ind.Value,
+			csvSafe(ind.Value),
 			ind.FirstSeen.UTC().Format(time.RFC3339),
 			ind.LastSeen.UTC().Format(time.RFC3339),
 			strconv.Itoa(ind.Count),
-			strings.Join(ind.Sources, "|"),
-			strings.Join(ind.Actors, "|"),
-			ind.SampleCommand,
+			csvSafe(strings.Join(ind.Sources, "|")),
+			csvSafe(strings.Join(ind.Actors, "|")),
+			csvSafe(ind.SampleCommand),
 		}
 		if err := cw.Write(row); err != nil {
 			return err
 		}
 	}
 	return cw.Error()
+}
+
+// csvSafe neutralizes spreadsheet formula injection (CSV injection, CWE-1236).
+// encoding/csv only does RFC4180 quoting; it does NOT stop a cell beginning
+// with = + - @ (or a leading tab/CR) from being evaluated as a formula when
+// the export is opened in Excel/LibreOffice/Sheets. Several IOC fields are
+// fully attacker-controlled (a captured username or shell command), so prefix
+// any such field with an apostrophe to force literal text.
+func csvSafe(v string) string {
+	if v == "" {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	}
+	return v
 }

@@ -120,6 +120,8 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 type sessionsResponse struct {
 	GeneratedAt string             `json:"generatedAt"`
 	WindowHours int                `json:"windowHours"`
+	Total       int                `json:"total"`    // true distinct sessions in window
+	Returned    int                `json:"returned"` // rows actually sent (newest N)
 	Sessions    []sessionRow       `json:"sessions"`
 }
 
@@ -159,9 +161,15 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	total, terr := s.st.CountSessionsSince(since)
+	if terr != nil {
+		total = len(sessions)
+	}
 	resp := sessionsResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
+		Total:       total,
+		Returned:    len(sessions),
 	}
 	for _, sm := range sessions {
 		dur := sm.EndTS.Sub(sm.StartTS).Milliseconds()
@@ -512,17 +520,28 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g := graph.Build(events, topN)
+	// Sum the per-kind distinct totals so the UI can show "rendered of total".
+	totalNodes := 0
+	for _, n := range g.Totals {
+		totalNodes += n
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(struct {
-		GeneratedAt string        `json:"generatedAt"`
-		WindowHours int           `json:"windowHours"`
-		Nodes       []graph.Node  `json:"nodes"`
-		Edges       []graph.Edge  `json:"edges"`
+		GeneratedAt string                 `json:"generatedAt"`
+		WindowHours int                    `json:"windowHours"`
+		Nodes       []graph.Node           `json:"nodes"`
+		Edges       []graph.Edge           `json:"edges"`
+		Totals      map[graph.NodeKind]int `json:"totals"`      // true distinct per kind, pre-cap
+		TotalNodes  int                    `json:"totalNodes"`  // sum of all distinct nodes pre-cap
+		Cap         int                    `json:"cap"`         // top-N per kind applied
 	}{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
 		Nodes:       g.Nodes,
 		Edges:       g.Edges,
+		Totals:      g.Totals,
+		TotalNodes:  totalNodes,
+		Cap:         g.Cap,
 	})
 }
 
@@ -719,6 +738,11 @@ type payloadDetailResponse struct {
 	SrcIP     string             `json:"srcIp,omitempty"`
 	TS        string             `json:"ts,omitempty"`
 	Inspect   payload.Inspection `json:"inspect"`
+	// SizeMismatch is true when the on-disk file's size differs from the
+	// recorded size — i.e. the bytes inspected do not hash to SHA256 (a known
+	// cowrie SFTP race). DiskSizeBytes is the actual on-disk size in that case.
+	SizeMismatch  bool  `json:"sizeMismatch,omitempty"`
+	DiskSizeBytes int64 `json:"diskSizeBytes,omitempty"`
 }
 
 func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
@@ -737,6 +761,7 @@ func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "artifact not found: "+err.Error(), http.StatusNotFound)
 		return
 	}
+	insp := payload.File(a.LocalPath)
 	resp := payloadDetailResponse{
 		SHA256:    a.SHA256,
 		URL:       a.URL,
@@ -747,7 +772,18 @@ func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
 		Session:   a.SessionID,
 		SrcIP:     a.SrcIP,
 		TS:        a.TS.UTC().Format(time.RFC3339),
-		Inspect:   payload.File(a.LocalPath),
+		Inspect:   insp,
+	}
+	// Integrity check: for some cowrie SFTP uploads, cowrie reports a shasum at
+	// upload-event time, then keeps writing the outfile — so the on-disk bytes
+	// (and size) end up NOT matching the recorded sha256. The inspector reads
+	// the on-disk file, so its magic/strings/size would be labeled under a sha
+	// they don't hash to. Detect the size divergence and flag it, and report
+	// the ACTUAL on-disk size so the modal doesn't show e.g. 160 KB next to a
+	// 1.88 MB file's strings.
+	if insp.Error == "" && a.SizeBytes > 0 && insp.SizeBytes != a.SizeBytes {
+		resp.SizeMismatch = true
+		resp.DiskSizeBytes = insp.SizeBytes
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -30,6 +30,19 @@ type SessionSummary struct {
 // Only cowrie events are considered: journal events have no session id
 // (per the design decision in the slice planning question) — a bare
 // SSH attempt isn't a session.
+// CountSessionsSince returns the TRUE number of distinct cowrie sessions in the
+// window. ListSessions caps at the newest `limit`, so the rendered row count
+// (always == limit on a busy box) is not the population; the dashboard now
+// shows "newest N of <this> sessions".
+func (s *Store) CountSessionsSince(since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(DISTINCT session_id) FROM events
+WHERE source='cowrie' AND session_id != '' AND ts >= ?`,
+		since.UTC().Format(time.RFC3339Nano)).Scan(&n)
+	return n, err
+}
+
 func (s *Store) ListSessions(since time.Time, limit int) ([]SessionSummary, error) {
 	if limit <= 0 {
 		limit = 200
@@ -38,7 +51,11 @@ func (s *Store) ListSessions(since time.Time, limit int) ([]SessionSummary, erro
 SELECT
   session_id,
   MAX(src_ip)                                       AS src_ip,
-  COALESCE(MAX(CASE WHEN username != '' THEN username END), '') AS username,
+  -- most-recent non-empty username (chronological), matching the detail view;
+  -- MAX(username) would be alphabetical and could disagree with the modal.
+  COALESCE((SELECT e2.username FROM events e2
+            WHERE e2.session_id = events.session_id AND e2.username != ''
+            ORDER BY e2.ts DESC LIMIT 1), '')       AS username,
   MAX(hassh)                                        AS hassh,
   MAX(ssh_client)                                   AS ssh_client,
   MIN(ts)                                           AS start_ts,

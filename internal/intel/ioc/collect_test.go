@@ -130,3 +130,36 @@ func TestWriteSTIXDeterministic(t *testing.T) {
 		t.Errorf("STIX export not deterministic:\n--- A ---\n%s\n--- B ---\n%s", a.String(), b.String())
 	}
 }
+
+// TestWriteCSVNeutralizesFormulaInjection locks in the CWE-1236 fix: a captured
+// username/command beginning with =,+,-,@ (attacker-controlled) must not be
+// emitted as a live spreadsheet formula.
+func TestWriteCSVNeutralizesFormulaInjection(t *testing.T) {
+	now := time.Now()
+	inds := []Indicator{
+		{Kind: "user", Value: "=cmd|' /c calc'!A1", FirstSeen: now, LastSeen: now, Count: 1},
+		{Kind: "user", Value: "+1+1", FirstSeen: now, LastSeen: now, Count: 1},
+		{Kind: "ip", Value: "1.2.3.4", FirstSeen: now, LastSeen: now, Count: 1, SampleCommand: "@SUM(1+9)*cmd"},
+		{Kind: "ip", Value: "5.6.7.8", FirstSeen: now, LastSeen: now, Count: 1, SampleCommand: "uname -a"},
+	}
+	var buf bytes.Buffer
+	if err := WriteCSV(&buf, inds); err != nil {
+		t.Fatalf("WriteCSV: %v", err)
+	}
+	out := buf.String()
+	for _, danger := range []string{"=cmd", "+1+1", "@SUM"} {
+		// The dangerous lead must be apostrophe-prefixed, never bare at a cell start.
+		if strings.Contains(out, ",'"+danger) || strings.Contains(out, "'"+danger) {
+			continue
+		}
+		t.Errorf("formula lead %q not neutralized in CSV:\n%s", danger, out)
+	}
+	// A benign value/command must pass through unchanged.
+	if !strings.Contains(out, "1.2.3.4") || !strings.Contains(out, "uname -a") {
+		t.Errorf("benign fields altered:\n%s", out)
+	}
+	// Sanity: csvSafe leaves normal text alone, prefixes dangerous leads.
+	if csvSafe("root") != "root" || csvSafe("=evil") != "'=evil" {
+		t.Errorf("csvSafe wrong: %q %q", csvSafe("root"), csvSafe("=evil"))
+	}
+}
