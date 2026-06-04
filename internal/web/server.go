@@ -450,14 +450,26 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			Country: country,
 			City:    city,
 		})
-		if cc != "" {
-			countryRow, ok := countryStats[cc]
-			if !ok {
-				countryRow = &topCountryRow{CC: cc, Country: country}
-				countryStats[cc] = countryRow
-			}
-			countryRow.Hits += row.Hits
+		// Aggregate into the country chart. If geo hasn't resolved yet (a brand-
+		// new high-volume attacker IP whose lookup didn't make the prefetch
+		// budget, and isn't in the persistent cache), bucket its hits under
+		// "Unknown" rather than DROPPING them — otherwise Attack Geography
+		// silently disagrees with Top source IPs (e.g. a 64k-hit IP showing in
+		// the IP list but missing from the country totals). Private/admin IPs
+		// are excluded entirely.
+		key, label := cc, country
+		if isPrivateIP(row.Key) {
+			continue
 		}
+		if key == "" {
+			key, label = "??", "Unknown"
+		}
+		countryRow, ok := countryStats[key]
+		if !ok {
+			countryRow = &topCountryRow{CC: key, Country: label}
+			countryStats[key] = countryRow
+		}
+		countryRow.Hits += row.Hits
 	}
 
 	for _, row := range topUsers {
@@ -475,7 +487,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		resp.TopCountries = resp.TopCountries[:12]
 	}
 	resp.Summary.UniqueIPs = uniqueIPs
+	// Count distinct resolved countries; the "??" Unknown bucket is not a country.
 	resp.Summary.Countries = len(countryStats)
+	if _, hasUnknown := countryStats["??"]; hasUnknown {
+		resp.Summary.Countries--
+	}
 
 	for _, row := range hourly {
 		resp.Hourly = append(resp.Hourly, hourPoint{T: row.Hour.Unix(), N: row.Hits})
