@@ -20,15 +20,18 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 ## Contents
 
 - [Features](#features)
-- [Quick Start](#quick-start)
+- [Setup Guide](#setup-guide)
 - [Local Development](#local-development)
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
 - [Persona And Bait](#persona-and-bait)
+- [IP Reputation Enrichment](#ip-reputation-enrichment)
+- [Threat Intel Sharing (MalwareBazaar)](#threat-intel-sharing-malwarebazaar)
 - [Architecture](#architecture)
 - [Security Notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
+- [Uninstall](#uninstall)
 - [Roadmap](#roadmap)
 
 ## Features
@@ -48,19 +51,65 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
 - **Persistent geo cache:** IP geolocation results are stored in SQLite and survive restarts. No more "resolving…" on every page load.
 
-## Quick Start
+## Setup Guide
 
-On a fresh Ubuntu/Debian VPS. Bring your SSH key, leave your password auth at the door.
+A complete walkthrough for standing up ShardLure on a fresh Ubuntu/Debian VPS
+(it also supports dnf/yum and pacman hosts). Budget ~10 minutes, most of it
+Cowrie's pip install.
+
+### Before you start — the one rule that matters
+
+**Add your SSH public key to the box first, and keep your current SSH session
+open until you've verified the new admin port works.** The installer moves real
+SSH off port 22 so Cowrie can squat there; if you have no key and no open
+session, you can lock yourself out. The installer is paranoid on your behalf —
+it *refuses* to move SSH if it can't find an `authorized_keys`, and it rolls the
+sshd config back automatically if the new one fails `sshd -t` — but the golden
+rule still stands.
+
+```bash
+# On your laptop, if you haven't already:
+ssh-copy-id user@your-vps        # or paste your pubkey into ~/.ssh/authorized_keys on the VPS
+```
+
+### Step 1 — Get the code onto the VPS
 
 ```bash
 git clone https://github.com/hett-patell/shardlure.git
 cd shardlure
+```
+
+> **Transferring sources yourself?** Use the tar-pipe deploy (`make deploy` /
+> `bash scripts/push-sources.sh arm`), **not** `scp` — some `scp`/editor
+> pipelines silently re-encode Go/Python to UTF-16 and the build dies with
+> "null bytes". See [Troubleshooting](#nul-bytes-or-utf-16-corruption).
+
+### Step 2 — Run the installer
+
+```bash
 sudo python3 scripts/shardlure.py run
 ```
 
-The installer is paranoid on your behalf: it refuses to move SSH off port 22 if it can't find an `authorized_keys`, and it rolls the sshd config back automatically if the new one fails `sshd -t`. No accidental "locked myself out at 2am" lore.
+It will, in order:
 
-The installer asks for:
+1. **Install dependencies** (git, python venv toolchain, authbind, Go) via your
+   distro's package manager.
+2. **Prompt for three ports** (defaults shown below).
+3. **Detect your admin IPs** — Tailscale IP + your current SSH client IP are
+   auto-added to `admin_ips` (so you never classify *yourself* as an attacker);
+   you can add more.
+4. **Move real SSH** to the admin port via a drop-in at
+   `/etc/ssh/sshd_config.d/99-shardlure-admin.conf` (key-only, root password
+   login disabled). The original config is backed up to
+   `/etc/ssh/sshd_config.shardlure-bak`.
+5. **Create the `cowrie` system user**, clone + build Cowrie into
+   `/var/lib/shardlure/cowrie`, apply the stealth persona, regenerate host keys,
+   and plant bait files.
+6. **Build the `shardlure` binary** to `/usr/local/bin/shardlure`.
+7. **Write** `/var/lib/shardlure/shardlure.yaml`.
+8. **Open firewall ports** (only if `ufw` is already active).
+9. **Install + start** two systemd services: `cowrie.service` and
+   `shardlure-live.service`.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -68,16 +117,45 @@ The installer asks for:
 | Admin SSH port | `2222` | Real SSH, key-only |
 | Dashboard port | `8080` | Live dashboard |
 
-After setup:
+### Step 3 — Verify SSH before you log out (do not skip)
+
+From a **second terminal**, confirm the new admin port works:
+
+```bash
+ssh -p 2222 user@your-vps        # use whatever admin port you chose
+```
+
+Only close your original session once that succeeds. (If something went wrong,
+the original sshd was auto-restored — but verify anyway.)
+
+### Step 4 — Check services and open the dashboard
 
 ```bash
 sudo python3 scripts/shardlure.py status
 systemctl status cowrie shardlure-live
+journalctl -u shardlure-live -f       # watch live ingest
 ```
 
-Open the dashboard at `http://<tailscale-ip>:8080`. Keep `8080` off the public internet — port `22` is the bait, your dashboard is not bait, do not get those confused.
+Open the dashboard at `http://<tailscale-ip>:8080`. **Keep `8080` off the public
+internet** — port `22` is the bait, your dashboard is not bait, do not get those
+confused. Tailscale or an SSH tunnel (`ssh -L 8080:127.0.0.1:8080 ...`) is the
+right way to reach it.
 
-For an extra dashboard guard, set `SHARDLURE_DASH_TOKEN` before running `web` or `live`.
+For defense in depth, set a token the dashboard requires on every request:
+
+```bash
+# Add to the shardlure-live systemd unit's [Service] section, then daemon-reload + restart:
+Environment=SHARDLURE_DASH_TOKEN=your-long-random-token
+```
+
+Then reach the dashboard with `?token=…` or an `Authorization: Bearer …` header.
+
+### Step 5 (optional) — Enable IP reputation enrichment & MalwareBazaar sharing
+
+Add provider API keys as `Environment=` lines in the `shardlure-live` unit (see
+[IP Reputation Enrichment](#ip-reputation-enrichment) and
+[Threat Intel Sharing](#threat-intel-sharing-malwarebazaar)). Two enrichment
+providers (Shodan, GreyNoise) work with no key at all.
 
 ### Resume Setup
 
@@ -150,6 +228,7 @@ sudo ./shardlure run
 | `finish` | Resume after partial setup |
 | `plant-bait`, `bait` | Inject bait files into Cowrie's virtual filesystem |
 | `start`, `stop`, `status` | Manage services |
+| `uninstall [--purge]` | Reverse the install: restore SSH, remove services + binary. `--purge` also deletes the data dir and `cowrie` user. See [Uninstall](#uninstall). |
 
 ## CI
 
@@ -379,6 +458,109 @@ This is harmless on rerun. `do_load` indicates the file content was loaded.
 ls /var/lib/shardlure/cowrie/honeyfs/opt/app/
 ```
 <img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/e62fe09e-e9fb-4d4e-891e-342298640e08" />
+
+## Uninstall
+
+Tearing ShardLure down means undoing everything the installer did: restoring
+real SSH to port 22, removing the two systemd services and the binary, and
+(optionally) deleting Cowrie, the captured-intel database, and the `cowrie`
+user. There are two ways to do it — the built-in command (recommended) and a
+fully manual walkthrough if you'd rather see every step.
+
+> **The same golden rule as install:** SSH gets reconfigured. Keep a working
+> session open and verify connectivity on the restored port **before** you log
+> out. The uninstaller restores SSH *first*, before touching anything else,
+> precisely so a half-finished teardown can't strand you.
+
+### Option A — the `uninstall` command (recommended)
+
+```bash
+# Stops + removes services and the binary, restores the original sshd_config,
+# removes the authbind/ufw rules — but KEEPS your data (DB, evidence, config):
+sudo python3 scripts/shardlure.py uninstall
+
+# Same, but ALSO delete /var/lib/shardlure (Cowrie clone, captured payloads,
+# the SQLite intel DB) and remove the 'cowrie' system user:
+sudo python3 scripts/shardlure.py uninstall --purge
+```
+
+What it does, in order (SSH first, on purpose):
+
+1. **Restore SSH** — copy `/etc/ssh/sshd_config.shardlure-bak` back over
+   `/etc/ssh/sshd_config`, delete the `99-shardlure-admin.conf` drop-in, run
+   `sshd -t`, and only then reload. If the validated config fails the test it
+   **aborts the reload** rather than risk your running sshd.
+2. **Remove services** — stop, disable, and delete `cowrie.service` and
+   `shardlure-live.service`; `daemon-reload`.
+3. **Remove the binary** — `/usr/local/bin/shardlure`.
+4. **Remove the authbind byport file** (only created when the honeypot port is
+   < 1024).
+5. **Firewall** — delete the honeypot and dashboard `ufw allow` rules. The
+   **admin SSH rule is left in place on purpose** so you can't lock yourself out.
+6. **Data** — kept by default; deleted only with `--purge` (along with the
+   `cowrie` user).
+
+> **Custom ports?** The firewall/authbind cleanup needs to know which ports you
+> used. If you didn't install on the defaults (22/2222/8080), pass them via
+> environment variables so the right rules are removed (SSH restore + service +
+> binary removal are port-independent and always correct regardless):
+>
+> ```bash
+> sudo SHARDLURE_HONEYPOT_PORT=22 SHARDLURE_ADMIN_PORT=2222 SHARDLURE_DASH_PORT=8080 \
+>   python3 scripts/shardlure.py uninstall --purge
+> ```
+
+After it finishes, **verify SSH from a second terminal** on the restored port
+(by default 22 once Cowrie is gone) before closing your session.
+
+### Option B — manual teardown
+
+Do this if the script isn't available or you want to inspect each step. Run as
+root.
+
+```bash
+# 1. Restore real SSH FIRST (so you can't get locked out).
+sudo cp /etc/ssh/sshd_config.shardlure-bak /etc/ssh/sshd_config   # if the backup exists
+sudo rm -f /etc/ssh/sshd_config.d/99-shardlure-admin.conf
+sudo sshd -t && sudo systemctl reload ssh                          # only reload if -t passes
+#   No backup? Re-enable the original Port line by hand in /etc/ssh/sshd_config,
+#   then `sudo sshd -t && sudo systemctl reload ssh`. VERIFY in a 2nd terminal.
+
+# 2. Stop, disable, and remove the systemd services.
+sudo systemctl stop shardlure-live.service cowrie.service
+sudo systemctl disable shardlure-live.service cowrie.service
+sudo rm -f /etc/systemd/system/shardlure-live.service /etc/systemd/system/cowrie.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+
+# 3. Remove the binary.
+sudo rm -f /usr/local/bin/shardlure
+
+# 4. Remove the authbind byport file (only if your honeypot port was < 1024).
+sudo rm -f /etc/authbind/byport/22       # use your honeypot port
+
+# 5. Revert firewall rules (skip the admin SSH port!).
+sudo ufw delete allow 22/tcp             # honeypot port
+sudo ufw delete allow 8080/tcp           # dashboard port
+#   Leave the admin SSH port (e.g. 2222) allowed until you've confirmed SSH on 22.
+
+# 6. Delete Cowrie, captured intel, and the cowrie user (DESTRUCTIVE — skip to keep data).
+sudo rm -rf /var/lib/shardlure
+sudo userdel -r cowrie
+```
+
+> `apt`/`dnf`/`pacman` packages installed as dependencies (git, python venv,
+> authbind, Go, build tools) are **not** removed by either method — they're
+> shared system packages and removing them could break unrelated things. Remove
+> them yourself only if you're sure nothing else needs them.
+
+### What's left behind (and is safe to keep)
+
+- Installed OS packages (see above).
+- Any extra `ufw` rules you added by hand.
+- Without `--purge`: `/var/lib/shardlure` and the `cowrie` user — your captured
+  intel survives so you can archive it. Treat the SQLite DB like a loaded gun
+  (it holds attacker-supplied passwords) and `shred`/securely delete it when done.
 
 ## Roadmap
 

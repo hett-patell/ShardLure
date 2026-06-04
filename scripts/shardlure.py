@@ -574,6 +574,130 @@ def cmd_finish() -> None:
     print_summary(admin, honeypot, dash)
 
 
+def restore_sshd() -> None:
+    """Undo migrate_sshd: remove the ShardLure drop-in and restore the original
+    sshd_config from the backup, validated before reload. Done FIRST during
+    uninstall so a botched teardown can never leave you locked out.
+
+    If no backup exists (e.g. partial install) we still remove the drop-in and
+    re-test; an invalid resulting config aborts the reload rather than risk the
+    running sshd."""
+    dropin = Path("/etc/ssh/sshd_config.d/99-shardlure-admin.conf")
+    main_cfg = Path("/etc/ssh/sshd_config")
+    bak = Path("/etc/ssh/sshd_config.shardlure-bak")
+    changed = False
+    if bak.exists():
+        log("restoring original sshd_config from backup")
+        shutil.copy2(bak, main_cfg)
+        changed = True
+    elif main_cfg.exists():
+        # No backup: at least un-comment any "#Port " lines we may have added.
+        text = main_cfg.read_text()
+        new = "\n".join(
+            line[1:] if line.startswith("#Port ") else line
+            for line in text.splitlines()
+        )
+        if new != text:
+            main_cfg.write_text(new + "\n")
+            changed = True
+    if dropin.exists():
+        log("removing ShardLure sshd drop-in")
+        dropin.unlink()
+        changed = True
+    if not changed:
+        log("no ShardLure sshd changes found; leaving ssh config untouched")
+        return
+    cp = run(["sshd", "-t"])
+    if cp.returncode != 0:
+        die("restored sshd config failed sshd -t; NOT reloading. "
+            "Inspect /etc/ssh/sshd_config before reloading ssh manually.")
+    run(["systemctl", "daemon-reload"])
+    if run(["systemctl", "reload", "ssh"]).returncode != 0:
+        run(["systemctl", "reload", "sshd"])
+    if bak.exists():
+        bak.unlink(missing_ok=True)
+    log("real SSH restored to its pre-ShardLure configuration")
+
+
+def remove_services() -> None:
+    log("stopping and removing systemd services")
+    run(["systemctl", "stop", "shardlure-live.service", "cowrie.service"])
+    run(["systemctl", "disable", "shardlure-live.service", "cowrie.service"])
+    for unit in ("shardlure-live.service", "cowrie.service"):
+        p = SYSTEMD_DIR / unit
+        if p.exists():
+            p.unlink()
+    run(["systemctl", "daemon-reload"])
+    run(["systemctl", "reset-failed"])
+
+
+def remove_firewall_rules(honeypot_port: int, admin_port: int, dash_port: int) -> None:
+    if not shutil.which("ufw"):
+        return
+    cp = run(["ufw", "status"], capture_output=True, text=True)
+    if "active" not in (cp.stdout or "").lower():
+        return
+    log("removing ufw rules added at install (admin port left as-is)")
+    # Deliberately do NOT delete the admin SSH port rule — removing it could
+    # lock the operator out. Only the honeypot + dashboard rules are reverted.
+    for port in (honeypot_port, dash_port):
+        if port == admin_port:
+            continue
+        run(["ufw", "delete", "allow", f"{port}/tcp"])
+
+
+def cmd_uninstall() -> None:
+    """Reverse the install: restore SSH, remove services + binary, and (with
+    --purge) delete the cowrie user, data dir and captured intel.
+
+    Order matters: SSH is restored FIRST so you cannot be locked out, even if a
+    later step fails."""
+    need_root()
+    purge = "--purge" in sys.argv[2:]
+    honeypot, admin, dash = load_finish_ports()
+
+    log("ShardLure uninstall starting")
+    log("step 1/5: restore real SSH (before anything else, to avoid lockout)")
+    restore_sshd()
+
+    log("step 2/5: stop + remove systemd services")
+    remove_services()
+
+    log("step 3/5: remove the shardlure binary")
+    binp = BIN_DIR / "shardlure"
+    if binp.exists():
+        binp.unlink()
+        log(f"removed {binp}")
+
+    log("step 4/5: remove authbind byport file (if any)")
+    if honeypot < 1024:
+        ab = Path(f"/etc/authbind/byport/{honeypot}")
+        if ab.exists():
+            ab.unlink()
+            log(f"removed {ab}")
+
+    log("step 5/5: firewall + data")
+    remove_firewall_rules(honeypot, admin, dash)
+
+    if purge:
+        log(f"--purge: deleting data dir {DATA_DIR} (cowrie clone, DB, evidence, config)")
+        if DATA_DIR.exists():
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+        if subprocess.run(["id", COWRIE_USER], capture_output=True).returncode == 0:
+            log(f"--purge: removing system user {COWRIE_USER}")
+            run(["userdel", "-r", COWRIE_USER])
+    else:
+        log(f"data preserved at {DATA_DIR} (captured intel, DB, config).")
+        log(f"  to also delete it and the '{COWRIE_USER}' user, re-run with --purge:")
+        log("  sudo python3 scripts/shardlure.py uninstall --purge")
+
+    print("\nShardLure uninstalled\n=====================")
+    print(f"Real SSH restored. VERIFY before logging out: ssh -p {admin} <user>@<host>")
+    print("  (If the backup was missing, double-check /etc/ssh/sshd_config by hand.)")
+    if not purge:
+        print(f"Data kept at {DATA_DIR}. Re-run with --purge to remove it.")
+
+
 def cmd_status() -> None:
     run(["systemctl", "status", "cowrie.service", "shardlure-live.service", "--no-pager"])
     if (BIN_DIR / "shardlure").exists():
@@ -607,8 +731,11 @@ def main() -> None:
         plant_bait_files()
         run(["systemctl", "restart", "cowrie.service"]).check_returncode()
         log("bait planted — test: ssh root@<public-ip> then cat /opt/app/.env")
+    elif cmd in ("uninstall", "remove"):
+        cmd_uninstall()
     else:
-        die("usage: sudo python3 scripts/shardlure.py {run|finish|start|stop|status|plant-bait}")
+        die("usage: sudo python3 scripts/shardlure.py "
+            "{run|finish|start|stop|status|plant-bait|uninstall [--purge]}")
 
 
 if __name__ == "__main__":
