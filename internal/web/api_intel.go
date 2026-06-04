@@ -70,7 +70,9 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 20000)
+	// Full window (was capped at the most-recent 20000 events, so any window
+	// wider than ~30h silently classified only the last 30h).
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -80,7 +82,7 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 	resp := mitreResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
-		TotalEvents: len(events),
+		TotalEvents: len(events), // now the true window total (full window read)
 		Grid:        mitre.CoverageGrid(hits),
 	}
 	for _, h := range hits {
@@ -345,7 +347,7 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // default 7d for TTP
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 0)
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -402,7 +404,7 @@ func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 0)
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -504,7 +506,7 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 		topN = n
 	}
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 0)
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -549,7 +551,7 @@ func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 720) // 30d default
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 0)
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -622,7 +624,8 @@ func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
 type payloadsResponse struct {
 	GeneratedAt string        `json:"generatedAt"`
 	WindowHours int           `json:"windowHours"`
-	Total       int           `json:"total"`
+	Total       int           `json:"total"`              // true distinct-payload count in window
+	Returned    int           `json:"returned,omitempty"` // rows actually returned (page size)
 	Rows        []payloadRow  `json:"rows"`
 }
 
@@ -690,10 +693,17 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 			HasLocal:     a.HasLocal,
 		})
 	}
+	// Total = true distinct-payload count for the window (not len(arts), which
+	// is the LIMIT-capped page size). Returned = rows actually sent.
+	total, err := s.st.CountDistinctPayloadsSince(since)
+	if err != nil {
+		total = len(arts) // fall back to page size rather than failing the panel
+	}
 	_ = json.NewEncoder(w).Encode(payloadsResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
-		Total:       len(arts),
+		Total:       total,
+		Returned:    len(rows),
 		Rows:        rows,
 	})
 }
@@ -818,7 +828,7 @@ func (s *Server) handleIOCList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 0)
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -855,7 +865,7 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 0)
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -892,7 +902,7 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 	}
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSince(since, 0)
+	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

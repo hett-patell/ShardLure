@@ -53,6 +53,26 @@ func (s *Store) GetEnrichment(ip, source string) (*EnrichmentRecord, bool, error
 	return &r, true, nil
 }
 
+// DistinctGeoCountryCount returns the number of distinct country codes among
+// all resolved geo lookups in the cache. Used for the dashboard "countries"
+// stat: previously /api/intel reported 0 (never computed) and /api/dashboard
+// derived it from only the top-25 IPs (undercounting a 2600-IP dataset to ~7).
+// The geo cache holds every IP the dashboard has ever resolved, so distinct
+// non-empty CCs there is a faithful "countries observed" count.
+func (s *Store) DistinctGeoCountryCount() (int, error) {
+	if err := s.EnsureEnrichmentTable(); err != nil {
+		return 0, err
+	}
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(DISTINCT json_extract(payload, '$.cc'))
+FROM ip_enrichment
+WHERE source='geo'
+  AND json_extract(payload, '$.ok') = 1
+  AND COALESCE(json_extract(payload, '$.cc'), '') != ''`).Scan(&n)
+	return n, err
+}
+
 // PutEnrichment upserts a cached lookup. Pass payload="" to record a
 // negative cache entry (provider returned nothing useful); the
 // fetched_at still gates re-querying so we don't hammer rate limits.

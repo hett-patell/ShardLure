@@ -47,3 +47,60 @@ FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
 	}
 	return out, rows.Err()
 }
+
+// IterateEventsSince streams every event with TS >= since (no row cap), in
+// ts ASC order, invoking fn per event. Unlike EventsSince — which caps at the
+// most-recent 5000 rows and was silently truncating every windowed analytic
+// (a "30d" view actually saw ~7.5h) — this covers the FULL window without
+// buffering the whole result set in memory, so MITRE/TTP/IOC/graph/deobf can
+// classify the entire window on a small VPS. fn must not retain e across calls.
+func (s *Store) IterateEventsSince(since time.Time, fn func(*models.Event) error) error {
+	rows, err := s.db.Query(`
+SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, actor_id
+FROM events WHERE ts >= ? ORDER BY ts ASC`,
+		since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		e := &models.Event{}
+		var ts, source, kind string
+		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
+			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.JA4, &e.Command,
+			&e.SHA256, &e.Filename, &e.ActorID); err != nil {
+			return err
+		}
+		e.TS, _ = parseTime(ts)
+		e.Source = models.Source(source)
+		e.Kind = models.EventKind(kind)
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// EventsSinceAll returns every event in the window (full window, no silent
+// cap), backed by IterateEventsSince. Use this for the windowed analytic
+// endpoints whose collectors take a []*Event slice. The result is the true
+// window population — a "30d" request returns 30 days of events, not the last
+// 5000.
+func (s *Store) EventsSinceAll(since time.Time) ([]*models.Event, error) {
+	var out []*models.Event
+	err := s.IterateEventsSince(since, func(e *models.Event) error {
+		out = append(out, e)
+		return nil
+	})
+	return out, err
+}
+
+// CountEventsSince returns the true number of events with TS >= since, via a
+// cheap indexed COUNT(*). Lets handlers report the real window total instead
+// of len(truncated-sample).
+func (s *Store) CountEventsSince(since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE ts >= ?`,
+		since.UTC().Format(time.RFC3339Nano)).Scan(&n)
+	return n, err
+}

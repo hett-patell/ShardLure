@@ -110,6 +110,10 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	// Countries was never set here, so the Overview stat always showed 0 even
+	// though /api/dashboard reported a real count. Use the geo-cache-wide
+	// distinct-CC count (best-effort; 0 on error keeps the panel alive).
+	countries, _ := s.st.DistinctGeoCountryCount()
 	resp := intelResponse{
 		GeneratedAt:   now.UTC().Format(time.RFC3339),
 		StartedAt:     s.startedAt.UTC().Format(time.RFC3339),
@@ -118,6 +122,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 			EventCount: ec,
 			ActorCount: ac,
 			UniqueIPs:  uniqueIPs,
+			Countries:  countries,
 		},
 	}
 

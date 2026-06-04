@@ -213,6 +213,25 @@ type ArtifactAggregate struct {
 // (grouped by sha256) ingested since the given time. Rows with empty
 // sha256 are skipped (they cannot be deduped meaningfully). Results
 // are ordered by most-recent capture timestamp DESC.
+// CountDistinctPayloadsSince returns the TRUE number of distinct payloads
+// (by sha256) captured in the window — what the payload library should report
+// as "N unique". ListArtifactsAggregatedSince applies a row LIMIT, so its
+// len() is the page size, not the population; reporting that as the total made
+// "1000 unique" appear regardless of how many actually existed. Uses the same
+// window + non-empty-sha criteria as the aggregation.
+func (s *Store) CountDistinctPayloadsSince(since time.Time) (int, error) {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return 0, err
+	}
+	cutoff := since.UTC().Format(time.RFC3339Nano)
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(DISTINCT sha256) FROM artifacts
+WHERE COALESCE(ts, created_at) >= ?
+  AND sha256 IS NOT NULL AND sha256 != ''`, cutoff).Scan(&n)
+	return n, err
+}
+
 func (s *Store) ListArtifactsAggregatedSince(since time.Time, limit int) ([]ArtifactAggregate, error) {
 	if limit <= 0 {
 		limit = 200

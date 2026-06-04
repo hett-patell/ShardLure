@@ -487,10 +487,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		resp.TopCountries = resp.TopCountries[:12]
 	}
 	resp.Summary.UniqueIPs = uniqueIPs
-	// Count distinct resolved countries; the "??" Unknown bucket is not a country.
-	resp.Summary.Countries = len(countryStats)
-	if _, hasUnknown := countryStats["??"]; hasUnknown {
-		resp.Summary.Countries--
+	// Countries: count distinct CCs across the WHOLE geo cache, not just the
+	// top-25 IPs that feed the topCountries chart — otherwise a 2600-IP dataset
+	// spanning 20+ countries reported ~7. Fall back to the top-25-derived count
+	// (minus the "??" Unknown bucket) if the geo-cache query fails.
+	if cc, err := s.st.DistinctGeoCountryCount(); err == nil && cc > 0 {
+		resp.Summary.Countries = cc
+	} else {
+		resp.Summary.Countries = len(countryStats)
+		if _, hasUnknown := countryStats["??"]; hasUnknown {
+			resp.Summary.Countries--
+		}
 	}
 
 	for _, row := range hourly {
