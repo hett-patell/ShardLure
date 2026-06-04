@@ -1602,7 +1602,7 @@ async function refresh() {
   renderActors(d.actors);
   renderCommands(d.recentCommands);
   if (selectedActor) loadActorDetail(selectedActor);
-  renderGeo(d.actors);
+  renderGeo(d.topCountries);
   renderGauge(d.summary, d.intentCounts, d.kindCounts);
   renderRadar(d.actors);
 }
@@ -2803,21 +2803,21 @@ if (readTabFromHash() === 'red') refreshBazaar();
 
 // ==== Widget functions ================================================
 
-function renderGeo(actors) {
+// renderGeo draws Attack Geography from the server's authoritative
+// topCountries aggregation (true hits-by-country over ALL events). It used to
+// recompute byCC over the recent-N actor slice in /api/intel, so a dominant
+// high-volume IP outside that slice (e.g. 64k hits from Brazil) was missing and
+// the chart disagreed with the globe's "By country". Now both share one source.
+function renderGeo(countries) {
   var el = document.getElementById('geo-bars');
   if (!el) return;
-  var byCC = {};
-  (actors || []).forEach(function(a) {
-    if (!a.cc) return;
-    if (!byCC[a.cc]) byCC[a.cc] = {cc:a.cc, country:a.country||a.cc, ev:0};
-    byCC[a.cc].ev += (a.events||0);
-  });
-  var rows = Object.values(byCC).sort(function(a,b){return b.ev-a.ev}).slice(0,10);
+  var rows = (countries || []).filter(function(c){ return c && c.cc; }).slice(0, 10);
   if (!rows.length) { el.innerHTML = '<span class="empty">geo resolving…</span>'; return; }
-  var mx = rows[0].ev || 1;
+  var mx = rows[0].hits || 1;
   el.innerHTML = rows.map(function(r) {
-    var p = Math.round(r.ev/mx*100);
-    return '<div class="geo-row"><span class="geo-flag">'+flag(r.cc)+'</span><span style="color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(r.country.slice(0,16))+'</span><div class="geo-track"><span class="geo-fill" style="width:'+p+'%"></span></div><span class="geo-n">'+fmt(r.ev)+'</span></div>';
+    var p = Math.round((r.hits || 0) / mx * 100);
+    var country = r.country || r.cc;
+    return '<div class="geo-row"><span class="geo-flag">'+flag(r.cc)+'</span><span style="color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(country.slice(0,16))+'</span><div class="geo-track"><span class="geo-fill" style="width:'+p+'%"></span></div><span class="geo-n">'+fmt(r.hits)+'</span></div>';
   }).join('');
 }
 

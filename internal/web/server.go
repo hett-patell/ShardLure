@@ -479,12 +479,23 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		resp.TopCommands = append(resp.TopCommands, topCommandRow{Command: row.Key, Hits: row.Hits})
 	}
 
-	for _, c := range countryStats {
-		resp.TopCountries = append(resp.TopCountries, *c)
-	}
-	sort.Slice(resp.TopCountries, func(i, j int) bool { return resp.TopCountries[i].Hits > resp.TopCountries[j].Hits })
-	if len(resp.TopCountries) > 12 {
-		resp.TopCountries = resp.TopCountries[:12]
+	// Prefer the authoritative all-events hits-by-country aggregation so the
+	// globe's "By country" matches the intel page's Attack Geography and isn't
+	// limited to the top-25 IPs. Fall back to the top-25-derived countryStats
+	// if the geo-join query fails.
+	if cph, err := s.st.TopCountriesByHits(12); err == nil && len(cph) > 0 {
+		resp.TopCountries = resp.TopCountries[:0]
+		for _, c := range cph {
+			resp.TopCountries = append(resp.TopCountries, topCountryRow{CC: c.CC, Country: c.Country, Hits: c.Hits})
+		}
+	} else {
+		for _, c := range countryStats {
+			resp.TopCountries = append(resp.TopCountries, *c)
+		}
+		sort.Slice(resp.TopCountries, func(i, j int) bool { return resp.TopCountries[i].Hits > resp.TopCountries[j].Hits })
+		if len(resp.TopCountries) > 12 {
+			resp.TopCountries = resp.TopCountries[:12]
+		}
 	}
 	resp.Summary.UniqueIPs = uniqueIPs
 	// Countries: count distinct CCs across the WHOLE geo cache, not just the

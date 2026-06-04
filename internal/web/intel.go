@@ -18,6 +18,7 @@ type intelResponse struct {
 	StartedAt      string          `json:"startedAt"`      // RFC3339 process start time
 	UptimeSeconds  int64           `json:"uptimeSeconds"`  // seconds the live process has been running
 	Summary        summaryBlock    `json:"summary"`
+	TopCountries   []topCountryRow `json:"topCountries"`   // true attack geography (all events by country)
 	KindCounts     []labelCountRow `json:"kindCounts"`
 	IntentCounts   []labelCountRow `json:"intentCounts"`
 	PlaybookCounts []labelCountRow `json:"playbookCounts"`
@@ -124,6 +125,15 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 			UniqueIPs:  uniqueIPs,
 			Countries:  countries,
 		},
+	}
+	// Attack Geography: true hits-by-country over ALL events (was recomputed
+	// client-side over only the recent-N actor slice, so a dominant high-volume
+	// IP outside that slice — e.g. 64k hits from Brazil — vanished from the
+	// chart). Authoritative SQL aggregation joined to the geo cache.
+	if cph, err := s.st.TopCountriesByHits(12); err == nil {
+		for _, c := range cph {
+			resp.TopCountries = append(resp.TopCountries, topCountryRow{CC: c.CC, Country: c.Country, Hits: c.Hits})
+		}
 	}
 
 	kinds, err := s.st.CountsByKind()

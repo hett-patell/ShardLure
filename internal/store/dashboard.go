@@ -28,6 +28,66 @@ var topCountsColumns = map[string]string{
 
 func (s *Store) TopSourceIPs(limit int) ([]CountRow, error) { return s.topCounts("src_ip", limit) }
 
+// CountryHit is a per-country event tally for the "Attack Geography" widget.
+type CountryHit struct {
+	CC      string
+	Country string
+	Hits    int
+}
+
+// TopCountriesByHits returns true attack geography: total event hits grouped
+// by the source IP's country, across ALL events — not just the top-25 IPs.
+// It joins each IP's event count to the geo cache (ip_enrichment, source='geo')
+// so the chart reflects every resolved attacker, fixing the case where a single
+// dominant IP (e.g. 64k hits) was absent because it wasn't in the recent-N
+// actor slice the old client-side aggregation walked. IPs with no resolved geo
+// are excluded (they can't be placed on a country).
+func (s *Store) TopCountriesByHits(limit int) ([]CountryHit, error) {
+	if err := s.EnsureEnrichmentTable(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 12
+	}
+	rows, err := s.db.Query(`
+WITH ip_hits AS (
+  SELECT src_ip, COUNT(*) AS hits
+  FROM events
+  WHERE src_ip IS NOT NULL AND src_ip != ''
+  GROUP BY src_ip
+),
+geo AS (
+  SELECT ip,
+         json_extract(payload, '$.cc')      AS cc,
+         json_extract(payload, '$.country') AS country
+  FROM ip_enrichment
+  WHERE source='geo' AND json_extract(payload, '$.ok') = 1
+)
+SELECT g.cc, MAX(g.country) AS country, SUM(h.hits) AS hits
+FROM ip_hits h
+JOIN geo g ON g.ip = h.src_ip
+WHERE g.cc IS NOT NULL AND g.cc != ''
+GROUP BY g.cc
+ORDER BY hits DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CountryHit
+	for rows.Next() {
+		var c CountryHit
+		if err := rows.Scan(&c.CC, &c.Country, &c.Hits); err != nil {
+			return nil, err
+		}
+		if c.Country == "" {
+			c.Country = c.CC
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) TopUsernames(limit int) ([]CountRow, error) { return s.topCounts("username", limit) }
 
 func (s *Store) TopCommands(limit int) ([]CountRow, error) { return s.topCounts("command", limit) }
