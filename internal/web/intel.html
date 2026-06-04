@@ -2273,11 +2273,24 @@ function renderPayloads(data) {
   renderPending(data);
 }
 
-// isPending reports whether a payload row is a shareable, not-yet-uploaded
-// sample: it has a local file + a real sha and isn't in the shared set.
+// isPending reports whether a payload row is actually eligible to ship to
+// MalwareBazaar and not yet uploaded. This MUST mirror the server's share
+// filter (store.ArtifactsForShare / BazaarUploadStats), otherwise this widget
+// over-counts versus the "MalwareBazaar sharing" panel's pending stat: that
+// panel counts only fetched, >1 KiB, download-origin binaries not yet uploaded.
+// A TTY transcript, a sub-1 KiB script, or a quarantine fetch has a local file
+// and a sha but will never be uploaded, so it is NOT pending here.
+//
+// (One honest difference remains: this widget is scoped to the selected time
+// window, while the panel stat is all-history — see renderPending's label.)
 function isPending(p) {
   var sha = p.sha256 || '';
-  return !!p.hasLocal && sha && sha !== '—' && !_bazaarSharedSet[sha];
+  if (!sha || sha === '—' || !p.hasLocal) return false;
+  if (_bazaarSharedSet[sha]) return false;
+  if ((p.status || '') !== 'fetched') return false;       // server: status='fetched'
+  if ((p.sizeBytes || 0) <= 1024) return false;            // server: size_bytes > 1024
+  if ((p.origin || '').indexOf('download') === -1) return false; // server: origin LIKE '%download%'
+  return true;
 }
 
 // renderPending fills the "Pending uploads" panel with only the payloads that
@@ -2288,9 +2301,16 @@ function renderPending(data) {
   var meta = document.getElementById('pending-meta');
   if (!tb) return;
   var rows = (data && data.rows ? data.rows : []).filter(isPending);
-  if (meta) meta.textContent = rows.length + ' pending';
+  // Label the window so this never looks like it should equal the all-history
+  // "MalwareBazaar sharing → pending" stat. Same eligibility filter, different
+  // time scope: this is "eligible & unshared in the last Nh".
+  if (meta) {
+    var wh = (data && data.windowHours) ? data.windowHours : 168;
+    var winLabel = wh % 24 === 0 ? (wh / 24) + 'd' : wh + 'h';
+    meta.textContent = rows.length + ' pending in ' + winLabel;
+  }
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="5"><div class="empty">nothing pending — all captured payloads are shared</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">nothing pending in this window — eligible payloads are shared</div></td></tr>';
     return;
   }
   var html = '';
@@ -2323,7 +2343,10 @@ async function refreshPayloads() {
   try {
     var [pr, br] = await Promise.all([
       fetch('/api/intel/payloads?window=' + encodeURIComponent(win) + '&_=' + Date.now(), {cache:'no-store'}),
-      fetch('/api/intel/bazaar?limit=200&_=' + Date.now(), {cache:'no-store'})
+      // limit=1000: fetch the full upload history so the shared-set used by
+      // isPending() is complete (otherwise already-shared samples beyond the
+      // first N would be mis-counted as pending).
+      fetch('/api/intel/bazaar?limit=1000&_=' + Date.now(), {cache:'no-store'})
     ]);
     if (!pr.ok) return;
     var pd = await pr.json();

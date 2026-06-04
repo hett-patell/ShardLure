@@ -912,8 +912,15 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDashboardAuth(w, r) {
 		return
 	}
+	// Cap raised to 1000 (matching the payloads endpoint) so the dashboard can
+	// fetch the COMPLETE upload set for client-side dedup. With the old 200 cap
+	// and >200 uploads, the payload library's shared-set was incomplete and
+	// already-shared samples were mis-counted as "pending".
 	limit := 50
-	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 200 {
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
+		if v > 1000 {
+			v = 1000
+		}
 		limit = v
 	}
 
