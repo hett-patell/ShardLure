@@ -1604,7 +1604,7 @@ async function refresh() {
   if (selectedActor) loadActorDetail(selectedActor);
   renderGeo(d.topCountries);
   renderGauge(d.summary, d.intentCounts, d.kindCounts);
-  renderRadar(d.actors);
+  renderRadar(d.radar);
 }
 
 refresh();
@@ -2871,11 +2871,13 @@ function renderGauge(summary, intentCounts, kindCounts) {
     '<div class="gb-row" style="grid-column:1/-1;border-top:1px solid var(--line);padding-top:3px;margin-top:3px"><span>'+fmt(ev)+' events · '+fmt(ac)+' actors · '+fmt(ips)+' IPs</span><span class="gb-val" style="color:'+color+'">'+score+'</span></div>';
 }
 
-function renderRadar(actors) {
+function renderRadar(rows) {
   var el=document.getElementById('radar-bars');
   if(!el)return;
-  var sorted=(actors||[]).filter(function(a){return a.rateHour>0})
-    .sort(function(a,b){return b.rateHour-a.rateHour}).slice(0,8);
+  // rows come pre-sorted top-by-rate from /api/intel (d.radar). Previously this
+  // read d.actors (the recent-80 slice), which missed the truly most aggressive
+  // attackers — it showed ~171/h when the real peak was 3000+/h.
+  var sorted=(rows||[]).filter(function(a){return a.rateHour>0}).slice(0,8);
   if(!sorted.length){el.innerHTML='<span class="empty">no active probes</span>';return}
   var mx=sorted[0].rateHour||1;
   el.innerHTML=sorted.map(function(a){

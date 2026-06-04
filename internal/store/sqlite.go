@@ -499,6 +499,59 @@ func (s *Store) ListActors(limit int) ([]models.Actor, error) {
 	return out, rows.Err()
 }
 
+// TopActorsByEvents returns actors ordered by total event_count — the actual
+// "top actors" by volume. The globe's actor list is ordered by last_seen (for
+// the live globe arcs), so a client-side slice of it showed recent actors, not
+// the highest-volume ones (the 64k-event top attacker was absent because it
+// wasn't recently active).
+func (s *Store) TopActorsByEvents(limit int) ([]models.Actor, error) {
+	if limit <= 0 {
+		limit = 14
+	}
+	rows, err := s.db.Query(`SELECT `+actorColumns+`
+FROM actors ORDER BY event_count DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.Actor
+	for rows.Next() {
+		var a models.Actor
+		if err := scanActorRow(rows, &a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// TopActorsByRate returns the actors with the highest attempts_per_hour. The
+// Brute-Force Radar needs the most AGGRESSIVE actors, but ListActors orders by
+// last_seen (most recent), so the radar — fed from that recent slice — was
+// missing the true high-rate attackers (e.g. showing 171/h when the real top
+// was 3113/h). This orders by rate so the radar reflects the actual peak.
+func (s *Store) TopActorsByRate(limit int) ([]models.Actor, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+	rows, err := s.db.Query(`SELECT `+actorColumns+`
+FROM actors WHERE attempts_per_hour > 0
+ORDER BY attempts_per_hour DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.Actor
+	for rows.Next() {
+		var a models.Actor
+		if err := scanActorRow(rows, &a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetActor(id string) (*models.Actor, error) {
 	row := s.db.QueryRow(`SELECT `+actorColumns+` FROM actors WHERE id=?`, id)
 	var a models.Actor

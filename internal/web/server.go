@@ -230,7 +230,8 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 type dashboardResponse struct {
 	GeneratedAt  string          `json:"generatedAt"`
 	Summary      summaryBlock    `json:"summary"`
-	Actors       []actorCard     `json:"actors"`
+	Actors       []actorCard     `json:"actors"`     // recent actors (drives globe points/arcs)
+	TopActors    []actorCard     `json:"topActors"`  // actors by event volume (the "Top actors" widget)
 	Recent       []recentRecord  `json:"recent"`
 	Sessions     []shellSessionRow `json:"sessions"`
 	TopIPs       []topIPRow      `json:"topIps"`
@@ -431,6 +432,30 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.Actors = append(resp.Actors, card)
+	}
+
+	// Top actors by event VOLUME for the "Top actors" widget. resp.Actors is
+	// ordered by last_seen (for the live globe), so the widget — slicing that —
+	// showed recent actors, not the highest-volume ones (the 64k-event top
+	// attacker was missing). This is a separate, volume-ordered list.
+	if topActors, err := s.st.TopActorsByEvents(14); err == nil {
+		for _, a := range topActors {
+			tc := actorCard{
+				ID:       a.ID,
+				IP:       a.PrimaryIP,
+				Playbook: a.Playbook,
+				Events:   a.EventCount,
+				RateHour: a.AttemptsPerHour,
+				LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
+				Conf:     a.Confidence,
+			}
+			if !isPrivateIP(a.PrimaryIP) {
+				if g := s.geo.cached(a.PrimaryIP); g.OK {
+					tc.Lat, tc.Lon, tc.Country, tc.CC = g.Lat, g.Lon, g.Country, g.CC
+				}
+			}
+			resp.TopActors = append(resp.TopActors, tc)
+		}
 	}
 
 	for _, row := range topIPs {

@@ -739,7 +739,9 @@ async function refresh() {
   renderTopUsers(d.topUsers);
   renderTopCommands(d.topCommands);
   renderShellSessions(d.sessions);
-  renderActors(actors);
+  // "Top actors" widget uses the volume-ordered topActors list (the recent
+  // last-seen-ordered `actors` still drives the globe points/arcs below).
+  renderActors(d.topActors || actors);
   renderFeed(recent);
 
   sparkData = (d.hourly || []).slice(-72);

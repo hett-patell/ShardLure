@@ -19,6 +19,7 @@ type intelResponse struct {
 	UptimeSeconds  int64           `json:"uptimeSeconds"`  // seconds the live process has been running
 	Summary        summaryBlock    `json:"summary"`
 	TopCountries   []topCountryRow `json:"topCountries"`   // true attack geography (all events by country)
+	Radar          []radarRow      `json:"radar"`          // top actors by attempts/hour (brute-force radar)
 	KindCounts     []labelCountRow `json:"kindCounts"`
 	IntentCounts   []labelCountRow `json:"intentCounts"`
 	PlaybookCounts []labelCountRow `json:"playbookCounts"`
@@ -31,6 +32,13 @@ type intelResponse struct {
 type labelCountRow struct {
 	Label string `json:"label"`
 	Hits  int    `json:"hits"`
+}
+
+// radarRow is one bar in the Brute-Force Radar: an attacker IP and its
+// attempts-per-hour rate.
+type radarRow struct {
+	IP       string  `json:"ip"`
+	RateHour float64 `json:"rateHour"`
 }
 
 type heatmapCell struct {
@@ -133,6 +141,17 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	if cph, err := s.st.TopCountriesByHits(12); err == nil {
 		for _, c := range cph {
 			resp.TopCountries = append(resp.TopCountries, topCountryRow{CC: c.CC, Country: c.Country, Hits: c.Hits})
+		}
+	}
+	// Brute-Force Radar: the most aggressive actors by attempts/hour across ALL
+	// actors (was derived client-side from the recent-80 actor slice, so it
+	// showed ~171/h when the true peak was 3000+/h).
+	if rad, err := s.st.TopActorsByRate(8); err == nil {
+		for _, a := range rad {
+			resp.Radar = append(resp.Radar, radarRow{
+				IP:       a.PrimaryIP,
+				RateHour: a.AttemptsPerHour,
+			})
 		}
 	}
 
