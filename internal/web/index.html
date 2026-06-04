@@ -421,6 +421,32 @@ const DASH_TOKEN = (function () {
     return _fetch(input, init);
   };
 })();
+// Inserts ?token=… into a same-origin URL, before any #fragment, without
+// duplicating an existing token param.
+function withToken(url) {
+  if (!DASH_TOKEN) return url;
+  var hash = '', u = String(url);
+  var hi = u.indexOf('#');
+  if (hi >= 0) { hash = u.slice(hi); u = u.slice(0, hi); }
+  if (/[?&]token=/.test(u)) return u + hash;
+  return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DASH_TOKEN) + hash;
+}
+// Rewrite internal page links (the sidebar/topbar "/" and "/intel" nav) so a
+// fresh navigation carries the token — otherwise clicking "Intel" lands on an
+// unauthenticated page. Runs on DOM ready and re-applies if links are added.
+function patchNavLinks() {
+  if (!DASH_TOKEN) return;
+  document.querySelectorAll('a[href^="/"]').forEach(function (a) {
+    var href = a.getAttribute('href');
+    // Only same-origin page routes (skip /api downloads — those use fetch/their
+    // own withToken, and skip anything already carrying a token).
+    if (!href || href.indexOf('/api/') === 0 || /[?&]token=/.test(href)) return;
+    a.setAttribute('href', withToken(href));
+  });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', patchNavLinks);
+} else { patchNavLinks(); }
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
 const fmt = function(n) { return Number(n || 0).toLocaleString(); };
@@ -594,7 +620,7 @@ function renderShellSessions(rows) {
   rows.forEach(function(r) {
     const row = document.createElement('a');
     row.className = 'row sess-row';
-    row.href = '/intel#session=' + encodeURIComponent(r.id);
+    row.href = withToken('/intel#session=' + encodeURIComponent(r.id));
     row.style.cssText = 'display: flex; gap: 10px; padding: 6px 10px; align-items: baseline; text-decoration: none; color: inherit; border-radius: 4px;';
     const loc = (r.cc ? r.cc + ' ' : '') + (r.city || r.country || '');
     const sample = r.sample ? r.sample : '(' + r.cmdCount + ' commands)';

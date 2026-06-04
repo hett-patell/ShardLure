@@ -1291,11 +1291,15 @@ const DASH_TOKEN = (function () {
     return sessionStorage.getItem('shardlure_token') || '';
   } catch (_) { return ''; }
 })();
-// Append the token to a same-origin /api/ URL (used for <a href> downloads,
-// which are navigations, not fetch()).
+// Insert ?token=… into a same-origin URL (used for <a href> downloads and the
+// page-nav links), before any #fragment, without duplicating an existing token.
 function withToken(url) {
   if (!DASH_TOKEN) return url;
-  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DASH_TOKEN);
+  var hash = '', u = String(url);
+  var hi = u.indexOf('#');
+  if (hi >= 0) { hash = u.slice(hi); u = u.slice(0, hi); }
+  if (/[?&]token=/.test(u)) return u + hash;
+  return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DASH_TOKEN) + hash;
 }
 // Wrap fetch so every same-origin /api/ request sends the Bearer token.
 (function () {
@@ -1315,6 +1319,20 @@ function withToken(url) {
     return _fetch(input, init);
   };
 })();
+// Rewrite internal page links (sidebar "/" globe + "/intel") so a fresh
+// navigation carries the token — otherwise clicking a nav item lands on an
+// unauthenticated page and you'd have to re-add ?token= by hand.
+function patchNavLinks() {
+  if (!DASH_TOKEN) return;
+  document.querySelectorAll('a[href^="/"]').forEach(function (a) {
+    var href = a.getAttribute('href');
+    if (!href || href.indexOf('/api/') === 0 || /[?&]token=/.test(href)) return;
+    a.setAttribute('href', withToken(href));
+  });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', patchNavLinks);
+} else { patchNavLinks(); }
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
 const fmt = function(n) { return Number(n || 0).toLocaleString(); };
