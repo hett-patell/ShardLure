@@ -71,16 +71,30 @@ def install_deps() -> None:
         log("unknown package manager; ensure git python3 venv authbind go are installed")
 
 
+def _ask_port(prompt: str, default: int) -> int:
+    while True:
+        raw = input(f"{prompt} [{default}]: ").strip() or str(default)
+        try:
+            n = int(raw)
+        except ValueError:
+            print("  Not a number — enter a port between 1 and 65535.")
+            continue
+        if 1 <= n <= 65535:
+            return n
+        print("  Port must be between 1 and 65535.")
+
+
 def prompt_config() -> tuple[int, int, int]:
     print("\nShardLure honeypot setup\n------------------------")
     print("Real SSH moves to a private admin port (key-only).")
     print("Cowrie honeypot listens on the bait port for attackers.\n")
-    hp = input("Honeypot SSH port attackers should hit [22]: ").strip() or "22"
-    ap = input("Admin SSH port for your key-based login [2222]: ").strip() or "2222"
-    dp = input("Dashboard port [8080]: ").strip() or "8080"
-    honeypot, admin, dash = int(hp), int(ap), int(dp)
+    honeypot = _ask_port("Honeypot SSH port attackers should hit", 22)
+    admin = _ask_port("Admin SSH port for your key-based login", 2222)
+    dash = _ask_port("Dashboard port", 8080)
     if honeypot == admin:
         die("honeypot port and admin port must differ")
+    if dash in (honeypot, admin):
+        die("dashboard port must differ from the SSH ports")
     return honeypot, admin, dash
 
 
@@ -104,13 +118,86 @@ def collect_admin_ips() -> list[str]:
     return list(dict.fromkeys(ips))
 
 
-def ensure_admin_ssh_keys() -> None:
-    found = False
+def _existing_authorized_keys() -> list[str]:
+    """Return authorized_keys files that already hold at least one key."""
+    found = []
     for path in ["/root/.ssh/authorized_keys", *glob.glob("/home/*/.ssh/authorized_keys")]:
-        if Path(path).is_file() and Path(path).stat().st_size > 0:
-            found = True
-    if not found:
-        die("no authorized_keys found. Add your SSH public key before moving real SSH off port 22.")
+        p = Path(path)
+        if p.is_file() and p.stat().st_size > 0:
+            found.append(path)
+    return found
+
+
+def _looks_like_ssh_pubkey(line: str) -> bool:
+    parts = line.strip().split()
+    return (
+        len(parts) >= 2
+        and parts[0] in (
+            "ssh-ed25519", "ssh-rsa", "ssh-dss", "ecdsa-sha2-nistp256",
+            "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com",
+            "sk-ecdsa-sha2-nistp256@openssh.com",
+        )
+        and len(parts[1]) > 20
+    )
+
+
+def _install_pubkey(pubkey: str) -> None:
+    """Install a pasted public key into the right account's authorized_keys.
+
+    Targets the SSH_CONNECTION user when we can resolve it (the human running
+    `sudo`), else falls back to root. Creates ~/.ssh with correct perms+owner."""
+    user = os.environ.get("SUDO_USER") or "root"
+    if user == "root":
+        home = Path("/root")
+    else:
+        home = Path(f"/home/{user}")
+        if not home.is_dir():
+            home, user = Path("/root"), "root"
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    ak = ssh_dir / "authorized_keys"
+    existing = ak.read_text() if ak.is_file() else ""
+    if pubkey.strip() not in existing:
+        with ak.open("a") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write(pubkey.strip() + "\n")
+    # Lock down perms + ownership so sshd accepts the key.
+    ssh_dir.chmod(0o700)
+    ak.chmod(0o600)
+    if user != "root":
+        run(["chown", "-R", f"{user}:{user}", str(ssh_dir)])
+    log(f"installed your public key into {ak} (account: {user})")
+
+
+def ensure_admin_ssh_keys() -> None:
+    """Guarantee a usable SSH key exists BEFORE we move real SSH off port 22 —
+    interactively onboarding one if needed, so a fresh-VPS user is never told to
+    'go add a key yourself' and then locked out. Refuses to proceed without a key."""
+    found = _existing_authorized_keys()
+    if found:
+        log(f"found existing authorized_keys: {', '.join(found)}")
+        return
+
+    print(
+        "\n  No SSH public key found on this server.\n"
+        "  Real SSH is about to move to a key-only admin port, so you MUST have a\n"
+        "  key installed first — otherwise you'll be locked out.\n\n"
+        "  On YOUR laptop, print your public key (create one with `ssh-keygen -t ed25519` if needed):\n"
+        "      cat ~/.ssh/id_ed25519.pub      # or id_rsa.pub\n"
+    )
+    for attempt in range(3):
+        pubkey = input("  Paste your SSH PUBLIC key here (starts with ssh-ed25519/ssh-rsa), or blank to abort: ").strip()
+        if not pubkey:
+            break
+        if _looks_like_ssh_pubkey(pubkey):
+            _install_pubkey(pubkey)
+            if _existing_authorized_keys():
+                return
+            die("key install did not take effect; aborting before touching sshd")
+        print("  That doesn't look like a public key (expected e.g. 'ssh-ed25519 AAAA... user@host'). Try again.")
+    die("no SSH key installed. Add your public key and re-run; "
+        "real SSH was NOT moved, so you are not locked out.")
 
 
 def migrate_sshd(admin_port: int) -> None:
@@ -579,12 +666,66 @@ def collect_admin_ips_quiet() -> list[str]:
     return list(dict.fromkeys(ips))
 
 
+def intro() -> None:
+    print(
+        "\n"
+        "============================================================\n"
+        " ShardLure installer — SSH honeypot + threat-intel dashboard\n"
+        "============================================================\n"
+        " This will, on THIS server:\n"
+        "   1. Install dependencies (git, python, Go, authbind, …)\n"
+        "   2. Move your REAL SSH to a private, key-only admin port\n"
+        "   3. Run the Cowrie honeypot on the bait port (default 22)\n"
+        "   4. Build + start ShardLure (live ingest + dashboard)\n"
+        "\n"
+        "  Before it moves SSH it will make sure you have a working key\n"
+        "  installed (it'll help you paste one in if not), and it pauses\n"
+        "  for you to VERIFY the new admin port works before continuing.\n"
+        "  The original sshd config is backed up and auto-rolled-back if\n"
+        "  the new one fails to validate.\n"
+    )
+    if input("  Proceed? [Y/n]: ").strip().lower() in ("n", "no"):
+        die("aborted by user (nothing changed)")
+
+
+def verify_admin_ssh_gate(admin_port: int) -> None:
+    """Pause after migrating sshd so the user proves they can still get in on the
+    new port BEFORE the install proceeds (and before they close this session)."""
+    user = os.environ.get("SUDO_USER") or getpass.getuser()
+    host = "<this-server-ip>"
+    conn = os.environ.get("SSH_CONNECTION", "")
+    if conn:
+        parts = conn.split()
+        if len(parts) >= 3:
+            host = parts[2]  # the server-side IP of the current SSH connection
+    print(
+        "\n  -------------------------------------------------------------\n"
+        f"  Real SSH now listens on port {admin_port} (key-only).\n"
+        "  >>> In a SEPARATE terminal, RIGHT NOW, confirm you can log in:\n"
+        f"        ssh -p {admin_port} {user}@{host}\n"
+        "  Do NOT close this session until that works.\n"
+        "  (If it fails, Ctrl-C here; the original sshd is still recoverable\n"
+        "   from /etc/ssh/sshd_config.shardlure-bak.)\n"
+        "  -------------------------------------------------------------\n"
+    )
+    while True:
+        ans = input(f"  Did `ssh -p {admin_port}` succeed in the other terminal? [yes/abort]: ").strip().lower()
+        if ans in ("yes", "y"):
+            return
+        if ans in ("abort", "a", "no", "n"):
+            die("aborted at SSH-verify gate. Real SSH is on the new port; "
+                "fix access (or restore from the .shardlure-bak backup) before re-running.")
+        print("  Please type 'yes' once you've confirmed login, or 'abort' to stop.")
+
+
 def cmd_run() -> None:
     need_root()
+    intro()
     install_deps()
     honeypot, admin, dash = prompt_config()
     admin_ips = collect_admin_ips()
     migrate_sshd(admin)
+    verify_admin_ssh_gate(admin)
     ensure_cowrie_user()
     install_cowrie(honeypot)
     build_shardlure()

@@ -60,17 +60,26 @@ Cowrie's pip install.
 
 ### Before you start — the one rule that matters
 
-**Add your SSH public key to the box first, and keep your current SSH session
-open until you've verified the new admin port works.** The installer moves real
-SSH off port 22 so Cowrie can squat there; if you have no key and no open
-session, you can lock yourself out. The installer is paranoid on your behalf —
-it *refuses* to move SSH if it can't find an `authorized_keys`, and it rolls the
-sshd config back automatically if the new one fails `sshd -t` — but the golden
-rule still stands.
+**Keep your current SSH session open until you've verified the new admin port
+works.** The installer moves real SSH off port 22 so Cowrie can squat there.
+
+You don't need to set up keys yourself first — the installer walks you through
+it. It is paranoid on your behalf:
+
+- If no SSH key is found on the server, it **pauses and lets you paste your
+  public key in**, installs it into the right account with correct
+  permissions, and only then moves SSH. (No key, no paste → it aborts *without*
+  touching sshd, so you can't lock yourself out.)
+- After moving SSH it **pauses at a verify gate**: open a second terminal,
+  confirm `ssh -p <admin-port>` works, and only then type `yes` to continue.
+- The original sshd config is backed up and **auto-rolled-back** if the new one
+  fails `sshd -t`.
+
+Print your laptop's public key when prompted (make one first if needed):
 
 ```bash
-# On your laptop, if you haven't already:
-ssh-copy-id user@your-vps        # or paste your pubkey into ~/.ssh/authorized_keys on the VPS
+ssh-keygen -t ed25519          # only if you don't already have a key
+cat ~/.ssh/id_ed25519.pub      # paste this when the installer asks
 ```
 
 ### Step 1 — Get the code onto the VPS
@@ -91,26 +100,31 @@ cd shardlure
 sudo python3 scripts/shardlure.py run
 ```
 
-It will, in order:
+It walks you through everything, in order:
 
-1. **Install dependencies** (git, python venv toolchain, authbind, Go) via your
+1. **Intro + confirm** — shows what it's about to change and waits for your OK.
+2. **Install dependencies** (git, python venv toolchain, authbind, Go) via your
    distro's package manager.
-2. **Prompt for three ports** (defaults shown below).
-3. **Detect your admin IPs** — Tailscale IP + your current SSH client IP are
+3. **Prompt for three ports** (validated; defaults shown below).
+4. **Detect your admin IPs** — Tailscale IP + your current SSH client IP are
    auto-added to `admin_ips` (so you never classify *yourself* as an attacker);
    you can add more.
-4. **Move real SSH** to the admin port via a drop-in at
+5. **Check / install your SSH key** — if the server has no key yet, it pauses
+   and lets you paste your public key in, installing it with correct perms.
+6. **Move real SSH** to the admin port via a drop-in at
    `/etc/ssh/sshd_config.d/99-shardlure-admin.conf` (key-only, root password
    login disabled). The original config is backed up to
    `/etc/ssh/sshd_config.shardlure-bak`.
-5. **Create the `cowrie` system user**, clone + build Cowrie into
+7. **Verify gate** — pauses for you to confirm `ssh -p <admin-port>` works in a
+   second terminal before going further (type `yes` to continue, `abort` to stop).
+8. **Create the `cowrie` system user**, clone + build Cowrie into
    `/var/lib/shardlure/cowrie`, apply the stealth persona, regenerate host keys,
    and plant bait files.
-6. **Build the `shardlure` binary** to `/usr/local/bin/shardlure`.
-7. **Write** `/var/lib/shardlure/shardlure.yaml`.
-8. **Open firewall ports** (only if `ufw` is already active).
-9. **Install + start** two systemd services: `cowrie.service` and
-   `shardlure-live.service`.
+9. **Build the `shardlure` binary** to `/usr/local/bin/shardlure`.
+10. **Write** `/var/lib/shardlure/shardlure.yaml`.
+11. **Open firewall ports** (only if `ufw` is already active).
+12. **Install + start** two systemd services: `cowrie.service` and
+    `shardlure-live.service`.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
