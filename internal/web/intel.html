@@ -1197,6 +1197,30 @@
         </div>
       </section>
 
+      <section class="panel" id="panel-pending">
+        <div class="panel-head">
+          <h2>Pending uploads</h2>
+          <span class="meta" id="pending-meta">payloads not yet on MalwareBazaar</span>
+          <button class="bz-btn" id="upload-pending-btn" onclick="event.stopPropagation();uploadAllPending(this)" style="margin-left:auto">▲ Upload all pending</button>
+        </div>
+        <div class="panel-body">
+        <table class="dense" id="pending-table">
+          <thead>
+            <tr>
+              <th>sha256</th>
+              <th class="num">size</th>
+              <th>last url</th>
+              <th>last actor</th>
+              <th style="width:78px">bazaar</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
       <section class="panel" id="panel-bazaar">
         <div class="panel-head">
           <h2>MalwareBazaar sharing</h2>
@@ -2167,9 +2191,57 @@ function renderPayloads(data) {
       if (sha && sha !== '—') openPayload(sha);
     });
   });
+  // The pending panel is a filtered view of the same payload data, so keep
+  // it in lockstep with the library on every refresh.
+  _lastPayloadData = data;
+  renderPending(data);
+}
+
+// isPending reports whether a payload row is a shareable, not-yet-uploaded
+// sample: it has a local file + a real sha and isn't in the shared set.
+function isPending(p) {
+  var sha = p.sha256 || '';
+  return !!p.hasLocal && sha && sha !== '—' && !_bazaarSharedSet[sha];
+}
+
+// renderPending fills the "Pending uploads" panel with only the payloads that
+// still need to be shared to MalwareBazaar. Reuses the payloads API data
+// already fetched for the library so there is no extra request.
+function renderPending(data) {
+  var tb = document.querySelector('#pending-table tbody');
+  var meta = document.getElementById('pending-meta');
+  if (!tb) return;
+  var rows = (data && data.rows ? data.rows : []).filter(isPending);
+  if (meta) meta.textContent = rows.length + ' pending';
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">nothing pending — all captured payloads are shared</div></td></tr>';
+    return;
+  }
+  var html = '';
+  rows.forEach(function(p) {
+    var sha = p.sha256;
+    var shaShort = sha.slice(0, 16) + '…';
+    var url = p.url ? '<a href="' + safeUrl(p.url) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + escHtml(p.url) + '</a>' : '—';
+    var shareBtn = '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>';
+    html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="1">' +
+      '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
+      '<td class="num">' + fmtSize(p.sizeBytes) + '</td>' +
+      '<td>' + url + '</td>' +
+      '<td>' + escHtml(p.actor || '—') + '</td>' +
+      '<td>' + shareBtn + '</td>' +
+      '</tr>';
+  });
+  tb.innerHTML = html;
+  tb.querySelectorAll('tr[data-sha]').forEach(function(row) {
+    row.querySelector('td').addEventListener('click', function() {
+      var sha = row.dataset.sha;
+      if (sha && sha !== '—') openPayload(sha);
+    });
+  });
 }
 
 var _bazaarSharedSet = {};
+var _lastPayloadData = null;
 async function refreshPayloads() {
   const win = Filters.window || '7d';
   try {
@@ -2806,6 +2878,57 @@ async function uploadAllToBazaar(masterBtn) {
   refreshBazaar();
 }
 
+// uploadAllPending uploads only the not-yet-shared payloads, driven from the
+// canonical payload data rather than DOM scraping. Shares the same sequential,
+// rate-limited cadence as uploadAllToBazaar. On completion it refreshes the
+// payload data so shared rows drop out of the pending panel.
+async function uploadAllPending(masterBtn) {
+  if (_uploadAllRunning) return;
+  var data = _lastPayloadData;
+  var shas = (data && data.rows ? data.rows : []).filter(isPending).map(function(p){ return p.sha256; });
+  if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ nothing pending'; return; }
+  _uploadAllRunning = true;
+  masterBtn.disabled = true;
+  var total = shas.length, done = 0, ok = 0, skip = 0, fail = 0;
+  masterBtn.textContent = '0/' + total + ' uploading…';
+  for (var j = 0; j < shas.length; j++) {
+    var sha = shas[j];
+    // The same sha may have a button in both the pending table and the
+    // library; update whichever live buttons exist.
+    var liveBtns = document.querySelectorAll('tr[data-sha="'+sha+'"] .bz-btn');
+    liveBtns.forEach(function(b){ b.disabled = true; b.textContent = 'uploading…'; });
+    try {
+      var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(sha), {method:'POST'});
+      var d = await r.json();
+      liveBtns = document.querySelectorAll('tr[data-sha="'+sha+'"] .bz-btn');
+      if (d.status === 'inserted' || d.status === 'file_already_known') {
+        ok++; _bazaarSharedSet[sha] = d.mbUrl || true;
+        liveBtns.forEach(function(b){ b.className = 'bz-btn ok'; b.textContent = '✓ ' + d.status; });
+      } else if (d.status === 'already_shared') {
+        skip++; _bazaarSharedSet[sha] = d.mbUrl || true;
+        liveBtns.forEach(function(b){ b.className = 'bz-btn ok'; b.textContent = '✓ shared'; });
+      } else {
+        fail++;
+        liveBtns.forEach(function(b){ b.className = 'bz-btn err'; b.textContent = '✗ ' + (d.error || d.status); });
+      }
+    } catch(e) {
+      fail++;
+    }
+    done++;
+    masterBtn.textContent = done + '/' + total + (fail ? ' (' + fail + ' err)' : '');
+    if (j < shas.length - 1) await new Promise(function(resolve){ setTimeout(resolve, 2500); });
+  }
+  _uploadAllRunning = false;
+  masterBtn.className = fail ? 'bz-btn err' : 'bz-btn ok';
+  var msg = ok + ' new';
+  if (skip) msg += ', ' + skip + ' known';
+  if (fail) msg += ', ' + fail + ' failed';
+  masterBtn.textContent = '✓ ' + msg;
+  masterBtn.disabled = false;
+  refreshBazaar();
+  refreshPayloads(); // re-render so shared rows leave the pending panel
+}
+
 async function uploadToBazaar(sha,btn) {
   if (!sha || btn.disabled) return;
   btn.disabled = true; btn.textContent = 'uploading…';
@@ -2815,9 +2938,11 @@ async function uploadToBazaar(sha,btn) {
     if (d.status === 'inserted' || d.status === 'file_already_known') {
       btn.className = 'bz-btn ok'; btn.textContent = '✓ ' + d.status;
       _bazaarSharedSet[sha] = d.mbUrl || true; refreshBazaar();
+      if (_lastPayloadData) renderPending(_lastPayloadData); // drop from pending panel
     } else if (d.status === 'already_shared') {
       btn.className = 'bz-btn ok'; btn.textContent = '✓ shared';
       _bazaarSharedSet[sha] = d.mbUrl || true;
+      if (_lastPayloadData) renderPending(_lastPayloadData);
     } else if (d.status === 'skipped') {
       btn.disabled = false; btn.textContent = 'skipped'; btn.style.color = 'var(--warn)';
     } else {
