@@ -1278,6 +1278,43 @@
 </div>
 
 <script>
+// ── Dashboard auth token forwarding ──────────────────────────────────────
+// When SHARDLURE_DASH_TOKEN is set, the server requires the token on every
+// /api/* request. The page itself is reached with ?token=… in the URL; capture
+// it once (and remember it for this tab) so the JS fetch() calls below — and
+// the download links — carry it too. Without this, the page loads but every
+// data fetch 401s. No token set => DASH_TOKEN stays '' and nothing changes.
+const DASH_TOKEN = (function () {
+  try {
+    var t = new URLSearchParams(location.search).get('token');
+    if (t) { sessionStorage.setItem('shardlure_token', t); return t; }
+    return sessionStorage.getItem('shardlure_token') || '';
+  } catch (_) { return ''; }
+})();
+// Append the token to a same-origin /api/ URL (used for <a href> downloads,
+// which are navigations, not fetch()).
+function withToken(url) {
+  if (!DASH_TOKEN) return url;
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DASH_TOKEN);
+}
+// Wrap fetch so every same-origin /api/ request sends the Bearer token.
+(function () {
+  if (!DASH_TOKEN) return;
+  var _fetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    try {
+      var url = (typeof input === 'string') ? input : (input && input.url) || '';
+      // Same-origin API path: a relative URL beginning with "/api/".
+      if (url.indexOf('/api/') === 0) {
+        init = init || {};
+        var h = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
+        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + DASH_TOKEN);
+        init.headers = h;
+      }
+    } catch (_) {}
+    return _fetch(input, init);
+  };
+})();
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
 const fmt = function(n) { return Number(n || 0).toLocaleString(); };
@@ -1956,8 +1993,8 @@ async function refreshIOC() {
   const window = Filters.window || '24h';
   const csvLink = document.getElementById('ioc-dl-csv');
   const stixLink = document.getElementById('ioc-dl-stix');
-  csvLink.href = '/api/ioc/csv?kind=' + IOC.kind + '&window=' + encodeURIComponent(window);
-  stixLink.href = '/api/ioc/stix?window=' + encodeURIComponent(window);
+  csvLink.href = withToken('/api/ioc/csv?kind=' + IOC.kind + '&window=' + encodeURIComponent(window));
+  stixLink.href = withToken('/api/ioc/stix?window=' + encodeURIComponent(window));
   try {
     const r = await fetch('/api/ioc/list?kind=' + IOC.kind + '&window=' + encodeURIComponent(window) +
                          '&limit=50&_=' + Date.now(), { cache: 'no-store' });
@@ -2388,7 +2425,7 @@ function renderWordlist(data) {
 async function refreshWordlist() {
   const window = Filters.window || '30d';
   const dl = document.getElementById('wl-dl');
-  dl.href = '/api/intel/wordlist?kind=' + WL.kind + '&format=txt&window=' + encodeURIComponent(window);
+  dl.href = withToken('/api/intel/wordlist?kind=' + WL.kind + '&format=txt&window=' + encodeURIComponent(window));
   try {
     const r = await fetch('/api/intel/wordlist?kind=' + WL.kind + '&format=json&limit=50&window=' +
                          encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
@@ -2544,7 +2581,7 @@ async function refreshReplay() {
   const dryrun = document.getElementById('replay-dryrun').checked ? '1' : '0';
   const qs = 'session=' + encodeURIComponent(sid) +
              '&sleeps=' + sleeps + '&dryrun=' + dryrun;
-  dl.href = '/api/intel/replay?' + qs + '&format=download';
+  dl.href = withToken('/api/intel/replay?' + qs + '&format=download');
   try {
     const r = await fetch('/api/intel/replay?' + qs + '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) {

@@ -395,6 +395,32 @@
 </div>
 
 <script>
+// Forward the dashboard auth token (?token=… in the page URL) on every /api/
+// fetch when SHARDLURE_DASH_TOKEN is set server-side. Without this the globe
+// loads but /api/dashboard and /api/capture 401. No token => no-op.
+const DASH_TOKEN = (function () {
+  try {
+    var t = new URLSearchParams(location.search).get('token');
+    if (t) { sessionStorage.setItem('shardlure_token', t); return t; }
+    return sessionStorage.getItem('shardlure_token') || '';
+  } catch (_) { return ''; }
+})();
+(function () {
+  if (!DASH_TOKEN) return;
+  var _fetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    try {
+      var url = (typeof input === 'string') ? input : (input && input.url) || '';
+      if (url.indexOf('/api/') === 0) {
+        init = init || {};
+        var h = new Headers(init.headers || {});
+        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + DASH_TOKEN);
+        init.headers = h;
+      }
+    } catch (_) {}
+    return _fetch(input, init);
+  };
+})();
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
 const fmt = function(n) { return Number(n || 0).toLocaleString(); };
