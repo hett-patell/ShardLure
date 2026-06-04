@@ -11,4 +11,6 @@ coverage.out
 .playwright-mcp/
 .shard-launch/
 agents
+__pycache__/
+*.pyc
 
