@@ -1508,7 +1508,7 @@ function renderCapture(d) {
     return '<tr class="' + (isNew ? 'cap-row-new' : '') + '">' +
       '<td>' + esc(rel(a.createdAt || a.ts)) + '</td>' +
       '<td>' + badge + '</td>' +
-      '<td class="url" title="' + esc(a.url) + (a.detail ? '\n' + a.detail : '') + '">' + esc(shortURL(a.url)) + '</td>' +
+      '<td class="url" title="' + esc(a.url + (a.detail ? '\n' + a.detail : '')) + '">' + esc(shortURL(a.url)) + '</td>' +
       '<td class="size n">' + (a.sizeBytes > 0 ? esc(fmtBytes(a.sizeBytes)) : '—') + '</td>' +
       '<td class="hash" title="' + esc(a.sha256 || '') + '">' + esc(shortHash(a.sha256)) + '</td>' +
       '<td class="ip">' + esc(a.srcIp || '—') + '</td>' +
@@ -1787,11 +1787,13 @@ function renderSessions(data) {
   meta.textContent = data.sessions.length + ' sessions · ' + data.windowHours + 'h window';
   let html = '';
   data.sessions.forEach(function(s, i) {
-    const user = s.user ? s.user : '<span style="color:var(--dim-2)">—</span>';
-    html += '<div class="sess-row" data-sid="' + s.id + '">' +
+    // s.id / s.ip / s.user are attacker-influenced (cowrie session id, source
+    // IP, attempted SSH username) — escape before they touch innerHTML.
+    const user = s.user ? esc(s.user) : '<span style="color:var(--dim-2)">—</span>';
+    html += '<div class="sess-row" data-sid="' + esc(s.id) + '">' +
       '<span class="sess-num">' + (i + 1) + '</span>' +
-      '<span class="sess-id">' + s.id + '</span>' +
-      '<span class="sess-ip">' + s.ip + '</span>' +
+      '<span class="sess-id">' + esc(s.id) + '</span>' +
+      '<span class="sess-ip">' + esc(s.ip) + '</span>' +
       '<span class="sess-user">' + user + '</span>' +
       '<span class="sess-dur">' + fmtDur(s.durMs) + '</span>' +
       '<span class="sess-n" title="events">' + s.events + 'e</span>' +

@@ -393,7 +393,8 @@ INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   primary_ip=excluded.primary_ip, playbook=excluded.playbook, intent=excluded.intent,
-  confidence=excluded.confidence, last_seen=excluded.last_seen, event_count=excluded.event_count,
+  confidence=excluded.confidence, first_seen=excluded.first_seen, last_seen=excluded.last_seen,
+  event_count=excluded.event_count,
   unique_users=excluded.unique_users, attempts_per_hour=excluded.attempts_per_hour,
   hassh=excluded.hassh, ssh_client=excluded.ssh_client, username_hash=excluded.username_hash,
   campaigns=excluded.campaigns, probe_score=excluded.probe_score, notes=excluded.notes`,

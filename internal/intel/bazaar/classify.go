@@ -52,7 +52,7 @@ func Classify(path string) (Classification, error) {
 
 	switch {
 	case bytes.HasPrefix(buf, []byte{0x7f, 'E', 'L', 'F'}):
-		classifyELF(buf, &c)
+		classifyELF(path, buf, &c)
 	case bytes.HasPrefix(buf, []byte("MZ")):
 		c.FileKind = "PE executable"
 		c.Tags = append(c.Tags, "exe")
@@ -94,13 +94,17 @@ func Classify(path string) (Classification, error) {
 // We open with debug/elf rather than parsing by hand because the
 // e_machine field encoding is annoyingly broad (EM_ARM, EM_AARCH64,
 // EM_X86_64, EM_386, EM_MIPS, EM_MIPSEL, EM_PPC, EM_PPC64, ...).
-func classifyELF(buf []byte, c *Classification) {
+func classifyELF(path string, buf []byte, c *Classification) {
 	c.FileKind = "ELF"
 	c.Tags = append(c.Tags, "elf")
-	// Parse from the already-read buffer. elf.NewFile reads the header and
-	// program headers from the ReaderAt; the 256 KiB buffer comfortably
-	// covers both for any real-world dropper.
-	ef, err := elf.NewFile(bytes.NewReader(buf))
+	// Parse the FULL file for structure: debug/elf eagerly reads the section
+	// header table, which e_shoff places at the END of the binary. A truncated
+	// in-memory buffer makes NewFile return EOF for any ELF larger than the
+	// buffer — and statically-linked Mirai/XMRig droppers (exactly the samples
+	// the arch + "static" tags target) are routinely 1-2 MB. So open the file
+	// as a seekable ReaderAt here; the family scan below still uses the cheap
+	// 256 KiB buf since distinctive strings live near the top.
+	ef, err := elf.Open(path)
 	if err != nil {
 		return
 	}

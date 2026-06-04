@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -152,6 +153,19 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/debug/pprof/symbol", s.guard(pprof.Symbol))
 	mux.HandleFunc("/debug/pprof/trace", s.guard(pprof.Trace))
 	mux.HandleFunc("/debug/runtime", s.guard(s.handleRuntimeStats))
+
+	// Loud warning when the dashboard runs without a token: with
+	// SHARDLURE_DASH_TOKEN unset, every endpoint is open — including the
+	// credential/password wordlist export and /debug/pprof/*. The dashboard is
+	// meant to live on Tailscale/loopback, but operators who bind it wider
+	// should know it's wide open. (We warn rather than refuse, to preserve the
+	// documented "token is optional defense-in-depth" behavior.)
+	if s.dashboardAuth == "" {
+		fmt.Fprintln(os.Stderr,
+			"shardlure: WARNING dashboard is UNAUTHENTICATED (SHARDLURE_DASH_TOKEN unset) — "+
+				"credential exports and pprof are world-readable to anyone who can reach this port. "+
+				"Keep it on Tailscale/loopback or set SHARDLURE_DASH_TOKEN.")
+	}
 
 	srv := &http.Server{
 		Addr:        s.addr,

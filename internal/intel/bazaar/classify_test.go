@@ -260,6 +260,75 @@ func minimalELF64(machine elf.Machine) []byte {
 	return b.Bytes()
 }
 
+// largeStaticELF64 builds a valid ELF64 whose program header table lives PAST
+// the 256 KiB classify buffer. This reproduces the real-world shape of a
+// statically-linked Mirai/XMRig dropper (1-2 MB) where the structural tables
+// are not in the first 256 KiB. debug/elf.NewFile on a truncated in-memory
+// buffer returns EOF for such a file; elf.Open on the full file parses it. The
+// binary is "static" (no PT_INTERP program header).
+func largeStaticELF64(machine elf.Machine) []byte {
+	const phoff = 300 * 1024 // beyond classifyScanBytes (256 KiB)
+	var b bytes.Buffer
+	b.Write([]byte{0x7f, 'E', 'L', 'F'})
+	b.WriteByte(2) // ELFCLASS64
+	b.WriteByte(1) // ELFDATA2LSB
+	b.WriteByte(1) // EI_VERSION
+	b.Write(make([]byte, 9)) // OSABI + ABIVERSION + 7 padding -> 16 bytes
+	_ = binary.Write(&b, binary.LittleEndian, uint16(2))       // e_type EXEC
+	_ = binary.Write(&b, binary.LittleEndian, uint16(machine)) // e_machine
+	_ = binary.Write(&b, binary.LittleEndian, uint32(1))       // e_version
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0))       // e_entry
+	_ = binary.Write(&b, binary.LittleEndian, uint64(phoff))   // e_phoff (past 256 KiB)
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0))       // e_shoff (none)
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0))       // e_flags
+	_ = binary.Write(&b, binary.LittleEndian, uint16(64))      // e_ehsize
+	_ = binary.Write(&b, binary.LittleEndian, uint16(56))      // e_phentsize
+	_ = binary.Write(&b, binary.LittleEndian, uint16(1))       // e_phnum (one PT_LOAD)
+	_ = binary.Write(&b, binary.LittleEndian, uint16(64))      // e_shentsize
+	_ = binary.Write(&b, binary.LittleEndian, uint16(0))       // e_shnum
+	_ = binary.Write(&b, binary.LittleEndian, uint16(0))       // e_shstrndx
+	// Pad from end-of-header (64) to phoff.
+	b.Write(make([]byte, phoff-64))
+	// One PT_LOAD program header (56 bytes): a non-PT_INTERP entry keeps the
+	// binary "static" per isStaticELF.
+	_ = binary.Write(&b, binary.LittleEndian, uint32(1)) // p_type = PT_LOAD
+	_ = binary.Write(&b, binary.LittleEndian, uint32(5)) // p_flags = R+X
+	for i := 0; i < 6; i++ {
+		_ = binary.Write(&b, binary.LittleEndian, uint64(0)) // p_offset..p_align
+	}
+	return b.Bytes()
+}
+
+// TestClassifyLargeELFKeepsArchAndStatic is the regression guard for the
+// single-read optimization: a >256 KiB ELF must still get its arch + "static"
+// tags. Before the fix, classifyELF parsed a 256 KiB-truncated buffer and
+// elf.NewFile returned EOF (the program header table sits past the buffer),
+// silently dropping every structural tag.
+func TestClassifyLargeELFKeepsArchAndStatic(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "big-static")
+	raw := largeStaticELF64(elf.EM_X86_64)
+	if len(raw) <= 256*1024 {
+		t.Fatalf("test binary must exceed 256 KiB, got %d", len(raw))
+	}
+	if err := os.WriteFile(p, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Classify(p)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if !containsTag(c.Tags, "elf") {
+		t.Errorf("missing elf tag: %v", c.Tags)
+	}
+	if !containsTag(c.Tags, "x86-64") {
+		t.Errorf("missing x86-64 tag on >256 KiB ELF (regression): %v", c.Tags)
+	}
+	if !containsTag(c.Tags, "static") {
+		t.Errorf("missing static tag on >256 KiB ELF (regression): %v", c.Tags)
+	}
+}
+
 // TestFirstLineHandlesEmpty makes sure firstLine() doesn't panic on
 // odd inputs (the classifier shells out to it on every script).
 func TestFirstLineHandlesEmpty(t *testing.T) {

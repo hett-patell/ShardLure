@@ -150,11 +150,17 @@ func (r *Resolver) lookup(ctx context.Context, ip, source string, fetch fetchFn)
 		return res
 	}
 
-	// Persist to cache only if we got a non-error response. Negative
-	// results (configured=false / no data) are still worth caching so
-	// repeated lookups don't keep hitting an unconfigured provider.
-	if encoded, err := json.Marshal(res); err == nil {
-		_ = r.St.PutEnrichment(ip, source, string(encoded))
+	// Persist to cache only for genuine, configured, error-free answers.
+	//   - !Configured (no API key): caching it pins "not configured" for the
+	//     full TTL, so setting a key would have no effect for 24h. The no-key
+	//     path costs nothing to recompute, so skip it.
+	//   - res.Error != "" (provider-level failure, e.g. IPQS success:false or a
+	//     malformed-JSON parse): caching an error as "fresh" hides recovery for
+	//     24h. Let the next lookup retry.
+	if res.Configured && res.Error == "" {
+		if encoded, err := json.Marshal(res); err == nil {
+			_ = r.St.PutEnrichment(ip, source, string(encoded))
+		}
 	}
 	res.Cached = false
 	res.FetchedAt = now
@@ -170,6 +176,25 @@ func decodeResult(payload string) Result {
 type fetchFn func(ctx context.Context, hc *http.Client, ip string) (Result, error)
 
 // helpers shared across providers --------------------------------
+
+// statusError carries the HTTP status code from a non-2xx response so callers
+// can branch on the numeric code (e.g. 404 = "no data") rather than matching
+// the upstream-supplied, non-canonical reason phrase string.
+type statusError struct {
+	Code   int
+	Status string
+}
+
+func (e *statusError) Error() string { return e.Status }
+
+// isHTTPStatus reports whether err is a statusError with the given code.
+func isHTTPStatus(err error, code int) bool {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.Code == code
+	}
+	return false
+}
 
 // httpJSON does a GET with the provided headers and returns the
 // decoded body, or an error suitable for surfacing in Result.Error.
@@ -194,7 +219,7 @@ func httpJSON(ctx context.Context, hc *http.Client, url string, headers map[stri
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return body, errors.New(resp.Status)
+		return body, &statusError{Code: resp.StatusCode, Status: resp.Status}
 	}
 	if out != nil {
 		if err := json.Unmarshal(body, out); err != nil {

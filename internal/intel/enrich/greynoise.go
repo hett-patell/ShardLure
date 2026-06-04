@@ -37,8 +37,9 @@ func fetchGreyNoise(ctx context.Context, hc *http.Client, ip string) (Result, er
 	raw, err := httpJSON(ctx, hc, url, headers, &parsed)
 	if err != nil {
 		// 404 from GreyNoise just means "we have no data" - treat as
-		// a clean benign-unknown rather than an error.
-		if err.Error() == "404 Not Found" {
+		// a clean benign-unknown rather than an error. Match on the
+		// numeric code, not the (non-canonical) reason phrase.
+		if isHTTPStatus(err, http.StatusNotFound) {
 			return Result{
 				Configured: true,
 				Verdict:    "unknown",

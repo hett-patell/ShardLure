@@ -34,11 +34,11 @@ func fetchOTX(ctx context.Context, hc *http.Client, ip string) (Result, error) {
 		return Result{Configured: false, Verdict: "unknown"}, nil
 	}
 	url := "https://otx.alienvault.com/api/v1/indicators/IPv4/" + ip + "/general"
-	var parsed otxResp
+	// out=nil: parseOTX owns the decode (avoids a redundant double-decode).
 	raw, err := httpJSON(ctx, hc, url, map[string]string{
 		"Accept":        "application/json",
 		"X-OTX-API-KEY": key,
-	}, &parsed)
+	}, nil)
 	if err != nil {
 		return Result{Configured: true}, err
 	}

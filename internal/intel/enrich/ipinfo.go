@@ -39,8 +39,8 @@ func fetchIPinfo(ctx context.Context, hc *http.Client, ip string) (Result, error
 		return Result{Configured: false, Verdict: "unknown"}, nil
 	}
 	url := "https://ipinfo.io/" + ip + "/json?token=" + key
-	var parsed ipinfoResp
-	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, &parsed)
+	// out=nil: parseIPinfo owns the decode (avoids a redundant double-decode).
+	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, nil)
 	if err != nil {
 		return Result{Configured: true}, err
 	}

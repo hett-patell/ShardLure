@@ -43,7 +43,12 @@ type cowrieLine struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
+// IngestFile is the full-replace ingest: it parses the whole file and replaces
+// the cowrie source's events + actors. The replace bool is retained for call-
+// site symmetry with the journal ingester and is always true in practice — the
+// incremental/append path is IngestFileAppend, which dedups.
 func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (*Result, error) {
+	_ = replace // always a full replace; see persistEvents doc comment
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -55,7 +60,7 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 		return nil, err
 	}
 	persistTTYBindings(st, bindings)
-	res, err := persistEvents(st, events, adminIPs, replace)
+	res, err := persistEvents(st, events, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
 	}
@@ -328,22 +333,17 @@ func buildCowrieActorsFromDB(st *store.Store, fresh []*models.Event, admin *netm
 	return cc.Finalize(), nil
 }
 
-func persistEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
+// persistEvents handles the full-replace ingest (IngestFile, replace=true):
+// the events slice IS the entire cowrie universe, so we rebuild every actor
+// from it and atomically replace the source's events + actors. There is no
+// append branch here on purpose — the append/dedup path is IngestFileAppend,
+// which dedups via batchDedupCowrie before writing. A non-replace branch here
+// would insert without dedup and double-count on re-ingest, so it is omitted.
+func persistEvents(st *store.Store, events []*models.Event, adminIPs []string) (*Result, error) {
 	admin := actor.AdminSet(adminIPs)
 	actor.AssignCowrieActorIDs(events, admin)
-	if replace {
-		// Replace: events slice IS the universe. No DB scan needed.
-		actors := actor.BuildFromCowrieAggregated(events, admin)
-		if err := st.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, events, actors); err != nil {
-			return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
-		}
-		return &Result{Events: len(events), Actors: len(actors)}, nil
-	}
-	actors, err := buildCowrieActorsFromDB(st, events, admin)
-	if err != nil {
-		return nil, err
-	}
-	if err := st.AppendEventsAndReplaceActorsAgg(models.SourceCowrie, events, actors); err != nil {
+	actors := actor.BuildFromCowrieAggregated(events, admin)
+	if err := st.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, events, actors); err != nil {
 		return nil, fmt.Errorf("persist cowrie events and actors: %w", err)
 	}
 	return &Result{Events: len(events), Actors: len(actors)}, nil

@@ -29,10 +29,13 @@ type shodanResp struct {
 
 func fetchShodan(ctx context.Context, hc *http.Client, ip string) (Result, error) {
 	url := "https://internetdb.shodan.io/" + ip
-	var parsed shodanResp
-	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, &parsed)
+	// out=nil: parseShodan owns the decode (httpJSON skips the unmarshal),
+	// avoiding a redundant double-decode of the body.
+	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, nil)
 	if err != nil {
-		if err.Error() == "404 Not Found" {
+		// 404 = Shodan has no record of this IP. Common and benign for a
+		// freshly-seen attacker; surface it as a clean "no observations".
+		if isHTTPStatus(err, http.StatusNotFound) {
 			return Result{
 				Configured: true,
 				Verdict:    "unknown",

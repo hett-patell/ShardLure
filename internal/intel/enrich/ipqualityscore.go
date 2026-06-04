@@ -37,8 +37,8 @@ func fetchIPQualityScore(ctx context.Context, hc *http.Client, ip string) (Resul
 	}
 	// strictness=1 balances false positives; key is a path segment.
 	url := "https://ipqualityscore.com/api/json/ip/" + key + "/" + ip + "?strictness=1"
-	var parsed ipqsResp
-	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, &parsed)
+	// out=nil: parseIPQS owns the decode (avoids a redundant double-decode).
+	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, nil)
 	if err != nil {
 		return Result{Configured: true}, err
 	}
