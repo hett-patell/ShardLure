@@ -15,6 +15,8 @@ import (
 
 type intelResponse struct {
 	GeneratedAt    string          `json:"generatedAt"`
+	StartedAt      string          `json:"startedAt"`      // RFC3339 process start time
+	UptimeSeconds  int64           `json:"uptimeSeconds"`  // seconds the live process has been running
 	Summary        summaryBlock    `json:"summary"`
 	KindCounts     []labelCountRow `json:"kindCounts"`
 	IntentCounts   []labelCountRow `json:"intentCounts"`
@@ -107,8 +109,11 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
 	resp := intelResponse{
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		StartedAt:     s.startedAt.UTC().Format(time.RFC3339),
+		UptimeSeconds: int64(now.Sub(s.startedAt).Seconds()),
 		Summary: summaryBlock{
 			EventCount: ec,
 			ActorCount: ac,

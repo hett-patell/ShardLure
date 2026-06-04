@@ -861,10 +861,11 @@
 
   <!-- ============ OVERVIEW TAB ============ -->
   <section class="view active" id="view-overview">
-  <div class="stats">
+  <div class="stats" style="grid-template-columns: repeat(5, 1fr)">
     <div class="stat"><div class="num accent" id="s-events">0</div><div class="label">events</div></div>
     <div class="stat"><div class="num blue" id="s-actors">0</div><div class="label">actors</div></div>
     <div class="stat"><div class="num accent" id="s-ips">0</div><div class="label">unique IPs</div></div>
+    <div class="stat"><div class="num blue" id="s-uptime" title="how long this ShardLure process has been running">—</div><div class="label">uptime</div></div>
     <div class="stat"><div class="num blue" id="s-upd">—</div><div class="label">updated</div></div>
   </div>
 
@@ -1531,6 +1532,11 @@ async function refresh() {
   document.getElementById('s-events').textContent = fmt(d.summary && d.summary.eventCount);
   document.getElementById('s-actors').textContent = fmt(d.summary && d.summary.actorCount);
   document.getElementById('s-ips').textContent = fmt(d.summary && d.summary.uniqueIps);
+  var upEl = document.getElementById('s-uptime');
+  if (upEl) {
+    upEl.textContent = (d.uptimeSeconds != null) ? fmtUptime(d.uptimeSeconds) : '—';
+    upEl.title = d.startedAt ? ('running since ' + new Date(d.startedAt).toLocaleString()) : 'process uptime';
+  }
   document.getElementById('s-upd').textContent = d.generatedAt ? rel(d.generatedAt) + ' ago' : '—';
   renderBars(document.getElementById('bars-kind'), d.kindCounts);
   renderBars(document.getElementById('bars-playbook'), d.playbookCounts);
@@ -1740,6 +1746,19 @@ function fmtDur(ms) {
   if (m < 60) return m + 'm' + (s % 60) + 's';
   const h = Math.floor(m / 60);
   return h + 'h' + (m % 60) + 'm';
+}
+// fmtUptime renders a process uptime (in seconds) compactly, surfacing the two
+// largest non-zero units so a long-running honeypot reads as "12d 4h", not an
+// hour count that overflows the stat box.
+function fmtUptime(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  if (sec < 60) return sec + 's';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
 }
 function fmtOffset(ms) {
   if (ms === 0) return '+0.0s';

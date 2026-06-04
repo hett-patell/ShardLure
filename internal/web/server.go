@@ -27,6 +27,10 @@ type Server struct {
 	bazaarEndpoint string
 	bazaarTags    []string
 	bazaarMaxBytes int64
+	// startedAt marks when this Server was constructed; surfaced as the
+	// dashboard "uptime" so the operator can tell at a glance how long the
+	// live process has been running (and spot an unexpected restart).
+	startedAt time.Time
 }
 
 type Options struct {
@@ -96,6 +100,7 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 		bazaarEndpoint: bzEndpoint,
 		bazaarTags:     bzTags,
 		bazaarMaxBytes: bzMax,
+		startedAt:      time.Now(),
 	}
 }
 
