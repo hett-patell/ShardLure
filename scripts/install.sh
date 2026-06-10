@@ -77,40 +77,45 @@ log "release: $TAG"
 # -- download binary -------------------------------------------------------
 URL="https://github.com/$REPO/releases/download/$TAG/$BIN_NAME"
 DEST="/usr/local/bin/shardlure"
+# Unpredictable mktemp paths: this script typically runs as root, and writing
+# to fixed names in world-writable /tmp would let a local user pre-plant a
+# symlink and have root clobber (or execute) an arbitrary file.
+DL_BIN="$(mktemp /tmp/shardlure-dl.XXXXXX)"
+DL_SUMS="$(mktemp /tmp/shardlure-sums.XXXXXX)"
+DL_ERR="$(mktemp /tmp/shardlure-curlerr.XXXXXX)"
+trap 'rm -f "$DL_BIN" "$DL_SUMS" "$DL_ERR"' EXIT
 log "downloading $URL …"
-curl -fsSL "$URL" -o /tmp/shardlure-dl 2>/tmp/shardlure-curl.err
-if [[ $? -ne 0 || ! -s /tmp/shardlure-dl ]]; then
-  err "download failed (URL: $URL). $(cat /tmp/shardlure-curl.err 2>/dev/null || true)"
+# `if !` form: under set -e a bare failing curl would abort before our
+# friendly error message could print.
+if ! curl -fsSL "$URL" -o "$DL_BIN" 2>"$DL_ERR" || [[ ! -s "$DL_BIN" ]]; then
+  err "download failed (URL: $URL). $(cat "$DL_ERR" 2>/dev/null || true)"
 fi
 
 # Download the checksum manifest and verify the binary before installing
 # as root. If the checksum file is missing (e.g. manually cut release
 # without CI), print a warning but continue — better than blocking a
-# deployment. If it exists, enforce a strict match.
+# deployment. If it exists, enforce a strict match. (`|| true` because under
+# set -e a missing manifest would otherwise abort instead of warning.)
 CHKSUM_URL="https://github.com/$REPO/releases/download/$TAG/SHA256SUMS"
-curl -fsSL "$CHKSUM_URL" -o /tmp/shardlure-sums 2>/dev/null
-if [[ -s /tmp/shardlure-sums ]]; then
+curl -fsSL "$CHKSUM_URL" -o "$DL_SUMS" 2>/dev/null || true
+if [[ -s "$DL_SUMS" ]]; then
   # Anchor the match: line must END with two spaces + exact BIN_NAME so a
   # release that ships e.g. shardlure-linux-arm64 alongside
   # shardlure-linux-arm64-musl can't accidentally match the wrong row.
-  expected=$(grep -F "  $BIN_NAME" /tmp/shardlure-sums | awk -v b="$BIN_NAME" '$2==b {print $1}' | head -1)
-  actual=$(sha256sum /tmp/shardlure-dl | awk '{print $1}')
+  expected=$(grep -F "  $BIN_NAME" "$DL_SUMS" | awk -v b="$BIN_NAME" '$2==b {print $1}' | head -1)
+  actual=$(sha256sum "$DL_BIN" | awk '{print $1}')
   if [[ -z "$expected" ]]; then
-    rm -f /tmp/shardlure-sums
     log "WARNING: no checksum entry for $BIN_NAME in SHA256SUMS — binary not verified"
   elif [[ "$expected" != "$actual" ]]; then
     err "checksum mismatch for $BIN_NAME. Expected: $expected, got: $actual. Do not proceed — the binary may be tampered."
   else
     log "checksum verified: $BIN_NAME ($actual)"
   fi
-  rm -f /tmp/shardlure-sums
 else
   log "WARNING: SHA256SUMS not found at $CHKSUM_URL — binary not verified"
 fi
 
-chmod +x /tmp/shardlure-dl
-install -m 755 /tmp/shardlure-dl "$DEST"
-rm -f /tmp/shardlure-dl /tmp/shardlure-curl.err
+install -m 755 "$DL_BIN" "$DEST"
 log "installed $DEST ($(wc -c < "$DEST") bytes)"
 
 # -- config ----------------------------------------------------------------

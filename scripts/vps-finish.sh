@@ -53,10 +53,15 @@ require (
 GOMOD
 
 go mod tidy
-go build -o /tmp/shardlure ./cmd/shardlure
-echo "built /tmp/shardlure ($(wc -c < /tmp/shardlure) bytes)"
+# Build into an unpredictable mktemp path (not the fixed /tmp/shardlure):
+# root copies this file into /usr/local/bin below, so a predictable name in
+# world-writable /tmp would be a TOCTOU/symlink-swap target.
+BUILD_BIN="$(mktemp /tmp/shardlure-build.XXXXXX)"
+trap 'rm -f "$BUILD_BIN"' EXIT
+go build -o "$BUILD_BIN" ./cmd/shardlure
+echo "built $BUILD_BIN ($(wc -c < "$BUILD_BIN") bytes)"
 
-sudo python3 <<'PY'
+sudo SL_BUILD_BIN="$BUILD_BIN" python3 <<'PY'
 import os
 import shutil
 import subprocess
@@ -106,7 +111,7 @@ lines += [
     "  timeout_sec: 45",
 ]
 CONFIG.write_text("\n".join(lines) + "\n")
-shutil.copy2("/tmp/shardlure", BIN)
+shutil.copy2(os.environ["SL_BUILD_BIN"], BIN)
 BIN.chmod(0o755)
 
 cowrie_exec = f"/usr/bin/authbind --deep {COWRIE_HOME}/venv/bin/python3 {COWRIE_HOME}/bin/cowrie start -n"

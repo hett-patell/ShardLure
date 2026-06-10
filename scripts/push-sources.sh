@@ -44,5 +44,5 @@ PY"
 
 echo "Done. On VPS finish setup with:"
 echo "  cd ~/ShardLure/shardlure && bash scripts/fix-go-sources.sh"
-echo "  sudo cp /tmp/shardlure /usr/local/bin/shardlure"
+echo "  # then run the 'sudo install ...' command fix-go-sources.sh prints"
 echo "  sudo python3 scripts/shardlure.py finish   # or run remaining steps manually"

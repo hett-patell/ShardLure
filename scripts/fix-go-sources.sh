@@ -62,5 +62,11 @@ else:
 PY
 
 go mod tidy
-go build -o /tmp/shardlure ./cmd/shardlure
-echo "OK: /tmp/shardlure built ($(wc -c < /tmp/shardlure) bytes)"
+# Unpredictable mktemp path instead of the fixed /tmp/shardlure: the operator
+# installs this as root next, so a predictable name in world-writable /tmp
+# would be a TOCTOU/symlink-swap target.
+BUILD_BIN="$(mktemp /tmp/shardlure-build.XXXXXX)"
+go build -o "$BUILD_BIN" ./cmd/shardlure
+echo "OK: built $BUILD_BIN ($(wc -c < "$BUILD_BIN") bytes)"
+echo "install with:"
+echo "  sudo install -m 755 $BUILD_BIN /usr/local/bin/shardlure && rm -f $BUILD_BIN"
