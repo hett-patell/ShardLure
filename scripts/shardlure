@@ -62,6 +62,33 @@ install_deps() {
       log "unknown package manager; ensure git, python3, venv, authbind, go are installed"
       ;;
   esac
+
+  # The package-manager calls above tolerate errors (|| true) so apt warnings on
+  # mismatched-arch repos don't abort. But if an *essential* tool is genuinely
+  # missing afterward, fail here with a clear message rather than at a confusing
+  # downstream step (e.g. an opaque `go build` failure).
+  local missing=()
+  for tool in git python3 go; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    die "required tools missing after dependency install: ${missing[*]}. Install them and re-run."
+  fi
+}
+
+# valid_port echoes the port if it is an integer 1-65535, else dies. This is a
+# security control, not just UX: the ports are interpolated verbatim into the
+# sshd drop-in, systemd units, and a Cowrie config heredoc, so an unvalidated
+# value (e.g. "22\nPermitRootLogin yes") could inject directives.
+valid_port() {
+  local p="$1" name="$2"
+  case "$p" in
+    ''|*[!0-9]*) die "$name must be an integer 1-65535, got: $p" ;;
+  esac
+  if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+    die "$name must be in range 1-65535, got: $p"
+  fi
+  printf '%s' "$p"
 }
 
 prompt_config() {
@@ -73,16 +100,19 @@ prompt_config() {
   echo
 
   read -r -p "Honeypot SSH port attackers should hit [22]: " _hp
-  HONEYPOT_PORT="${_hp:-22}"
+  HONEYPOT_PORT="$(valid_port "${_hp:-22}" 'honeypot port')"
 
   read -r -p "Admin SSH port for your key-based login [2222]: " _ap
-  ADMIN_SSH_PORT="${_ap:-2222}"
+  ADMIN_SSH_PORT="$(valid_port "${_ap:-2222}" 'admin port')"
 
   read -r -p "Dashboard port [8080]: " _dp
-  DASHBOARD_PORT="${_dp:-8080}"
+  DASHBOARD_PORT="$(valid_port "${_dp:-8080}" 'dashboard port')"
 
   if [ "$HONEYPOT_PORT" = "$ADMIN_SSH_PORT" ]; then
     die "honeypot port and admin port must differ"
+  fi
+  if [ "$DASHBOARD_PORT" = "$HONEYPOT_PORT" ] || [ "$DASHBOARD_PORT" = "$ADMIN_SSH_PORT" ]; then
+    die "dashboard port must differ from the SSH ports"
   fi
 }
 
@@ -154,6 +184,35 @@ EOF
   log "real SSH now on port $ADMIN_SSH_PORT"
 }
 
+# verify_admin_ssh_gate pauses after the SSH move so the operator proves they
+# can still log in on the new admin port BEFORE the install proceeds (and before
+# they close this session). Mirrors the Python installer's gate; without it a
+# bad admin-port config locks the user out.
+verify_admin_ssh_gate() {
+  local user host conn
+  user="${SUDO_USER:-$(whoami)}"
+  host="<this-server-ip>"
+  conn="${SSH_CONNECTION:-}"
+  if [ -n "$conn" ]; then
+    host="$(printf '%s' "$conn" | awk '{print $3}')"
+  fi
+  echo
+  echo "  -------------------------------------------------------------"
+  echo "  Real SSH now listens on port $ADMIN_SSH_PORT (key-only)."
+  echo "  >>> In a SEPARATE terminal, RIGHT NOW, confirm you can log in:"
+  echo "        ssh -p $ADMIN_SSH_PORT $user@$host"
+  echo "  Do NOT close this session until that works."
+  echo "  -------------------------------------------------------------"
+  while true; do
+    read -r -p "  Did 'ssh -p $ADMIN_SSH_PORT' succeed in the other terminal? [yes/abort]: " _ans
+    case "$_ans" in
+      yes|y|Y) return 0 ;;
+      abort|a|no|n|N) die "aborted at SSH-verify gate. Real SSH is on the new port; fix access before re-running." ;;
+      *) echo "  Type 'yes' once you've confirmed login, or 'abort' to stop." ;;
+    esac
+  done
+}
+
 setup_authbind() {
   if [ "$HONEYPOT_PORT" -ge 1024 ]; then
     return
@@ -184,9 +243,10 @@ install_cowrie() {
     git -C "$COWRIE_HOME" pull --ff-only || true
   fi
 
-  python3 -m venv "$COWRIE_HOME/venv"
-  "$COWRIE_HOME/venv/bin/pip" install --upgrade pip wheel
-  "$COWRIE_HOME/venv/bin/pip" install -r "$COWRIE_HOME/requirements.txt"
+  python3 -m venv "$COWRIE_HOME/venv" || die "failed to create Cowrie virtualenv"
+  "$COWRIE_HOME/venv/bin/pip" install --upgrade pip wheel || die "pip install (pip/wheel) failed"
+  "$COWRIE_HOME/venv/bin/pip" install -r "$COWRIE_HOME/requirements.txt" \
+    || die "pip install of Cowrie requirements failed; Cowrie would be left broken"
 
   mkdir -p "$COWRIE_HOME/var/log/cowrie" "$COWRIE_HOME/var/lib/cowrie/downloads" "$COWRIE_HOME/etc"
   if [ ! -f "$COWRIE_HOME/etc/cowrie.cfg" ]; then
@@ -199,28 +259,35 @@ install_cowrie() {
 # appended by ShardLure setup
 EOF
 
-  python3 - <<PY
+  # Pass paths/ports through the environment rather than interpolating them
+  # into the Python source: a value containing a quote (or worse) would
+  # otherwise break or inject into the heredoc.
+  COWRIE_HOME="$COWRIE_HOME" HONEYPOT_PORT="$HONEYPOT_PORT" python3 - <<'PY'
+import os
 from pathlib import Path
-cfg = Path("$COWRIE_HOME/etc/cowrie.cfg")
+home = os.environ["COWRIE_HOME"]
+port = os.environ["HONEYPOT_PORT"]
+cfg = Path(home) / "etc/cowrie.cfg"
 text = cfg.read_text()
-block = """
+block = f"""
 [honeypot]
 hostname = prod-app-server-01
-log_path = $COWRIE_HOME/var/log/cowrie
-data_path = $COWRIE_HOME/var/lib/cowrie
-download_path = $COWRIE_HOME/var/lib/cowrie/downloads
+log_path = {home}/var/log/cowrie
+data_path = {home}/var/lib/cowrie
+download_path = {home}/var/lib/cowrie/downloads
 
 [output_jsonlog]
 enabled = true
-logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json
+logfile = {home}/var/log/cowrie/cowrie.json
 
 [ssh]
-listen_endpoints = tcp:${HONEYPOT_PORT}:interface=0.0.0.0
+listen_endpoints = tcp:{port}:interface=0.0.0.0
 """
-for section in ("[honeypot]", "[output_jsonlog]", "[ssh]"):
-    if section in text:
-        continue
-cfg.write_text(text.rstrip() + "\\n" + block)
+# Only append when the sections are actually missing. Previously the write ran
+# unconditionally (it sat outside the loop), so the block was appended even
+# when every section already existed.
+if not all(s in text for s in ("[honeypot]", "[output_jsonlog]", "[ssh]")):
+    cfg.write_text(text.rstrip() + "\n" + block)
 PY
 
   chown -R "$COWRIE_USER:$COWRIE_USER" "$COWRIE_HOME"
@@ -230,8 +297,13 @@ PY
 build_shardlure() {
   log "building shardlure binary"
   if [ -d "$ROOT" ] && [ -f "$ROOT/go.mod" ]; then
-    (cd "$ROOT" && go mod tidy && go build -o /tmp/shardlure ./cmd/shardlure)
-    install -m 0755 /tmp/shardlure "$BIN_DIR/shardlure"
+    # Build into a private mktemp file (in the root-owned BIN_DIR, not the
+    # world-writable /tmp) to avoid a TOCTOU/symlink race on a predictable path.
+    local _tmpbin
+    _tmpbin="$(mktemp "$BIN_DIR/.shardlure.XXXXXX")" || die "mktemp failed"
+    (cd "$ROOT" && go mod tidy && go build -o "$_tmpbin" ./cmd/shardlure) || { rm -f "$_tmpbin"; die "go build failed"; }
+    install -m 0755 "$_tmpbin" "$BIN_DIR/shardlure"
+    rm -f "$_tmpbin"
   elif command -v go >/dev/null 2>&1 && [ -f "$ROOT/go.mod" ]; then
     (cd "$ROOT" && go build -o "$BIN_DIR/shardlure" ./cmd/shardlure)
   else
@@ -348,6 +420,7 @@ cmd_run() {
   prompt_config
   collect_admin_ips
   migrate_sshd
+  verify_admin_ssh_gate
   ensure_cowrie_user
   install_cowrie
   build_shardlure

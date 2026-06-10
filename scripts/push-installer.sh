@@ -5,6 +5,13 @@ HOST="${1:-arm}"
 REMOTE="${2:-/home/ubuntu/ShardLure/shardlure/scripts/shardlure.py}"
 LOCAL="$(cd "$(dirname "$0")" && pwd)/shardlure.py"
 
+# REMOTE is interpolated into remote shell commands and Python -c snippets;
+# restrict to a safe path charset (also blocks the quote that would break the
+# Python string literal) so a crafted value can't inject either.
+case "$REMOTE" in
+  *[!A-Za-z0-9/._~-]*) echo "error: REMOTE path has unsafe characters: $REMOTE" >&2; exit 1 ;;
+esac
+
 if [[ ! -f "$LOCAL" ]]; then
   echo "missing $LOCAL" >&2
   exit 1

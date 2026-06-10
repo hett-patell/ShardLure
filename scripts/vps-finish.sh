@@ -60,6 +60,7 @@ sudo python3 <<'PY'
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 DATA = Path("/var/lib/shardlure")
@@ -81,9 +82,13 @@ if shutil.which("tailscale"):
         if line.strip():
             admin_ips.append(line.strip())
             break
-if not admin_ips:
-    admin_ips = ["100.95.188.127"]
 admin_ips = list(dict.fromkeys(admin_ips))
+if not admin_ips:
+    # No admin IP could be determined (no SHARDLURE_ADMIN_IPS, no Tailscale).
+    # An empty admin_ips list just means no IPs are exempted from the honeypot
+    # accounting — that's a safe default. (Previously this fell back to a
+    # hardcoded personal Tailscale IP, which was wrong for every other host.)
+    print("warning: no admin IPs detected (set SHARDLURE_ADMIN_IPS to exempt your own IP)", file=sys.stderr)
 
 DATA.mkdir(parents=True, exist_ok=True)
 lines = [f"data_dir: {DATA}", "admin_ips:"] + [f"  - {ip}" for ip in admin_ips]
@@ -138,7 +143,8 @@ for cmd in (
     ["systemctl", "restart", "shardlure-live.service"],
 ):
     subprocess.run(cmd, check=True)
-print("dashboard: http://%s:%d" % (admin_ips[0], dash_port))
+dash_host = admin_ips[0] if admin_ips else "127.0.0.1"
+print("dashboard: http://%s:%d" % (dash_host, dash_port))
 PY
 
 systemctl is-active cowrie shardlure-live

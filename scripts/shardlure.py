@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -200,6 +201,23 @@ def ensure_admin_ssh_keys() -> None:
         "real SSH was NOT moved, so you are not locked out.")
 
 
+def ssh_is_socket_activated() -> bool:
+    """True when systemd's ssh.socket owns the listening port(s).
+
+    On Ubuntu 22.10+/24.04 sshd is socket-activated: ssh.socket's
+    ListenStream= determines the listening port and the `Port` directive in
+    sshd_config is silently IGNORED. If we don't account for this, the admin
+    SSH "move" writes Port <admin> but sshd keeps listening on 22 — and once
+    Cowrie grabs 22, the operator is locked out. Detect it so migrate_sshd can
+    write a socket drop-in instead of relying on the (ineffective) Port line.
+    """
+    cp = run(["systemctl", "is-active", "ssh.socket"], capture_output=True, text=True)
+    if cp.stdout.strip() == "active":
+        return True
+    cp = run(["systemctl", "is-enabled", "ssh.socket"], capture_output=True, text=True)
+    return cp.stdout.strip() in ("enabled", "static", "indirect")
+
+
 def migrate_sshd(admin_port: int) -> None:
     log(f"moving real SSH to port {admin_port} (key-only)")
     ensure_admin_ssh_keys()
@@ -207,6 +225,8 @@ def migrate_sshd(admin_port: int) -> None:
     dropin.parent.mkdir(parents=True, exist_ok=True)
     main_cfg = Path("/etc/ssh/sshd_config")
     bak = Path("/etc/ssh/sshd_config.shardlure-bak")
+    socket_activated = ssh_is_socket_activated()
+    socket_dropin = Path("/etc/systemd/system/ssh.socket.d/zz-shardlure-admin.conf")
     if main_cfg.exists() and not bak.exists():
         shutil.copy2(main_cfg, bak)
     if main_cfg.exists():
@@ -228,6 +248,20 @@ PubkeyAuthentication yes
 PermitRootLogin prohibit-password
 """
     )
+    if socket_activated:
+        # The first (empty) ListenStream= clears the unit's inherited
+        # ListenStream=22; the second binds the admin port. Without the reset
+        # line systemd would ADD the admin port while keeping 22, leaving the
+        # real sshd squatting on the bait port.
+        log("ssh is socket-activated; writing ssh.socket drop-in for the admin port")
+        socket_dropin.parent.mkdir(parents=True, exist_ok=True)
+        socket_dropin.write_text(
+            f"""# Managed by ShardLure
+[Socket]
+ListenStream=
+ListenStream={admin_port}
+"""
+        )
 
     def _rollback(reason: str) -> None:
         log(f"sshd config invalid ({reason}); rolling back to backup")
@@ -237,6 +271,13 @@ PermitRootLogin prohibit-password
             dropin.unlink()
         except FileNotFoundError:
             pass
+        if socket_activated:
+            try:
+                socket_dropin.unlink()
+            except FileNotFoundError:
+                pass
+            run(["systemctl", "daemon-reload"])
+            run(["systemctl", "restart", "ssh.socket"])
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "reload", "ssh"])
 
@@ -246,12 +287,24 @@ PermitRootLogin prohibit-password
         die("sshd -t rejected the new configuration; original ssh restored")
 
     run(["systemctl", "daemon-reload"])
-    cp = run(["systemctl", "reload", "ssh"])
-    if cp.returncode != 0:
-        cp2 = run(["systemctl", "reload", "sshd"])
-        if cp2.returncode != 0:
-            _rollback("systemctl reload failed")
-            die("ssh reload failed; original ssh restored")
+    if socket_activated:
+        # Restart the socket so the new ListenStream= takes effect. Already
+        # established admin connections survive (their sshd@ instances keep
+        # running); only the listening socket is rebound.
+        cp = run(["systemctl", "restart", "ssh.socket"])
+        if cp.returncode != 0:
+            _rollback("ssh.socket restart failed")
+            die("ssh.socket restart failed; original ssh restored")
+        # ssh.service may still hold port 22 from a non-socket start; stop it so
+        # Cowrie can bind the bait port. Ignore errors (it may not be running).
+        run(["systemctl", "stop", "ssh.service"])
+    else:
+        cp = run(["systemctl", "reload", "ssh"])
+        if cp.returncode != 0:
+            cp2 = run(["systemctl", "reload", "sshd"])
+            if cp2.returncode != 0:
+                _rollback("systemctl reload failed")
+                die("ssh reload failed; original ssh restored")
     log(f"real SSH now on port {admin_port}")
 
 
@@ -293,40 +346,27 @@ def install_cowrie(honeypot_port: int) -> None:
         (COWRIE_HOME / d).mkdir(parents=True, exist_ok=True)
     cfg = COWRIE_HOME / "etc/cowrie.cfg"
     if not cfg.exists():
-        shutil.copy2(COWRIE_HOME / "etc/cowrie.cfg.dist", cfg)
-    text = cfg.read_text()
-    block = f"""
-[honeypot]
-hostname = prod-app-server-01
-sensor_name = prod-app-server-01
-log_path = {COWRIE_HOME}/var/log/cowrie
-state_path = {COWRIE_HOME}/var/lib/cowrie
-download_path = {COWRIE_HOME}/var/lib/cowrie/downloads
-contents_path = {COWRIE_HOME}/honeyfs
-data_path = {COWRIE_HOME}/src/cowrie/data
-etc_path = {COWRIE_HOME}/etc
-
-[shell]
-arch = linux-x64-lsb
-kernel_name = Linux
-kernel_version = 5.15.0-94-generic
-kernel_build_string = #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024
-hardware_platform = x86_64
-operating_system = GNU/Linux
-ssh_version = OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022
-filesystem = {COWRIE_HOME}/src/cowrie/data/fs.pickle
-
-[output_jsonlog]
-enabled = true
-logfile = {COWRIE_HOME}/var/log/cowrie/cowrie.json
-
-[ssh]
-version = SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6
-listen_endpoints = tcp:{honeypot_port}:interface=0.0.0.0
-"""
-    if not all(s in text for s in ("[honeypot]", "[output_jsonlog]", "[ssh]")):
-        text = text.rstrip() + "\n" + block
-    cfg.write_text(text)
+        # Locate the distributed default config. Cowrie used to ship it at
+        # etc/cowrie.cfg.dist; newer revisions moved it under
+        # src/cowrie/data/etc/. Search both (and fall back to a glob) so the
+        # installer works across Cowrie versions.
+        dist_candidates = [
+            COWRIE_HOME / "etc/cowrie.cfg.dist",
+            COWRIE_HOME / "src/cowrie/data/etc/cowrie.cfg.dist",
+        ]
+        dist = next((p for p in dist_candidates if p.exists()), None)
+        if dist is None:
+            found = list(COWRIE_HOME.glob("**/cowrie.cfg.dist"))
+            dist = found[0] if found else None
+        if dist is None:
+            die("could not find cowrie.cfg.dist in the Cowrie checkout; "
+                "Cowrie's layout may have changed again")
+        shutil.copy2(dist, cfg)
+    # patch_cowrie_cfg injects/normalizes the [honeypot]/[shell]/[output_jsonlog]/
+    # [ssh] sections (and the listen_endpoints port) idempotently. It is the
+    # single source of truth for the config shape — apply_stealth_persona below
+    # re-runs it against the stealth template, so we don't hand-assemble a
+    # duplicate block here.
     cfg.write_text(patch_cowrie_cfg(cfg.read_text(), honeypot_port))
     apply_stealth_persona(honeypot_port)
     run(["chown", "-R", f"{COWRIE_USER}:{COWRIE_USER}", str(COWRIE_HOME)])
@@ -430,10 +470,20 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
     out: list[str] = []
     section = ""
     ssh_listen_set = False
+    ssh_section_seen = False
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
+            # Leaving a section. If it was [ssh] and it had no
+            # listen_endpoints line of its own, inject ours here rather than
+            # emitting a second [ssh] header later (configparser rejects
+            # duplicate sections with DuplicateSectionError).
+            if section == "[ssh]" and not ssh_listen_set:
+                out.append(f"listen_endpoints = {endpoint}")
+                ssh_listen_set = True
             section = stripped.lower()
+            if section == "[ssh]":
+                ssh_section_seen = True
             out.append(line)
             continue
         if section == "[ssh]" and stripped.startswith("listen_endpoints"):
@@ -442,10 +492,20 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
                 ssh_listen_set = True
             continue
         out.append(line)
+    # Handle [ssh] being the final section in the file (no trailing header to
+    # trigger the inject-on-exit path above).
+    if ssh_section_seen and not ssh_listen_set:
+        out.append(f"listen_endpoints = {endpoint}")
+        ssh_listen_set = True
     if not ssh_listen_set:
         out.extend(["", "[ssh]", f"listen_endpoints = {endpoint}"])
-    block = f"""
-[honeypot]
+    # Append any of the non-[ssh] sections that are still missing. Each is
+    # guarded independently so a config that already has, say, [output_jsonlog]
+    # but not [honeypot] doesn't get [output_jsonlog] duplicated (which would
+    # trip configparser's DuplicateSectionError). [ssh] is handled above.
+    joined = "\n".join(out)
+    extra_sections = {
+        "[honeypot]": f"""[honeypot]
 hostname = prod-app-server-01
 sensor_name = prod-app-server-01
 log_path = {COWRIE_HOME}/var/log/cowrie
@@ -453,9 +513,8 @@ state_path = {COWRIE_HOME}/var/lib/cowrie
 download_path = {COWRIE_HOME}/var/lib/cowrie/downloads
 contents_path = {COWRIE_HOME}/honeyfs
 data_path = {COWRIE_HOME}/src/cowrie/data
-etc_path = {COWRIE_HOME}/etc
-
-[shell]
+etc_path = {COWRIE_HOME}/etc""",
+        "[shell]": f"""[shell]
 arch = linux-x64-lsb
 kernel_name = Linux
 kernel_version = 5.15.0-94-generic
@@ -463,18 +522,16 @@ kernel_build_string = #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024
 hardware_platform = x86_64
 operating_system = GNU/Linux
 ssh_version = OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022
-filesystem = {COWRIE_HOME}/src/cowrie/data/fs.pickle
-
-[output_jsonlog]
+filesystem = {COWRIE_HOME}/src/cowrie/data/fs.pickle""",
+        "[output_jsonlog]": f"""[output_jsonlog]
 enabled = true
-logfile = {COWRIE_HOME}/var/log/cowrie/cowrie.json
-
-[ssh]
-version = SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6
-listen_endpoints = {endpoint}
-"""
-    if "[honeypot]" not in "\n".join(out):
-        out.append(block.rstrip())
+logfile = {COWRIE_HOME}/var/log/cowrie/cowrie.json""",
+    }
+    for header, body in extra_sections.items():
+        if header not in joined:
+            out.append("")
+            out.append(body)
+            joined += "\n" + body
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -485,12 +542,21 @@ def build_shardlure() -> None:
     cp = run(["go", "mod", "tidy"], cwd=str(ROOT))
     if cp.returncode != 0:
         die("go mod tidy failed")
-    out = Path("/tmp/shardlure")
-    cp = run(["go", "build", "-o", str(out), "./cmd/shardlure"], cwd=str(ROOT))
-    if cp.returncode != 0:
-        die("go build failed")
-    shutil.copy2(out, BIN_DIR / "shardlure")
-    (BIN_DIR / "shardlure").chmod(0o755)
+    # Build into a private temp file inside the root-owned BIN_DIR (not the
+    # world-writable /tmp) to avoid a TOCTOU/symlink race on a predictable
+    # path, then atomically move it into place.
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".shardlure.", dir=str(BIN_DIR))
+    os.close(fd)
+    out = Path(tmp_name)
+    try:
+        cp = run(["go", "build", "-o", str(out), "./cmd/shardlure"], cwd=str(ROOT))
+        if cp.returncode != 0:
+            die("go build failed")
+        out.chmod(0o755)
+        os.replace(out, BIN_DIR / "shardlure")
+    finally:
+        out.unlink(missing_ok=True)
 
 
 def write_config(admin_ips: list[str], admin_port: int, honeypot_port: int, dash_port: int) -> None:
@@ -761,20 +827,36 @@ def restore_sshd() -> None:
     dropin = Path("/etc/ssh/sshd_config.d/99-shardlure-admin.conf")
     main_cfg = Path("/etc/ssh/sshd_config")
     bak = Path("/etc/ssh/sshd_config.shardlure-bak")
+    socket_dropin = Path("/etc/systemd/system/ssh.socket.d/zz-shardlure-admin.conf")
     changed = False
+    socket_restored = False
+    if socket_dropin.exists():
+        # Remove the socket-activation override so ssh.socket reverts to its
+        # packaged ListenStream (port 22). Done before the sshd_config reload so
+        # the box is reachable on 22 again under the restored config.
+        log("removing ShardLure ssh.socket drop-in")
+        socket_dropin.unlink()
+        socket_restored = True
+        changed = True
     if bak.exists():
         log("restoring original sshd_config from backup")
         shutil.copy2(bak, main_cfg)
         changed = True
     elif main_cfg.exists():
-        # No backup: at least un-comment any "#Port " lines we may have added.
-        text = main_cfg.read_text()
-        new = "\n".join(
-            line[1:] if line.startswith("#Port ") else line
-            for line in text.splitlines()
-        )
-        if new != text:
-            main_cfg.write_text(new + "\n")
+        # No backup: best-effort un-comment of the Port line we commented at
+        # install time (install did `sed 's/^Port /#Port /'`). Only the FIRST
+        # such line is restored — sshd honours a single active Port, and a user
+        # may have their own unrelated "#Port ..." comments we must not touch.
+        out, restored = [], False
+        for line in main_cfg.read_text().splitlines():
+            if not restored and line.startswith("#Port "):
+                out.append(line[1:])
+                restored = True
+                log(f"un-commented '{line[1:]}' in sshd_config (no backup present)")
+            else:
+                out.append(line)
+        if restored:
+            main_cfg.write_text("\n".join(out) + "\n")
             changed = True
     if dropin.exists():
         log("removing ShardLure sshd drop-in")
@@ -788,6 +870,9 @@ def restore_sshd() -> None:
         die("restored sshd config failed sshd -t; NOT reloading. "
             "Inspect /etc/ssh/sshd_config before reloading ssh manually.")
     run(["systemctl", "daemon-reload"])
+    if socket_restored:
+        # Rebind the socket to its packaged port (22) before reloading sshd.
+        run(["systemctl", "restart", "ssh.socket"])
     if run(["systemctl", "reload", "ssh"]).returncode != 0:
         run(["systemctl", "reload", "sshd"])
     if bak.exists():
