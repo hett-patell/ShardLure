@@ -70,10 +70,9 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	// Full window (was capped at the most-recent 20000 events, so any window
 	// wider than ~30h silently classified only the last 30h).
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -355,8 +354,7 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // default 7d for TTP
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -412,8 +410,7 @@ func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
 	}
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -514,8 +511,7 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("top")); err == nil && n > 0 && n <= 500 {
 		topN = n
 	}
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -570,8 +566,7 @@ func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 720) // 30d default
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -847,8 +842,7 @@ func (s *Server) handleIOCList(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -884,8 +878,7 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -921,8 +914,7 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	events, err := s.st.EventsSinceAll(since)
+	events, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return

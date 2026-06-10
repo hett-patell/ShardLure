@@ -242,8 +242,28 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 
 	if journalSSH {
 		go func() {
-			if err := journal.TailFollow(ctx, st, cfg.Journal.Unit, cfg.AdminIPs); err != nil && ctx.Err() == nil {
-				fmt.Fprintf(os.Stderr, "journal tail stopped: %v\n", err)
+			// Restart the tail on failure with capped backoff. A scanner error
+			// (e.g. an oversized journal line) or journalctl exiting would
+			// otherwise end journal ingestion silently for the daemon's whole
+			// lifetime — and since the process keeps running, Restart=always
+			// never kicks in.
+			backoff := time.Second
+			for ctx.Err() == nil {
+				err := journal.TailFollow(ctx, st, cfg.Journal.Unit, cfg.AdminIPs)
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "journal tail stopped: %v (restarting in %s)\n", err, backoff)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
 			}
 		}()
 	}
@@ -275,6 +295,10 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 			if err := st.MaintenancePurge(cfg.RetentionDays); err != nil {
 				fmt.Fprintf(os.Stderr, "maintenance purge: %v\n", err)
 			}
+			// Also clean Cowrie's own source dirs so they don't grow without
+			// bound and so purged artifacts can't be re-archived from the
+			// surviving source file on the next tick.
+			capRunner.PurgeOldSourceFiles(cfg.RetentionDays)
 		}
 		runPurge()
 		for {

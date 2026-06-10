@@ -311,6 +311,21 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			return err
 		}
 	}
+
+	// v7: (kind, ts) composite index. The capture runner calls
+	// RecentCommandEvents and RecentFileDownloadEvents on every 5s tick; both
+	// filter `WHERE kind=? ORDER BY ts DESC`. With no kind-leading index SQLite
+	// scanned the whole table down idx_events_ts until it found enough matches
+	// — on a brute-force-dominated honeypot those kinds are rare, so it was a
+	// full scan twice per tick. This index makes them indexed range searches.
+	if current < 7 {
+		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts)`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -701,43 +716,98 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		return err
 	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
-	// Serialize the purge transaction with all other writers (ensure* calls
-	// above already took/released writeMu via execWrite; lock here, not earlier,
-	// because writeMu is not reentrant).
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	tx, err := s.db.Begin()
-	if err != nil {
+
+	// Collect the on-disk evidence files belonging to artifacts we're about to
+	// delete, so we can unlink them AFTER the row deletion commits. Without
+	// this the evidence/ dir grew without bound (the purge deleted only rows),
+	// eventually filling the disk and stopping all telemetry. local_path is
+	// always a path WE wrote (filepath.Join(EvidenceDir, ...)), never attacker
+	// input, so it is safe to remove directly.
+	var artifactFiles []string
+	func() {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		rows, err := s.db.Query(
+			`SELECT local_path FROM artifacts WHERE COALESCE(ts, created_at) < ? AND local_path IS NOT NULL AND local_path != ''`,
+			cutoff)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err == nil && p != "" {
+				artifactFiles = append(artifactFiles, p)
+			}
+		}
+	}()
+
+	// Small reference tables: delete in one short transaction. Children first
+	// so application-level references don't dangle.
+	if err := func() error {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		// Enrichment cache — column is fetched_at (see enrichment.go).
+		if _, err := tx.Exec(`DELETE FROM ip_enrichment WHERE fetched_at < ?`, cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM cowrie_tty_index WHERE ts < ?`, cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM artifacts WHERE COALESCE(ts, created_at) < ?`, cutoff); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}(); err != nil {
 		return err
 	}
-	defer tx.Rollback()
 
-	// Order: children first so foreign-key or application-level
-	// references don't dangle. Each DELETE is bounded by the
-	// cutoff; none of these scan the full table.
-
-	// 1. Enrichment cache — references IPs that appear in events.
-	//    Column is fetched_at (see enrichment.go); the earlier
-	//    queried_at name was wrong and made this DELETE fail every
-	//    24h on the live system.
-	if _, err := tx.Exec(`DELETE FROM ip_enrichment WHERE fetched_at < ?`, cutoff); err != nil {
-		return err
+	// Events — the largest table. Delete in bounded chunks, each its own
+	// transaction, releasing writeMu between chunks. A single DELETE of the
+	// whole expired backlog (millions of rows × 7 indexes) on the first purge
+	// of an aged DB held writeMu for minutes, stalling the ingest tick, journal
+	// tail, and capture runner, and ballooned the WAL.
+	const purgeChunk = 5000
+	for {
+		var affected int64
+		if err := func() error {
+			s.writeMu.Lock()
+			defer s.writeMu.Unlock()
+			res, err := s.db.Exec(
+				`DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE ts < ? LIMIT ?)`,
+				cutoff, purgeChunk)
+			if err != nil {
+				return err
+			}
+			affected, _ = res.RowsAffected()
+			return nil
+		}(); err != nil {
+			return err
+		}
+		if affected < purgeChunk {
+			break
+		}
 	}
 
-	// 2. TTY transcript index — references sessions from events.
-	if _, err := tx.Exec(`DELETE FROM cowrie_tty_index WHERE ts < ?`, cutoff); err != nil {
-		return err
-	}
+	// Reclaim WAL space the chunked deletes accumulated.
+	func() {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	}()
 
-	// 3. Artifact rows — independent time-based cutoff.
-	if _, err := tx.Exec(`DELETE FROM artifacts WHERE COALESCE(ts, created_at) < ?`, cutoff); err != nil {
-		return err
+	// Unlink the evidence files now that their rows are gone. Best-effort: an
+	// unremovable file is logged-by-omission (a later run / quota sweep retries)
+	// rather than failing the purge. The ".txt" sibling is the rendered TTY
+	// transcript written next to the raw capture.
+	for _, p := range artifactFiles {
+		_ = os.Remove(p)
+		_ = os.Remove(p + ".txt")
 	}
-
-	// 4. Events — the root table and typically the largest.
-	if _, err := tx.Exec(`DELETE FROM events WHERE ts < ?`, cutoff); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return nil
 }

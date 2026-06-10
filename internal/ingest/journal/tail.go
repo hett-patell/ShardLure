@@ -51,13 +51,16 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 		}
 	}
 	if err := sc.Err(); err != nil {
-		// Reap the child before returning — a non-EOF scanner error (e.g.
-		// bufio.ErrTooLong) would otherwise leak the journalctl process.
+		// Kill BEFORE Wait. journalctl -f never exits on its own, so a plain
+		// Wait() here blocks forever on a scanner error (e.g. bufio.ErrTooLong
+		// from a >1MiB line) — wedging the goroutine and silently ending
+		// journal ingestion. Killing the child makes Wait() return.
+		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return err
 	}
 	if ctx.Err() != nil {
-		_ = cmd.Wait()
+		_ = cmd.Wait() // ctx cancellation already signalled the child via CommandContext
 		return nil
 	}
 	return cmd.Wait()

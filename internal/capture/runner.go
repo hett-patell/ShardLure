@@ -318,6 +318,18 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		// the basename, even when the recorded value is absolute — otherwise a
 		// crafted absolute path (e.g. /etc/shadow) would be copied into the
 		// evidence dir and could later be shipped to MalwareBazaar.
+		// Dedup BEFORE the expensive copy+hash: urlKey needs nothing from the
+		// file, and without this the 200 newest downloads were re-read,
+		// re-hashed, and rewritten on every 5s tick (GB/min of write
+		// amplification). Mirrors syncCowrieDownloads.
+		urlKey := e.Command
+		if urlKey == "" {
+			urlKey = "cowrie-event:" + fmt.Sprint(e.ID)
+		}
+		exists, err := r.st.ArtifactURLRecorded(urlKey)
+		if err != nil || exists {
+			continue
+		}
 		src := filepath.Join(r.cowrieDownloadsDir(), filepath.Base(e.Filename))
 		if _, err := os.Stat(src); err != nil {
 			continue
@@ -329,14 +341,6 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		dest := filepath.Join(r.fetch.EvidenceDir, "cowrie", base)
 		sum, size, err := copyArtifact(src, dest)
 		if err != nil {
-			continue
-		}
-		urlKey := e.Command
-		if urlKey == "" {
-			urlKey = "cowrie-event:" + fmt.Sprint(e.ID)
-		}
-		exists, err := r.st.ArtifactURLRecorded(urlKey)
-		if err != nil || exists {
 			continue
 		}
 		if err := r.st.RecordArtifact(store.Artifact{
@@ -364,6 +368,43 @@ func (r *Runner) cowrieDownloadsDir() string {
 		home = filepath.Join(r.cfg.DataDir, "cowrie")
 	}
 	return filepath.Join(home, "var", "lib", "cowrie", "downloads")
+}
+
+// PurgeOldSourceFiles deletes regular files older than retentionDays from
+// Cowrie's own downloads and ttylog directories. Cowrie never cleans these and
+// the store-level purge only deletes DB rows, so without this: (a) the dirs
+// grow without bound, and (b) once a tracked artifact's row is purged, the
+// surviving source file makes the next 5s tick re-copy and re-record it (the
+// "resurrection" that permanently defeats retention). retentionDays <= 0
+// disables purging, matching Store.MaintenancePurge.
+func (r *Runner) PurgeOldSourceFiles(retentionDays int) int {
+	if retentionDays <= 0 {
+		return 0
+	}
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+	removed := 0
+	for _, dir := range []string{r.cowrieDownloadsDir(), r.cowrieTTYDir()} {
+		if dir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, ent := range entries {
+			if ent.IsDir() || ent.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			info, err := ent.Info()
+			if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, ent.Name())); err == nil {
+				removed++
+			}
+		}
+	}
+	return removed
 }
 
 func copyArtifact(src, dest string) (sha string, size int64, err error) {

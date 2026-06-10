@@ -18,6 +18,7 @@ import (
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/store"
+	"github.com/networkshard/shardlure/pkg/models"
 )
 
 // httpError logs the real (possibly DB-internal) error server-side and returns
@@ -51,6 +52,66 @@ type Server struct {
 	countriesMu     sync.Mutex
 	countriesCached []topCountryRow
 	countriesAt     time.Time
+
+	// eventsCache memoizes the full windowed event slice that the intel
+	// endpoints (mitre/ttp/deobf/graph/wordlist/ioc) each load on every poll.
+	// Materializing a 7–30d window over a multi-million-row table costs a full
+	// scan and a multi-GB allocation; without this, several of those widgets
+	// firing together on one tab open ran that work concurrently, an OOM/IO
+	// storm. Keyed by window-hours; computed under the lock so concurrent
+	// pollers of the same window collapse onto one scan.
+	eventsMu    sync.Mutex
+	eventsCache map[int]windowedEvents
+}
+
+type windowedEvents struct {
+	events []*models.Event
+	at     time.Time
+}
+
+// eventsWindowTTL bounds staleness of the cached window. Data only changes on
+// the 5s ingest tick, so a few seconds is invisible to the operator.
+const eventsWindowTTL = 15 * time.Second
+
+// maxWindowHours clamps the queried window so a stray ?window=99999d can't pin
+// an enormous slice in cache. Retention caps the data well below this anyway.
+const maxWindowHours = 24 * 366
+
+// eventsForWindowCached returns the events with TS within the last windowHours,
+// memoized per window for eventsWindowTTL. The returned slice is shared and
+// MUST be treated read-only by callers (the intel collectors only read).
+func (s *Server) eventsForWindowCached(windowHours int) ([]*models.Event, error) {
+	if windowHours <= 0 {
+		windowHours = 24
+	}
+	if windowHours > maxWindowHours {
+		windowHours = maxWindowHours
+	}
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+	if e, ok := s.eventsCache[windowHours]; ok && time.Since(e.at) < eventsWindowTTL {
+		return e.events, nil
+	}
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	ev, err := s.st.EventsSinceAll(since)
+	if err != nil {
+		if e, ok := s.eventsCache[windowHours]; ok {
+			return e.events, nil // serve last-good on transient error
+		}
+		return nil, err
+	}
+	if s.eventsCache == nil {
+		s.eventsCache = make(map[int]windowedEvents, 4)
+	}
+	// Evict stale entries so the map can't accumulate slices for windows that
+	// are no longer being polled.
+	for k, e := range s.eventsCache {
+		if time.Since(e.at) >= eventsWindowTTL {
+			delete(s.eventsCache, k)
+		}
+	}
+	s.eventsCache[windowHours] = windowedEvents{events: ev, at: time.Now()}
+	return ev, nil
 }
 
 // topCountriesCached returns the hits-by-country aggregation, recomputing at

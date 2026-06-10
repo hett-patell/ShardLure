@@ -159,9 +159,13 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 // SessionEvents returns every event in a session in chronological order.
 // Used to render the play-by-play terminal-style timeline.
 func (s *Store) SessionEvents(sessionID string) ([]*models.Event, error) {
+	// source='cowrie' lets the planner use idx_events_session(source,
+	// session_id, ts): without it the session_id predicate can't lead any
+	// index and every session-detail click full-scanned the events table.
+	// Sessions are cowrie-only, so this doesn't drop rows.
 	rows, err := s.db.Query(`
 SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, actor_id
-FROM events WHERE session_id=? ORDER BY ts ASC`, sessionID)
+FROM events WHERE source='cowrie' AND session_id=? ORDER BY ts ASC`, sessionID)
 	if err != nil {
 		return nil, err
 	}

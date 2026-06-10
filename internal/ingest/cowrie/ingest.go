@@ -169,18 +169,28 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 		}
 		batch := tsList[i:end]
 		placeholders := make([]string, len(batch))
-		args := make([]any, 0, len(batch)+1)
-		args = append(args, models.SourceCowrie)
+		args := make([]any, 0, len(batch))
 		for j, t := range batch {
 			placeholders[j] = "?"
 			args = append(args, t)
 		}
-		query := "SELECT ts, kind, src_ip, session_id, username, command FROM events WHERE source=? AND ts IN (" +
+		// Filter on ts only, NOT source. Any `source=...` constraint (param or
+		// literal) makes SQLite pick the covering idx_events_identity on the
+		// source= prefix and scan EVERY cowrie row in the table; `ts IN (...)`
+		// alone uses idx_events_ts as point lookups (both verified via EXPLAIN
+		// QUERY PLAN). We re-apply the source filter in Go so semantics are
+		// unchanged — a non-cowrie row sharing a ts can't match a cowrie
+		// candidate's identity tuple anyway, but filtering keeps it exact.
+		query := "SELECT source, ts, kind, src_ip, session_id, username, command FROM events WHERE ts IN (" +
 			strings.Join(placeholders, ",") + ")"
 		if err := st.QueryRows(query, args, func(scan func(...any) error) error {
+			var src string
 			var id cowrieIdentity
-			if err := scan(&id.TS, &id.Kind, &id.IP, &id.Session, &id.Username, &id.Command); err != nil {
+			if err := scan(&src, &id.TS, &id.Kind, &id.IP, &id.Session, &id.Username, &id.Command); err != nil {
 				return err
+			}
+			if src != string(models.SourceCowrie) {
+				return nil
 			}
 			existing[id] = struct{}{}
 			return nil

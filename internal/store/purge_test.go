@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -127,5 +128,87 @@ func TestMaintenancePurgeZeroIsNoop(t *testing.T) {
 	}
 	if err := s.MaintenancePurge(-5); err != nil {
 		t.Fatalf("negative retention should be a no-op, got: %v", err)
+	}
+}
+
+// TestMaintenancePurgeDeletesEvidenceFiles verifies the purge unlinks the
+// on-disk evidence file (and its .txt transcript sibling) for expired
+// artifacts, while leaving fresh artifacts' files intact. Without this the
+// evidence dir grew without bound.
+func TestMaintenancePurgeDeletesEvidenceFiles(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "ev.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	oldTS := now.AddDate(0, 0, -90)
+	freshTS := now.AddDate(0, 0, -1)
+
+	mkfile := func(name string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return p
+	}
+	oldPath := mkfile("old-artifact")
+	mkfile("old-artifact.txt") // transcript sibling
+	freshPath := mkfile("fresh-artifact")
+
+	if err := s.UpsertArtifact(Artifact{TS: oldTS, URL: "http://e/old", LocalPath: oldPath, Origin: "test", Status: "ok"}); err != nil {
+		t.Fatalf("upsert old: %v", err)
+	}
+	if err := s.UpsertArtifact(Artifact{TS: freshTS, URL: "http://e/fresh", LocalPath: freshPath, Origin: "test", Status: "ok"}); err != nil {
+		t.Fatalf("upsert fresh: %v", err)
+	}
+
+	if err := s.MaintenancePurge(30); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("expired artifact file should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(oldPath + ".txt"); !os.IsNotExist(err) {
+		t.Errorf("expired transcript sibling should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Errorf("fresh artifact file must survive, got: %v", err)
+	}
+}
+
+// TestMaintenancePurgeChunkedEvents seeds more than one purge chunk (5000) of
+// stale events and confirms the chunked DELETE loop removes them all while
+// keeping fresh rows.
+func TestMaintenancePurgeChunkedEvents(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "chunk.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	oldTS := time.Now().UTC().AddDate(0, 0, -90)
+	freshTS := time.Now().UTC().AddDate(0, 0, -1)
+	for i := 0; i < 5200; i++ {
+		if err := s.InsertEvent(&models.Event{TS: oldTS, Source: "cowrie", Kind: "connect", SrcIP: "1.1.1.1"}); err != nil {
+			t.Fatalf("insert old %d: %v", i, err)
+		}
+	}
+	if err := s.InsertEvent(&models.Event{TS: freshTS, Source: "cowrie", Kind: "connect", SrcIP: "2.2.2.2"}); err != nil {
+		t.Fatalf("insert fresh: %v", err)
+	}
+
+	if err := s.MaintenancePurge(30); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("want 1 fresh event left after chunked purge, got %d", n)
 	}
 }
