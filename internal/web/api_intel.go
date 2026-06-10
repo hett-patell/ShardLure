@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -74,7 +75,7 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 	// wider than ~30h silently classified only the last 30h).
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 
@@ -158,7 +159,7 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	sessions, err := s.st.ListSessions(since, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	total, terr := s.st.CountSessionsSince(since)
@@ -238,7 +239,7 @@ func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
 
 	events, err := s.st.SessionEvents(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	if len(events) == 0 {
@@ -357,7 +358,7 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	limit := 100
@@ -414,7 +415,7 @@ func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 
@@ -471,7 +472,7 @@ func (s *Server) handleIntelReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.st.SessionEvents(sid)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	opts := replay.Options{
@@ -516,7 +517,7 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	g := graph.Build(events, topN)
@@ -572,7 +573,7 @@ func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 
@@ -688,7 +689,7 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 	}
 	arts, err := s.st.ListArtifactsAggregatedSince(since, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	rows := make([]payloadRow, 0, len(arts))
@@ -805,10 +806,14 @@ func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing ip", http.StatusBadRequest)
 		return
 	}
-	// Basic IPv4 sanity check; nothing fancy, just keep the API from
-	// being a generic outbound request relay.
-	if !looksLikeIP(ip) {
-		http.Error(w, "invalid ip", http.StatusBadRequest)
+	// Validate strictly: a parseable, GLOBAL-unicast IP. Rejecting loopback,
+	// private, link-local, unspecified and multicast keeps this endpoint from
+	// being used to probe internal hosts via the enrichment providers (the
+	// providers wouldn't return anything useful for those anyway).
+	parsed := net.ParseIP(ip)
+	if parsed == nil || !parsed.IsGlobalUnicast() || parsed.IsPrivate() ||
+		parsed.IsLoopback() || parsed.IsLinkLocalUnicast() {
+		http.Error(w, "invalid or non-public ip", http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -821,27 +826,6 @@ func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
 		IP:          ip,
 		Results:     results,
 	})
-}
-
-func looksLikeIP(s string) bool {
-	if len(s) < 7 || len(s) > 45 { // covers IPv4 + IPv6 bounds
-		return false
-	}
-	dots := 0
-	colons := 0
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9':
-		case r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
-		case r == '.':
-			dots++
-		case r == ':':
-			colons++
-		default:
-			return false
-		}
-	}
-	return (dots == 3 && colons == 0) || colons >= 2
 }
 
 // ==== /api/ioc/list and /api/ioc/{csv,stix} =======================
@@ -866,7 +850,7 @@ func (s *Server) handleIOCList(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
@@ -903,7 +887,7 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
@@ -940,7 +924,7 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	events, err := s.st.EventsSinceAll(since)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	indicators := ioc.Collect(events, nil)
@@ -972,13 +956,13 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 
 	stats, err := s.st.BazaarUploadStats()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 
 	uploads, err := s.st.ListBazaarUploads(limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 
@@ -1154,7 +1138,7 @@ func (s *Server) handleIntelTimeline(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-1 * time.Hour)
 	events, err := s.st.EventsSince(since, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 

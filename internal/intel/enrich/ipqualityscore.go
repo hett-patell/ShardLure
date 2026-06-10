@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	urlpkg "net/url"
 	"strings"
 )
 
@@ -35,8 +36,11 @@ func fetchIPQualityScore(ctx context.Context, hc *http.Client, ip string) (Resul
 	if key == "" {
 		return Result{Configured: false, Verdict: "unknown"}, nil
 	}
-	// strictness=1 balances false positives; key is a path segment.
-	url := "https://ipqualityscore.com/api/json/ip/" + key + "/" + ip + "?strictness=1"
+	// strictness=1 balances false positives. NOTE: IPQS's API only accepts the
+	// key as a URL path segment — it has no header-auth option — so unlike the
+	// other providers the key unavoidably appears in the request URL. Keep
+	// access logs for this host restricted accordingly.
+	url := "https://ipqualityscore.com/api/json/ip/" + key + "/" + urlpkg.PathEscape(ip) + "?strictness=1"
 	// out=nil: parseIPQS owns the decode (avoids a redundant double-decode).
 	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, nil)
 	if err != nil {

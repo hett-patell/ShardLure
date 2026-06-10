@@ -51,6 +51,9 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 		}
 	}
 	if err := sc.Err(); err != nil {
+		// Reap the child before returning — a non-EOF scanner error (e.g.
+		// bufio.ErrTooLong) would otherwise leak the journalctl process.
+		_ = cmd.Wait()
 		return err
 	}
 	if ctx.Err() != nil {

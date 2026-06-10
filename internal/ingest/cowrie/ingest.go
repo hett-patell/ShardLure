@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -242,7 +243,11 @@ func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string)
 		if p == currentPath {
 			continue
 		}
-		_, _ = IngestFileAppend(st, p, adminIPs)
+		// Best-effort, but surface failures: a corrupt or unreadable rotated
+		// log was previously swallowed silently, hiding lost telemetry.
+		if _, err := IngestFileAppend(st, p, adminIPs); err != nil {
+			log.Printf("cowrie backfill: ingest %s failed: %v", p, err)
+		}
 	}
 }
 
@@ -472,8 +477,13 @@ func mapKind(eventID string) (models.EventKind, bool) {
 		return models.KindFailedPass, true
 	case "cowrie.login.success":
 		return models.KindAccepted, true
-	case "cowrie.client.version", "cowrie.session.connect":
+	case "cowrie.session.connect":
 		return models.KindConnect, true
+	case "cowrie.client.version":
+		// Distinct from the connection itself: this is the client's identity
+		// banner (hassh/ssh_client). Kept as its own kind so it is not counted
+		// as a second connect for the same session. See KindClientVersion.
+		return models.KindClientVersion, true
 	case "cowrie.command.input":
 		return models.KindCommand, true
 	case "cowrie.session.file_upload":

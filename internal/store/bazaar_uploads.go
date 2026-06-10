@@ -24,7 +24,8 @@ type BazaarUpload struct {
 // pattern for artifacts/ip_enrichment/cowrie_tty_index after the
 // same class of bug, so this brings v5 in line.
 func (s *Store) ensureBazaarUploadsTable() error {
-	_, err := s.execWrite(`
+	s.onceBazaar.Do(func() {
+		_, s.errBazaar = s.execWrite(`
 CREATE TABLE IF NOT EXISTS bazaar_uploads (
   sha256          TEXT PRIMARY KEY,
   uploaded_at     TEXT NOT NULL,
@@ -33,7 +34,8 @@ CREATE TABLE IF NOT EXISTS bazaar_uploads (
 );
 CREATE INDEX IF NOT EXISTS idx_bazaar_uploads_ts ON bazaar_uploads(uploaded_at);
 `)
-	return err
+	})
+	return s.errBazaar
 }
 
 // BazaarUploadRecorded reports whether we have a row for the given

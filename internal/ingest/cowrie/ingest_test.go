@@ -73,6 +73,24 @@ func TestMapKindTunnel(t *testing.T) {
 	}
 }
 
+// TestMapKindConnectVsClientVersion guards against the regression where both
+// cowrie.session.connect and cowrie.client.version mapped to KindConnect,
+// double-counting every session as two connections. They must map to distinct
+// kinds: the connection itself vs the client identity banner.
+func TestMapKindConnectVsClientVersion(t *testing.T) {
+	conn, ok := mapKind("cowrie.session.connect")
+	if !ok || conn != models.KindConnect {
+		t.Fatalf("cowrie.session.connect should map to %q, got %q (ok=%v)", models.KindConnect, conn, ok)
+	}
+	ver, ok := mapKind("cowrie.client.version")
+	if !ok || ver != models.KindClientVersion {
+		t.Fatalf("cowrie.client.version should map to %q, got %q (ok=%v)", models.KindClientVersion, ver, ok)
+	}
+	if conn == ver {
+		t.Fatalf("connect and client.version must not share a kind (both %q)", conn)
+	}
+}
+
 func TestParseReaderCountsSkippedLines(t *testing.T) {
 	input := strings.Join([]string{
 		`{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","username":"root","session":"s1"}`,

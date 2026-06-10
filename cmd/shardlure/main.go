@@ -111,6 +111,10 @@ func main() {
 	case "live":
 		cmdLive(st, cfg, args[1:])
 	case "run":
+		// syscall.Exec below replaces this process, so the deferred st.Close()
+		// in main() would never run; close the store now (the wrapper re-opens
+		// it). Harmless even though the OS would reclaim the fd on exec.
+		_ = st.Close()
 		cmdRun(cfg)
 	case "status":
 		cmdStatus(st)

@@ -31,6 +31,9 @@ func TestLooksLikeDeployCmd(t *testing.T) {
 		"which wget",          // probes for a downloader, doesn't use one
 		"df -h /tmp/",         //
 		"",                    //
+		"cd ./subdir",                              // relative-path arg, not exec-from-cwd
+		"cat ./notes.txt",                          // reading a relative file
+		"curl http://h/a && ssh -o StrictHostKeyChecking=no x@y", // -o is an ssh flag, not curl output
 	}
 	for _, c := range notDeploy {
 		if looksLikeDeployCmd(c) {

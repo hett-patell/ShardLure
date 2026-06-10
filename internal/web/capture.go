@@ -42,12 +42,12 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 
 	sum, err := s.st.CaptureSummary()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "capture", err, http.StatusInternalServerError)
 		return
 	}
 	rows, err := s.st.ListRecentArtifacts(35)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "capture", err, http.StatusInternalServerError)
 		return
 	}
 

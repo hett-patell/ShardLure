@@ -148,14 +148,17 @@ func (s *Store) topCounts(column string, limit int) ([]CountRow, error) {
 	if !ok {
 		return nil, fmt.Errorf("topCounts: column %q not in allowlist", column)
 	}
-	query := "SELECT " + column + ", COUNT(*) AS hits FROM events WHERE " + where + " GROUP BY " + column + " ORDER BY hits DESC"
-	var rows rowScanner
-	var err error
-	if limit > 0 {
-		rows, err = s.db.Query(query+" LIMIT ?", limit)
-	} else {
-		rows, err = s.db.Query(query)
+	// A non-positive limit must not turn into an unbounded scan: on a busy
+	// honeypot the events table is large and the distinct count of usernames/
+	// commands an attacker can fabricate is effectively unbounded, so an
+	// uncapped GROUP BY could pull a huge result set into memory. Fall back to
+	// a generous default cap; every real caller passes an explicit small limit.
+	const defaultTopLimit = 1000
+	if limit <= 0 {
+		limit = defaultTopLimit
 	}
+	query := "SELECT " + column + ", COUNT(*) AS hits FROM events WHERE " + where + " GROUP BY " + column + " ORDER BY hits DESC LIMIT ?"
+	rows, err := s.db.Query(query, limit)
 	if err != nil {
 		return nil, err
 	}

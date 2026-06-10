@@ -28,6 +28,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/store"
@@ -94,15 +95,34 @@ func NewResolver(st *store.Store) *Resolver {
 // results rather than being elided so the UI can prompt the operator
 // to add them.
 func (r *Resolver) LookupAll(ctx context.Context, ip string) []Result {
-	return []Result{
-		r.lookup(ctx, ip, ProviderAbuseIPDB, fetchAbuseIPDB),
-		r.lookup(ctx, ip, ProviderVirusTotal, fetchVirusTotal),
-		r.lookup(ctx, ip, ProviderGreyNoise, fetchGreyNoise),
-		r.lookup(ctx, ip, ProviderShodan, fetchShodan),
-		r.lookup(ctx, ip, ProviderOTX, fetchOTX),
-		r.lookup(ctx, ip, ProviderIPQS, fetchIPQualityScore),
-		r.lookup(ctx, ip, ProviderIPinfo, fetchIPinfo),
+	// Run providers concurrently rather than sequentially: each has its own
+	// timeout, so seven in series could take ~7×timeout (~42s worst case) for a
+	// single enrichment request. Results are written into fixed indices so the
+	// returned order stays stable (the dashboard renders them in this order).
+	type job struct {
+		source string
+		fetch  fetchFn
 	}
+	jobs := []job{
+		{ProviderAbuseIPDB, fetchAbuseIPDB},
+		{ProviderVirusTotal, fetchVirusTotal},
+		{ProviderGreyNoise, fetchGreyNoise},
+		{ProviderShodan, fetchShodan},
+		{ProviderOTX, fetchOTX},
+		{ProviderIPQS, fetchIPQualityScore},
+		{ProviderIPinfo, fetchIPinfo},
+	}
+	out := make([]Result, len(jobs))
+	var wg sync.WaitGroup
+	wg.Add(len(jobs))
+	for i, j := range jobs {
+		go func(i int, j job) {
+			defer wg.Done()
+			out[i] = r.lookup(ctx, ip, j.source, j.fetch)
+		}(i, j)
+	}
+	wg.Wait()
+	return out
 }
 
 // lookup is the shared cache-then-fetch path for any provider.

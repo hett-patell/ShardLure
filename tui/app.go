@@ -184,7 +184,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.actors, cmd = m.actors.Update(msg)
-	return m, tea.Batch(cmd, tick())
+	// Do NOT schedule a tick here. The tick loop is self-sustaining: Init()
+	// fires the first tick and the tickMsg case reschedules each subsequent
+	// one. Rescheduling on every message (key presses, resize, mouse) spawned
+	// an extra concurrent tick timer per event, compounding without bound.
+	return m, cmd
 }
 
 func (m *model) View() string {

@@ -10,7 +10,8 @@ import (
 )
 
 func main() {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil { fmt.Println("cannot resolve home dir:", err); os.Exit(1) }
 	st, err := store.Open(home + "/.local/share/shardlure/shardlure.db")
 	if err != nil { fmt.Println(err); os.Exit(1) }
 	defer st.Close()

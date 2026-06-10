@@ -17,7 +17,13 @@ const (
 	KindFailedKey   EventKind = "failed_publickey"
 	KindAccepted    EventKind = "accepted"
 	KindConnect     EventKind = "connect"
-	KindCommand     EventKind = "command"
+	// KindClientVersion is Cowrie's cowrie.client.version — the SSH client
+	// banner/identity announcement (carries hassh + ssh_client). It co-occurs
+	// with KindConnect at session start, so it is tracked separately rather
+	// than folded into KindConnect, which would double-count every session as
+	// two connections (inflating event counts, attempt rates, and probe score).
+	KindClientVersion EventKind = "client_version"
+	KindCommand       EventKind = "command"
 	KindFileUp      EventKind = "file_upload"
 	KindFileDown    EventKind = "file_download"
 	KindTunnel      EventKind = "tunnel"

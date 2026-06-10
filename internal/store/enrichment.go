@@ -18,7 +18,8 @@ type EnrichmentRecord struct {
 }
 
 func (s *Store) EnsureEnrichmentTable() error {
-	_, err := s.execWrite(`
+	s.onceEnrich.Do(func() {
+		_, s.errEnrich = s.execWrite(`
 CREATE TABLE IF NOT EXISTS ip_enrichment (
   ip TEXT NOT NULL,
   source TEXT NOT NULL,
@@ -26,7 +27,8 @@ CREATE TABLE IF NOT EXISTS ip_enrichment (
   fetched_at TEXT NOT NULL,
   PRIMARY KEY (ip, source)
 )`)
-	return err
+	})
+	return s.errEnrich
 }
 
 // GetEnrichment returns the cached record for (ip, source) along with

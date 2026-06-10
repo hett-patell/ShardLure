@@ -24,7 +24,10 @@ type Artifact struct {
 }
 
 func (s *Store) ensureArtifactsTable() error {
-	if _, err := s.execWrite(`
+	// Runs the DDL once; every later call is a cheap sync.Once check (no DDL,
+	// no writeMu) instead of a CREATE-TABLE on every read/write.
+	s.onceArtifacts.Do(func() {
+		if _, err := s.execWrite(`
 CREATE TABLE IF NOT EXISTS artifacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -41,20 +44,22 @@ CREATE TABLE IF NOT EXISTS artifacts (
   created_at TEXT NOT NULL,
   UNIQUE(url)
 )`); err != nil {
-		return err
-	}
-	// Indexes for the hot artifact queries. Only UNIQUE(url) existed before,
-	// so GetArtifactBySHA (WHERE sha256), CowrieTTYArtifactForSession
-	// (WHERE session_id), the bazaar pending NOT-IN (WHERE sha256), and
-	// ListRecentArtifacts / ArtifactsForShare (ORDER BY created_at) all
-	// full-scanned the table. This function owns the table (lazily created),
-	// so the indexes live here rather than in the migration ladder.
-	_, err := s.execWrite(`
+			s.errArtifacts = err
+			return
+		}
+		// Indexes for the hot artifact queries. Only UNIQUE(url) existed before,
+		// so GetArtifactBySHA (WHERE sha256), CowrieTTYArtifactForSession
+		// (WHERE session_id), the bazaar pending NOT-IN (WHERE sha256), and
+		// ListRecentArtifacts / ArtifactsForShare (ORDER BY created_at) all
+		// full-scanned the table. This function owns the table (lazily created),
+		// so the indexes live here rather than in the migration ladder.
+		_, s.errArtifacts = s.execWrite(`
 CREATE INDEX IF NOT EXISTS idx_artifacts_sha256 ON artifacts(sha256);
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at);
 `)
-	return err
+	})
+	return s.errArtifacts
 }
 
 func (s *Store) ArtifactURLRecorded(url string) (bool, error) {
@@ -403,13 +408,15 @@ LIMIT 1`, sha256)
 // ingest from `cowrie.log.closed` events; the capture pass uses it to
 // stamp session_id onto the resulting artifact row.
 func (s *Store) ensureCowrieTTYIndex() error {
-	_, err := s.execWrite(`
+	s.onceTTY.Do(func() {
+		_, s.errTTY = s.execWrite(`
 CREATE TABLE IF NOT EXISTS cowrie_tty_index (
   sha256     TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
   ts         TEXT NOT NULL
 )`)
-	return err
+	})
+	return s.errTTY
 }
 
 // RecordCowrieTTYBinding inserts (or updates) a sha->session mapping

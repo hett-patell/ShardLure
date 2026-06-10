@@ -23,8 +23,8 @@ type Runner struct {
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
-	cap := cfg.Capture
-	evidence := cap.EvidenceDir
+	capCfg := cfg.Capture
+	evidence := capCfg.EvidenceDir
 	if evidence == "" {
 		evidence = filepath.Join(cfg.DataDir, "evidence")
 	}
@@ -33,8 +33,8 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 		cfg: cfg,
 		fetch: NewSafeFetcher(
 			evidence,
-			cap.MaxBytes,
-			time.Duration(cap.TimeoutSec)*time.Second,
+			capCfg.MaxBytes,
+			time.Duration(capCfg.TimeoutSec)*time.Second,
 			cfg.AdminIPs,
 		),
 	}

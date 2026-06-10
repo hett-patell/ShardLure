@@ -212,10 +212,12 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		// is conservative and still ships our 26-sample backlog in
 		// under a minute.
 		if i+1 < len(candidates) {
+			t := time.NewTimer(opts.RateLimit)
 			select {
 			case <-ctx.Done():
+				t.Stop() // don't leak the timer when the context wins the race
 				return uploaded, skipped, ctx.Err()
-			case <-time.After(opts.RateLimit):
+			case <-t.C:
 			}
 		}
 	}

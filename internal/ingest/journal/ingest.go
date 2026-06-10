@@ -67,28 +67,11 @@ func parseReaderCounting(r io.Reader) ([]*models.Event, int, error) {
 
 func looksLikeSSHD(line string) bool {
 	for _, marker := range []string{"sshd[", "Invalid user", "Failed password", "Failed publickey", "Accepted "} {
-		if containsASCII(line, marker) {
+		if strings.Contains(line, marker) {
 			return true
 		}
 	}
 	return false
-}
-
-func containsASCII(haystack, needle string) bool {
-	return len(needle) > 0 && len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
-}
-
-func indexOf(s, sub string) int {
-	n := len(sub)
-	if n == 0 {
-		return 0
-	}
-	for i := 0; i+n <= len(s); i++ {
-		if s[i:i+n] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -18,6 +19,15 @@ import (
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/store"
 )
+
+// httpError logs the real (possibly DB-internal) error server-side and returns
+// a generic message to the client, so store/SQL internals aren't exposed over
+// HTTP. All these endpoints are auth-gated, but leaking schema/error detail is
+// still poor hygiene. `where` is a short handler tag for the server log.
+func httpError(w http.ResponseWriter, where string, err error, code int) {
+	log.Printf("web: %s: %v", where, err)
+	http.Error(w, http.StatusText(code), code)
+}
 
 type Server struct {
 	st            *store.Store
@@ -209,6 +219,10 @@ func (s *Server) RunContext(ctx context.Context) error {
 		// pprof to find out why instead of just getting a generic
 		// upstream truncation.
 		WriteTimeout: 60 * time.Second,
+		// Bound idle keep-alive connections so a slow/slowloris client can't
+		// hold sockets open indefinitely.
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -244,12 +258,13 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 	if s.dashboardAuth == "" {
 		return true
 	}
+	// Header-only: the token must never travel in the URL. A query-string
+	// ?token= would leak into access logs, browser history, Referer headers,
+	// and proxy logs. The dashboard's own fetches set the header, so dropping
+	// the query-string path costs nothing.
 	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if token == "" {
 		token = strings.TrimSpace(r.Header.Get("X-ShardLure-Token"))
-	}
-	if token == "" {
-		token = strings.TrimSpace(r.URL.Query().Get("token"))
 	}
 	if subtle.ConstantTimeCompare([]byte(token), []byte(s.dashboardAuth)) == 1 {
 		return true
@@ -387,37 +402,37 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	actors, err := s.st.ListActors(100)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
 	events, err := s.st.RecentEvents(120)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
 	topIPs, err := s.st.TopSourceIPs(25)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
 	topUsers, err := s.st.TopUsernames(20)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
 	topCommands, err := s.st.TopCommands(20)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
 	hourly, err := s.st.HourlyEventCounts(72)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
 	shellSessions, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
 	uniqueIPs, _ := s.st.UniqueIPCount()

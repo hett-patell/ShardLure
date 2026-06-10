@@ -4,8 +4,10 @@ import (
 	"container/list"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -85,11 +87,15 @@ func geoHTTPAllowed(cfg geoConfig) bool {
 func geoLookupURL(ip string, cfg geoConfig) string {
 	key := strings.TrimSpace(os.Getenv("SHARDLURE_IPAPI_KEY"))
 	fields := "status,country,countryCode,city,lat,lon"
+	// Escape the IP into the path. Callers already validate it looks like an
+	// IP, but escaping is the correct defensive practice so a stray special
+	// character can never break out of the path segment.
+	esc := url.PathEscape(ip)
 	if key != "" {
-		return fmt.Sprintf("https://pro.ip-api.com/json/%s?key=%s&fields=%s", ip, key, fields)
+		return fmt.Sprintf("https://pro.ip-api.com/json/%s?key=%s&fields=%s", esc, url.QueryEscape(key), fields)
 	}
 	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1" || cfg.InsecureHTTP {
-		return fmt.Sprintf("http://ip-api.com/json/%s?fields=%s", ip, fields)
+		return fmt.Sprintf("http://ip-api.com/json/%s?fields=%s", esc, fields)
 	}
 	return ""
 }
@@ -325,7 +331,10 @@ func (g *geoResolver) fetch(ip string) {
 		Lat     float64 `json:"lat"`
 		Lon     float64 `json:"lon"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	// Cap the response body: a misbehaving/hostile geo API shouldn't be able to
+	// stream an unbounded body into the decoder. 64 KiB is far more than the
+	// small JSON object ip-api returns.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err != nil {
 		g.mu.Lock()
 		delete(g.inflight, ip)
 		g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Minute)})

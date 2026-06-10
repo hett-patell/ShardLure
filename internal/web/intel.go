@@ -104,17 +104,17 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	ec, err := s.st.EventCount()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	ac, err := s.st.ActorCount()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	uniqueIPs, err := s.st.UniqueIPCount()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 
@@ -154,7 +154,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	kinds, err := s.st.CountsByKind()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	for _, k := range kinds {
@@ -163,7 +163,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	intents, err := s.st.CountsByIntent()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	for _, k := range intents {
@@ -172,7 +172,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	playbooks, err := s.st.CountsByPlaybook()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	for _, k := range playbooks {
@@ -181,7 +181,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	sources, err := s.st.CountsBySource()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	for _, k := range sources {
@@ -190,7 +190,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	cells, err := s.st.HourlyEventCountsByKind(72)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	for _, c := range cells {
@@ -203,7 +203,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	actors, err := s.st.ListActors(80)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	geoIPs := make([]string, 0, len(actors))
@@ -239,7 +239,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		}
 		users, err := s.st.ActorUsersLimit(a.ID, 8)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			httpError(w, "intel", err, http.StatusInternalServerError)
 			return
 		}
 		for _, u := range users {
@@ -250,7 +250,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	cmds, err := s.st.RecentCommands(120)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	for _, c := range cmds {
@@ -273,7 +273,7 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 
 	a, err := s.st.GetActor(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		httpError(w, "intel", err, http.StatusNotFound)
 		return
 	}
 
@@ -303,7 +303,7 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	users, err := s.st.ActorUsersLimit(id, 20)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	for _, u := range users {
@@ -312,13 +312,13 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	if cmd, err := s.st.LastCommandByActor(id); err == nil {
 		row.LastCommand = cmd
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 
 	events, err := s.st.EventsByActor(id, 150)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 	var cmds []commandRow

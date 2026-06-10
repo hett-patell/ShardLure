@@ -524,9 +524,11 @@ func looksLikeDeployCmd(cmd string) bool {
 		strings.Contains(lc, "tftp ") ||
 		strings.Contains(lc, "busybox wget") ||
 		strings.Contains(lc, "busybox tftp")
+	// NOTE: deliberately no "-o" output-flag signal — it's too ambiguous
+	// (matches `ssh -o StrictHostKeyChecking=no`). A real curl/wget-to-disk
+	// dropper is already caught by the pipe-to-shell, redirect, or /tmp/ sinks.
 	hasSink := strings.Contains(lc, "|sh") || strings.Contains(lc, "| sh") ||
 		strings.Contains(lc, "|bash") || strings.Contains(lc, "| bash") ||
-		strings.Contains(lc, "-o") || // wget -O / curl -o output file
 		strings.Contains(lc, ">") || // redirect to a file
 		strings.Contains(lc, "/tmp/")
 	if hasDownloader && hasSink {
@@ -537,15 +539,45 @@ func looksLikeDeployCmd(cmd string) bool {
 	if strings.Contains(lc, "chmod +x") || strings.Contains(lc, "chmod 777") {
 		return true
 	}
-	// Running a dropped binary: "./payload", "sh /tmp/x", "bash /tmp/x",
-	// "exec /tmp/x". "./" specifically is execute-from-cwd, which recon
-	// sessions don't do but droppers do.
-	if strings.Contains(lc, "./") {
+	// Executing a dropped binary from cwd: "./payload" or "; ./payload". Only
+	// count "./" when it's the START of a command token (line start or after a
+	// shell separator) — otherwise "cd ./subdir" and other relative-path
+	// arguments produce false positives.
+	if isExecFromCwd(lc) {
 		return true
 	}
 	if strings.Contains(lc, "/tmp/") &&
 		(strings.Contains(lc, "sh ") || strings.Contains(lc, "bash ") || strings.Contains(lc, "exec ")) {
 		return true
+	}
+	return false
+}
+
+// isExecFromCwd reports whether lc invokes a binary from the current directory
+// ("./foo") as a command — i.e. "./" appears at the start of a command token
+// (string start or right after a shell command separator), not merely as part
+// of a path argument like "cd ./subdir" or "cat ./file".
+func isExecFromCwd(lc string) bool {
+	for i := 0; i+1 < len(lc); i++ {
+		if lc[i] != '.' || lc[i+1] != '/' {
+			continue
+		}
+		if i == 0 {
+			return true
+		}
+		// Walk back over spaces to the preceding non-space char; it must be a
+		// command separator for "./" to be a command start.
+		j := i - 1
+		for j >= 0 && lc[j] == ' ' {
+			j--
+		}
+		if j < 0 {
+			return true
+		}
+		switch lc[j] {
+		case ';', '&', '|', '(', '`':
+			return true
+		}
 	}
 	return false
 }

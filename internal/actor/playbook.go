@@ -102,13 +102,16 @@ func isMostlyLowerAlpha(s string) bool {
 	if len(s) < 3 {
 		return false
 	}
-	alpha := 0
+	alpha, total := 0, 0
 	for _, r := range s {
+		total++
 		if (r >= 'a' && r <= 'z') || r == '_' {
 			alpha++
 		}
 	}
-	return float64(alpha)/float64(len(s)) > 0.85
+	// Compare rune counts on both sides: len(s) counts bytes, so a multi-byte
+	// UTF-8 username would otherwise get an unfairly low ratio.
+	return float64(alpha)/float64(total) > 0.85
 }
 
 // ClassifyIntent from event mix (cowrie-rich later).

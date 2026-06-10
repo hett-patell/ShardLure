@@ -23,6 +23,22 @@ type Store struct {
 	// single connection — so concurrent READS still run in parallel under WAL
 	// (a 1-connection pool would make a slow analytics query block ingest).
 	writeMu sync.Mutex
+
+	// Lazy-table creation guards. The artifacts / enrichment / bazaar / tty
+	// tables are created on first use (CREATE TABLE IF NOT EXISTS), but the
+	// ensure* helpers were called on EVERY read and write — each running a DDL
+	// statement under writeMu, adding pointless lock contention on hot paths.
+	// A sync.Once per table runs the DDL exactly once; subsequent calls are a
+	// cheap atomic check with no lock.
+	onceArtifacts sync.Once
+	onceEnrich    sync.Once
+	onceBazaar    sync.Once
+	onceTTY       sync.Once
+	// errs from the once-bodies, so a failed creation still surfaces.
+	errArtifacts error
+	errEnrich    error
+	errBazaar    error
+	errTTY       error
 }
 
 type sqlExecer interface {

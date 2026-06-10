@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -38,9 +39,14 @@ func fetchIPinfo(ctx context.Context, hc *http.Client, ip string) (Result, error
 	if key == "" {
 		return Result{Configured: false, Verdict: "unknown"}, nil
 	}
-	url := "https://ipinfo.io/" + ip + "/json?token=" + key
+	// Send the key as a Bearer header, not a ?token= query param, so it
+	// doesn't leak into proxy/access logs or Referer.
+	url := "https://ipinfo.io/" + url.PathEscape(ip) + "/json"
 	// out=nil: parseIPinfo owns the decode (avoids a redundant double-decode).
-	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, nil)
+	raw, err := httpJSON(ctx, hc, url, map[string]string{
+		"Accept":        "application/json",
+		"Authorization": "Bearer " + key,
+	}, nil)
 	if err != nil {
 		return Result{Configured: true}, err
 	}

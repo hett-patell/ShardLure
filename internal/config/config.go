@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,7 +150,49 @@ func Load(path string) (Config, error) {
 	if c.Cowrie.JSONLog == "" {
 		c.Cowrie.JSONLog = filepath.Join(c.DataDir, "cowrie", "var", "log", "cowrie", "cowrie.json")
 	}
+	if err := c.Validate(); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// Validate rejects nonsensical config values that would otherwise fail far
+// from their cause (e.g. a negative port surfaces as an opaque bind error, a
+// negative retention silently never purges). It is intentionally lenient about
+// zero values that have defined meaning (Port 0 = pick default later, Retention
+// 0 = purging disabled by design).
+func (c Config) Validate() error {
+	checkPort := func(name string, p int) error {
+		if p < 0 || p > 65535 {
+			return fmt.Errorf("config: %s must be in 0-65535, got %d", name, p)
+		}
+		return nil
+	}
+	if err := checkPort("ssh.admin_port", c.SSH.AdminPort); err != nil {
+		return err
+	}
+	if err := checkPort("ssh.honeypot_port", c.SSH.HoneypotPort); err != nil {
+		return err
+	}
+	if err := checkPort("dashboard.port", c.Dashboard.Port); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.DataDir) == "" {
+		return fmt.Errorf("config: data_dir must not be empty")
+	}
+	if c.RetentionDays < 0 {
+		return fmt.Errorf("config: retention_days must be >= 0, got %d", c.RetentionDays)
+	}
+	if c.Capture.MaxBytes < 0 {
+		return fmt.Errorf("config: capture.max_bytes must be >= 0, got %d", c.Capture.MaxBytes)
+	}
+	if c.Capture.TimeoutSec < 0 {
+		return fmt.Errorf("config: capture.timeout_sec must be >= 0, got %d", c.Capture.TimeoutSec)
+	}
+	if c.Intel.Bazaar.MaxBytes < 0 {
+		return fmt.Errorf("config: intel.bazaar.max_bytes must be >= 0, got %d", c.Intel.Bazaar.MaxBytes)
+	}
+	return nil
 }
 
 func DefaultConfigPath() string {
