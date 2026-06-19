@@ -640,3 +640,4 @@ MIT - see [LICENSE](LICENSE).
 | [ShardShell](https://github.com/hett-patell/ShardShell) | PHP post-exploitation shell |
 | [ShardPass](https://github.com/hett-patell/ShardPass) | Minimal TOTP authenticator (Chrome MV3) |
 | [ShardPet](https://github.com/hett-patell/ShardPet) | Pixel-Pokémon browser extension |
+| [ShardTune](https://github.com/hett-patell/ShardTune) | Spotify controller + listening analytics (Chrome/Brave) |
