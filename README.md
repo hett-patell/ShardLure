@@ -163,7 +163,14 @@ For defense in depth, set a token the dashboard requires on every request:
 Environment=SHARDLURE_DASH_TOKEN=your-long-random-token
 ```
 
-Then reach the dashboard with `?token=…` or an `Authorization: Bearer …` header.
+Then reach the dashboard with `?token=…` (page load) or an `Authorization: Bearer …`
+header (API calls — the token is never accepted in an `/api` URL, to keep it out
+of access logs).
+
+> **Fail-closed bind:** without a token, ShardLure **refuses to start** if the
+> dashboard would bind a *public* address — loopback, private, and Tailscale
+> (`100.64.0.0/10`) binds are allowed (with a warning). Either keep it private or
+> set `SHARDLURE_DASH_TOKEN`.
 
 ### Step 5 (optional) — Enable IP reputation enrichment & MalwareBazaar sharing
 

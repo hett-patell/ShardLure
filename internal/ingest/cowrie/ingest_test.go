@@ -227,6 +227,67 @@ func TestIngestFileAppendRecoversAfterPoisonLine(t *testing.T) {
 	}
 }
 
+// TestLiveTickLoopMidWriteNoLossNoDup simulates the production live ticker
+// (cmd/shardlure: IngestFileAppend every 5s) hitting cowrie mid-write: a tick
+// lands when only PART of a JSON line has been flushed, then the next tick sees
+// the completed line. The partial line must not be lost (MED-1) nor double-
+// counted across the two ticks. This is the closest no-VPS reproduction of the
+// real ingest loop.
+func TestLiveTickLoopMidWriteNoLossNoDup(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cowrie.json")
+
+	full := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","username":"root","session":"s1"}`
+
+	// Tick 1: cowrie has flushed only the first half of the line (no newline).
+	half := full[:60]
+	if err := os.WriteFile(path, []byte(half), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("tick1: %v", err)
+	}
+
+	// Tick 2: cowrie finished the line (rest + newline).
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(full[60:] + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("tick2: %v", err)
+	}
+
+	// Tick 3: a brand-new line arrives.
+	appendLine(t, path, `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:05.000000Z","src_ip":"1.2.3.4","username":"admin","session":"s2"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("tick3: %v", err)
+	}
+
+	events, err := st.EventsBySource(models.SourceCowrie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly 2 distinct events, each once: the mid-write line (recovered, not
+	// lost, not duplicated) and the new line.
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (no loss, no dup), got %d", len(events))
+	}
+	sessions := map[string]int{}
+	for _, e := range events {
+		sessions[e.SessionID]++
+	}
+	if sessions["s1"] != 1 || sessions["s2"] != 1 {
+		t.Fatalf("expected s1 and s2 each exactly once, got %v", sessions)
+	}
+}
+
 func TestIngestFileReplaceKeepsJournalDataAndPersistsActorID(t *testing.T) {
 	st := openTestStore(t)
 	defer st.Close()
