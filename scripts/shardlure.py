@@ -250,16 +250,23 @@ PermitRootLogin prohibit-password
     )
     if socket_activated:
         # The first (empty) ListenStream= clears the unit's inherited
-        # ListenStream=22; the second binds the admin port. Without the reset
+        # ListenStream=22; the rest bind the admin port. Without the reset
         # line systemd would ADD the admin port while keeping 22, leaving the
         # real sshd squatting on the bait port.
+        #
+        # Bind BOTH 0.0.0.0 and [::] explicitly: Ubuntu's stock ss.socket ships
+        # BindIPv6Only=ipv6-only, so a bare `ListenStream=2222` binds IPv6 ONLY
+        # and the documented `ssh -p 2222 user@<ipv4>` (incl. a Tailscale v4 IP)
+        # gets connection-refused. Listing both stacks makes the admin port
+        # reachable regardless of the inherited BindIPv6Only.
         log("ssh is socket-activated; writing ssh.socket drop-in for the admin port")
         socket_dropin.parent.mkdir(parents=True, exist_ok=True)
         socket_dropin.write_text(
             f"""# Managed by ShardLure
 [Socket]
 ListenStream=
-ListenStream={admin_port}
+ListenStream=0.0.0.0:{admin_port}
+ListenStream=[::]:{admin_port}
 """
         )
 
