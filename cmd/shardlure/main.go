@@ -210,7 +210,11 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 	if cowriePath == "" {
 		fatal(fmt.Errorf("cowrie path missing; set in config cowrie.json_log or pass --cowrie=<path>"))
 	}
-	fmt.Printf("live wrapper: cowrie=%s journal=%v interval=%s dashboard=http://127.0.0.1%s\n", cowriePath, journalSSH, interval, addr)
+	dashURL := addr
+	if p := addrPort(addr); p > 0 {
+		dashURL = fmt.Sprintf("http://127.0.0.1:%d", p)
+	}
+	fmt.Printf("live wrapper: cowrie=%s journal=%v interval=%s dashboard=%s\n", cowriePath, journalSSH, interval, dashURL)
 	if tailscaleHint {
 		if ip := tailscaleIPv4(); ip != "" {
 			if p := addrPort(addr); p > 0 {
