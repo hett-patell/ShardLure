@@ -15,11 +15,11 @@ import (
 
 type intelResponse struct {
 	GeneratedAt    string          `json:"generatedAt"`
-	StartedAt      string          `json:"startedAt"`      // RFC3339 process start time
-	UptimeSeconds  int64           `json:"uptimeSeconds"`  // seconds the live process has been running
+	StartedAt      string          `json:"startedAt"`     // RFC3339 process start time
+	UptimeSeconds  int64           `json:"uptimeSeconds"` // seconds the live process has been running
 	Summary        summaryBlock    `json:"summary"`
-	TopCountries   []topCountryRow `json:"topCountries"`   // true attack geography (all events by country)
-	Radar          []radarRow      `json:"radar"`          // top actors by attempts/hour (brute-force radar)
+	TopCountries   []topCountryRow `json:"topCountries"` // true attack geography (all events by country)
+	Radar          []radarRow      `json:"radar"`        // top actors by attempts/hour (brute-force radar)
 	KindCounts     []labelCountRow `json:"kindCounts"`
 	IntentCounts   []labelCountRow `json:"intentCounts"`
 	PlaybookCounts []labelCountRow `json:"playbookCounts"`
@@ -89,7 +89,9 @@ type actorDetailResponse struct {
 }
 
 func (s *Server) handleIntelPage(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDashboardAuth(w, r) {
+	// Page route: accept ?token= so a browser navigation can load the HTML,
+	// whose JS then uses the header for /api calls. See requirePageAuth.
+	if !s.requirePageAuth(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

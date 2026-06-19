@@ -2,6 +2,8 @@ package cowrie
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/netmatch"
@@ -56,7 +59,9 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	}
 	defer f.Close()
 
-	events, skipped, _, bindings, err := parseReader(f)
+	// Full replace of a complete static file: process a final line even if it
+	// lacks a trailing newline.
+	events, skipped, _, bindings, err := parseReader(f, true)
 	if err != nil {
 		return nil, err
 	}
@@ -89,19 +94,29 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		return nil, err
 	}
 
-	// Reset offset if the file was rotated (different inode) or truncated.
+	// headSig fingerprints the file's first bytes. copytruncate-style rotation
+	// truncates in place and regrows, keeping the inode — so inode+size checks
+	// alone can miss it and skip the new content. A changed head signature
+	// (vs. the persisted one) means the file was replaced, so reset to 0.
+	headSig := headSignature(f)
+
+	// Reset offset if the file was rotated (different inode), truncated, or
+	// replaced in place (same inode, different head — copytruncate).
 	startOffset := prev.Offset
-	if prev.Inode != 0 && prev.Inode != inode {
+	rotatedInPlace := prev.Inode == inode && prev.HeadSig != "" && headSig != "" && prev.HeadSig != headSig
+	if (prev.Inode != 0 && prev.Inode != inode) || rotatedInPlace {
 		backfillRotatedLogs(st, path, adminIPs)
 	}
-	if prev.Inode != inode || fi.Size() < startOffset {
+	if prev.Inode != inode || fi.Size() < startOffset || rotatedInPlace {
 		startOffset = 0
 	}
 	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
 		return nil, err
 	}
 
-	events, skipped, consumed, bindings, err := parseReader(f)
+	// Incremental tail: hold back an unterminated final line (cowrie may be
+	// mid-write) so we don't consume past it and lose the event.
+	events, skipped, consumed, bindings, err := parseReader(f, false)
 	if err != nil {
 		return nil, err
 	}
@@ -115,10 +130,11 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		newOffset = fi.Size()
 	}
 	newState := store.IngestState{
-		Source: models.SourceCowrie,
-		Path:   path,
-		Inode:  inode,
-		Offset: newOffset,
+		Source:  models.SourceCowrie,
+		Path:    path,
+		Inode:   inode,
+		Offset:  newOffset,
+		HeadSig: headSig,
 	}
 
 	fresh, err := batchDedupCowrie(st, events)
@@ -374,59 +390,167 @@ type ttyBinding struct {
 	TS        time.Time
 }
 
+// headSignature fingerprints the first bytes of a file so the append-mode
+// reader can detect copytruncate-style rotation (truncate-in-place + regrow,
+// which keeps the inode). Uses ReadAt so the file's read cursor is untouched.
+// Returns "" on any error — callers treat an empty/unknown signature as "can't
+// tell", falling back to the inode+size heuristic rather than over-resetting.
+func headSignature(f *os.File) string {
+	buf := make([]byte, 512)
+	n, err := f.ReadAt(buf, 0)
+	if n == 0 || (err != nil && err != io.EOF) {
+		return ""
+	}
+	sum := sha256.Sum256(buf[:n])
+	return hex.EncodeToString(sum[:8]) // 64-bit prefix is plenty for change detection
+}
+
+// maxLineBytes caps a single cowrie JSON line. Cowrie logs attacker-controlled
+// fields (command input, username, password) verbatim, so a line can be made
+// arbitrarily large; we discard anything past this bound rather than buffer it.
+const maxLineBytes = 2 * 1024 * 1024
+
+// lineChunk is one logical line read from the cowrie log.
+type lineChunk struct {
+	data       []byte // line body (without the trailing newline); empty if oversized
+	length     int64  // bytes of the body actually on disk (excluding the newline)
+	terminated bool   // true if a trailing '\n' was present
+	oversized  bool   // true if the line exceeded maxLineBytes and was discarded
+}
+
+// readLineBounded reads up to and including the next '\n'. If the line exceeds
+// `max`, it keeps draining bytes to the newline (so the caller learns the true
+// on-disk length and terminator state, and can advance the offset past the
+// poison line) but discards the body to bound memory. The returned error is
+// io.EOF when the stream ended; chunk.terminated distinguishes a complete line
+// from a partial tail.
+func readLineBounded(br *bufio.Reader, max int) (lineChunk, error) {
+	var buf []byte
+	var length int64
+	oversized := false
+	for {
+		b, err := br.ReadByte()
+		if err != nil {
+			return lineChunk{data: buf, length: length, terminated: false, oversized: oversized}, err
+		}
+		if b == '\n' {
+			return lineChunk{data: buf, length: length, terminated: true, oversized: oversized}, nil
+		}
+		length++
+		if int64(len(buf)) < int64(max) {
+			buf = append(buf, b)
+		} else if !oversized {
+			oversized = true
+			buf = nil // drop what we accumulated; we only drain to the newline now
+		}
+	}
+}
+
 // parseReader returns parsed events, the count of skipped/malformed lines,
-// and the exact number of bytes consumed by the scanner. The byte count is
-// used by IngestFileAppend to advance the persisted offset accurately,
-// without skipping a partial line at the tail if the writer (cowrie) appended
-// more data while we were reading.
-func parseReader(r io.Reader) ([]*models.Event, int, int64, []ttyBinding, error) {
+// and the exact number of bytes consumed (newline-terminated). The byte count
+// lets IngestFileAppend advance the persisted offset accurately.
+//
+// processFinalPartial controls the unterminated trailing line:
+//   - false (incremental append): a final line without '\n' is treated as a
+//     partial mid-write — NOT parsed and NOT counted in `consumed`, so the
+//     offset stays before it and it is re-read once cowrie finishes the line.
+//   - true (full-replace of a complete static file): the trailing line is a
+//     legitimate final record and is parsed.
+func parseReader(r io.Reader, processFinalPartial bool) ([]*models.Event, int, int64, []ttyBinding, error) {
 	var out []*models.Event
 	var bindings []ttyBinding
 	var skipped int
 	var consumed int64
-	sc := bufio.NewScanner(r)
-	buf := make([]byte, 0, 256*1024)
-	sc.Buffer(buf, 2*1024*1024)
-	for sc.Scan() {
-		raw := sc.Bytes()
-		// +1 for the line terminator the scanner already stripped.
-		// (Last line may lack one; we don't advance the offset past EOF
-		// so the extra +1 there is harmless — capped by the actual file size.)
-		consumed += int64(len(raw)) + 1
-		line := strings.TrimSpace(string(raw))
-		if line == "" {
+
+	// We use bufio.Reader (not bufio.Scanner) deliberately. Scanner aborts the
+	// whole parse with ErrTooLong on a single over-long line, and since the
+	// caller advances the persisted offset by `consumed`, a return-without-
+	// progress permanently stalls incremental ingest at that byte (an attacker
+	// can trigger this with one giant SSH command). With a reader we can skip a
+	// poison line yet still advance past it, and we can tell a newline-
+	// terminated line from a partial tail (cowrie mid-write) so we don't count
+	// the partial line in `consumed` and lose it.
+	br := bufio.NewReaderSize(r, 256*1024)
+	for {
+		chunk, err := readLineBounded(br, maxLineBytes)
+		if len(chunk.data) == 0 && chunk.terminated && err == nil {
+			// Empty (blank) line with terminator: count its byte and move on.
+			consumed++
 			continue
 		}
-		var rec cowrieLine
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		if !chunk.terminated {
+			// No trailing newline: an incomplete final line. For incremental
+			// ingest, leave the offset before it so it's re-read once complete.
+			// For a full replace of a complete file, process it as the last
+			// record. Oversized unterminated tails are always discarded.
+			if processFinalPartial && !chunk.oversized && len(chunk.data) > 0 {
+				if line := strings.TrimSpace(string(chunk.data)); line != "" {
+					if rec, ok := decodeCowrieLine(line, &bindings); ok {
+						if e, ok := toEvent(rec, line); ok {
+							out = append(out, e)
+						} else {
+							skipped++
+						}
+					} else {
+						skipped++
+					}
+				}
+			}
+			break
+		}
+
+		// A complete line: its bytes plus the newline are durably consumed,
+		// whether or not it parses.
+		consumed += chunk.length + 1
+
+		if chunk.oversized {
+			// Line exceeded the cap; we discarded its body but consumed its
+			// bytes so ingest advances instead of wedging. Count as skipped.
 			skipped++
+			if err != nil {
+				break
+			}
 			continue
 		}
-		// Sidechannel: cowrie.log.closed carries the sha->session
-		// binding for a freshly-renamed ttylog. We capture it here
-		// rather than turning it into a top-level event kind to
-		// avoid polluting MITRE/IOC/UI surfaces with operational
-		// noise from cowrie's own log rotation.
-		if rec.EventID == "cowrie.log.closed" && rec.SHA256 != "" && rec.Session != "" {
-			if ts, ok := parseTS(rec.Timestamp); ok {
-				bindings = append(bindings, ttyBinding{
-					SHA:       strings.ToLower(strings.TrimSpace(rec.SHA256)),
-					SessionID: rec.Session,
-					TS:        ts,
-				})
+
+		if line := strings.TrimSpace(string(chunk.data)); line != "" {
+			if rec, ok := decodeCowrieLine(line, &bindings); ok {
+				if e, ok := toEvent(rec, line); ok {
+					out = append(out, e)
+				} else {
+					skipped++
+				}
+			} else {
+				skipped++
 			}
 		}
-		e, ok := toEvent(rec, line)
-		if !ok {
-			skipped++
-			continue
+
+		if err != nil {
+			break // io.EOF after a fully-terminated line
 		}
-		out = append(out, e)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, skipped, consumed, nil, err
 	}
 	return out, skipped, consumed, bindings, nil
+}
+
+// decodeCowrieLine unmarshals one JSON line into a cowrieLine. It also captures
+// the cowrie.log.closed sha->session sidechannel binding (appended to *bindings)
+// rather than surfacing it as a top-level event, to keep MITRE/IOC/UI free of
+// cowrie's own log-rotation noise. Returns ok=false on malformed JSON.
+func decodeCowrieLine(line string, bindings *[]ttyBinding) (cowrieLine, bool) {
+	var rec cowrieLine
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		return cowrieLine{}, false
+	}
+	if rec.EventID == "cowrie.log.closed" && rec.SHA256 != "" && rec.Session != "" {
+		if ts, ok := parseTS(rec.Timestamp); ok {
+			*bindings = append(*bindings, ttyBinding{
+				SHA:       strings.ToLower(strings.TrimSpace(rec.SHA256)),
+				SessionID: rec.Session,
+				TS:        ts,
+			})
+		}
+	}
+	return rec, true
 }
 
 func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
@@ -469,16 +593,40 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 		Kind:      kind,
 		SrcIP:     r.SrcIP,
 		SrcPort:   srcPort,
-		Username:  r.Username,
-		Password:  r.Password,
+		Username:  clip(r.Username, maxFieldBytes),
+		Password:  clip(r.Password, maxFieldBytes),
 		SessionID: r.Session,
 		HASSH:     r.HASSH,
-		SSHClient: sshClient,
-		Command:   command,
+		SSHClient: clip(sshClient, maxFieldBytes),
+		Command:   clip(command, maxFieldBytes),
 		SHA256:    strings.TrimSpace(r.SHA256),
-		Filename:  filename,
-		Raw:       raw,
+		Filename:  clip(filename, maxFieldBytes),
+		Raw:       clip(raw, maxRawBytes),
 	}, true
+}
+
+// Field caps bound how much attacker-controlled text we persist per event.
+// Real cowrie commands/usernames are far smaller; these only fence off abuse
+// (a multi-hundred-KB "command") so the DB, in-memory event batches, and the
+// dashboard can't be bloated by a single crafted line. Truncation is a pure
+// byte-prefix so it stays deterministic — the dedup identity tuple includes
+// username+command, and a stable prefix keeps re-ingest dedup correct.
+const (
+	maxFieldBytes = 64 * 1024
+	maxRawBytes   = 256 * 1024
+)
+
+// clip truncates s to at most max bytes, on a UTF-8 rune boundary so we never
+// emit an invalid trailing rune.
+func clip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func mapKind(eventID string) (models.EventKind, bool) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -31,14 +32,14 @@ func httpError(w http.ResponseWriter, where string, err error, code int) {
 }
 
 type Server struct {
-	st            *store.Store
-	addr          string
-	geo           *geoResolver
-	dashboardAuth string
-	home          homePoint
-	bazaarKey     string
+	st             *store.Store
+	addr           string
+	geo            *geoResolver
+	dashboardAuth  string
+	home           homePoint
+	bazaarKey      string
 	bazaarEndpoint string
-	bazaarTags    []string
+	bazaarTags     []string
 	bazaarMaxBytes int64
 	// startedAt marks when this Server was constructed; surfaced as the
 	// dashboard "uptime" so the operator can tell at a glance how long the
@@ -138,17 +139,17 @@ func (s *Server) topCountriesCached() []topCountryRow {
 }
 
 type Options struct {
-	HomeLat        float64
-	HomeLon        float64
-	HomeCity       string
-	HomeCountry    string
-	HomeCC         string
-	GeoEnabled     bool
+	HomeLat         float64
+	HomeLon         float64
+	HomeCity        string
+	HomeCountry     string
+	HomeCC          string
+	GeoEnabled      bool
 	GeoInsecureHTTP bool
-	BazaarAPIKey   string
-	BazaarEndpoint string
-	BazaarTags     []string
-	BazaarMaxBytes int64
+	BazaarAPIKey    string
+	BazaarEndpoint  string
+	BazaarTags      []string
+	BazaarMaxBytes  int64
 }
 
 func New(st *store.Store, addr string, opts ...Options) *Server {
@@ -257,13 +258,21 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/debug/pprof/trace", s.guard(pprof.Trace))
 	mux.HandleFunc("/debug/runtime", s.guard(s.handleRuntimeStats))
 
-	// Loud warning when the dashboard runs without a token: with
-	// SHARDLURE_DASH_TOKEN unset, every endpoint is open — including the
+	// With SHARDLURE_DASH_TOKEN unset every endpoint is open — including the
 	// credential/password wordlist export and /debug/pprof/*. The dashboard is
-	// meant to live on Tailscale/loopback, but operators who bind it wider
-	// should know it's wide open. (We warn rather than refuse, to preserve the
-	// documented "token is optional defense-in-depth" behavior.)
+	// meant to live on Tailscale/loopback.
+	//
+	// Fail CLOSED for the one config that's almost certainly a mistake: an
+	// unauthenticated bind to a public, routable address (exposing credential
+	// exports to the internet). Loopback / private / CGNAT (Tailscale) / and
+	// the bare ":port" / 0.0.0.0 "behind a firewall" case stay a warning, to
+	// preserve the documented "token is optional defense-in-depth" behavior.
 	if s.dashboardAuth == "" {
+		if host := listenHostIP(s.addr); host != nil && isPublicIP(host) {
+			return fmt.Errorf("refusing to start: dashboard would bind a PUBLIC address (%s) with no "+
+				"SHARDLURE_DASH_TOKEN set — credential exports and pprof would be world-readable. "+
+				"Set a token, or bind to loopback/Tailscale", s.addr)
+		}
 		fmt.Fprintln(os.Stderr,
 			"shardlure: WARNING dashboard is UNAUTHENTICATED (SHARDLURE_DASH_TOKEN unset) — "+
 				"credential exports and pprof are world-readable to anyone who can reach this port. "+
@@ -308,26 +317,91 @@ func (s *Server) RunContext(ctx context.Context) error {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if !s.requireDashboardAuth(w, r) {
+	if !s.requirePageAuth(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(indexHTML))
 }
 
+// tokenMatches is the constant-time token comparison shared by the API
+// (header-only) and page (header or ?token=) auth gates.
+func (s *Server) tokenMatches(token string) bool {
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(token)), []byte(s.dashboardAuth)) == 1
+}
+
+// listenHostIP returns the parsed IP a listen address binds to, or nil when the
+// host is empty (":8080"), a wildcard ("0.0.0.0"/"::"), or a hostname — i.e.
+// the "behind a firewall / Tailscale" cases we only warn about, not the
+// explicit public-IP bind we refuse.
+func listenHostIP(addr string) net.IP {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr // addr may be a bare host with no port
+	}
+	if host == "" {
+		return nil // ":8080" — wildcard, can't tell if public; warn only
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() {
+		return nil // hostname or 0.0.0.0/:: — warn only
+	}
+	return ip
+}
+
+// isPublicIP reports whether ip is a globally-routable address: not loopback,
+// private, CGNAT/Tailscale (100.64/10), link-local, multicast, or unspecified.
+func isPublicIP(ip net.IP) bool {
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	// 100.64.0.0/10 CGNAT — Tailscale's range; documented bind target, allow it.
+	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+		return false
+	}
+	return true
+}
+
+// requireDashboardAuth gates /api/* and debug routes. Header-only by design:
+// the token must never travel in an /api URL, where it would leak into access
+// logs, Referer headers, and proxy logs. The dashboard's fetch wrapper always
+// sets the Authorization header, so these routes need nothing else.
 func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardAuth == "" {
 		return true
 	}
-	// Header-only: the token must never travel in the URL. A query-string
-	// ?token= would leak into access logs, browser history, Referer headers,
-	// and proxy logs. The dashboard's own fetches set the header, so dropping
-	// the query-string path costs nothing.
-	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if token == "" {
-		token = strings.TrimSpace(r.Header.Get("X-ShardLure-Token"))
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if strings.TrimSpace(token) == "" {
+		token = r.Header.Get("X-ShardLure-Token")
 	}
-	if subtle.ConstantTimeCompare([]byte(token), []byte(s.dashboardAuth)) == 1 {
+	if s.tokenMatches(token) {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="shardlure-dashboard"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+// requirePageAuth gates the two HTML page routes (/ and /intel). Unlike the API
+// gate it ALSO accepts a ?token= query param: a browser navigating to the
+// dashboard URL can't set a header, so the page must load first for its JS to
+// stash the token and set the header on every subsequent /api call. Without
+// this, a configured SHARDLURE_DASH_TOKEN made the dashboard unreachable in a
+// browser (the page 401'd before any JS ran). Token-in-URL exposure is confined
+// to these two GETs; all data endpoints stay header-only above.
+func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.dashboardAuth == "" {
+		return true
+	}
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if strings.TrimSpace(token) == "" {
+		token = r.Header.Get("X-ShardLure-Token")
+	}
+	if strings.TrimSpace(token) == "" {
+		token = r.URL.Query().Get("token")
+	}
+	if s.tokenMatches(token) {
 		return true
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="shardlure-dashboard"`)
@@ -336,18 +410,18 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 }
 
 type dashboardResponse struct {
-	GeneratedAt  string          `json:"generatedAt"`
-	Summary      summaryBlock    `json:"summary"`
-	Actors       []actorCard     `json:"actors"`     // recent actors (drives globe points/arcs)
-	TopActors    []actorCard     `json:"topActors"`  // actors by event volume (the "Top actors" widget)
-	Recent       []recentRecord  `json:"recent"`
+	GeneratedAt  string            `json:"generatedAt"`
+	Summary      summaryBlock      `json:"summary"`
+	Actors       []actorCard       `json:"actors"`    // recent actors (drives globe points/arcs)
+	TopActors    []actorCard       `json:"topActors"` // actors by event volume (the "Top actors" widget)
+	Recent       []recentRecord    `json:"recent"`
 	Sessions     []shellSessionRow `json:"sessions"`
-	TopIPs       []topIPRow      `json:"topIps"`
-	TopUsers     []topUserRow    `json:"topUsers"`
-	TopCommands  []topCommandRow `json:"topCommands"`
-	TopCountries []topCountryRow `json:"topCountries"`
-	Hourly       []hourPoint     `json:"hourly"`
-	Home         homePoint       `json:"home"`
+	TopIPs       []topIPRow        `json:"topIps"`
+	TopUsers     []topUserRow      `json:"topUsers"`
+	TopCommands  []topCommandRow   `json:"topCommands"`
+	TopCountries []topCountryRow   `json:"topCountries"`
+	Hourly       []hourPoint       `json:"hourly"`
+	Home         homePoint         `json:"home"`
 }
 
 // shellSessionRow is a flattened cowrie session for the "Recent shell
@@ -730,20 +804,20 @@ func (s *Server) handleRuntimeStats(w http.ResponseWriter, r *http.Request) {
 	liveIPs, liveLRU, liveMax, liveUsersCap := actor.LiveJournalCollectorStats()
 
 	resp := map[string]any{
-		"generatedAt":               time.Now().UTC().Format(time.RFC3339Nano),
-		"heapAlloc":                 ms.HeapAlloc,
-		"heapInuse":                 ms.HeapInuse,
-		"sys":                       ms.Sys,
-		"numGoroutines":             runtime.NumGoroutine(),
-		"numGC":                     ms.NumGC,
-		"pauseTotalNs":              ms.PauseTotalNs,
-		"liveJournalCollectorIPs":   liveIPs,
-		"liveJournalCollectorLRU":   liveLRU,
-		"liveJournalCollectorMax":   liveMax,
-		"liveJournalUsersPerIPMax":  liveUsersCap,
-		"geoCacheEntries":           geoEntries,
-		"geoCacheLRU":               geoLRU,
-		"geoCacheMax":               geoMax,
+		"generatedAt":              time.Now().UTC().Format(time.RFC3339Nano),
+		"heapAlloc":                ms.HeapAlloc,
+		"heapInuse":                ms.HeapInuse,
+		"sys":                      ms.Sys,
+		"numGoroutines":            runtime.NumGoroutine(),
+		"numGC":                    ms.NumGC,
+		"pauseTotalNs":             ms.PauseTotalNs,
+		"liveJournalCollectorIPs":  liveIPs,
+		"liveJournalCollectorLRU":  liveLRU,
+		"liveJournalCollectorMax":  liveMax,
+		"liveJournalUsersPerIPMax": liveUsersCap,
+		"geoCacheEntries":          geoEntries,
+		"geoCacheLRU":              geoLRU,
+		"geoCacheMax":              geoMax,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -96,10 +96,10 @@ func TestSafeDialAcceptsAllowed(t *testing.T) {
 //
 // Two flavours:
 //
-//	1. TestLoopback=true: localhost resolves to 127.0.0.1 / ::1, both
-//	   pass the loopback escape, dial should succeed.
-//	2. TestLoopback=false: every resolved IP is loopback and thus
-//	   blocked; the call must error with "blocked resolved target".
+//  1. TestLoopback=true: localhost resolves to 127.0.0.1 / ::1, both
+//     pass the loopback escape, dial should succeed.
+//  2. TestLoopback=false: every resolved IP is loopback and thus
+//     blocked; the call must error with "blocked resolved target".
 func TestSafeDialResolvesHostname(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -177,6 +177,14 @@ func TestBlockedIPReservedRanges(t *testing.T) {
 		"192.168.1.1",     // private
 		"224.0.0.1",       // multicast
 		"192.0.0.1",       // IETF protocol assignments
+		// NAT64 / 6to4 translation addresses that resolve to internal v4
+		// (MED-3 regression guard): a NAT64 gateway would route these inside.
+		"64:ff9b::7f00:1",    // NAT64 well-known -> 127.0.0.1
+		"64:ff9b::a00:1",     // NAT64 well-known -> 10.0.0.1
+		"64:ff9b::a9fe:a9fe", // NAT64 well-known -> 169.254.169.254 (metadata)
+		"64:ff9b:1::7f00:1",  // local-use NAT64 -> 127.0.0.1
+		"2002:7f00:1::",      // 6to4 -> 127.0.0.1
+		"2002:a00:1::",       // 6to4 -> 10.0.0.1
 	}
 	for _, s := range blocked {
 		if !blockedIP(net.ParseIP(s), nil, false) {

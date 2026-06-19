@@ -160,10 +160,20 @@ func assertSafeURL(raw string, adminIPs []string) error {
 //     hosts; IsPrivate() is false for it.
 //   - 198.18.0.0/15  benchmarking (RFC 2544) — IsPrivate() false.
 //   - 192.0.0.0/24   IETF protocol assignments.
+//   - 64:ff9b::/96   NAT64 well-known prefix (RFC 6052) and 64:ff9b:1::/48
+//     local-use NAT64 (RFC 8215): a NAT64 gateway translates these to the
+//     embedded IPv4, so e.g. 64:ff9b::7f00:1 reaches 127.0.0.1 internally.
+//     IsPrivate/IsLoopback are false for the v6 form, so they need explicit
+//     blocking; checkEmbeddedV4 below is a second layer.
+//   - 2002::/16      6to4 (RFC 3056) — embeds an IPv4 that can route internally.
+//
 // (169.254.169.254 cloud metadata is already caught by IsLinkLocalUnicast.)
 var reservedRanges = func() []*net.IPNet {
 	var out []*net.IPNet
-	for _, c := range []string{"100.64.0.0/10", "198.18.0.0/15", "192.0.0.0/24"} {
+	for _, c := range []string{
+		"100.64.0.0/10", "198.18.0.0/15", "192.0.0.0/24",
+		"64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
+	} {
 		if _, n, err := net.ParseCIDR(c); err == nil {
 			out = append(out, n)
 		}
@@ -191,11 +201,39 @@ func blockedIP(ip net.IP, adminIPs []string, allowLoopback bool) bool {
 			return true
 		}
 	}
+	// Second layer for IPv4-in-IPv6 translation/transition addresses: if the
+	// embedded IPv4 is itself blocked (loopback/private/etc.), block the v6
+	// form too, even for a translation prefix not enumerated above.
+	if v4 := embeddedV4(ip); v4 != nil && blockedIP(v4, adminIPs, allowLoopback) {
+		return true
+	}
 	// adminIPs entries may be bare IPs or CIDR ranges. The old loop compared
 	// only ip.Equal(net.ParseIP(a)), so a CIDR entry parsed to nil and matched
 	// nothing — meaning an admin range was NOT exempted from being a fetch
 	// target. netmatch handles both forms.
 	return netmatch.New(adminIPs).HasIP(ip)
+}
+
+// embeddedV4 extracts the IPv4 address embedded in an IPv4-in-IPv6 translation
+// address, or nil if there isn't one. Covers NAT64 (64:ff9b::/96 and
+// 64:ff9b:1::/48, RFC 6052/8215 — v4 in the low 32 bits) and 6to4 (2002::/16,
+// RFC 3056 — v4 in bytes 2..5). Used as a defense-in-depth check so a
+// translated address pointing at an internal v4 is rejected even if its prefix
+// isn't separately enumerated.
+func embeddedV4(ip net.IP) net.IP {
+	v6 := ip.To16()
+	if v6 == nil || ip.To4() != nil {
+		return nil // not an IPv6 address
+	}
+	switch {
+	case v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b:
+		// 64:ff9b::/96 and 64:ff9b:1::/48 NAT64 — embedded v4 in the last 4 bytes.
+		return net.IPv4(v6[12], v6[13], v6[14], v6[15]).To4()
+	case v6[0] == 0x20 && v6[1] == 0x02:
+		// 2002::/16 6to4 — embedded v4 in bytes 2..5.
+		return net.IPv4(v6[2], v6[3], v6[4], v6[5]).To4()
+	}
+	return nil
 }
 
 // Fetch downloads url into evidence/quarantine/<sha256> (mode 0600). Never executes content.

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
@@ -98,7 +99,9 @@ func TestParseReaderCountsSkippedLines(t *testing.T) {
 		`{"eventid":"cowrie.login.failed","timestamp":"not-a-time","src_ip":"1.2.3.4","username":"root","session":"s2"}`,
 		`{"eventid":"cowrie.unknown","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4"}`,
 	}, "\n")
-	events, skipped, _, _, err := parseReader(strings.NewReader(input))
+	// Full-file semantics: process the final line even without a trailing
+	// newline, so all 4 lines (1 parsed + 3 malformed) are accounted for.
+	events, skipped, _, _, err := parseReader(strings.NewReader(input), true)
 	if err != nil {
 		t.Fatalf("parseReader: %v", err)
 	}
@@ -107,6 +110,120 @@ func TestParseReaderCountsSkippedLines(t *testing.T) {
 	}
 	if skipped != 3 {
 		t.Fatalf("expected 3 skipped lines, got %d", skipped)
+	}
+}
+
+// TestParseReaderSkipsOversizedLine guards HIGH-1: a single log line larger
+// than the per-line cap must NOT abort the whole parse (which previously
+// returned ErrTooLong and left the ingest offset un-advanced, permanently
+// stalling cowrie ingest). The oversized line is skipped; lines after it are
+// still parsed; consumed advances past the whole input so the offset moves on.
+func TestParseReaderSkipsOversizedLine(t *testing.T) {
+	huge := `{"eventid":"cowrie.command.input","src_ip":"1.2.3.4","session":"s1","input":"` + strings.Repeat("A", 3*1024*1024) + `"}`
+	good := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","username":"root","session":"s2"}`
+	input := huge + "\n" + good + "\n"
+
+	events, skipped, consumed, _, err := parseReader(strings.NewReader(input), false)
+	if err != nil {
+		t.Fatalf("parseReader must not error on an oversized line: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected the post-poison line to parse (1 event), got %d", len(events))
+	}
+	if skipped < 1 {
+		t.Fatalf("expected the oversized line counted as skipped, got %d", skipped)
+	}
+	if consumed != int64(len(input)) {
+		t.Fatalf("expected consumed=%d (advance past poison line), got %d", len(input), consumed)
+	}
+}
+
+// TestParseReaderDoesNotConsumePartialTrailingLine guards MED-1: a final line
+// without a trailing newline is incomplete (cowrie is mid-write). It must not
+// be counted in `consumed`, so the offset stays before it and it is re-read
+// once complete. Otherwise the event is silently lost.
+func TestParseReaderDoesNotConsumePartialTrailingLine(t *testing.T) {
+	complete := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","username":"root","session":"s1"}`
+	partial := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3`
+	input := complete + "\n" + partial // no trailing newline
+
+	events, _, consumed, _, err := parseReader(strings.NewReader(input), false)
+	if err != nil {
+		t.Fatalf("parseReader: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected only the complete line to parse, got %d events", len(events))
+	}
+	if consumed != int64(len(complete)+1) {
+		t.Fatalf("expected consumed to stop after the newline (%d), got %d", len(complete)+1, consumed)
+	}
+}
+
+// TestToEventClipsOversizedFields guards MED-2: attacker-controlled fields are
+// truncated so one crafted line can't bloat the DB / event batches. Truncation
+// must be a deterministic byte-prefix (dedup identity includes command).
+func TestToEventClipsOversizedFields(t *testing.T) {
+	big := strings.Repeat("x", 200*1024)
+	rec := cowrieLine{
+		EventID:   "cowrie.command.input",
+		Timestamp: "2026-05-21T12:00:00.000000Z",
+		SrcIP:     "1.2.3.4",
+		Session:   "s1",
+		Username:  big,
+		Input:     big,
+	}
+	e, ok := toEvent(rec, `{"eventid":"cowrie.command.input"}`)
+	if !ok {
+		t.Fatal("expected parse")
+	}
+	if len(e.Command) != maxFieldBytes {
+		t.Fatalf("command not clipped to %d, got %d", maxFieldBytes, len(e.Command))
+	}
+	if len(e.Username) != maxFieldBytes {
+		t.Fatalf("username not clipped to %d, got %d", maxFieldBytes, len(e.Username))
+	}
+	// Determinism: same input clips identically (dedup relies on this).
+	e2, _ := toEvent(rec, `{"eventid":"cowrie.command.input"}`)
+	if e.Command != e2.Command {
+		t.Fatal("clip must be deterministic")
+	}
+}
+
+// TestClipRuneBoundary ensures clip never splits a multi-byte rune.
+func TestClipRuneBoundary(t *testing.T) {
+	s := strings.Repeat("é", 100) // 2 bytes each
+	out := clip(s, 5)             // 5 lands mid-rune; must back off to 4
+	if !utf8.ValidString(out) {
+		t.Fatalf("clip produced invalid UTF-8: %q", out)
+	}
+	if len(out) > 5 {
+		t.Fatalf("clip exceeded max: %d", len(out))
+	}
+}
+
+// TestIngestFileAppendRecoversAfterPoisonLine is the end-to-end guard for
+// HIGH-1: an oversized line must not wedge the incremental offset. After the
+// poison line, a subsequent appended good line must still be ingested.
+func TestIngestFileAppendRecoversAfterPoisonLine(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+
+	path := writeTempCowrieLog(t, `{"eventid":"cowrie.command.input","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","session":"s1","input":"`+strings.Repeat("A", 3*1024*1024)+`"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("append with poison line must not error: %v", err)
+	}
+
+	appendLine(t, path, `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:01:00.000000Z","src_ip":"5.6.7.8","username":"admin","session":"s2"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+
+	events, err := st.EventsBySource(models.SourceCowrie)
+	if err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected the post-poison good line to be ingested (1 event), got %d", len(events))
 	}
 }
 
@@ -179,6 +296,59 @@ func TestIngestFileAppendDedupsByEventIdentity(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("expected duplicate append to keep 1 event, got %d", len(events))
+	}
+}
+
+// TestIngestFileAppendDetectsCopytruncate guards LOW-1: a file truncated in
+// place and regrown past the old offset (logrotate copytruncate) keeps its
+// inode, so the inode+size heuristic alone would seek past — and skip — the new
+// content. The head-signature change must trigger a reset so the new events are
+// ingested. We simulate copytruncate by truncating the file and rewriting it
+// (os.WriteFile on the same path keeps the inode on Linux).
+func TestIngestFileAppendDetectsCopytruncate(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+
+	// First generation: enough lines that the saved offset is well past 0.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cowrie.json")
+	var gen1 strings.Builder
+	for i := 0; i < 20; i++ {
+		gen1.WriteString(`{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:0` +
+			"0" + `.00000` + string(rune('0'+i%10)) + `Z","src_ip":"1.2.3.4","username":"root","session":"g1-` +
+			string(rune('a'+i)) + `"}` + "\n")
+	}
+	if err := os.WriteFile(path, []byte(gen1.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("gen1 append: %v", err)
+	}
+
+	// copytruncate: same path/inode, brand-new shorter content with a DIFFERENT
+	// first line (so the head signature changes).
+	gen2 := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-22T09:00:00.000000Z","src_ip":"9.9.9.9","username":"admin","session":"g2-only"}` + "\n"
+	if err := os.WriteFile(path, []byte(gen2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("gen2 append: %v", err)
+	}
+
+	// The gen2 event (9.9.9.9) must have been ingested, not skipped because the
+	// saved offset pointed past the (now shorter) file's new content.
+	events, err := st.EventsBySource(models.SourceCowrie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.SrcIP == "9.9.9.9" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("copytruncate not detected: gen2 event (9.9.9.9) was skipped")
 	}
 }
 
@@ -313,5 +483,24 @@ func TestIncrementalRebuildMatchesFullRebuild(t *testing.T) {
 		if ia != fa {
 			t.Errorf("actor %s aggregate mismatch:\n incremental=%+v\n full=%+v", id, ia, fa)
 		}
+	}
+}
+
+// TestParseReaderOversizedUnterminatedTailNotConsumed: a giant final line with
+// no newline is an incomplete write — it must be neither parsed nor consumed,
+// so the offset stays put until cowrie finishes the line.
+func TestParseReaderOversizedUnterminatedTailNotConsumed(t *testing.T) {
+	good := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","username":"root","session":"s1"}`
+	hugePartial := `{"eventid":"x","input":"` + strings.Repeat("Z", 3*1024*1024) // no closing/newline
+	input := good + "\n" + hugePartial
+	events, _, consumed, _, err := parseReader(strings.NewReader(input), false)
+	if err != nil {
+		t.Fatalf("parseReader: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected only the good line, got %d", len(events))
+	}
+	if consumed != int64(len(good)+1) {
+		t.Fatalf("expected consumed=%d (offset before the partial poison tail), got %d", len(good)+1, consumed)
 	}
 }

@@ -83,6 +83,53 @@ func TestLookupNoKeysIsFastAndFailOpen(t *testing.T) {
 	}
 }
 
+// TestLookupAllRejectsUnsafeIPs is the MED-4 regression guard: LookupAll must
+// refuse malformed or internal/reserved addresses up front and NEVER fan out to
+// the providers (so it returns a single error Result, not the 7-provider set).
+// This makes the package self-defending instead of trusting the caller.
+func TestLookupAllRejectsUnsafeIPs(t *testing.T) {
+	st := newTestStore(t)
+	r := &Resolver{St: st, HTTP: &http.Client{Timeout: time.Second}, Now: time.Now}
+
+	unsafe := []string{
+		"",                     // empty
+		"not-an-ip",            // garbage
+		"1.2.3.4/../../secret", // path-injection attempt
+		"127.0.0.1",            // loopback
+		"169.254.169.254",      // cloud metadata
+		"10.0.0.1",             // private
+		"::1",                  // ipv6 loopback
+		"0.0.0.0",              // unspecified
+	}
+	for _, ip := range unsafe {
+		got := r.LookupAll(context.Background(), ip)
+		if len(got) != 1 || got[0].Error == "" {
+			t.Errorf("LookupAll(%q) should return a single error result (no provider fan-out), got %+v", ip, got)
+		}
+	}
+
+	// A well-formed public IP still fans out to all 7 providers.
+	if got := r.LookupAll(context.Background(), "8.8.8.8"); len(got) != 7 {
+		t.Errorf("LookupAll(public IP) should fan out to 7 providers, got %d", len(got))
+	}
+}
+
+// TestSafeForEnrichment unit-checks the classifier directly.
+func TestSafeForEnrichment(t *testing.T) {
+	safe := []string{"8.8.8.8", "1.1.1.1", "203.0.113.5"}
+	for _, ip := range safe {
+		if !safeForEnrichment(ip) {
+			t.Errorf("safeForEnrichment(%q) = false, want true", ip)
+		}
+	}
+	unsafe := []string{"", "garbage", "127.0.0.1", "10.0.0.1", "192.168.1.1", "169.254.0.1", "::1", "224.0.0.1", "0.0.0.0"}
+	for _, ip := range unsafe {
+		if safeForEnrichment(ip) {
+			t.Errorf("safeForEnrichment(%q) = true, want false", ip)
+		}
+	}
+}
+
 // TestCacheHit: a second call within the TTL window must come from
 // SQLite and not invoke fetch again.
 func TestCacheHit(t *testing.T) {

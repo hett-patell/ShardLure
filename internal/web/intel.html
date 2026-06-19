@@ -1319,6 +1319,29 @@ function withToken(url) {
     return _fetch(input, init);
   };
 })();
+// downloadWithAuth fetches an /api download endpoint (which is header-only —
+// it does NOT accept ?token=) through the wrapped fetch above so the Bearer
+// header is sent, then triggers a client-side download of the response Blob.
+// Native <a href download> can't set a header, so a query-string token would
+// just 401 when DASH_TOKEN is set; this keeps the token out of the URL/logs.
+function downloadWithAuth(url, filename) {
+  fetch(url).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.blob();
+  }).then(function (blob) {
+    var href = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = href;
+    a.download = filename || '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(href); }, 1000);
+  }).catch(function (e) {
+    console.error('download failed:', e);
+    alert('Download failed: ' + e.message);
+  });
+}
 // Rewrite internal page links (sidebar "/" globe + "/intel") so a fresh
 // navigation carries the token — otherwise clicking a nav item lands on an
 // unauthenticated page and you'd have to re-add ?token= by hand.
@@ -2022,8 +2045,18 @@ async function refreshIOC() {
   const window = Filters.window || '24h';
   const csvLink = document.getElementById('ioc-dl-csv');
   const stixLink = document.getElementById('ioc-dl-stix');
-  csvLink.href = withToken('/api/ioc/csv?kind=' + IOC.kind + '&window=' + encodeURIComponent(window));
-  stixLink.href = withToken('/api/ioc/stix?window=' + encodeURIComponent(window));
+  // Header-only /api downloads: fetch with the auth header + Blob-download
+  // (see downloadWithAuth) instead of a query-string token that would 401.
+  csvLink.onclick = function (e) {
+    e.preventDefault(); e.stopPropagation();
+    downloadWithAuth('/api/ioc/csv?kind=' + IOC.kind + '&window=' + encodeURIComponent(window),
+                     'shardlure-ioc-' + IOC.kind + '.csv');
+  };
+  stixLink.onclick = function (e) {
+    e.preventDefault(); e.stopPropagation();
+    downloadWithAuth('/api/ioc/stix?window=' + encodeURIComponent(window), 'shardlure-ioc.stix.json');
+  };
+  stixLink.removeAttribute('href');
   try {
     const r = await fetch('/api/ioc/list?kind=' + IOC.kind + '&window=' + encodeURIComponent(window) +
                          '&limit=50&_=' + Date.now(), { cache: 'no-store' });
@@ -2493,7 +2526,11 @@ function renderWordlist(data) {
 async function refreshWordlist() {
   const window = Filters.window || '30d';
   const dl = document.getElementById('wl-dl');
-  dl.href = withToken('/api/intel/wordlist?kind=' + WL.kind + '&format=txt&window=' + encodeURIComponent(window));
+  dl.onclick = function (e) {
+    e.preventDefault(); e.stopPropagation();
+    downloadWithAuth('/api/intel/wordlist?kind=' + WL.kind + '&format=txt&window=' + encodeURIComponent(window),
+                     'shardlure-wordlist-' + WL.kind + '.txt');
+  };
   try {
     const r = await fetch('/api/intel/wordlist?kind=' + WL.kind + '&format=json&limit=50&window=' +
                          encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
@@ -2656,7 +2693,10 @@ async function refreshReplay() {
   const dryrun = document.getElementById('replay-dryrun').checked ? '1' : '0';
   const qs = 'session=' + encodeURIComponent(sid) +
              '&sleeps=' + sleeps + '&dryrun=' + dryrun;
-  dl.href = withToken('/api/intel/replay?' + qs + '&format=download');
+  dl.onclick = function (e) {
+    e.preventDefault(); e.stopPropagation();
+    downloadWithAuth('/api/intel/replay?' + qs + '&format=download', 'shardlure-replay.sh');
+  };
   try {
     const r = await fetch('/api/intel/replay?' + qs + '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) {

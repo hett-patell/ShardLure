@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -48,14 +49,14 @@ type Result struct {
 	Cached     bool            `json:"cached"`
 	Stale      bool            `json:"stale"`
 	FetchedAt  time.Time       `json:"fetchedAt,omitempty"`
-	Score      *int            `json:"score,omitempty"`     // 0-100 where applicable
-	Verdict    string          `json:"verdict,omitempty"`   // "malicious", "benign", "unknown"…
+	Score      *int            `json:"score,omitempty"`   // 0-100 where applicable
+	Verdict    string          `json:"verdict,omitempty"` // "malicious", "benign", "unknown"…
 	ASN        string          `json:"asn,omitempty"`
 	ASOwner    string          `json:"asOwner,omitempty"`
 	Country    string          `json:"country,omitempty"`
 	Tags       []string        `json:"tags,omitempty"`
 	Summary    string          `json:"summary,omitempty"`
-	URL        string          `json:"url,omitempty"`     // link back to provider's web UI
+	URL        string          `json:"url,omitempty"` // link back to provider's web UI
 	Error      string          `json:"error,omitempty"`
 	Raw        json.RawMessage `json:"raw,omitempty"`
 }
@@ -73,9 +74,9 @@ const (
 
 // Resolver coordinates cached lookups across all providers.
 type Resolver struct {
-	St     *store.Store
-	HTTP   *http.Client
-	Now    func() time.Time
+	St   *store.Store
+	HTTP *http.Client
+	Now  func() time.Time
 }
 
 // NewResolver returns a Resolver bound to the given event store. The
@@ -94,7 +95,37 @@ func NewResolver(st *store.Store) *Resolver {
 // provider, in a stable order. Missing keys yield Configured=false
 // results rather than being elided so the UI can prompt the operator
 // to add them.
+// safeForEnrichment reports whether ip is a well-formed public IP that is safe
+// to hand to an outbound provider lookup. This makes the package self-defending
+// rather than trusting each caller to validate first: a non-parseable string
+// (which could carry path/query-injection like "1.2.3.4/../x" into providers
+// that concatenate it into a URL) or an internal/reserved address is rejected
+// here, at the single choke point every provider call passes through.
+func safeForEnrichment(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	if parsed.IsLoopback() || parsed.IsPrivate() || parsed.IsUnspecified() ||
+		parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() ||
+		parsed.IsMulticast() || parsed.IsInterfaceLocalMulticast() {
+		return false
+	}
+	return true
+}
+
 func (r *Resolver) LookupAll(ctx context.Context, ip string) []Result {
+	// Self-defense: never issue an outbound provider request for a malformed or
+	// internal address, regardless of whether the caller validated. See MED-4.
+	parsed := net.ParseIP(ip)
+	if parsed == nil || !safeForEnrichment(ip) {
+		return []Result{{Source: "enrich", Error: "invalid or non-public IP"}}
+	}
+	// Canonicalize: providers concatenate this into request URLs, and the cache
+	// keys on it. net.IP.String() only ever yields hex/dot/colon characters, so
+	// this guarantees no path/query-injection reaches a provider even though
+	// several build URLs by string concatenation.
+	ip = parsed.String()
 	// Run providers concurrently rather than sequentially: each has its own
 	// timeout, so seven in series could take ~7×timeout (~42s worst case) for a
 	// single enrichment request. Results are written into fixed indices so the

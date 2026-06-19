@@ -159,6 +159,9 @@ CREATE TABLE IF NOT EXISTS ingest_state (
   path TEXT NOT NULL,
   inode INTEGER NOT NULL DEFAULT 0,
   offset INTEGER NOT NULL DEFAULT 0,
+  -- head_sig fingerprints the file's first bytes to detect copytruncate-style
+  -- in-place rotation (same inode, replaced content) and reset the offset.
+  head_sig TEXT,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (source, path)
 );
@@ -326,7 +329,50 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			return err
 		}
 	}
+
+	// v8: add ingest_state.head_sig (copytruncate detection). A fresh DB already
+	// has the column from the CREATE TABLE above, so guard the ALTER on a
+	// PRAGMA check to stay idempotent — ADD COLUMN errors if it exists.
+	if current < 8 {
+		has, err := s.columnExists("ingest_state", "head_sig")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE ingest_state ADD COLUMN head_sig TEXT`); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (8, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// columnExists reports whether a table has a given column (via PRAGMA
+// table_info). Used by migrations that ADD COLUMN idempotently.
+func (s *Store) columnExists(table, column string) (bool, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid         int
+			name, ctype string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // currentSchemaVersion returns the highest applied migration version
