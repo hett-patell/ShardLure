@@ -30,33 +30,33 @@ const (
 	// dedupe on SDO content hashes). 2024-01-01T00:00:00Z is the
 	// project's first public commit window.
 	stixIdentityCreated = "2024-01-01T00:00:00Z"
-	stixIdentityName = "ShardLure"
+	stixIdentityName    = "ShardLure"
 )
 
 type stixBundle struct {
-	Type        string      `json:"type"`
-	ID          string      `json:"id"`
-	SpecVersion string      `json:"spec_version"`
+	Type        string       `json:"type"`
+	ID          string       `json:"id"`
+	SpecVersion string       `json:"spec_version"`
 	Objects     []stixObject `json:"objects"`
 }
 
 type stixObject struct {
-	Type           string    `json:"type"`
-	SpecVersion    string    `json:"spec_version,omitempty"`
-	ID             string    `json:"id"`
-	Created        string    `json:"created,omitempty"`
-	Modified       string    `json:"modified,omitempty"`
-	Name           string    `json:"name,omitempty"`
-	Description    string    `json:"description,omitempty"`
-	IdentityClass  string    `json:"identity_class,omitempty"`
-	Pattern        string    `json:"pattern,omitempty"`
-	PatternType    string    `json:"pattern_type,omitempty"`
-	ValidFrom      string    `json:"valid_from,omitempty"`
-	Labels         []string  `json:"labels,omitempty"`
-	IndicatorTypes []string  `json:"indicator_types,omitempty"`
-	CreatedByRef   string    `json:"created_by_ref,omitempty"`
-	KillChainPhases []killChainPhase `json:"kill_chain_phases,omitempty"`
-	ExternalReferences []externalRef `json:"external_references,omitempty"`
+	Type               string           `json:"type"`
+	SpecVersion        string           `json:"spec_version,omitempty"`
+	ID                 string           `json:"id"`
+	Created            string           `json:"created,omitempty"`
+	Modified           string           `json:"modified,omitempty"`
+	Name               string           `json:"name,omitempty"`
+	Description        string           `json:"description,omitempty"`
+	IdentityClass      string           `json:"identity_class,omitempty"`
+	Pattern            string           `json:"pattern,omitempty"`
+	PatternType        string           `json:"pattern_type,omitempty"`
+	ValidFrom          string           `json:"valid_from,omitempty"`
+	Labels             []string         `json:"labels,omitempty"`
+	IndicatorTypes     []string         `json:"indicator_types,omitempty"`
+	CreatedByRef       string           `json:"created_by_ref,omitempty"`
+	KillChainPhases    []killChainPhase `json:"kill_chain_phases,omitempty"`
+	ExternalReferences []externalRef    `json:"external_references,omitempty"`
 }
 
 type killChainPhase struct {

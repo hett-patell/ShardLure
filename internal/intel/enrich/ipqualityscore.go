@@ -17,18 +17,18 @@ import (
 //
 // Docs: https://www.ipqualityscore.com/documentation/proxy-detection-api/overview
 type ipqsResp struct {
-	Success     bool    `json:"success"`
-	Message     string  `json:"message"`
-	FraudScore  int     `json:"fraud_score"`
-	CountryCode string  `json:"country_code"`
-	ISP         string  `json:"ISP"`
-	ASN         int     `json:"ASN"`
-	Proxy       bool    `json:"proxy"`
-	VPN         bool    `json:"vpn"`
-	Tor         bool    `json:"tor"`
-	IsCrawler   bool    `json:"is_crawler"`
-	BotStatus   bool    `json:"bot_status"`
-	RecentAbuse bool    `json:"recent_abuse"`
+	Success     bool   `json:"success"`
+	Message     string `json:"message"`
+	FraudScore  int    `json:"fraud_score"`
+	CountryCode string `json:"country_code"`
+	ISP         string `json:"ISP"`
+	ASN         int    `json:"ASN"`
+	Proxy       bool   `json:"proxy"`
+	VPN         bool   `json:"vpn"`
+	Tor         bool   `json:"tor"`
+	IsCrawler   bool   `json:"is_crawler"`
+	BotStatus   bool   `json:"bot_status"`
+	RecentAbuse bool   `json:"recent_abuse"`
 }
 
 func fetchIPQualityScore(ctx context.Context, hc *http.Client, ip string) (Result, error) {

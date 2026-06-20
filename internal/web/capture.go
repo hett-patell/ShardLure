@@ -8,8 +8,8 @@ import (
 )
 
 type captureResponse struct {
-	GeneratedAt string           `json:"generatedAt"`
-	Summary     captureSummary   `json:"summary"`
+	GeneratedAt string            `json:"generatedAt"`
+	Summary     captureSummary    `json:"summary"`
 	Artifacts   []captureArtifact `json:"artifacts"`
 }
 

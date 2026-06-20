@@ -11,9 +11,15 @@ import (
 
 func main() {
 	home, err := os.UserHomeDir()
-	if err != nil { fmt.Println("cannot resolve home dir:", err); os.Exit(1) }
+	if err != nil {
+		fmt.Println("cannot resolve home dir:", err)
+		os.Exit(1)
+	}
 	st, err := store.Open(home + "/.local/share/shardlure/shardlure.db")
-	if err != nil { fmt.Println(err); os.Exit(1) }
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 	defer st.Close()
 	now := time.Now().UTC()
 	mk := func(off time.Duration, src models.Source, kind models.EventKind, ip, user, cmd, sid, actor string) *models.Event {
@@ -22,9 +28,12 @@ func main() {
 		var pw string
 		if kind == models.KindFailedPass {
 			switch user {
-			case "root":  pw = "toor"
-			case "admin": pw = "admin"
-			default:      pw = "123456"
+			case "root":
+				pw = "toor"
+			case "admin":
+				pw = "admin"
+			default:
+				pw = "123456"
 			}
 		}
 		return &models.Event{TS: now.Add(off), Source: src, Kind: kind, SrcIP: ip, Username: user, Password: pw, Command: cmd, SessionID: sid, ActorID: actor, Raw: "{}"}
@@ -72,7 +81,9 @@ func main() {
 		{ID: "cowrie:hassh-bbb", Source: "cowrie", PrimaryIP: "78.90.12.34", Playbook: "opportunistic", Intent: "credential-stuffing", Confidence: 50, FirstSeen: now.Add(-30 * time.Minute), LastSeen: now.Add(-28 * time.Minute), EventCount: 3, UniqueUsers: 2, AttemptsPerHour: 12, HASSH: "hassh-bbb", SSHClient: "SSH-2.0-go"},
 	}
 	for i := range actors {
-		if err := st.UpsertActor(&actors[i]); err != nil { fmt.Println("actor:", err) }
+		if err := st.UpsertActor(&actors[i]); err != nil {
+			fmt.Println("actor:", err)
+		}
 	}
 
 	// Stage a fake captured payload on disk so Slice G has something

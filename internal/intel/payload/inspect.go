@@ -29,14 +29,14 @@ const (
 
 // Inspection is the structured result a single artifact yields.
 type Inspection struct {
-	Path        string   `json:"path,omitempty"`
-	Magic       string   `json:"magic,omitempty"`       // e.g. "ELF64", "PE32+", "shebang:/bin/bash", "ASCII text"
-	MimeHint    string   `json:"mimeHint,omitempty"`    // best-effort; uses file extension as fallback
-	SizeBytes   int64    `json:"sizeBytes"`
-	Truncated   bool     `json:"truncated,omitempty"`   // strings only walked first MaxScanBytes
-	Strings     []string `json:"strings,omitempty"`     // up to MaxStringsLines printable runs
-	HexPreview  string   `json:"hexPreview,omitempty"`  // canonical xxd-style first MaxHexBytes
-	Error       string   `json:"error,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	Magic      string   `json:"magic,omitempty"`    // e.g. "ELF64", "PE32+", "shebang:/bin/bash", "ASCII text"
+	MimeHint   string   `json:"mimeHint,omitempty"` // best-effort; uses file extension as fallback
+	SizeBytes  int64    `json:"sizeBytes"`
+	Truncated  bool     `json:"truncated,omitempty"`  // strings only walked first MaxScanBytes
+	Strings    []string `json:"strings,omitempty"`    // up to MaxStringsLines printable runs
+	HexPreview string   `json:"hexPreview,omitempty"` // canonical xxd-style first MaxHexBytes
+	Error      string   `json:"error,omitempty"`
 }
 
 // File runs the full inspection pipeline on a path. A missing or
@@ -195,7 +195,7 @@ func extractStrings(buf []byte, minRun, maxLines int) []string {
 		// Printable + non-whitespace control set we accept as part of
 		// a string run. Excludes newlines + tabs so each line of a
 		// shell script becomes its own string.
-		if (b >= 0x20 && b < 0x7f) {
+		if b >= 0x20 && b < 0x7f {
 			cur.WriteByte(b)
 			continue
 		}
@@ -212,7 +212,8 @@ func extractStrings(buf []byte, minRun, maxLines int) []string {
 }
 
 // canonicalHex returns an xxd-style hex+ASCII dump of buf, e.g.
-//   00000000  7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|
+//
+//	00000000  7f 45 4c 46 02 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|
 func canonicalHex(buf []byte) string {
 	var b strings.Builder
 	for off := 0; off < len(buf); off += 16 {

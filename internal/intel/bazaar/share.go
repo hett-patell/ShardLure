@@ -39,15 +39,15 @@ type UploadRecorder interface {
 // values rather than silently defaulting, because uploading to the
 // wrong endpoint or with an empty key would be an embarrassing bug.
 type Options struct {
-	APIKey       string
-	Endpoint     string
-	ExtraTags    []string
-	MaxBytes     int64
-	DryRun       bool
-	Anonymous    bool
-	Comment      string // operator-supplied comment appended to per-sample context
-	RateLimit    time.Duration
-	OnProgress   func(c Candidate, classification Classification, result *Result, err error)
+	APIKey     string
+	Endpoint   string
+	ExtraTags  []string
+	MaxBytes   int64
+	DryRun     bool
+	Anonymous  bool
+	Comment    string // operator-supplied comment appended to per-sample context
+	RateLimit  time.Duration
+	OnProgress func(c Candidate, classification Classification, result *Result, err error)
 }
 
 // Errors surfaced to callers. Kept as sentinels so the CLI can map

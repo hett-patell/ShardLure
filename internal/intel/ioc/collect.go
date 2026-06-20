@@ -6,7 +6,7 @@
 //   - ip:   any src_ip seen as an attacker
 //   - hash: sha256 of payloads cowrie captured during a session
 //   - url:  any URL extracted from a command (wget/curl/http literals,
-//           plus reverse-shell /dev/tcp targets normalised to URLs)
+//     plus reverse-shell /dev/tcp targets normalised to URLs)
 //   - user: any username an attacker attempted (failed or otherwise)
 //
 // Each indicator carries the first/last seen window, the count of

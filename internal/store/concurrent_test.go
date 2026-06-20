@@ -49,13 +49,13 @@ func TestConcurrentWritersNoLockErrors(t *testing.T) {
 
 	mkEvent := func(w, i int) *models.Event {
 		return &models.Event{
-			TS:       time.Now().Add(time.Duration(w*1000+i) * time.Millisecond),
-			Source:   models.SourceCowrie,
-			Kind:     models.KindFailedPass,
-			SrcIP:    fmt.Sprintf("198.51.100.%d", w),
-			Username: fmt.Sprintf("user%d", i%5),
+			TS:        time.Now().Add(time.Duration(w*1000+i) * time.Millisecond),
+			Source:    models.SourceCowrie,
+			Kind:      models.KindFailedPass,
+			SrcIP:     fmt.Sprintf("198.51.100.%d", w),
+			Username:  fmt.Sprintf("user%d", i%5),
 			SessionID: fmt.Sprintf("s-%d-%d", w, i),
-			Raw:      "{}",
+			Raw:       "{}",
 		}
 	}
 

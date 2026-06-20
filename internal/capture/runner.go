@@ -17,9 +17,9 @@ import (
 
 // Runner archives attacker payloads: Cowrie downloads + quarantine URL fetches.
 type Runner struct {
-	st   *store.Store
-	cfg  config.Config
-	fetch *SafeFetcher
+	st         *store.Store
+	cfg        config.Config
+	fetch      *SafeFetcher
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
 }
 
@@ -467,5 +467,3 @@ func copyArtifact(src, dest string, maxBytes int64) (sha string, size int64, err
 	_ = os.Chmod(dest, 0o600)
 	return sum, n, nil
 }
-
-

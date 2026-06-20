@@ -199,5 +199,3 @@ func looksPrintable(s string) bool {
 	}
 	return float64(printable)/float64(len([]rune(s))) >= 0.85
 }
-
-

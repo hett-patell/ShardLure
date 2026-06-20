@@ -27,7 +27,7 @@ func ExtractURLs(command string) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	add := func(u string) {
-		u = strings.TrimRight(u, `"'`,)
+		u = strings.TrimRight(u, `"'`)
 		u = strings.TrimRight(u, `;|&`)
 		if u == "" {
 			return

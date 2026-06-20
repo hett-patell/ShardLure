@@ -76,8 +76,8 @@ func ClassifyOne(e *models.Event) []string {
 // uses this to render the empty-cell pattern that gives an honest
 // picture of what the honeypot can and can't see.
 type GridTactic struct {
-	Tactic     Tactic           `json:"tactic"`
-	Techniques []GridTechnique  `json:"techniques"`
+	Tactic     Tactic          `json:"tactic"`
+	Techniques []GridTechnique `json:"techniques"`
 }
 
 type GridTechnique struct {

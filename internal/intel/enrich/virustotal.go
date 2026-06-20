@@ -19,11 +19,11 @@ type vtResp struct {
 				Suspicious int `json:"suspicious"`
 				Undetected int `json:"undetected"`
 			} `json:"last_analysis_stats"`
-			AsOwner   string `json:"as_owner"`
-			ASN       int    `json:"asn"`
-			Country   string `json:"country"`
-			Network   string `json:"network"`
-			Reputation int   `json:"reputation"`
+			AsOwner    string `json:"as_owner"`
+			ASN        int    `json:"asn"`
+			Country    string `json:"country"`
+			Network    string `json:"network"`
+			Reputation int    `json:"reputation"`
 		} `json:"attributes"`
 	} `json:"data"`
 }
@@ -37,8 +37,8 @@ func fetchVirusTotal(ctx context.Context, hc *http.Client, ip string) (Result, e
 	url := "https://www.virustotal.com/api/v3/ip_addresses/" + ip
 	var parsed vtResp
 	raw, err := httpJSON(ctx, hc, url, map[string]string{
-		"Accept":     "application/json",
-		"x-apikey":   key,
+		"Accept":   "application/json",
+		"x-apikey": key,
 	}, &parsed)
 	if err != nil {
 		return Result{Configured: true}, err

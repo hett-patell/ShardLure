@@ -7,30 +7,30 @@ import (
 
 func TestSetHas(t *testing.T) {
 	s := New([]string{
-		"203.0.113.7",       // bare IPv4
-		"192.168.0.0/16",    // IPv4 CIDR
-		"100.64.0.0/10",     // Tailscale CGNAT range
-		"2001:db8::/32",     // IPv6 CIDR
-		"  10.0.0.1  ",      // whitespace tolerated
-		"",                  // skipped
-		"not-an-ip",         // skipped (Invalid would surface it)
+		"203.0.113.7",    // bare IPv4
+		"192.168.0.0/16", // IPv4 CIDR
+		"100.64.0.0/10",  // Tailscale CGNAT range
+		"2001:db8::/32",  // IPv6 CIDR
+		"  10.0.0.1  ",   // whitespace tolerated
+		"",               // skipped
+		"not-an-ip",      // skipped (Invalid would surface it)
 	})
 
 	cases := []struct {
 		ip   string
 		want bool
 	}{
-		{"203.0.113.7", true},     // exact IPv4
-		{"203.0.113.8", false},    // adjacent, not listed
-		{"192.168.1.50", true},    // inside /16
-		{"192.169.0.1", false},    // outside /16
-		{"100.100.50.1", true},    // inside CGNAT /10 — the regression case
-		{"101.0.0.1", false},      // outside /10
-		{"2001:db8::dead", true},  // inside IPv6 /32
-		{"2001:dead::1", false},   // outside IPv6 /32
-		{"10.0.0.1", true},        // trimmed exact
-		{"", false},               // empty
-		{"garbage", false},        // unparseable
+		{"203.0.113.7", true},    // exact IPv4
+		{"203.0.113.8", false},   // adjacent, not listed
+		{"192.168.1.50", true},   // inside /16
+		{"192.169.0.1", false},   // outside /16
+		{"100.100.50.1", true},   // inside CGNAT /10 — the regression case
+		{"101.0.0.1", false},     // outside /10
+		{"2001:db8::dead", true}, // inside IPv6 /32
+		{"2001:dead::1", false},  // outside IPv6 /32
+		{"10.0.0.1", true},       // trimmed exact
+		{"", false},              // empty
+		{"garbage", false},       // unparseable
 	}
 	for _, c := range cases {
 		if got := s.Has(c.ip); got != c.want {

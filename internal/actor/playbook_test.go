@@ -4,10 +4,10 @@ import "testing"
 
 func TestClassifyPlaybook(t *testing.T) {
 	cases := []struct {
-		name      string
-		users     []string
-		aph       float64
-		want      string
+		name  string
+		users []string
+		aph   float64
+		want  string
 	}{
 		{"empty", nil, 100, "unknown"},
 		{

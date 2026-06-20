@@ -111,5 +111,3 @@ func matchFromRegex(re *regexp.Regexp, line string, kind models.EventKind) match
 		kind: kind,
 	}
 }
-
-

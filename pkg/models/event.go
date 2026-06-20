@@ -24,9 +24,9 @@ const (
 	// two connections (inflating event counts, attempt rates, and probe score).
 	KindClientVersion EventKind = "client_version"
 	KindCommand       EventKind = "command"
-	KindFileUp      EventKind = "file_upload"
-	KindFileDown    EventKind = "file_download"
-	KindTunnel      EventKind = "tunnel"
+	KindFileUp        EventKind = "file_upload"
+	KindFileDown      EventKind = "file_download"
+	KindTunnel        EventKind = "tunnel"
 )
 
 type Event struct {

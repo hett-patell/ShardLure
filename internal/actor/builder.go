@@ -513,6 +513,7 @@ func AdminSet(ips []string) *netmatch.Set {
 //     redirect, an -O/-o output file, or a /tmp path), or
 //   - an explicit make-executable / run-from-tmp action (chmod +x, ./payload,
 //     busybox wget, sh /tmp/...).
+//
 // This is heuristic confidence scoring only, so over- vs under-matching just
 // nudges ProbeScore — but tightening it keeps recon sessions from masquerading
 // as deploys in the dashboard's "spicy ones" view.

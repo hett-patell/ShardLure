@@ -231,11 +231,11 @@ func minimalELF64(machine elf.Machine) []byte {
 	var b bytes.Buffer
 	// e_ident
 	b.Write([]byte{0x7f, 'E', 'L', 'F'})
-	b.WriteByte(2) // EI_CLASS = ELFCLASS64
-	b.WriteByte(1) // EI_DATA = ELFDATA2LSB
-	b.WriteByte(1) // EI_VERSION
-	b.WriteByte(0) // EI_OSABI
-	b.WriteByte(0) // EI_ABIVERSION
+	b.WriteByte(2)           // EI_CLASS = ELFCLASS64
+	b.WriteByte(1)           // EI_DATA = ELFDATA2LSB
+	b.WriteByte(1)           // EI_VERSION
+	b.WriteByte(0)           // EI_OSABI
+	b.WriteByte(0)           // EI_ABIVERSION
 	b.Write(make([]byte, 7)) // padding to 16 bytes
 	// e_type (2 = EXEC)
 	_ = binary.Write(&b, binary.LittleEndian, uint16(2))
@@ -270,10 +270,10 @@ func largeStaticELF64(machine elf.Machine) []byte {
 	const phoff = 300 * 1024 // beyond classifyScanBytes (256 KiB)
 	var b bytes.Buffer
 	b.Write([]byte{0x7f, 'E', 'L', 'F'})
-	b.WriteByte(2) // ELFCLASS64
-	b.WriteByte(1) // ELFDATA2LSB
-	b.WriteByte(1) // EI_VERSION
-	b.Write(make([]byte, 9)) // OSABI + ABIVERSION + 7 padding -> 16 bytes
+	b.WriteByte(2)                                             // ELFCLASS64
+	b.WriteByte(1)                                             // ELFDATA2LSB
+	b.WriteByte(1)                                             // EI_VERSION
+	b.Write(make([]byte, 9))                                   // OSABI + ABIVERSION + 7 padding -> 16 bytes
 	_ = binary.Write(&b, binary.LittleEndian, uint16(2))       // e_type EXEC
 	_ = binary.Write(&b, binary.LittleEndian, uint16(machine)) // e_machine
 	_ = binary.Write(&b, binary.LittleEndian, uint32(1))       // e_version

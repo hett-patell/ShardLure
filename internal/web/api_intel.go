@@ -14,14 +14,14 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/intel/deobf"
 	"github.com/networkshard/shardlure/internal/intel/enrich"
+	"github.com/networkshard/shardlure/internal/intel/graph"
 	"github.com/networkshard/shardlure/internal/intel/ioc"
 	"github.com/networkshard/shardlure/internal/intel/mitre"
 	"github.com/networkshard/shardlure/internal/intel/payload"
-	"github.com/networkshard/shardlure/internal/intel/ttp"
-	"github.com/networkshard/shardlure/internal/intel/deobf"
-	"github.com/networkshard/shardlure/internal/intel/graph"
 	"github.com/networkshard/shardlure/internal/intel/replay"
+	"github.com/networkshard/shardlure/internal/intel/ttp"
 	"sync"
 
 	"github.com/networkshard/shardlure/internal/intel/bazaar"
@@ -46,17 +46,17 @@ type mitreResponse struct {
 }
 
 type mitreHit struct {
-	ID         string         `json:"id"`
-	Name       string         `json:"name"`
-	Tactic     string         `json:"tactic"`
-	URL        string         `json:"url,omitempty"`
-	Count      int            `json:"count"`
-	ActorCount int            `json:"actorCount"`
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	Tactic     string          `json:"tactic"`
+	URL        string          `json:"url,omitempty"`
+	Count      int             `json:"count"`
+	ActorCount int             `json:"actorCount"`
 	TopActors  []mitreTopActor `json:"topActors,omitempty"`
 }
 
 type mitreTopActor struct {
-	ID    string `json:"id"`    // stripped of "journal:" / "cowrie:"
+	ID    string `json:"id"` // stripped of "journal:" / "cowrie:"
 	Count int    `json:"count"`
 }
 
@@ -121,11 +121,11 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 // ==== /api/intel/sessions and /api/intel/session =================
 
 type sessionsResponse struct {
-	GeneratedAt string             `json:"generatedAt"`
-	WindowHours int                `json:"windowHours"`
-	Total       int                `json:"total"`    // true distinct sessions in window
-	Returned    int                `json:"returned"` // rows actually sent (newest N)
-	Sessions    []sessionRow       `json:"sessions"`
+	GeneratedAt string       `json:"generatedAt"`
+	WindowHours int          `json:"windowHours"`
+	Total       int          `json:"total"`    // true distinct sessions in window
+	Returned    int          `json:"returned"` // rows actually sent (newest N)
+	Sessions    []sessionRow `json:"sessions"`
 }
 
 type sessionRow struct {
@@ -197,12 +197,12 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 type sessionDetailResponse struct {
-	ID         string            `json:"id"`
-	IP         string            `json:"ip"`
-	User       string            `json:"user,omitempty"`
-	Start      string            `json:"start"`
-	End        string            `json:"end"`
-	Lines      []sessionEventRow `json:"lines"`
+	ID         string             `json:"id"`
+	IP         string             `json:"ip"`
+	User       string             `json:"user,omitempty"`
+	Start      string             `json:"start"`
+	End        string             `json:"end"`
+	Lines      []sessionEventRow  `json:"lines"`
 	Transcript *sessionTranscript `json:"transcript,omitempty"`
 }
 
@@ -382,13 +382,13 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 // ==== /api/intel/deobf ============================================
 
 type deobfRow struct {
-	TS       string         `json:"ts"`
-	SrcIP    string         `json:"srcIp,omitempty"`
-	Session  string         `json:"session,omitempty"`
-	Actor    string         `json:"actor,omitempty"`
-	Original string         `json:"original"`
-	Final    string         `json:"final"`
-	Layers   []deobf.Layer  `json:"layers"`
+	TS       string        `json:"ts"`
+	SrcIP    string        `json:"srcIp,omitempty"`
+	Session  string        `json:"session,omitempty"`
+	Actor    string        `json:"actor,omitempty"`
+	Original string        `json:"original"`
+	Final    string        `json:"final"`
+	Layers   []deobf.Layer `json:"layers"`
 }
 
 type deobfResponse struct {
@@ -531,9 +531,9 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 		WindowHours int                    `json:"windowHours"`
 		Nodes       []graph.Node           `json:"nodes"`
 		Edges       []graph.Edge           `json:"edges"`
-		Totals      map[graph.NodeKind]int `json:"totals"`      // true distinct per kind, pre-cap
-		TotalNodes  int                    `json:"totalNodes"`  // sum of all distinct nodes pre-cap
-		Cap         int                    `json:"cap"`         // top-N per kind applied
+		Totals      map[graph.NodeKind]int `json:"totals"`     // true distinct per kind, pre-cap
+		TotalNodes  int                    `json:"totalNodes"` // sum of all distinct nodes pre-cap
+		Cap         int                    `json:"cap"`        // top-N per kind applied
 	}{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
@@ -548,11 +548,11 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 // ==== /api/intel/wordlist =========================================
 
 type wordlistResponse struct {
-	GeneratedAt string            `json:"generatedAt"`
-	WindowHours int               `json:"windowHours"`
-	Kind        string            `json:"kind"`
-	Total       int               `json:"total"`
-	Entries     []wordlist.Entry  `json:"entries"`
+	GeneratedAt string           `json:"generatedAt"`
+	WindowHours int              `json:"windowHours"`
+	Kind        string           `json:"kind"`
+	Total       int              `json:"total"`
+	Entries     []wordlist.Entry `json:"entries"`
 }
 
 func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
@@ -640,11 +640,11 @@ func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
 // ==== /api/intel/payloads and /api/intel/payload =================
 
 type payloadsResponse struct {
-	GeneratedAt string        `json:"generatedAt"`
-	WindowHours int           `json:"windowHours"`
-	Total       int           `json:"total"`              // true distinct-payload count in window
-	Returned    int           `json:"returned,omitempty"` // rows actually returned (page size)
-	Rows        []payloadRow  `json:"rows"`
+	GeneratedAt string       `json:"generatedAt"`
+	WindowHours int          `json:"windowHours"`
+	Total       int          `json:"total"`              // true distinct-payload count in window
+	Returned    int          `json:"returned,omitempty"` // rows actually returned (page size)
+	Rows        []payloadRow `json:"rows"`
 }
 
 // payloadRow is one unique payload (grouped by sha256). URL/Actor/
@@ -653,19 +653,19 @@ type payloadsResponse struct {
 type payloadRow struct {
 	SHA256       string `json:"sha256"`
 	Origin       string `json:"origin,omitempty"`
-	URL          string `json:"url,omitempty"`           // last-seen URL
-	Status       string `json:"status,omitempty"`        // last-seen status
+	URL          string `json:"url,omitempty"`    // last-seen URL
+	Status       string `json:"status,omitempty"` // last-seen status
 	SizeBytes    int64  `json:"sizeBytes"`
-	Actor        string `json:"actor,omitempty"`         // last-seen actor
-	Session      string `json:"session,omitempty"`       // last-seen session
-	SrcIP        string `json:"srcIp,omitempty"`         // last-seen src IP
-	TS           string `json:"ts"`                      // last-seen timestamp
-	FirstTS      string `json:"firstTs,omitempty"`       // first-seen timestamp
-	Occurrences  int    `json:"occurrences"`             // total captures of this sha
-	URLCount     int    `json:"urlCount"`                // distinct URLs
-	IPCount      int    `json:"ipCount"`                 // distinct source IPs
-	ActorCount   int    `json:"actorCount"`              // distinct actors
-	SessionCount int    `json:"sessionCount"`            // distinct sessions
+	Actor        string `json:"actor,omitempty"`   // last-seen actor
+	Session      string `json:"session,omitempty"` // last-seen session
+	SrcIP        string `json:"srcIp,omitempty"`   // last-seen src IP
+	TS           string `json:"ts"`                // last-seen timestamp
+	FirstTS      string `json:"firstTs,omitempty"` // first-seen timestamp
+	Occurrences  int    `json:"occurrences"`       // total captures of this sha
+	URLCount     int    `json:"urlCount"`          // distinct URLs
+	IPCount      int    `json:"ipCount"`           // distinct source IPs
+	ActorCount   int    `json:"actorCount"`        // distinct actors
+	SessionCount int    `json:"sessionCount"`      // distinct sessions
 	HasLocal     bool   `json:"hasLocal"`
 }
 
@@ -796,9 +796,9 @@ func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
 // ==== /api/intel/enrich ===========================================
 
 type enrichResponse struct {
-	GeneratedAt string           `json:"generatedAt"`
-	IP          string           `json:"ip"`
-	Results     []enrich.Result  `json:"results"`
+	GeneratedAt string          `json:"generatedAt"`
+	IP          string          `json:"ip"`
+	Results     []enrich.Result `json:"results"`
 }
 
 func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
@@ -835,11 +835,11 @@ func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
 // ==== /api/ioc/list and /api/ioc/{csv,stix} =======================
 
 type iocListResponse struct {
-	GeneratedAt string           `json:"generatedAt"`
-	WindowHours int              `json:"windowHours"`
-	Kind        string           `json:"kind"`
-	Total       int              `json:"total"`
-	Indicators  []ioc.Indicator  `json:"indicators"`
+	GeneratedAt string          `json:"generatedAt"`
+	WindowHours int             `json:"windowHours"`
+	Kind        string          `json:"kind"`
+	Total       int             `json:"total"`
+	Indicators  []ioc.Indicator `json:"indicators"`
 }
 
 // handleIOCList returns a JSON preview of the IOC set. Optionally
@@ -1002,7 +1002,10 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 					if cls, cerr := bazaar.Classify(art.LocalPath); cerr == nil {
 						classifyMu.Lock()
 						if len(classifyCache) >= 500 {
-							for k := range classifyCache { delete(classifyCache, k); break }
+							for k := range classifyCache {
+								delete(classifyCache, k)
+								break
+							}
 						}
 						classifyCache[u.SHA256] = cls
 						classifyMu.Unlock()
@@ -1183,4 +1186,3 @@ func (s *Server) handleIntelTimeline(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
-

@@ -22,17 +22,17 @@ func TestLooksLikeDeployCmd(t *testing.T) {
 
 	// Recon / benign commands that the old substring heuristic mis-flagged.
 	notDeploy := []string{
-		"ls /tmp/",            // bare /tmp listing — the classic false positive
-		"ls -la /tmp",         //
-		"cat /tmp/whatever",   // read, not execute
-		"uname -a",            //
-		"cat /proc/cpuinfo",   //
-		"echo curl",           // mentions curl, does nothing
-		"which wget",          // probes for a downloader, doesn't use one
-		"df -h /tmp/",         //
-		"",                    //
-		"cd ./subdir",                              // relative-path arg, not exec-from-cwd
-		"cat ./notes.txt",                          // reading a relative file
+		"ls /tmp/",          // bare /tmp listing — the classic false positive
+		"ls -la /tmp",       //
+		"cat /tmp/whatever", // read, not execute
+		"uname -a",          //
+		"cat /proc/cpuinfo", //
+		"echo curl",         // mentions curl, does nothing
+		"which wget",        // probes for a downloader, doesn't use one
+		"df -h /tmp/",       //
+		"",                  //
+		"cd ./subdir",       // relative-path arg, not exec-from-cwd
+		"cat ./notes.txt",   // reading a relative file
 		"curl http://h/a && ssh -o StrictHostKeyChecking=no x@y", // -o is an ssh flag, not curl output
 	}
 	for _, c := range notDeploy {

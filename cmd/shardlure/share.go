@@ -128,12 +128,12 @@ func (a *bazaarRecorderAdapter) RecordBazaarUpload(sha, status, mbURL string, at
 // collectShareCandidates pulls every artifact eligible for upload.
 // Eligibility (matched by the WHERE clause):
 //
-//   * status = 'fetched'    — we actually have the bytes on disk
-//   * size_bytes > 1024     — skip empty + tiny redir sentinels
-//   * sha256 IS NOT NULL    — needed for dedup
-//   * origin LIKE '%download%'  — exclude TTY transcripts (those
+//   - status = 'fetched'    — we actually have the bytes on disk
+//   - size_bytes > 1024     — skip empty + tiny redir sentinels
+//   - sha256 IS NOT NULL    — needed for dedup
+//   - origin LIKE '%download%'  — exclude TTY transcripts (those
 //     are operator artifacts, not malware samples)
-//   * created_at >= now - since  — honour abuse.ch freshness policy
+//   - created_at >= now - since  — honour abuse.ch freshness policy
 //
 // If singleSHA is non-empty, it overrides the WHERE clause completely
 // so an operator can force-retry a specific sample regardless of
@@ -223,5 +223,3 @@ func shaShort(sha string) string {
 	}
 	return sha
 }
-
-
