@@ -290,6 +290,9 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 		src := filepath.Join(dl, ent.Name())
 		sum, size, err := copyArtifact(src, filepath.Join(dest, ent.Name()), r.cfg.Capture.MaxBytes)
 		if err != nil {
+			// Surface skips (e.g. oversized download rejected by the size cap)
+			// instead of silently dropping the artifact.
+			log.Printf("capture: skip cowrie download %s: %v", ent.Name(), err)
 			continue
 		}
 		if err := r.st.RecordArtifact(store.Artifact{
@@ -346,6 +349,9 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		dest := filepath.Join(r.fetch.EvidenceDir, "cowrie", base)
 		sum, size, err := copyArtifact(src, dest, r.cfg.Capture.MaxBytes)
 		if err != nil {
+			// Surface skips (e.g. oversized file rejected by the size cap)
+			// instead of silently dropping the artifact.
+			log.Printf("capture: skip cowrie file_download %s: %v", base, err)
 			continue
 		}
 		if err := r.st.RecordArtifact(store.Artifact{
