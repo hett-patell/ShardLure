@@ -33,8 +33,8 @@ import (
 //     stay pinned until the LRU rolls over (which could be days on
 //     a quiet honeypot).
 var (
-	liveMaxIPs         = 4096
-	liveMaxUsersPerIP  = 256
+	liveMaxIPs          = 4096
+	liveMaxUsersPerIP   = 256
 	liveUserOverflowKey = "_overflow_"
 	liveIdleTTL         = 12 * time.Hour
 )
@@ -387,9 +387,7 @@ func SyncJournalIP(st *store.Store, ip string, admin *netmatch.Set) error {
 		return nil
 	}
 	ptrs := make([]*models.Event, len(events))
-	for i := range events {
-		ptrs[i] = events[i]
-	}
+	copy(ptrs, events)
 	actors := BuildFromJournal(ptrs, admin)
 	if len(actors) == 0 {
 		return nil

@@ -348,23 +348,6 @@ func buildCowrieActorsForIDs(st *store.Store, fresh []*models.Event, ids []strin
 	return cc.Finalize(), nil
 }
 
-// buildCowrieActorsFromDB streams persisted cowrie events past the actor
-// collector (so the full event set never lives in memory) and folds in the
-// fresh batch before producing aggregated actors.
-func buildCowrieActorsFromDB(st *store.Store, fresh []*models.Event, admin *netmatch.Set) ([]*models.AggregatedActor, error) {
-	cc := actor.NewCowrieCollector(admin)
-	if err := st.IterateEventsBySource(models.SourceCowrie, func(e *models.Event) error {
-		cc.Add(e)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	for _, e := range fresh {
-		cc.Add(e)
-	}
-	return cc.Finalize(), nil
-}
-
 // persistEvents handles the full-replace ingest (IngestFile, replace=true):
 // the events slice IS the entire cowrie universe, so we rebuild every actor
 // from it and atomically replace the source's events + actors. There is no

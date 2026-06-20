@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -777,6 +778,10 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 			`SELECT local_path FROM artifacts WHERE COALESCE(ts, created_at) < ? AND local_path IS NOT NULL AND local_path != ''`,
 			cutoff)
 		if err != nil {
+			// If we can't enumerate the files, their rows still get deleted
+			// below — log so the orphaned evidence files are noticed (a later
+			// purge won't see them once the rows are gone).
+			log.Printf("store: purge could not list artifact files (will orphan on disk): %v", err)
 			return
 		}
 		defer rows.Close()

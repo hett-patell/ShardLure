@@ -163,7 +163,7 @@ func (s *Store) ListArtifactsSince(since time.Time, limit int) ([]Artifact, erro
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-SELECT id, ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at
+SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
 FROM artifacts
 WHERE COALESCE(ts, created_at) >= ?
 ORDER BY COALESCE(ts, created_at) DESC
@@ -383,7 +383,7 @@ func (s *Store) GetArtifactBySHA(sha256 string) (*Artifact, error) {
 		return nil, err
 	}
 	row := s.db.QueryRow(`
-SELECT id, ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at
+SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
 FROM artifacts
 WHERE sha256=?
 ORDER BY COALESCE(ts, created_at) DESC
@@ -489,7 +489,7 @@ func (s *Store) CowrieTTYArtifactForSession(sessionID string) (*Artifact, error)
 		return nil, err
 	}
 	row := s.db.QueryRow(`
-SELECT id, ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at
+SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
 FROM artifacts
 WHERE session_id=? AND origin='cowrie_tty'
 ORDER BY COALESCE(ts, created_at) DESC
@@ -519,7 +519,7 @@ func (s *Store) ListRecentArtifacts(limit int) ([]Artifact, error) {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-SELECT id, ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at
+SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
 FROM artifacts
 ORDER BY created_at DESC
 LIMIT ?`, limit)

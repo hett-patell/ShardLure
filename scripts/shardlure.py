@@ -52,6 +52,9 @@ def install_deps() -> None:
     arch = os.uname().machine
     log(f"installing dependencies via {pm} ({arch})")
     if pm == "apt":
+        # `update` may fail on a transient repo mirror yet still leave usable
+        # cached package lists, so it's non-fatal; the `install` MUST succeed
+        # (a partial dep set surfaces later as a cryptic build/runtime failure).
         run(["apt-get", "update", "-qq"])
         run(
             [
@@ -61,13 +64,13 @@ def install_deps() -> None:
                 "curl", "ca-certificates", "golang-go",
             ],
             env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
-        )
+        ).check_returncode()
     elif pm in ("dnf", "yum"):
         run([pm, "install", "-y", "git", "python3", "python3-pip", "python3-devel",
-             "gcc", "openssl-devel", "libffi-devel", "authbind", "curl", "ca-certificates", "golang"])
+             "gcc", "openssl-devel", "libffi-devel", "authbind", "curl", "ca-certificates", "golang"]).check_returncode()
     elif pm == "pacman":
         run(["pacman", "-Sy", "--noconfirm", "git", "python", "python-pip", "base-devel",
-             "openssl", "libffi", "authbind", "curl", "go"])
+             "openssl", "libffi", "authbind", "curl", "go"]).check_returncode()
     else:
         log("unknown package manager; ensure git python3 venv authbind go are installed")
 
@@ -343,7 +346,11 @@ def install_cowrie(honeypot_port: int) -> None:
     if not (COWRIE_HOME / ".git").exists():
         run(["git", "clone", "--depth", "1", "https://github.com/cowrie/cowrie.git", str(COWRIE_HOME)]).check_returncode()
     else:
-        run(["git", "-C", str(COWRIE_HOME), "pull", "--ff-only"])
+        # A failed fast-forward pull is non-fatal (the existing clone still
+        # builds), but surface it so the operator knows cowrie wasn't updated
+        # rather than silently running stale source.
+        if run(["git", "-C", str(COWRIE_HOME), "pull", "--ff-only"]).returncode != 0:
+            log("warning: cowrie 'git pull --ff-only' failed; continuing with existing checkout")
     run([sys.executable, "-m", "venv", str(COWRIE_HOME / "venv")]).check_returncode()
     pip = COWRIE_HOME / "venv/bin/pip"
     run([str(pip), "install", "--upgrade", "pip", "wheel"]).check_returncode()

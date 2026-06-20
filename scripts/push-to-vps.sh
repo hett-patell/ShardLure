@@ -1,6 +1,6 @@
 #!/bin/bash
 # Push scripts/shardlure to VPS without scp corruption (use stdin cat).
-set -e
+set -eo pipefail
 HOST="${1:-arm}"
 DEST="${2:-~/ShardLure/shardlure/scripts/shardlure}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

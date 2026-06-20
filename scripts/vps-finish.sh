@@ -38,6 +38,9 @@ for p in sorted(root.rglob("*")):
 print(f"repaired {fixed} file(s)")
 PY
 
+# Back up any existing go.mod before overwriting with the known-good template,
+# so a botched run is recoverable.
+[ -f go.mod ] && cp -f go.mod "go.mod.bak-$(date +%Y%m%d-%H%M%S)"
 cat > go.mod <<'GOMOD'
 module github.com/networkshard/shardlure
 
