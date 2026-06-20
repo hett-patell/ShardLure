@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -479,6 +480,13 @@ func parseReader(r io.Reader, processFinalPartial bool) ([]*models.Event, int, i
 			continue
 		}
 		if !chunk.terminated {
+			// A genuine read error (not a clean EOF) means the underlying file
+			// read failed — surface it rather than silently treating the
+			// truncated stream as a complete parse. Bytes already counted in
+			// `consumed` stay valid (they were fully-terminated lines).
+			if err != nil && !errors.Is(err, io.EOF) {
+				return out, skipped, consumed, bindings, err
+			}
 			// No trailing newline: an incomplete final line. For incremental
 			// ingest, leave the offset before it so it's re-read once complete.
 			// For a full replace of a complete file, process it as the last

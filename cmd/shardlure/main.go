@@ -433,7 +433,7 @@ func cmdIOC(st *store.Store) {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Println("# ShardLure IOC slice (journal actors)")
+	fmt.Println("# ShardLure IOC slice (all actors)")
 	for _, a := range actors {
 		fmt.Printf("%s  playbook=%s  events=%d  rate=%.0f/h  probe=%d\n",
 			a.PrimaryIP, a.Playbook, a.EventCount, a.AttemptsPerHour, a.ProbeScore)
