@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -151,8 +152,12 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 		}
 		srcPath := filepath.Join(src, name)
 		dstRaw := filepath.Join(dest, name)
-		sum, size, err := copyArtifact(srcPath, dstRaw)
+		sum, size, err := copyArtifact(srcPath, dstRaw, r.cfg.Capture.MaxBytes)
 		if err != nil {
+			// Don't silently skip — an operator needs to know a TTY capture was
+			// dropped (e.g. oversized, or a transient I/O error), since it means
+			// missing evidence.
+			log.Printf("capture: skip cowrie-tty %s: %v", name, err)
 			continue
 		}
 		// Best-effort transcript. A decode failure should not block
@@ -283,7 +288,7 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 			continue
 		}
 		src := filepath.Join(dl, ent.Name())
-		sum, size, err := copyArtifact(src, filepath.Join(dest, ent.Name()))
+		sum, size, err := copyArtifact(src, filepath.Join(dest, ent.Name()), r.cfg.Capture.MaxBytes)
 		if err != nil {
 			continue
 		}
@@ -339,7 +344,7 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 			base = filepath.Base(src)
 		}
 		dest := filepath.Join(r.fetch.EvidenceDir, "cowrie", base)
-		sum, size, err := copyArtifact(src, dest)
+		sum, size, err := copyArtifact(src, dest, r.cfg.Capture.MaxBytes)
 		if err != nil {
 			continue
 		}
@@ -407,12 +412,21 @@ func (r *Runner) PurgeOldSourceFiles(retentionDays int) int {
 	return removed
 }
 
-func copyArtifact(src, dest string) (sha string, size int64, err error) {
+// copyArtifact copies src->dest, hashing as it goes. maxBytes caps the copy so
+// an attacker-controlled cowrie download / TTY log can't exhaust disk; a source
+// exceeding the cap is rejected (not silently truncated, which would corrupt the
+// sha). maxBytes <= 0 means unlimited (caller opted out).
+func copyArtifact(src, dest string, maxBytes int64) (sha string, size int64, err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return "", 0, err
 	}
 	defer in.Close()
+	if maxBytes > 0 {
+		if fi, statErr := in.Stat(); statErr == nil && fi.Size() > maxBytes {
+			return "", 0, fmt.Errorf("artifact %s exceeds max size (%d > %d bytes)", filepath.Base(src), fi.Size(), maxBytes)
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return "", 0, err
 	}
@@ -426,9 +440,18 @@ func copyArtifact(src, dest string) (sha string, size int64, err error) {
 		_ = os.Remove(tmpPath)
 	}()
 	h := sha256.New()
-	n, err := io.Copy(tmp, io.TeeReader(in, h))
+	// Read at most maxBytes+1: if we get more than maxBytes the source grew
+	// between Stat and read (or is a growing file) — reject rather than truncate.
+	reader := io.Reader(in)
+	if maxBytes > 0 {
+		reader = io.LimitReader(in, maxBytes+1)
+	}
+	n, err := io.Copy(tmp, io.TeeReader(reader, h))
 	if err != nil {
 		return "", 0, err
+	}
+	if maxBytes > 0 && n > maxBytes {
+		return "", 0, fmt.Errorf("artifact %s exceeds max size (>%d bytes)", filepath.Base(src), maxBytes)
 	}
 	if err := tmp.Close(); err != nil {
 		return "", 0, err

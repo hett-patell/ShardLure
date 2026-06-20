@@ -204,6 +204,13 @@ RestartSec=5
 WantedBy=multi-user.target
 SVC
 
+# The unit embeds SHARDLURE_DASH_TOKEN via Environment=; systemd units are
+# world-readable by default (0644), so any local user could read the token.
+# Lock the unit to root-only when a token is present.
+if [[ -n "$DASH_TOKEN" ]]; then
+  chmod 600 /etc/systemd/system/shardlure-live.service
+fi
+
 log "shardlure-live systemd unit written (cowrie unit deferred until cowrie install completes)"
 
 # -- cowrie installation ---------------------------------------------------

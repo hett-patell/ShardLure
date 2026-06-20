@@ -679,10 +679,26 @@ def print_summary(admin_port: int, honeypot_port: int, dash_port: int) -> None:
     print("  journalctl -u shardlure-live -f")
 
 
+def _env_port(name: str, default: int) -> int:
+    """Parse a port from the environment, falling back to default on a missing,
+    non-numeric, or out-of-range value (rather than crashing with a bare
+    int() ValueError mid-install)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        p = int(raw)
+    except ValueError:
+        die(f"{name} must be an integer 1-65535, got {raw!r}")
+    if not (1 <= p <= 65535):
+        die(f"{name} must be in range 1-65535, got {p}")
+    return p
+
+
 def load_finish_ports() -> tuple[int, int, int]:
-    honeypot = int(os.environ.get("SHARDLURE_HONEYPOT_PORT", "22"))
-    admin = int(os.environ.get("SHARDLURE_ADMIN_PORT", "2222"))
-    dash = int(os.environ.get("SHARDLURE_DASH_PORT", "8080"))
+    honeypot = _env_port("SHARDLURE_HONEYPOT_PORT", 22)
+    admin = _env_port("SHARDLURE_ADMIN_PORT", 2222)
+    dash = _env_port("SHARDLURE_DASH_PORT", 8080)
     return honeypot, admin, dash
 
 

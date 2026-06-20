@@ -1,7 +1,10 @@
 package web
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -753,8 +756,14 @@ func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	a, err := s.st.GetArtifactBySHA(sha)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "artifact not found", http.StatusNotFound)
+		return
+	}
 	if err != nil {
-		http.Error(w, "artifact not found: "+err.Error(), http.StatusNotFound)
+		// A real lookup error: log server-side, return a generic 500 — never
+		// echo the raw DB error to the client.
+		httpError(w, "payload detail", err, http.StatusInternalServerError)
 		return
 	}
 	insp := payload.File(a.LocalPath)
@@ -1110,8 +1119,12 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		resp.Status = result.Status
 		resp.MBURL = result.SampleURL
 	} else if shareErr != nil {
+		// Log the real upstream (MalwareBazaar) error server-side; return a
+		// generic message so an admin-API response can't leak API tokens,
+		// internal URLs, or upstream internals echoed back in an error string.
+		log.Printf("web: bazaar share: %v", shareErr)
 		resp.Status = "error"
-		resp.Error = shareErr.Error()
+		resp.Error = "share failed — see server logs"
 	} else {
 		resp.Status = "skipped"
 	}
