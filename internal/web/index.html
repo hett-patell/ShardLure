@@ -1,15 +1,35 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="tactical">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ShardLure Live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script src="https://unpkg.com/globe.gl@2.32.0/dist/globe.gl.min.js"></script>
 <style>
+  /* Invariant tokens (not theme-dependent): semantic taxonomy + fonts fallback. */
   :root {
+    --good: #48b878;
+    --warn: #c89828;
+  }
+  /* TACTICAL (default) — warm near-black, signal amber. */
+  html[data-theme="tactical"] {
+    --bg: #15120e;
+    --glass: #1b1713;
+    --glass-2: #241d16;
+    --line: rgba(190,160,110,0.16);
+    --line-strong: rgba(190,160,110,0.28);
+    --text: #ece4d6;
+    --dim: #9a8b75;
+    --accent: #e0a23c;       --accent-rgb: 224,162,60;
+    --accent-2: #cc5436;     --accent-2-rgb: 204,84,54;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --sans: "Space Grotesk", system-ui, sans-serif;
+  }
+  /* DRAGON (legacy) — original blood-red / molten-gold. */
+  html[data-theme="dragon"] {
     --bg: #0a0608;
     --glass: #141010;
     --glass-2: #1e1618;
@@ -17,10 +37,8 @@
     --line-strong: rgba(200,120,100,0.22);
     --text: #e8dcd8;
     --dim: #907068;
-    --accent: #d02828;
-    --accent-2: #c89828;
-    --good: #48b878;
-    --warn: #c89828;
+    --accent: #d02828;       --accent-rgb: 208,40,40;
+    --accent-2: #c89828;     --accent-2-rgb: 200,152,40;
     --mono: "JetBrains Mono", ui-monospace, monospace;
     --sans: "Chakra Petch", system-ui, sans-serif;
   }
@@ -80,8 +98,8 @@
     animation: pulse 1.8s infinite;
   }
   @keyframes pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(208,40,40,0.55), 0 0 10px rgba(208,40,40,0.8); }
-    100% { box-shadow: 0 0 0 14px rgba(208,40,40,0), 0 0 10px rgba(208,40,40,0.8); }
+    0%   { box-shadow: 0 0 0 0 rgba(var(--accent-rgb),0.55), 0 0 10px rgba(var(--accent-rgb),0.8); }
+    100% { box-shadow: 0 0 0 14px rgba(var(--accent-rgb),0), 0 0 10px rgba(var(--accent-rgb),0.8); }
   }
   .title .meta {
     color: var(--dim); font-family: var(--mono); font-size: 11px;
@@ -95,7 +113,7 @@
     color: var(--dim);
   }
   .nav a:hover { color: var(--text); border-color: var(--line-strong); }
-  .nav a.active { color: var(--accent); border-color: rgba(208,40,40,0.45); background: rgba(208,40,40,0.08); }
+  .nav a.active { color: var(--accent); border-color: rgba(var(--accent-rgb),0.45); background: rgba(var(--accent-rgb),0.08); }
 
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px; }
@@ -200,7 +218,7 @@
   }
   .cap-badge.capturing { color: var(--warn); border-color: rgba(200,152,40,0.45); background: rgba(200,152,40,0.1); }
   .cap-badge.fetched { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
-  .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: rgba(208,40,40,0.4); background: rgba(208,40,40,0.08); }
+  .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: rgba(var(--accent-rgb),0.4); background: rgba(var(--accent-rgb),0.08); }
 
   .users { display: flex; flex-wrap: wrap; gap: 6px; }
   .users .pill {
@@ -265,8 +283,8 @@
   }
   .sb-item:hover { color: var(--text); background: var(--glass-2); border-color: var(--line); }
   .sb-item.on {
-    color: var(--accent); background: rgba(208,40,40,0.08);
-    border-color: rgba(208,40,40,0.20);
+    color: var(--accent); background: rgba(var(--accent-rgb),0.08);
+    border-color: rgba(var(--accent-rgb),0.20);
   }
   .sb-item.on::before {
     content: ''; position: absolute; left: -1px; top: 8px; bottom: 8px;
@@ -284,7 +302,7 @@
   }
   @keyframes sbPulse {
     0%,100% { box-shadow: 0 0 4px var(--accent); }
-    50% { box-shadow: 0 0 14px var(--accent), 0 0 24px rgba(208,40,40,0.15); }
+    50% { box-shadow: 0 0 14px var(--accent), 0 0 24px rgba(var(--accent-rgb),0.15); }
   }
   .rail.left { left: 52px; }
   @media (max-width: 760px) {
@@ -300,6 +318,7 @@
   <a class="sb-item on" href="/" title="Globe"><svg viewBox="0 0 24 24"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg></a>
   <a class="sb-item" href="/intel" title="Intel Console"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
   <div class="sb-spacer"></div>
+  <button class="sb-item" id="open-settings" type="button" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
   <div class="sb-dot"></div>
 </nav>
 
@@ -405,6 +424,36 @@ const DASH_TOKEN = (function () {
     return sessionStorage.getItem('shardlure_token') || '';
   } catch (_) { return ''; }
 })();
+
+// ============================================================================
+// Prefs — shared user-preference store. KEEP THIS IIFE BYTE-IDENTICAL across
+// index.html and intel.html. Per-page behaviour lives in the "PAGE GLUE" block,
+// not here. Display prefs persist in localStorage; the dashboard token stays in
+// sessionStorage (handled above), never here.
+// ============================================================================
+const Prefs = (function () {
+  var KEY = 'shardlure_prefs';
+  var DEFAULTS = { theme: 'tactical', refresh: 5000, window: '24h', autoRotate: true, reduceMotion: false };
+  var state = Object.assign({}, DEFAULTS);
+  try {
+    var saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+    for (var k in DEFAULTS) if (k in saved) state[k] = saved[k];
+  } catch (_) {}
+  function apply() {
+    document.documentElement.dataset.theme = (state.theme === 'dragon') ? 'dragon' : 'tactical';
+    document.documentElement.classList.toggle('reduce-motion', !!state.reduceMotion);
+    window.dispatchEvent(new CustomEvent('prefschange', { detail: Object.assign({}, state) }));
+  }
+  function persist() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (_) {} }
+  return {
+    get: function () { return Object.assign({}, state); },
+    set: function (patch) { Object.assign(state, patch); persist(); apply(); },
+    reset: function () { state = Object.assign({}, DEFAULTS); persist(); apply(); }, // does NOT touch token
+    apply: apply
+  };
+})();
+Prefs.apply(); // sync data-theme + reduce-motion before first paint of dynamic content
+
 (function () {
   if (!DASH_TOKEN) return;
   var _fetch = window.fetch.bind(window);
@@ -488,9 +537,9 @@ const globe = Globe()(document.getElementById('globe'))
   .backgroundImageUrl('https://networkshard.com/ssh-attacks/img/night-sky.png')
   .backgroundColor('rgba(0,0,0,0)')
   .showGraticules(true)
-  .atmosphereColor('#d02828')
+  .atmosphereColor(getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#e0a23c')
   .atmosphereAltitude(0.22)
-  .pointColor(function(){ return '#d02828'; })
+  .pointColor(function(){ return getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#e0a23c'; })
   .pointAltitude(0.02)
   .pointRadius(0.22);
 
@@ -520,9 +569,10 @@ function drawSpark(series) {
   const maxV = Math.max.apply(null, series.map(function(p){ return p.n || 0; }));
   document.getElementById('spark-max').textContent = 'peak ' + fmt(maxV) + '/h';
 
+  const _sparkRGB = (getComputedStyle(document.documentElement).getPropertyValue('--accent-rgb').trim() || '208,40,40');
   const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, 'rgba(208,40,40,0.55)');
-  grad.addColorStop(1, 'rgba(208,40,40,0.02)');
+  grad.addColorStop(0, 'rgba(' + _sparkRGB + ',0.55)');
+  grad.addColorStop(1, 'rgba(' + _sparkRGB + ',0.02)');
   const pad = 1;
   const xy = function(p) {
     return [
@@ -539,7 +589,7 @@ function drawSpark(series) {
 
   ctx.beginPath();
   series.forEach(function(p, i){ const q = xy(p); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); });
-  ctx.strokeStyle = '#d02828';
+  ctx.strokeStyle = 'rgba(' + _sparkRGB + ',1)';
   ctx.lineWidth = 1.2;
   ctx.stroke();
 }
@@ -758,9 +808,13 @@ async function refresh() {
     .pointAltitude(function(p){ return 0.005 + 0.18 * Math.sqrt((p.n || 0) / maxN); })
     .pointRadius(function(p){ return 0.18 + 0.55 * Math.sqrt((p.n || 0) / maxN); })
     .pointLabel(function(p){
-      return '<div style="font-family:ui-monospace,monospace;font-size:11px;background:rgba(20,16,16,0.92);border:1px solid rgba(200,120,100,0.22);padding:6px 9px;border-radius:4px;">' +
-        '<span style="color:#c89828">' + esc(p.ip) + '</span> <span style="color:#d02828;font-weight:600">' + fmt(p.n) + 'x</span><br/>' +
-        '<span style="color:#e8dcd8">' + esc(p.playbook) + '</span></div>';
+      var cs = getComputedStyle(document.documentElement);
+      var ac = cs.getPropertyValue('--accent').trim() || '#e0a23c';
+      var a2 = cs.getPropertyValue('--accent-2').trim() || '#cc5436';
+      var tx = cs.getPropertyValue('--text').trim() || '#ece4d6';
+      return '<div style="font-family:ui-monospace,monospace;font-size:11px;background:rgba(20,16,16,0.92);border:1px solid var(--line);padding:6px 9px;border-radius:4px;">' +
+        '<span style="color:' + a2 + '">' + esc(p.ip) + '</span> <span style="color:' + ac + ';font-weight:600">' + fmt(p.n) + 'x</span><br/>' +
+        '<span style="color:' + tx + '">' + esc(p.playbook) + '</span></div>';
     });
 
   const arcs = points.slice(0, 80).map(function(p, idx) {
@@ -768,7 +822,7 @@ async function refresh() {
   });
   const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2); }).join('|');
   globe.arcsData(arcs)
-    .arcColor(function(){ return ['rgba(208,40,40,0.12)', 'rgba(208,40,40,0.95)']; })
+    .arcColor(function(){ var rgb = getComputedStyle(document.documentElement).getPropertyValue('--accent-rgb').trim() || '208,40,40'; return ['rgba(' + rgb + ',0.12)', 'rgba(' + rgb + ',0.95)']; })
     .arcStroke(function(a){ return Math.max(0.55, 0.55 + 1.1 * Math.sqrt((a.n || 0) / maxN)); })
     .arcDashLength(0.42)
     .arcDashGap(0.18)
@@ -780,9 +834,179 @@ async function refresh() {
 
 refresh();
 refreshCapture();
-setInterval(refresh, 5000);
-setInterval(refreshCapture, 2000);
 window.addEventListener('resize', function() { drawSpark(sparkData); });
+
+// ============================================================================
+// PAGE GLUE (globe page) — wires Prefs to this page's specifics. NOT shared.
+// Configurable pollers, globe re-theme from CSS vars, auto-rotate gating.
+// ============================================================================
+var _pollFast = null, _pollSlow = null;
+function startPollers(ms) {
+  if (_pollFast) clearInterval(_pollFast);
+  if (_pollSlow) clearInterval(_pollSlow);
+  _pollFast = _pollSlow = null;
+  if (!ms || ms <= 0) return;           // paused
+  _pollFast = setInterval(refresh, ms);
+  _pollSlow = setInterval(refreshCapture, Math.max(1000, Math.round(ms * 0.4)));
+}
+// Pull the live accent from CSS so the globe matches whatever theme is active.
+function themeColors() {
+  var cs = getComputedStyle(document.documentElement);
+  return {
+    accent: cs.getPropertyValue('--accent').trim() || '#e0a23c',
+    rgb: (cs.getPropertyValue('--accent-rgb').trim() || '224,162,60')
+  };
+}
+function applyGlobeTheme() {
+  if (typeof globe === 'undefined' || !globe) return;
+  var c = themeColors();
+  globe.atmosphereColor(c.accent);
+  globe.pointColor(function () { return c.accent; });
+  globe.arcColor(function () { return ['rgba(' + c.rgb + ',0.12)', 'rgba(' + c.rgb + ',0.95)']; });
+  // globe.gl caches per-datum colors; re-set the same data to force re-derivation.
+  try { globe.pointsData(globe.pointsData()); globe.arcsData(globe.arcsData()); } catch (_) {}
+}
+function applyGlobeMotion(p) {
+  if (typeof globe === 'undefined' || !globe || !globe.controls) return;
+  try { globe.controls().autoRotate = !!p.autoRotate && !p.reduceMotion; } catch (_) {}
+}
+window.addEventListener('prefschange', function (e) {
+  var p = e.detail || Prefs.get();
+  startPollers(p.refresh);
+  applyGlobeTheme();
+  applyGlobeMotion(p);
+  drawSpark(sparkData);   // re-read accent for the sparkline
+});
+// Initial application (globe is created earlier in this script).
+(function () {
+  var p = Prefs.get();
+  startPollers(p.refresh);
+  applyGlobeTheme();
+  applyGlobeMotion(p);
+})();
 </script>
+
+<!-- ============================================================
+     SETTINGS MODAL — KEEP BYTE-IDENTICAL across index.html & intel.html.
+     Themed via CSS tokens; page-specific rows self-hide via feature detection.
+     ============================================================ -->
+<style>
+  .sl-modal { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; }
+  .sl-modal.open { display: flex; }
+  .sl-scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.62); backdrop-filter: blur(2px); }
+  .sl-card {
+    position: relative; width: 380px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px); overflow-y: auto;
+    background: var(--glass); border: 1px solid var(--line-strong); border-radius: 6px;
+    padding: 20px 22px; font-family: var(--sans); color: var(--text);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  .sl-card h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .sl-card .sl-sub { margin: 0 0 18px; font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+  .sl-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .sl-row:last-of-type { border-bottom: none; }
+  .sl-row label { font-size: 13px; }
+  .sl-row label small { display: block; font-family: var(--mono); font-size: 10px; color: var(--dim); margin-top: 2px; }
+  .sl-row select, .sl-row input[type="password"] {
+    background: var(--glass-2); color: var(--text); border: 1px solid var(--line); border-radius: 3px;
+    font-family: var(--mono); font-size: 12px; padding: 6px 8px; min-width: 130px;
+  }
+  .sl-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+  .sl-actions { display: flex; gap: 10px; margin-top: 18px; }
+  .sl-btn {
+    flex: 1; appearance: none; cursor: pointer; font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+    padding: 9px 12px; border-radius: 3px; border: 1px solid var(--line); background: var(--glass-2); color: var(--text);
+  }
+  .sl-btn:hover { border-color: var(--line-strong); }
+  .sl-btn.primary { border-color: var(--accent); color: var(--accent); }
+  .sl-x { position: absolute; top: 14px; right: 16px; appearance: none; background: none; border: none; cursor: pointer; color: var(--dim); font-size: 18px; line-height: 1; }
+  .sl-x:hover { color: var(--text); }
+</style>
+<div class="sl-modal" id="sl-modal" role="dialog" aria-modal="true" aria-label="Settings">
+  <div class="sl-scrim" data-close></div>
+  <div class="sl-card">
+    <button class="sl-x" data-close aria-label="Close">&times;</button>
+    <h2>Settings</h2>
+    <p class="sl-sub">ShardLure dashboard preferences</p>
+
+    <div class="sl-row">
+      <label for="sl-theme">Theme<small>Tactical (default) or Dragon (legacy)</small></label>
+      <select id="sl-theme"><option value="tactical">Tactical</option><option value="dragon">Dragon (legacy)</option></select>
+    </div>
+    <div class="sl-row">
+      <label for="sl-refresh">Live refresh<small>primary feed polling rate</small></label>
+      <select id="sl-refresh">
+        <option value="2000">Every 2s</option><option value="5000">Every 5s</option>
+        <option value="15000">Every 15s</option><option value="0">Paused</option>
+      </select>
+    </div>
+    <div class="sl-row" data-page="intel">
+      <label for="sl-window">Default time window<small>remembered across reloads</small></label>
+      <select id="sl-window"><option value="1h">1h</option><option value="24h">24h</option><option value="7d">7d</option><option value="30d">30d</option></select>
+    </div>
+    <div class="sl-row" data-page="globe">
+      <label for="sl-autorotate">Globe auto-rotate<small>spin the globe automatically</small></label>
+      <input type="checkbox" id="sl-autorotate">
+    </div>
+    <div class="sl-row">
+      <label for="sl-reduce">Reduce motion<small>stop pulses, animations, globe spin</small></label>
+      <input type="checkbox" id="sl-reduce">
+    </div>
+    <div class="sl-row">
+      <label for="sl-token">Dashboard token<small>applied on reload</small></label>
+      <input type="password" id="sl-token" placeholder="SHARDLURE_DASH_TOKEN" autocomplete="off">
+    </div>
+
+    <div class="sl-actions">
+      <button class="sl-btn" id="sl-reset" type="button">Reset preferences</button>
+      <button class="sl-btn primary" id="sl-savetoken" type="button">Save token &amp; reload</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var modal = document.getElementById('sl-modal');
+  var trigger = document.getElementById('open-settings');
+  if (!modal || !trigger) return;
+  var elTheme = document.getElementById('sl-theme'), elRefresh = document.getElementById('sl-refresh');
+  var elWindow = document.getElementById('sl-window'), elAuto = document.getElementById('sl-autorotate');
+  var elReduce = document.getElementById('sl-reduce'), elToken = document.getElementById('sl-token');
+
+  // Hide rows that don't apply to this page (feature detection).
+  if (typeof globe === 'undefined')   modal.querySelectorAll('[data-page="globe"]').forEach(function(n){ n.style.display = 'none'; });
+  if (typeof Filters === 'undefined') modal.querySelectorAll('[data-page="intel"]').forEach(function(n){ n.style.display = 'none'; });
+
+  function syncForm() {
+    var p = Prefs.get();
+    elTheme.value = p.theme; elRefresh.value = String(p.refresh);
+    if (elWindow) elWindow.value = p.window;
+    if (elAuto) elAuto.checked = !!p.autoRotate;
+    elReduce.checked = !!p.reduceMotion;
+    try { elToken.value = sessionStorage.getItem('shardlure_token') || ''; } catch (_) {}
+  }
+  function open() { syncForm(); modal.classList.add('open'); }
+  function close() { modal.classList.remove('open'); }
+
+  trigger.addEventListener('click', open);
+  modal.querySelectorAll('[data-close]').forEach(function(n){ n.addEventListener('click', close); });
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape') close(); });
+
+  // Live-apply on change (no reload needed for display prefs).
+  elTheme.addEventListener('change', function(){ Prefs.set({ theme: elTheme.value }); });
+  elRefresh.addEventListener('change', function(){ Prefs.set({ refresh: parseInt(elRefresh.value, 10) }); });
+  if (elWindow) elWindow.addEventListener('change', function(){ Prefs.set({ window: elWindow.value }); });
+  if (elAuto) elAuto.addEventListener('change', function(){ Prefs.set({ autoRotate: elAuto.checked }); });
+  elReduce.addEventListener('change', function(){ Prefs.set({ reduceMotion: elReduce.checked }); });
+
+  document.getElementById('sl-reset').addEventListener('click', function(){ Prefs.reset(); syncForm(); });
+  document.getElementById('sl-savetoken').addEventListener('click', function(){
+    try {
+      var v = elToken.value.trim();
+      if (v) sessionStorage.setItem('shardlure_token', v); else sessionStorage.removeItem('shardlure_token');
+    } catch (_) {}
+    location.reload(); // the fetch wrapper captures the token at load
+  });
+})();
+</script>
+
 </body>
 </html>
