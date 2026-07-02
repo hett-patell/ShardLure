@@ -28,11 +28,17 @@ func cmdShare(st *store.Store, cfg config.Config, args []string) {
 }
 
 func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
+	// intel.bazaar.freshness_days is the documented knob for the default
+	// freshness window; --since overrides it per-run.
+	freshDays := cfg.Intel.Bazaar.FreshnessDays
+	if freshDays <= 0 {
+		freshDays = 10
+	}
 	fs := flag.NewFlagSet("share bazaar", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would upload without contacting MalwareBazaar")
 	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded)")
 	sha := fs.String("sha", "", "upload only the sample with this sha256 (overrides limit/since)")
-	since := fs.Duration("since", 10*24*time.Hour, "only consider artifacts captured within this duration")
+	since := fs.Duration("since", time.Duration(freshDays)*24*time.Hour, "only consider artifacts captured within this duration (default from intel.bazaar.freshness_days)")
 	anonymous := fs.Bool("anonymous", false, "submit without attribution to your account")
 	statusOnly := fs.Bool("status", false, "list past uploads from bazaar_uploads instead of uploading")
 	comment := fs.String("comment", "", "extra comment appended to every sample's context.comment")
@@ -54,7 +60,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
 		fatal(fmt.Errorf("collect candidates: %w", err))
 	}
 	if len(cands) == 0 {
-		fmt.Println("no candidates: nothing in artifacts table within the freshness window (try --since 30d)")
+		fmt.Println("no candidates: nothing in artifacts table within the freshness window (try --since 720h)")
 		return
 	}
 

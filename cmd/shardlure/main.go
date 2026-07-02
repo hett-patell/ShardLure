@@ -453,7 +453,7 @@ Usage:
   shardlure run
   shardlure status
   shardlure ioc
-  shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 10d] [--anonymous] [--status]
+  shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 240h] [--anonymous] [--status]
 
 Config: ~/.local/share/shardlure/ or -config shardlure.yaml
 `)

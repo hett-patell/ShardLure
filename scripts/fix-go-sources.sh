@@ -30,7 +30,10 @@ for p in sorted(root.rglob("*.go")):
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if not s.endswith("\n"):
         s += "\n"
-    if s.encode("utf-8") != orig.replace(b"\x00", b"") if b"\x00" in orig else orig:
+    # Rewrite only when normalization actually changed the bytes. (The old
+    # ternary here was missing parentheses, so the comparison bound tighter
+    # than the conditional and every clean file was rewritten on every run.)
+    if s.encode("utf-8") != orig:
         p.write_text(s, encoding="utf-8", newline="\n")
         fixed += 1
         print("fixed", p.relative_to(root))

@@ -10,18 +10,22 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/networkshard/shardlure/internal/store"
+	"github.com/networkshard/shardlure/pkg/models"
 )
 
 type tickMsg time.Time
 
 type model struct {
-	st        *store.Store
-	dbPath    string
-	actors    table.Model
-	events    viewport.Model
-	detail    viewport.Model
-	actorRows []table.Row
-	cursor    int
+	st     *store.Store
+	dbPath string
+	actors table.Model
+	events viewport.Model
+	detail viewport.Model
+	// actorList is the snapshot backing the table rows. The detail panel
+	// must read from this same snapshot — re-querying ListActors for the
+	// detail while the table shows older rows made the two panels describe
+	// different actors (the list re-sorts by last_seen as events arrive).
+	actorList []models.Actor
 	width     int
 	height    int
 	err       error
@@ -61,7 +65,7 @@ func newModel(st *store.Store, dbPath string) *model {
 	ev := viewport.New(80, 8)
 	dt := viewport.New(80, 10)
 	m := &model{st: st, dbPath: dbPath, actors: t, events: ev, detail: dt}
-	_ = m.loadData()
+	m.refresh()
 	return m
 }
 
@@ -73,12 +77,24 @@ func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func (m *model) loadData() error {
+// refresh reloads everything and records any failure in m.err so View can
+// surface it instead of silently freezing on stale data. A later successful
+// refresh clears the error.
+func (m *model) refresh() {
+	if err := m.reload(); err != nil {
+		m.err = err
+		return
+	}
+	m.err = nil
+}
+
+func (m *model) reload() error {
 	list, err := m.st.ListActors(30)
 	if err != nil {
-		return err
+		return fmt.Errorf("list actors: %w", err)
 	}
-	var rows []table.Row
+	m.actorList = list
+	rows := make([]table.Row, 0, len(list))
 	for _, a := range list {
 		rows = append(rows, table.Row{
 			a.PrimaryIP,
@@ -88,19 +104,14 @@ func (m *model) loadData() error {
 			relTime(a.LastSeen),
 		})
 	}
-	m.actorRows = rows
 	m.actors.SetRows(rows)
-	if m.cursor >= len(rows) {
-		m.cursor = 0
+	if m.actors.Cursor() >= len(rows) {
+		m.actors.SetCursor(0)
 	}
-	m.actors.SetCursor(m.cursor)
-	return m.refreshPanels()
-}
 
-func (m *model) refreshPanels() error {
 	events, err := m.st.RecentEvents(40)
 	if err != nil {
-		return err
+		return fmt.Errorf("recent events: %w", err)
 	}
 	var eb strings.Builder
 	now := time.Now()
@@ -119,32 +130,34 @@ func (m *model) refreshPanels() error {
 	}
 	m.events.SetContent(eb.String())
 
-	list, err := m.st.ListActors(30)
+	return m.renderDetail()
+}
+
+// renderDetail rebuilds the detail panel for the actor under the table
+// cursor, reading from the same snapshot the table rows were built from.
+func (m *model) renderDetail() error {
+	cur := m.actors.Cursor()
+	if cur < 0 || cur >= len(m.actorList) {
+		m.detail.SetContent(dimStyle.Render("no actors yet"))
+		return nil
+	}
+	a := m.actorList[cur]
+	users, err := m.st.ActorUsersLimit(a.ID, 12)
 	if err != nil {
-		return fmt.Errorf("list actors: %w", err)
+		return fmt.Errorf("actor users: %w", err)
 	}
-	if m.cursor < len(list) {
-		a := list[m.cursor]
-		users, err := m.st.ActorUsers(a.ID)
-		if err != nil {
-			return fmt.Errorf("actor users: %w", err)
-		}
-		var db strings.Builder
-		db.WriteString(titleStyle.Render("Actor ") + a.PrimaryIP + "\n\n")
-		db.WriteString(fmt.Sprintf("  id:       %s\n", a.ID))
-		db.WriteString(fmt.Sprintf("  playbook: %s\n", accentStyle.Render(a.Playbook)))
-		db.WriteString(fmt.Sprintf("  events:   %d  users: %d  rate: %.0f/h\n", a.EventCount, a.UniqueUsers, a.AttemptsPerHour))
-		db.WriteString(fmt.Sprintf("  seen:     %s -> %s\n", a.FirstSeen.Format(time.RFC3339), relTime(a.LastSeen)))
-		db.WriteString(fmt.Sprintf("  fp hash:  %s\n\n", a.UsernameHash))
-		db.WriteString("Top usernames:\n")
-		for i, u := range users {
-			if i >= 12 {
-				break
-			}
-			db.WriteString(fmt.Sprintf("  %5d  %s\n", u.Count, u.Username))
-		}
-		m.detail.SetContent(db.String())
+	var db strings.Builder
+	db.WriteString(titleStyle.Render("Actor ") + a.PrimaryIP + "\n\n")
+	db.WriteString(fmt.Sprintf("  id:       %s\n", a.ID))
+	db.WriteString(fmt.Sprintf("  playbook: %s\n", accentStyle.Render(a.Playbook)))
+	db.WriteString(fmt.Sprintf("  events:   %d  users: %d  rate: %.0f/h\n", a.EventCount, a.UniqueUsers, a.AttemptsPerHour))
+	db.WriteString(fmt.Sprintf("  seen:     %s -> %s\n", a.FirstSeen.Format(time.RFC3339), relTime(a.LastSeen)))
+	db.WriteString(fmt.Sprintf("  fp hash:  %s\n\n", a.UsernameHash))
+	db.WriteString("Top usernames:\n")
+	for _, u := range users {
+		db.WriteString(fmt.Sprintf("  %5d  %s\n", u.Count, u.Username))
 	}
+	m.detail.SetContent(db.String())
 	return nil
 }
 
@@ -154,20 +167,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-				m.actors.SetCursor(m.cursor)
-				_ = m.refreshPanels()
+		case "up", "k", "down", "j":
+			// The table's own keymap binds these; let it move the cursor
+			// exactly once, then re-render the detail for the new selection.
+			// (Handling movement here AND falling through to table.Update
+			// moved the cursor twice, leaving the highlight permanently one
+			// row ahead of the detail panel.)
+			var cmd tea.Cmd
+			m.actors, cmd = m.actors.Update(msg)
+			if err := m.renderDetail(); err != nil {
+				m.err = err
 			}
-		case "down", "j":
-			if m.cursor < len(m.actorRows)-1 {
-				m.cursor++
-				m.actors.SetCursor(m.cursor)
-				_ = m.refreshPanels()
-			}
+			return m, cmd
 		case "r":
-			_ = m.loadData()
+			m.refresh()
+			return m, nil
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -178,7 +192,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail.Width = msg.Width - 4
 		m.detail.Height = msg.Height - 22
 	case tickMsg:
-		_ = m.refreshPanels()
+		m.refresh()
 		return m, tick()
 	}
 
@@ -192,11 +206,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) View() string {
-	if m.err != nil {
-		return fmt.Sprintf("error: %v\n", m.err)
-	}
 	header := titleStyle.Render("ShardLure") + dimStyle.Render("  actor identity  ") + dimStyle.Render("q quit | j/k move | r reload")
-	return lipgloss.JoinVertical(lipgloss.Left,
+	body := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		"",
 		titleStyle.Render("Actors"),
@@ -208,6 +219,11 @@ func (m *model) View() string {
 		),
 		dimStyle.Render(m.dbPath),
 	)
+	if m.err != nil {
+		body = lipgloss.JoinVertical(lipgloss.Left, body,
+			lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(fmt.Sprintf("error: %v (retrying)", m.err)))
+	}
+	return body
 }
 
 func relTime(t time.Time) string {
