@@ -766,7 +766,10 @@ async function refresh() {
   const arcs = points.slice(0, 80).map(function(p, idx) {
     return { startLat: p.lat, startLng: p.lng, endLat: home.lat, endLng: home.lon, idx: idx, n: p.n };
   });
-  const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2); }).join('|');
+  // Skip the arcsData reset when the arc set hasn't changed: re-setting it
+  // every 5s poll restarted the dash animations visibly.
+  const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2) + ':' + a.n; }).join('|');
+  if (arcKey === lastArcKey) return;
   globe.arcsData(arcs)
     .arcColor(function(){ return ['rgba(208,40,40,0.12)', 'rgba(208,40,40,0.95)']; })
     .arcStroke(function(a){ return Math.max(0.55, 0.55 + 1.1 * Math.sqrt((a.n || 0) / maxN)); })

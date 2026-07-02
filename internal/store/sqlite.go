@@ -101,7 +101,6 @@ CREATE TABLE IF NOT EXISTS events (
   session_id TEXT,
   hassh TEXT,
   ssh_client TEXT,
-  ja4 TEXT,
   command TEXT,
   sha256 TEXT,
   filename TEXT,
@@ -205,11 +204,9 @@ CREATE TABLE IF NOT EXISTS ingest_state (
 		}
 		// Create indexes that touch backfilled columns now that the
 		// columns are guaranteed to exist on this database.
-		const postIdx = `
-CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
-CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_ip, session_id, username, command);
-`
-		if _, err := s.db.Exec(postIdx); err != nil {
+		// (idx_events_identity — a 7-column covering index — used to be
+		// created here too; v9 drops it, so fresh installs skip it.)
+		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id)`); err != nil {
 			return err
 		}
 		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?)`, now); err != nil {
@@ -348,6 +345,22 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			return err
 		}
 	}
+
+	// v9: drop idx_events_identity. The 7-column covering index (including
+	// the attacker-controlled username/command columns) had exactly one
+	// designed reader — Store.EventExists — which was replaced by the
+	// batched ts-IN dedup and then removed. Both dedup paths deliberately
+	// avoid the index (its source= prefix triggers a full-source scan;
+	// see batchDedupCowrie), so the only thing it did was amplify every
+	// event INSERT, the hottest write in the system.
+	if current < 9 {
+		if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_events_identity`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (9, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -419,7 +432,6 @@ func (s *Store) ensureLegacyColumns() error {
 		{"session_id", `ALTER TABLE events ADD COLUMN session_id TEXT`},
 		{"hassh", `ALTER TABLE events ADD COLUMN hassh TEXT`},
 		{"ssh_client", `ALTER TABLE events ADD COLUMN ssh_client TEXT`},
-		{"ja4", `ALTER TABLE events ADD COLUMN ja4 TEXT`},
 		{"command", `ALTER TABLE events ADD COLUMN command TEXT`},
 		{"sha256", `ALTER TABLE events ADD COLUMN sha256 TEXT`},
 		{"filename", `ALTER TABLE events ADD COLUMN filename TEXT`},
@@ -461,10 +473,10 @@ func (s *Store) InsertEvent(e *models.Event) error {
 
 func insertEvent(db sqlExecer, e *models.Event) error {
 	res, err := db.Exec(`
-INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, raw, actor_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.Kind, e.SrcIP, e.SrcPort,
-		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient, e.JA4,
+		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient,
 		e.Command, e.SHA256, e.Filename, e.Raw, e.ActorID)
 	if err != nil {
 		return err
@@ -499,12 +511,6 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
-func (s *Store) UpsertActorIP(actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return upsertActorIP(s.db, actorID, ip, firstSeen, lastSeen, count)
-}
-
 func upsertActorIP(db sqlExecer, actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
 	_, err := db.Exec(`
 INSERT INTO actor_ips (actor_id, ip, first_seen, last_seen, count) VALUES (?, ?, ?, ?, ?)
@@ -514,12 +520,6 @@ ON CONFLICT(actor_id, ip) DO UPDATE SET
   count=excluded.count`,
 		actorID, ip, firstSeen.UTC().Format(time.RFC3339Nano), lastSeen.UTC().Format(time.RFC3339Nano), count)
 	return err
-}
-
-func (s *Store) UpsertActorUser(actorID, user string, count int) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return upsertActorUser(s.db, actorID, user, count)
 }
 
 func upsertActorUser(db sqlExecer, actorID, user string, count int) error {
@@ -691,8 +691,8 @@ func (s *Store) ActorUsersLimit(id string, limit int) ([]models.ActorUser, error
 // columns needed by the TUI live-feed and the web dashboard recent list
 // (id, ts, source, kind, src_ip, username, command, actor_id, raw).
 // Fields not selected (src_port, password, session_id, hassh, ssh_client,
-// ja4, sha256, filename) are left at their zero value. If you need a
-// full event row use EventsByIP or EventsBySource instead.
+// sha256, filename) are left at their zero value. If you need full event
+// rows use EventsSince or IterateEventsBySource instead.
 func (s *Store) RecentEvents(limit int) ([]models.Event, error) {
 	rows, err := s.db.Query(`
 SELECT id, ts, source, kind, src_ip, username, command, actor_id, raw FROM events ORDER BY ts DESC LIMIT ?`, limit)

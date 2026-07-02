@@ -29,17 +29,21 @@ type Result struct {
 }
 
 type cowrieLine struct {
-	EventID     string `json:"eventid"`
-	Timestamp   string `json:"timestamp"`
-	SrcIP       string `json:"src_ip"`
-	SrcPort     any    `json:"src_port"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
-	Session     string `json:"session"`
-	HASSH       string `json:"hassh"`
-	SSHVersion  string `json:"version"`
-	Input       string `json:"input"`
-	Message     string `json:"message"`
+	EventID    string `json:"eventid"`
+	Timestamp  string `json:"timestamp"`
+	SrcIP      string `json:"src_ip"`
+	SrcPort    any    `json:"src_port"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	Session    string `json:"session"`
+	HASSH      string `json:"hassh"`
+	SSHVersion string `json:"version"`
+	Input      string `json:"input"`
+	// NOTE: cowrie's "message" field is deliberately NOT decoded. It carries
+	// human-readable banners ("Remote SSH version: ...", "login attempt
+	// [...] failed") that would pollute Top Commands and IOC extraction if
+	// anything ever fell back to it — and skipping it also avoids allocating
+	// that often-sizeable string for every log line.
 	URL         string `json:"url"`
 	Outfile     string `json:"outfile"`
 	Filename    string `json:"filename"`
@@ -651,15 +655,10 @@ func parseTS(s string) (time.Time, bool) {
 	if s == "" {
 		return time.Time{}, false
 	}
-	layouts := []string{
-		time.RFC3339Nano,
-		"2006-01-02T15:04:05.000000Z",
-		"2006-01-02T15:04:05Z",
-	}
-	for _, l := range layouts {
-		if t, err := time.Parse(l, s); err == nil {
-			return t.UTC(), true
-		}
+	// RFC3339Nano accepts every timestamp cowrie emits (fractional-second
+	// and plain "Z" forms are strict subsets of it).
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t.UTC(), true
 	}
 	return time.Time{}, false
 }

@@ -71,8 +71,12 @@ func ParseLine(line string) (*models.Event, bool) {
 
 	ts, err := time.Parse(time.RFC3339, m.ts)
 	if err != nil {
-		// short-iso may lack Z; try appending
-		ts, err = time.Parse("2006-01-02T15:04:05-07:00", m.ts)
+		// journalctl -o short-iso emits the numeric zone WITHOUT a colon
+		// ("2026-07-02T15:04:05+0530"), which RFC3339 rejects. (The old
+		// fallback here used "-07:00" — a strict subset of RFC3339's
+		// "Z07:00" — so it could never succeed and every short-iso line
+		// with a no-colon offset was silently dropped.)
+		ts, err = time.Parse("2006-01-02T15:04:05-0700", m.ts)
 		if err != nil {
 			return nil, false
 		}

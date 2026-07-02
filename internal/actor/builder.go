@@ -24,7 +24,6 @@ type IPStats struct {
 }
 
 type CowrieStats struct {
-	Key       string
 	PrimaryIP string
 	HASSH     string
 	Client    string
@@ -113,16 +112,6 @@ const (
 // the smallest window where rate carries information for our classifier.
 const minWindowHours = 0.25
 
-// BuildFromJournal groups journal events into actors (1 IP = 1 actor for journal mode).
-func BuildFromJournal(events []*models.Event, adminIPs *netmatch.Set) []*models.Actor {
-	agg := BuildFromJournalAggregated(events, adminIPs)
-	out := make([]*models.Actor, 0, len(agg))
-	for _, a := range agg {
-		out = append(out, a.Actor)
-	}
-	return out
-}
-
 // BuildFromJournalAggregated returns actors with the per-IP and per-user
 // stats the builder already computed so the persistence layer does not need
 // to scan events a second time.
@@ -132,29 +121,6 @@ func BuildFromJournalAggregated(events []*models.Event, adminIPs *netmatch.Set) 
 		jc.add(e)
 	}
 	return jc.finalize()
-}
-
-// BuildJournalActorsStreaming pushes journal events through the same logic
-// as BuildFromJournalAggregated without requiring them in a slice. The
-// caller passes a function that, when invoked, yields the next event or
-// (nil, io.EOF) when done. Used by the ingest path so we don't materialize
-// every persisted journal event in memory just to recompute actors.
-func BuildJournalActorsStreaming(next func() (*models.Event, error), adminIPs *netmatch.Set) ([]*AggregatedActor, error) {
-	jc := newJournalCollector(adminIPs)
-	for {
-		e, err := next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-		if e == nil {
-			break
-		}
-		jc.add(e)
-	}
-	return jc.finalize(), nil
 }
 
 // JournalCollector is the streaming equivalent of BuildFromJournalAggregated.
@@ -180,29 +146,6 @@ func (c *journalCollector) Add(e *models.Event) { c.add(e) }
 // Finalize is the exported wrapper around finalize().
 func (c *journalCollector) Finalize() []*AggregatedActor { return c.finalize() }
 
-// FinalizeIP returns the current AggregatedActor for a single IP
-// without iterating the whole byIP map. Returns nil if the IP has
-// been filtered out (admin) or has no recorded events yet. Used by
-// the live journal tail so each new event triggers a per-IP actor
-// upsert instead of a full rebuild.
-//
-// Cost: O(U log U) where U is the unique-username count for that IP
-// (the sort in sortedKeys + the map copy). For typical journal
-// traffic U stays in single digits; even a spray with 1000 distinct
-// usernames is sub-millisecond per event. The previous comment
-// claimed O(1) amortised, which was wrong - it's O(1) for counter
-// updates in add(), but FinalizeIP itself is O(U).
-func (c *journalCollector) FinalizeIP(ip string) *AggregatedActor {
-	st, ok := c.byIP[ip]
-	if !ok || st.Count == 0 {
-		return nil
-	}
-	// copyUsers=true: FinalizeIP can be called many times against
-	// the same live collector, so the returned aggregator must not
-	// alias the collector's internal map.
-	return buildJournalActor(ip, st, true)
-}
-
 func (c *journalCollector) add(e *models.Event) {
 	if e == nil || e.SrcIP == "" || c.admin.Has(e.SrcIP) {
 		return
@@ -227,13 +170,13 @@ func (c *journalCollector) add(e *models.Event) {
 func (c *journalCollector) finalize() []*AggregatedActor {
 	var actors []*AggregatedActor
 	for ip, st := range c.byIP {
-		if st.Count == 0 {
-			continue
-		}
-		// copyUsers=false: the bulk finalize() path discards the
-		// collector immediately after, so we can hand the user map
-		// off by reference without aliasing hazards.
-		actors = append(actors, buildJournalActor(ip, st, false))
+		// The collector is discarded right after finalize(), so the
+		// Users map is handed off by reference without aliasing hazards.
+		actors = append(actors, &AggregatedActor{
+			Actor: journalActor(ip, st),
+			IPs:   map[string]IPStat{ip: {Count: st.Count, First: st.First, Last: st.Last}},
+			Users: st.Users,
+		})
 	}
 	sort.Slice(actors, func(i, j int) bool {
 		return actors[i].Actor.LastSeen.After(actors[j].Actor.LastSeen)
@@ -241,18 +184,14 @@ func (c *journalCollector) finalize() []*AggregatedActor {
 	return actors
 }
 
-// buildJournalActor constructs the AggregatedActor for a single
-// (ip, stats) pair using the journal scoring rules. Shared by both
-// the bulk finalize() (collector-then-discard) and the incremental
-// FinalizeIP (collector-lives-on) paths.
-//
-// copyUsers controls aliasing: pass true when the returned actor's
-// Users map must not share storage with st.Users (i.e. the collector
-// will keep mutating st after we return). Pass false when the
-// collector is about to be discarded.
-func buildJournalActor(ip string, st *IPStats, copyUsers bool) *AggregatedActor {
+// journalActor constructs the Actor row for a single (ip, stats) pair using
+// the journal scoring rules. Shared by the bulk finalize() path and the
+// live per-event sync path (which needs only the Actor plus this IP's stat,
+// not a full AggregatedActor with copied maps).
+func journalActor(ip string, st *IPStats) *models.Actor {
 	users := sortedKeys(st.Users)
-	hours := st.Last.Sub(st.First).Hours()
+	window := st.Last.Sub(st.First).Hours()
+	hours := window
 	if hours < minWindowHours {
 		hours = minWindowHours
 	}
@@ -274,62 +213,22 @@ func buildJournalActor(ip string, st *IPStats, copyUsers bool) *AggregatedActor 
 		ProbeScore:      journalProbeScore(st.Count, aph, len(st.Users)),
 		Notes:           fmt.Sprintf("%d distinct usernames", len(st.Users)),
 	}
-	if st.Last.Sub(st.First).Hours() >= minWindowHours && aph > 100 {
+	if window >= minWindowHours && aph > 100 {
 		a.Confidence = ConfidenceJournalHighAPH
 	}
-	ips := map[string]IPStat{
-		ip: {Count: st.Count, First: st.First, Last: st.Last},
-	}
-	usersOut := st.Users
-	if copyUsers {
-		usersOut = make(map[string]int, len(st.Users))
-		for k, v := range st.Users {
-			usersOut[k] = v
-		}
-	}
-	return &AggregatedActor{Actor: a, IPs: ips, Users: usersOut}
+	return a
 }
 
-// BuildFromCowrie groups events by HASSH (fallback: source IP).
-func BuildFromCowrie(events []*models.Event, adminIPs *netmatch.Set) []*models.Actor {
-	agg := BuildFromCowrieAggregated(events, adminIPs)
-	out := make([]*models.Actor, 0, len(agg))
-	for _, a := range agg {
-		out = append(out, a.Actor)
-	}
-	return out
-}
-
-// BuildFromCowrieAggregated mirrors BuildFromCowrie but returns the per-IP
-// and per-user stats the builder already computed so the persistence layer
-// does not need to re-walk events. See writeActorsTx.
+// BuildFromCowrieAggregated groups events by HASSH (fallback: source IP)
+// and returns actors with the per-IP and per-user stats the builder already
+// computed so the persistence layer does not need to re-walk events. See
+// writeActorsTx.
 func BuildFromCowrieAggregated(events []*models.Event, adminIPs *netmatch.Set) []*AggregatedActor {
 	cc := newCowrieCollector(adminIPs)
 	for _, e := range events {
 		cc.add(e)
 	}
 	return cc.finalize()
-}
-
-// BuildCowrieActorsStreaming is the streaming analogue of
-// BuildFromCowrieAggregated. See BuildJournalActorsStreaming for the
-// memory rationale.
-func BuildCowrieActorsStreaming(next func() (*models.Event, error), adminIPs *netmatch.Set) ([]*AggregatedActor, error) {
-	cc := newCowrieCollector(adminIPs)
-	for {
-		e, err := next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-		if e == nil {
-			break
-		}
-		cc.add(e)
-	}
-	return cc.finalize(), nil
 }
 
 // CowrieCollector incrementally feeds events into the cowrie clustering
@@ -371,7 +270,6 @@ func (c *cowrieCollector) add(e *models.Event) {
 	st, ok := c.byKey[key]
 	if !ok {
 		st = &CowrieStats{
-			Key:       key,
 			PrimaryIP: e.SrcIP,
 			HASSH:     e.HASSH,
 			Client:    e.SSHClient,
@@ -401,9 +299,10 @@ func (c *cowrieCollector) add(e *models.Event) {
 	}
 	st.IPs[e.SrcIP] = ip
 
-	if st.HASSH == "" {
-		st.HASSH = e.HASSH
-	}
+	// No HASSH backfill: an event carrying a HASSH always routes to the
+	// HASSH-keyed cluster above, so an IP-keyed cluster only ever sees
+	// empty HASSH values. Client CAN be empty on early session events
+	// within the same cluster, so it is backfilled.
 	if st.Client == "" {
 		st.Client = e.SSHClient
 	}
@@ -426,9 +325,6 @@ func (c *cowrieCollector) add(e *models.Event) {
 func (c *cowrieCollector) finalize() []*AggregatedActor {
 	var actors []*AggregatedActor
 	for _, st := range c.byKey {
-		if st.Count == 0 {
-			continue
-		}
 		users := sortedKeys(st.Users)
 		hours := st.Last.Sub(st.First).Hours()
 		if hours < minWindowHours {
@@ -439,13 +335,8 @@ func (c *cowrieCollector) finalize() []*AggregatedActor {
 		intent := ClassifyIntent(st.Tunnel, st.Payload, st.Probe, st.DeployCmd)
 		playbook := ClassifyPlaybook(users, aph)
 
-		idSuffix := st.PrimaryIP
-		if st.HASSH != "" {
-			idSuffix = st.HASSH
-		}
-		id := fmt.Sprintf("cowrie:%s", idSuffix)
 		a := &models.Actor{
-			ID:              id,
+			ID:              CowrieActorID(st.PrimaryIP, st.HASSH),
 			Source:          models.SourceCowrie,
 			PrimaryIP:       st.PrimaryIP,
 			Playbook:        playbook,

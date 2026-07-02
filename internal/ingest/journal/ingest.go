@@ -110,6 +110,18 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 			return nil, err
 		}
 		duplicates = dupes
+		// Nothing new — skip the full actor rebuild (which streams the
+		// entire persisted journal history and rewrites every journal
+		// actor row). This is the common case on daemon restart, where
+		// the 30-day journalctl seed re-offers already-ingested lines.
+		if len(freshStored) == 0 {
+			return &Result{
+				Events:       0,
+				Actors:       0,
+				SkippedAdmin: skippedAdmin,
+				Duplicates:   duplicates,
+			}, nil
+		}
 		// Rebuild actors by streaming persisted journal events + the
 		// fresh attack subset; never materializes the full event set.
 		aggActors, err = buildJournalActorsFromDB(st, freshAttackOnly(freshStored), admin)
@@ -163,9 +175,6 @@ func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.E
 	tsSet := make(map[string]struct{}, len(candidates))
 	for _, e := range candidates {
 		tsSet[e.TS.UTC().Format(time.RFC3339Nano)] = struct{}{}
-	}
-	if len(tsSet) == 0 {
-		return candidates, 0, nil
 	}
 	// SQLite limits IN-list size; chunk to be safe.
 	const chunk = 400
@@ -222,18 +231,27 @@ func loadExistingJournalIdentities(st *store.Store, tsBatch []string, into map[j
 		return nil
 	}
 	placeholders := make([]string, len(tsBatch))
-	args := make([]any, 0, len(tsBatch)+1)
-	args = append(args, models.SourceJournal)
+	args := make([]any, 0, len(tsBatch))
 	for i, t := range tsBatch {
 		placeholders[i] = "?"
 		args = append(args, t)
 	}
-	query := "SELECT ts, kind, src_ip, username, command FROM events WHERE source=? AND ts IN (" +
+	// Filter on ts only, NOT source — same planner pathology the cowrie
+	// dedup already works around (see batchDedupCowrie): a `source=?`
+	// constraint makes SQLite pick a source-prefixed index and scan every
+	// journal row in the table per chunk, while `ts IN (...)` alone is
+	// point lookups on idx_events_ts (verified via EXPLAIN QUERY PLAN).
+	// The source filter is re-applied in Go.
+	query := "SELECT source, ts, kind, src_ip, username, command FROM events WHERE ts IN (" +
 		strings.Join(placeholders, ",") + ")"
 	return st.QueryRows(query, args, func(scan func(...any) error) error {
+		var src string
 		var id journalIdentity
-		if err := scan(&id.TS, &id.Kind, &id.IP, &id.Username, &id.Command); err != nil {
+		if err := scan(&src, &id.TS, &id.Kind, &id.IP, &id.Username, &id.Command); err != nil {
 			return err
+		}
+		if src != string(models.SourceJournal) {
+			return nil
 		}
 		into[id] = struct{}{}
 		return nil

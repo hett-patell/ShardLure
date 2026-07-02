@@ -24,7 +24,7 @@ func (s *Store) EventsSince(since time.Time, limit int) ([]*models.Event, error)
 		limit = 5000
 	}
 	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, actor_id
+SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, actor_id
 FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
 		since.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
@@ -36,7 +36,7 @@ FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
 		e := &models.Event{}
 		var ts, source, kind string
 		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
-			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.JA4, &e.Command,
+			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.Command,
 			&e.SHA256, &e.Filename, &e.ActorID); err != nil {
 			return nil, err
 		}
@@ -56,7 +56,7 @@ FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
 // classify the entire window on a small VPS. fn must not retain e across calls.
 func (s *Store) IterateEventsSince(since time.Time, fn func(*models.Event) error) error {
 	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, actor_id
+SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, actor_id
 FROM events WHERE ts >= ? ORDER BY ts ASC`,
 		since.UTC().Format(time.RFC3339Nano))
 	if err != nil {
@@ -67,7 +67,7 @@ FROM events WHERE ts >= ? ORDER BY ts ASC`,
 		e := &models.Event{}
 		var ts, source, kind string
 		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
-			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.JA4, &e.Command,
+			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.Command,
 			&e.SHA256, &e.Filename, &e.ActorID); err != nil {
 			return err
 		}
@@ -93,14 +93,4 @@ func (s *Store) EventsSinceAll(since time.Time) ([]*models.Event, error) {
 		return nil
 	})
 	return out, err
-}
-
-// CountEventsSince returns the true number of events with TS >= since, via a
-// cheap indexed COUNT(*). Lets handlers report the real window total instead
-// of len(truncated-sample).
-func (s *Store) CountEventsSince(since time.Time) (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE ts >= ?`,
-		since.UTC().Format(time.RFC3339Nano)).Scan(&n)
-	return n, err
 }

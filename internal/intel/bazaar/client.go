@@ -84,13 +84,7 @@ type Submission struct {
 type Result struct {
 	Status    string
 	SampleURL string
-	Raw       []byte
 }
-
-// IsDuplicate reports whether MalwareBazaar already had the sample.
-// Treated as success by callers — we record the upload row either way
-// so the local store stops trying to re-submit on the next run.
-func (r Result) IsDuplicate() bool { return r.Status == "file_already_known" }
 
 // IsAccepted reports whether MalwareBazaar took the sample (either
 // freshly inserted or already known). Callers should record the row
@@ -202,7 +196,7 @@ func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, fmt.Errorf("parse response: %w; body=%q", err, truncateForError(raw))
 	}
-	r := &Result{Status: parsed.QueryStatus, Raw: raw}
+	r := &Result{Status: parsed.QueryStatus}
 	if r.IsAccepted() && sha256 != "" {
 		r.SampleURL = "https://bazaar.abuse.ch/sample/" + sha256 + "/"
 	}

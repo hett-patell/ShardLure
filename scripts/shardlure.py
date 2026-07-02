@@ -452,6 +452,8 @@ def plant_bait_files() -> None:
         return
 
     def fs(cmd: str) -> None:
+        # mkdir on an existing dir (and similar) is a benign non-zero exit;
+        # fsctl prints its own diagnostics, so no extra handling here.
         run([str(fsctl), str(pickle_path), cmd])
 
     for d in (
@@ -461,18 +463,16 @@ def plant_bait_files() -> None:
         "/var/backups", "/var/backups/nightly",
         "/etc/nginx", "/etc/nginx/sites-available",
     ):
-        cp = run([str(fsctl), str(pickle_path), f"mkdir {d}"])
-        if cp.returncode != 0:
-            pass
+        fs(f"mkdir {d}")
     for hostfile in bait_src.rglob("*"):
         if not hostfile.is_file():
             continue
         rel = hostfile.relative_to(bait_src)
         vpath = f"/{rel.as_posix()}"
-        run([str(fsctl), str(pickle_path), f"touch {vpath}"])
+        fs(f"touch {vpath}")
         dst = honeyfs / rel
         if dst.is_file():
-            run([str(fsctl), str(pickle_path), f"load {vpath} {dst}"])
+            fs(f"load {vpath} {dst}")
     dst_pickle = COWRIE_HOME / "var/lib/cowrie/fs.pickle"
     if pickle_path.exists():
         shutil.copy2(pickle_path, dst_pickle)

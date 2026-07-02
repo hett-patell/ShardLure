@@ -21,10 +21,11 @@ func TestExtractURLsDevTCP(t *testing.T) {
 }
 
 func TestBlockedPrivateIP(t *testing.T) {
-	if err := assertSafeURL("http://127.0.0.1/malware", nil); err == nil {
+	sf := &SafeFetcher{}
+	if err := sf.assertSafeURL("http://127.0.0.1/malware"); err == nil {
 		t.Fatal("expected block for loopback")
 	}
-	if err := assertSafeURL("http://192.168.1.1/x", nil); err == nil {
+	if err := sf.assertSafeURL("http://192.168.1.1/x"); err == nil {
 		t.Fatal("expected block for RFC1918")
 	}
 }

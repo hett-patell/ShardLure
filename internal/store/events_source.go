@@ -1,19 +1,8 @@
 package store
 
 import (
-	"time"
-
 	"github.com/networkshard/shardlure/pkg/models"
 )
-
-func (s *Store) EventExists(e *models.Event) (bool, error) {
-	var n int
-	err := s.db.QueryRow(`
-SELECT COUNT(1) FROM events
-WHERE source=? AND kind=? AND ts=? AND src_ip=? AND session_id=? AND username=? AND command=?`,
-		e.Source, e.Kind, e.TS.UTC().Format(time.RFC3339Nano), e.SrcIP, e.SessionID, e.Username, e.Command).Scan(&n)
-	return n > 0, err
-}
 
 // EventsBySource loads every event for the given source into memory.
 //
@@ -38,7 +27,7 @@ func (s *Store) EventsBySource(source models.Source) ([]*models.Event, error) {
 //
 // Returning an error from fn aborts iteration and propagates the error.
 func (s *Store) IterateEventsBySource(source models.Source, fn func(*models.Event) error) error {
-	rows, err := s.db.Query(`SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, raw, actor_id
+	rows, err := s.db.Query(`SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id
 FROM events WHERE source=? ORDER BY ts ASC`, source)
 	if err != nil {
 		return err
@@ -49,7 +38,7 @@ FROM events WHERE source=? ORDER BY ts ASC`, source)
 		e := &models.Event{}
 		var ts string
 		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.SrcIP, &e.SrcPort, &e.Username, &e.Password,
-			&e.SessionID, &e.HASSH, &e.SSHClient, &e.JA4, &e.Command, &e.SHA256, &e.Filename, &e.Raw, &e.ActorID); err != nil {
+			&e.SessionID, &e.HASSH, &e.SSHClient, &e.Command, &e.SHA256, &e.Filename, &e.Raw, &e.ActorID); err != nil {
 			return err
 		}
 		e.TS, _ = parseTime(ts)
@@ -82,7 +71,7 @@ func (s *Store) IterateEventsByActorIDs(ids []string, fn func(*models.Event) err
 			placeholders[j] = "?"
 			args[j] = id
 		}
-		q := `SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, raw, actor_id
+		q := `SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id
 FROM events WHERE actor_id IN (` + joinComma(placeholders) + `) ORDER BY ts ASC`
 		rows, err := s.db.Query(q, args...)
 		if err != nil {
@@ -94,7 +83,7 @@ FROM events WHERE actor_id IN (` + joinComma(placeholders) + `) ORDER BY ts ASC`
 				e := &models.Event{}
 				var ts string
 				if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.SrcIP, &e.SrcPort, &e.Username, &e.Password,
-					&e.SessionID, &e.HASSH, &e.SSHClient, &e.JA4, &e.Command, &e.SHA256, &e.Filename, &e.Raw, &e.ActorID); err != nil {
+					&e.SessionID, &e.HASSH, &e.SSHClient, &e.Command, &e.SHA256, &e.Filename, &e.Raw, &e.ActorID); err != nil {
 					return err
 				}
 				e.TS, _ = parseTime(ts)

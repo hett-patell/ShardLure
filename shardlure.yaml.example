@@ -35,7 +35,9 @@ geoip:
   # Required for globe arcs / country stats (resolves attacker IPs).
   enabled: true
   insecure_http: true
-  mmdb: /var/lib/shardlure/GeoLite2-City.mmdb
+  # mmdb (offline GeoLite2 lookup) is parsed but NOT implemented yet —
+  # see the README roadmap. Setting it has no effect today.
+  # mmdb: /var/lib/shardlure/GeoLite2-City.mmdb
 
 # Outbound threat-intel sharing. Each destination is opt-in; leaving
 # api_key empty disables it. See the "Threat Intel Sharing" README

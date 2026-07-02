@@ -171,8 +171,6 @@ func artifactToCandidate(a store.Artifact) bazaar.Candidate {
 		LocalPath: a.LocalPath,
 		SizeBytes: a.SizeBytes,
 		URL:       a.URL,
-		SrcIP:     a.SrcIP,
-		SessionID: a.SessionID,
 		CreatedAt: a.CreatedAt,
 	}
 }

@@ -908,9 +908,9 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
 	if err := ioc.WriteCSV(w, indicators); err != nil {
-		// Best-effort: header already written; nothing useful to surface to
-		// the browser, but we still log via the server's default writer.
-		_ = err
+		// Best-effort: header already written, so nothing can be surfaced
+		// to the browser — log for the operator instead.
+		log.Printf("api_intel: ioc csv write: %v", err)
 	}
 }
 
@@ -934,7 +934,8 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/vnd.oasis.stix+json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
 	if err := ioc.WriteSTIX(w, indicators); err != nil {
-		_ = err
+		// Header already written; log-only, same as the CSV handler.
+		log.Printf("api_intel: ioc stix write: %v", err)
 	}
 }
 
@@ -1097,7 +1098,7 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 
 	cand := bazaar.Candidate{
 		SHA256: art.SHA256, LocalPath: art.LocalPath, SizeBytes: art.SizeBytes,
-		URL: art.URL, SrcIP: art.SrcIP, SessionID: art.SessionID, CreatedAt: art.CreatedAt,
+		URL: art.URL, CreatedAt: art.CreatedAt,
 	}
 	rec := &bazaarRecorderAdapter{st: s.st}
 	var result *bazaar.Result

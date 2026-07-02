@@ -50,9 +50,6 @@ func (s *Store) BazaarUploadRecorded(sha string) (bool, error) {
 	}
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(1) FROM bazaar_uploads WHERE sha256=?`, sha).Scan(&n)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
 	return n > 0, err
 }
 

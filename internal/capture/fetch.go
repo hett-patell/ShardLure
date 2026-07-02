@@ -150,10 +150,6 @@ func (f *SafeFetcher) assertSafeURL(raw string) error {
 	return nil
 }
 
-func assertSafeURL(raw string, adminIPs []string) error {
-	return (&SafeFetcher{AdminIPs: adminIPs}).assertSafeURL(raw)
-}
-
 // reservedRanges are address blocks the SSRF guard must reject but that the
 // net.IP predicates below do NOT cover:
 //   - 100.64.0.0/10  CGNAT (RFC 6598) — routable internal range on many cloud

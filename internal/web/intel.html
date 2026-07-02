@@ -841,11 +841,6 @@
       <span class="chip" data-window="7d">7d</span>
       <span class="chip" data-window="30d">30d</span>
       <span class="chip-sep">·</span>
-      <span class="chip-sep">source:</span>
-      <span class="chip on" data-source="all">all</span>
-      <span class="chip" data-source="journal">journal</span>
-      <span class="chip" data-source="cowrie">cowrie</span>
-      <span class="chip-sep">·</span>
       <input class="search" id="search-input" placeholder="search IP / user / command…" />
     </div>
   </div>
@@ -1639,7 +1634,7 @@ window.addEventListener('resize', function() {
 });
 
 /* ==== Slice A: tabs, sticky filter bar, search ==== */
-const Filters = { window: '24h', source: 'all', search: '' };
+const Filters = { window: '24h', search: '' };
 
 function setActiveView(name) {
   document.querySelectorAll('.tab').forEach(function(t) {
@@ -1681,7 +1676,6 @@ function bindChipGroup(attr, key) {
   });
 }
 bindChipGroup('window', 'window');
-bindChipGroup('source', 'source');
 
 const searchInput = document.getElementById('search-input');
 let searchTimer = 0;
@@ -1845,15 +1839,6 @@ function fmtOffset(ms) {
   const m = Math.floor(s / 60);
   return '+' + m + 'm' + (s % 60).toFixed(0) + 's';
 }
-function relTime(iso) {
-  const t = new Date(iso).getTime();
-  const d = (Date.now() - t) / 1000;
-  if (d < 60) return Math.floor(d) + 's ago';
-  if (d < 3600) return Math.floor(d / 60) + 'm ago';
-  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
-  return Math.floor(d / 86400) + 'd ago';
-}
-
 function renderSessions(data) {
   const list = document.getElementById('sessions-list');
   const meta = document.getElementById('sessions-meta');

@@ -209,10 +209,6 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	}
 }
 
-func (s *Server) Run() error {
-	return s.RunContext(context.Background())
-}
-
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
 func (s *Server) RunContext(ctx context.Context) error {
 	mux := http.NewServeMux()

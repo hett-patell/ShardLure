@@ -41,7 +41,6 @@ type Event struct {
 	SessionID string
 	HASSH     string
 	SSHClient string
-	JA4       string
 	Command   string
 	SHA256    string
 	Filename  string
@@ -73,14 +72,6 @@ type Actor struct {
 	// actor.journalProbeScore from the event mix and attempt rate.
 	ProbeScore int
 	Notes      string
-}
-
-type ActorIP struct {
-	ActorID   string
-	IP        string
-	FirstSeen time.Time
-	LastSeen  time.Time
-	Count     int
 }
 
 type ActorUser struct {

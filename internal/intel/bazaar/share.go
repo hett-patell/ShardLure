@@ -15,13 +15,15 @@ import (
 // these and feeds them to the per-sample pipeline. Caller (cmd) is
 // responsible for the actual artifacts query so this package stays
 // store-agnostic — easier to unit-test without spinning up sqlite.
+// Deliberately NO SrcIP/SessionID fields: those must never reach abuse.ch
+// (they identify the honeypot host and session), and not carrying them at
+// all is the strongest guarantee a future buildComment/buildReferences
+// change can't leak them.
 type Candidate struct {
 	SHA256    string
 	LocalPath string
 	SizeBytes int64
 	URL       string // attacker-supplied URL recovered from the cowrie session, if any
-	SrcIP     string
-	SessionID string
 	CreatedAt time.Time
 }
 
