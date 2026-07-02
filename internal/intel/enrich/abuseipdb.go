@@ -1,10 +1,8 @@
 package enrich
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 )
 
@@ -24,20 +22,24 @@ type abuseIPDBResp struct {
 	} `json:"data"`
 }
 
-func fetchAbuseIPDB(ctx context.Context, hc *http.Client, ip string) (Result, error) {
-	key := envKey("SHARDLURE_ABUSEIPDB_KEY")
-	if key == "" {
-		return Result{Configured: false, Verdict: "unknown"}, nil
-	}
+var abuseIPDBSpec = providerSpec{
+	envVar: "SHARDLURE_ABUSEIPDB_KEY",
+	buildReq: func(ip, key string) (string, map[string]string) {
+		return "https://api.abuseipdb.com/api/v2/check?ipAddress=" + ip + "&maxAgeInDays=90",
+			map[string]string{
+				"Accept": "application/json",
+				"Key":    key,
+			}
+	},
+	parse: parseAbuseIPDB,
+}
 
-	url := "https://api.abuseipdb.com/api/v2/check?ipAddress=" + ip + "&maxAgeInDays=90"
+// parseAbuseIPDB maps the /check payload onto a Result. Split out from the
+// HTTP wrapper so it can be unit-tested without a network round-trip.
+func parseAbuseIPDB(raw []byte, ip string) Result {
 	var parsed abuseIPDBResp
-	raw, err := httpJSON(ctx, hc, url, map[string]string{
-		"Accept": "application/json",
-		"Key":    key,
-	}, &parsed)
-	if err != nil {
-		return Result{Configured: true}, err
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return Result{Configured: true, Error: err.Error()}
 	}
 
 	d := parsed.Data
@@ -77,5 +79,5 @@ func fetchAbuseIPDB(ctx context.Context, hc *http.Client, ip string) (Result, er
 		Summary:    summary,
 		URL:        "https://www.abuseipdb.com/check/" + ip,
 		Raw:        json.RawMessage(raw),
-	}, nil
+	}
 }

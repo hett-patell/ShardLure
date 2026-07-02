@@ -1,9 +1,7 @@
 package enrich
 
 import (
-	"context"
 	"encoding/json"
-	"net/http"
 )
 
 // GreyNoise community endpoint shape. The community API is free and
@@ -22,32 +20,37 @@ type greyNoiseResp struct {
 	Message        string `json:"message"`
 }
 
-func fetchGreyNoise(ctx context.Context, hc *http.Client, ip string) (Result, error) {
-	// GreyNoise is always 'configured' since the community endpoint
-	// is keyless. We mark Configured=true to signal "we can query
-	// this provider" rather than "you've supplied a key".
-	url := "https://api.greynoise.io/v3/community/" + ip
-
-	headers := map[string]string{"Accept": "application/json"}
-	if key := envKey("SHARDLURE_GREYNOISE_KEY"); key != "" {
-		headers["key"] = key
-	}
-
-	var parsed greyNoiseResp
-	raw, err := httpJSON(ctx, hc, url, headers, &parsed)
-	if err != nil {
-		// 404 from GreyNoise just means "we have no data" - treat as
-		// a clean benign-unknown rather than an error. Match on the
-		// numeric code, not the (non-canonical) reason phrase.
-		if isHTTPStatus(err, http.StatusNotFound) {
-			return Result{
-				Configured: true,
-				Verdict:    "unknown",
-				Summary:    "no GreyNoise observations",
-				URL:        "https://viz.greynoise.io/ip/" + ip,
-			}, nil
+var greyNoiseSpec = providerSpec{
+	// keyOptional: the community endpoint is keyless, so GreyNoise is always
+	// 'configured'; a key is sent when present for the higher rate limit.
+	envVar:      "SHARDLURE_GREYNOISE_KEY",
+	keyOptional: true,
+	buildReq: func(ip, key string) (string, map[string]string) {
+		headers := map[string]string{"Accept": "application/json"}
+		if key != "" {
+			headers["key"] = key
 		}
-		return Result{Configured: true}, err
+		return "https://api.greynoise.io/v3/community/" + ip, headers
+	},
+	parse: parseGreyNoise,
+	// 404 from GreyNoise just means "we have no data" - treat as a clean
+	// benign-unknown rather than an error.
+	notFound: func(ip string) Result {
+		return Result{
+			Configured: true,
+			Verdict:    "unknown",
+			Summary:    "no GreyNoise observations",
+			URL:        "https://viz.greynoise.io/ip/" + ip,
+		}
+	},
+}
+
+// parseGreyNoise maps the community payload onto a Result. Split out from the
+// HTTP wrapper so it can be unit-tested without a network round-trip.
+func parseGreyNoise(raw []byte, ip string) Result {
+	var parsed greyNoiseResp
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return Result{Configured: true, Error: err.Error()}
 	}
 
 	verdict := "unknown"
@@ -91,5 +94,5 @@ func fetchGreyNoise(ctx context.Context, hc *http.Client, ip string) (Result, er
 		Summary:    summary,
 		URL:        link,
 		Raw:        json.RawMessage(raw),
-	}, nil
+	}
 }

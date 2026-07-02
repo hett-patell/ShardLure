@@ -1,9 +1,7 @@
 package enrich
 
 import (
-	"context"
 	"encoding/json"
-	"net/http"
 	"net/url"
 	"strings"
 )
@@ -34,23 +32,18 @@ type ipinfoResp struct {
 	} `json:"privacy"`
 }
 
-func fetchIPinfo(ctx context.Context, hc *http.Client, ip string) (Result, error) {
-	key := envKey("SHARDLURE_IPINFO_KEY")
-	if key == "" {
-		return Result{Configured: false, Verdict: "unknown"}, nil
-	}
+var ipinfoSpec = providerSpec{
+	envVar: "SHARDLURE_IPINFO_KEY",
 	// Send the key as a Bearer header, not a ?token= query param, so it
 	// doesn't leak into proxy/access logs or Referer.
-	url := "https://ipinfo.io/" + url.PathEscape(ip) + "/json"
-	// out=nil: parseIPinfo owns the decode (avoids a redundant double-decode).
-	raw, err := httpJSON(ctx, hc, url, map[string]string{
-		"Accept":        "application/json",
-		"Authorization": "Bearer " + key,
-	}, nil)
-	if err != nil {
-		return Result{Configured: true}, err
-	}
-	return parseIPinfo(raw, ip), nil
+	buildReq: func(ip, key string) (string, map[string]string) {
+		return "https://ipinfo.io/" + url.PathEscape(ip) + "/json",
+			map[string]string{
+				"Accept":        "application/json",
+				"Authorization": "Bearer " + key,
+			}
+	},
+	parse: parseIPinfo,
 }
 
 // parseIPinfo maps the IPinfo response onto a Result. Split out for testing.

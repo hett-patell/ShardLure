@@ -6,37 +6,15 @@ set -euo pipefail
 cd "${HOME}/ShardLure/shardlure"
 
 echo "[vps-finish] repairing corrupted text files"
-python3 <<'PY'
-from pathlib import Path
-
-root = Path(".").resolve()
-exts = {".go", ".mod", ".sum", ".py", ".sh", ".yaml", ".yml", ".md"}
-names = {"go.mod", "go.sum", "Makefile"}
-fixed = 0
-for p in sorted(root.rglob("*")):
-    if not p.is_file():
-        continue
-    if p.suffix not in exts and p.name not in names:
-        continue
-    b = p.read_bytes()
-    if not b:
-        continue
-    if b"\x00" not in b and not b.startswith((b"\xff\xfe", b"\xfe\xff")):
-        continue
-    if b.startswith(b"\xff\xfe"):
-        s = b[2:].decode("utf-16-le", errors="ignore")
-    elif b.startswith(b"\xfe\xff"):
-        s = b[2:].decode("utf-16-be", errors="ignore")
-    else:
-        s = b.replace(b"\x00", b"").decode("utf-8", errors="ignore")
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    if not s.endswith("\n"):
-        s += "\n"
-    p.write_text(s, encoding="utf-8", newline="\n")
-    fixed += 1
-    print("fixed", p.relative_to(root))
-print(f"repaired {fixed} file(s)")
-PY
+# Shared repair helper from the pushed checkout (this script cd'd into it
+# above). Self-heal the helper first — it may itself be transfer-corrupted.
+LIB="scripts/lib/repair_text.py"
+if [ ! -f "$LIB" ]; then
+  echo "[vps-finish] error: $LIB missing — push sources first (bash scripts/push-sources.sh)" >&2
+  exit 1
+fi
+python3 -c 'import sys; p=sys.argv[1]; b=open(p,"rb").read(); c=b.replace(b"\x00",b"").replace(b"\xff\xfe",b"").replace(b"\xfe\xff",b"").replace(b"\r\n",b"\n"); open(p,"wb").write(c) if c!=b else None' "$LIB"
+python3 "$LIB" --root . --mode deploy
 
 # Back up any existing go.mod before overwriting with the known-good template,
 # so a botched run is recoverable.

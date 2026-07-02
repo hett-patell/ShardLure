@@ -8,61 +8,13 @@ if [[ -f "$(dirname "$0")/../go.mod" ]]; then
 fi
 cd "$ROOT"
 
-ROOT="$ROOT" python3 - <<'PY'
-import os
-from pathlib import Path
-
-root = Path(os.environ["ROOT"])
-fixed = 0
-for p in sorted(root.rglob("*.go")):
-    b = p.read_bytes()
-    if not b:
-        continue
-    orig = b
-    if b.startswith(b"\xff\xfe"):
-        s = b[2:].decode("utf-16-le", errors="ignore")
-    elif b.startswith(b"\xfe\xff"):
-        s = b[2:].decode("utf-16-be", errors="ignore")
-    elif b"\x00" in b:
-        s = b.replace(b"\x00", b"").decode("utf-8", errors="ignore")
-    else:
-        s = b.decode("utf-8", errors="ignore")
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    if not s.endswith("\n"):
-        s += "\n"
-    # Rewrite only when normalization actually changed the bytes. (The old
-    # ternary here was missing parentheses, so the comparison bound tighter
-    # than the conditional and every clean file was rewritten on every run.)
-    if s.encode("utf-8") != orig:
-        p.write_text(s, encoding="utf-8", newline="\n")
-        fixed += 1
-        print("fixed", p.relative_to(root))
-
-for name in ("go.mod", "go.sum"):
-    p = root / name
-    if not p.exists():
-        continue
-    b = p.read_bytes()
-    if b"\x00" not in b and not b.startswith((b"\xff\xfe", b"\xfe\xff")):
-        continue
-    if b.startswith(b"\xff\xfe"):
-        s = b[2:].decode("utf-16-le", errors="ignore")
-    elif b.startswith(b"\xfe\xff"):
-        s = b[2:].decode("utf-16-be", errors="ignore")
-    else:
-        s = b.replace(b"\x00", b"").decode("utf-8", errors="ignore")
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    if not s.endswith("\n"):
-        s += "\n"
-    p.write_text(s, encoding="utf-8", newline="\n")
-    fixed += 1
-    print("fixed", name)
-
-if fixed == 0:
-    print("no corrupted text files found")
-else:
-    print(f"repaired {fixed} file(s)")
-PY
+# Repair logic lives in ONE place (scripts/lib/repair_text.py) — the four
+# previously-embedded copies drifted into independent bugs. The helper itself
+# may be transfer-corrupted on a remote, so self-heal it first with a
+# minimal NUL/BOM/CRLF strip that assumes nothing about its content.
+LIB="$(dirname "$0")/lib/repair_text.py"
+python3 -c 'import sys; p=sys.argv[1]; b=open(p,"rb").read(); c=b.replace(b"\x00",b"").replace(b"\xff\xfe",b"").replace(b"\xfe\xff",b"").replace(b"\r\n",b"\n"); open(p,"wb").write(c) if c!=b else None' "$LIB"
+python3 "$LIB" --root "$ROOT" --mode go
 
 go mod tidy
 # Unpredictable mktemp path instead of the fixed /tmp/shardlure: the operator

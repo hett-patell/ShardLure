@@ -279,6 +279,82 @@ func TestParseIPinfo(t *testing.T) {
 	}
 }
 
+func TestParseAbuseIPDB(t *testing.T) {
+	raw := []byte(`{"data":{"ipAddress":"1.2.3.4","abuseConfidenceScore":88,"countryCode":"CN","isp":"Evil Cloud","usageType":"Data Center/Web Hosting/Transit","totalReports":142,"lastReportedAt":"2026-06-30T10:00:00+00:00","hostnames":["bot.example.net"]}}`)
+	r := parseAbuseIPDB(raw, "1.2.3.4")
+	if r.Verdict != "malicious" {
+		t.Errorf("score 88 should be malicious, got %q", r.Verdict)
+	}
+	if r.Score == nil || *r.Score != 88 {
+		t.Errorf("score not carried through: %v", r.Score)
+	}
+	if !containsStr(r.Tags, "data-center/web-hosting/transit") || !containsStr(r.Tags, "bot.example.net") {
+		t.Errorf("missing usage-type/hostname tags: %v", r.Tags)
+	}
+	if !strings.Contains(r.Summary, "142 reports") || !strings.Contains(r.Summary, "last 2026-06-30") {
+		t.Errorf("summary wrong: %q", r.Summary)
+	}
+	if r.Country != "CN" || r.ASOwner != "Evil Cloud" {
+		t.Errorf("geo/isp wrong: %q %q", r.Country, r.ASOwner)
+	}
+
+	// Mid score -> suspicious; low -> benign.
+	if parseAbuseIPDB([]byte(`{"data":{"abuseConfidenceScore":30}}`), "1.1.1.1").Verdict != "suspicious" {
+		t.Error("score 30 should be suspicious")
+	}
+	if parseAbuseIPDB([]byte(`{"data":{"abuseConfidenceScore":0}}`), "1.1.1.1").Verdict != "benign" {
+		t.Error("score 0 should be benign")
+	}
+}
+
+func TestParseVirusTotal(t *testing.T) {
+	raw := []byte(`{"data":{"attributes":{"last_analysis_stats":{"harmless":60,"malicious":5,"suspicious":1,"undetected":10},"as_owner":"Bad AS","asn":4134,"country":"CN","network":"1.2.3.0/24","reputation":-20}}}`)
+	r := parseVirusTotal(raw, "1.2.3.4")
+	if r.Verdict != "malicious" {
+		t.Errorf("5 malicious engines should be malicious, got %q", r.Verdict)
+	}
+	if r.ASN != "AS4134" || r.ASOwner != "Bad AS" {
+		t.Errorf("asn wrong: %q %q", r.ASN, r.ASOwner)
+	}
+	if !containsStr(r.Tags, "1.2.3.0/24") {
+		t.Errorf("network tag missing: %v", r.Tags)
+	}
+	if !strings.Contains(r.Summary, "5/76 engines") || !strings.Contains(r.Summary, "reputation=-20") {
+		t.Errorf("summary wrong: %q", r.Summary)
+	}
+
+	// Zero engines -> unknown; one malicious -> suspicious.
+	if parseVirusTotal([]byte(`{"data":{"attributes":{}}}`), "1.1.1.1").Verdict != "unknown" {
+		t.Error("no engine data should be unknown")
+	}
+	if parseVirusTotal([]byte(`{"data":{"attributes":{"last_analysis_stats":{"malicious":1,"harmless":70}}}}`), "1.1.1.1").Verdict != "suspicious" {
+		t.Error("1 malicious engine should be suspicious")
+	}
+}
+
+func TestParseGreyNoise(t *testing.T) {
+	raw := []byte(`{"ip":"1.2.3.4","noise":true,"riot":false,"classification":"malicious","name":"SSH Bruteforcer","link":"https://viz.greynoise.io/ip/1.2.3.4","last_seen":"2026-07-01","message":"Success"}`)
+	r := parseGreyNoise(raw, "1.2.3.4")
+	if r.Verdict != "malicious" {
+		t.Errorf("classification should map through, got %q", r.Verdict)
+	}
+	if !containsStr(r.Tags, "internet-noise") || !containsStr(r.Tags, "SSH Bruteforcer") {
+		t.Errorf("tags wrong: %v", r.Tags)
+	}
+	if r.URL != "https://viz.greynoise.io/ip/1.2.3.4" {
+		t.Errorf("link not used: %q", r.URL)
+	}
+
+	// Missing link falls back to the viz URL; empty message synthesises one.
+	r2 := parseGreyNoise([]byte(`{"classification":"benign","last_seen":"2026-06-01"}`), "9.9.9.9")
+	if r2.URL != "https://viz.greynoise.io/ip/9.9.9.9" {
+		t.Errorf("fallback URL wrong: %q", r2.URL)
+	}
+	if !strings.Contains(r2.Summary, "classification=benign") || !strings.Contains(r2.Summary, "last seen 2026-06-01") {
+		t.Errorf("synthesised summary wrong: %q", r2.Summary)
+	}
+}
+
 func containsStr(s []string, want string) bool {
 	for _, v := range s {
 		if v == want {
