@@ -18,7 +18,7 @@ echo "Packing $ROOT -> $HOST:$REMOTE"
 ssh "$HOST" "mkdir -p $REMOTE"
 
 tar -C "$ROOT" -czf - \
-  --exclude='shardlure' \
+  --exclude='./shardlure' \
   --exclude='*.db' \
   --exclude='*.db-wal' \
   --exclude='*.db-shm' \
