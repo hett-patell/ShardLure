@@ -64,7 +64,15 @@ trap 'rm -f "$BUILD_BIN"' EXIT
 go build -o "$BUILD_BIN" ./cmd/shardlure
 echo "built $BUILD_BIN ($(wc -c < "$BUILD_BIN") bytes)"
 
-sudo SL_BUILD_BIN="$BUILD_BIN" python3 <<'PY'
+# Forward SHARDLURE_* overrides explicitly: sudo's env_reset strips them, so
+# without this the Python block below always saw the defaults no matter what
+# the operator exported.
+sudo SL_BUILD_BIN="$BUILD_BIN" \
+  SHARDLURE_HONEYPOT_PORT="${SHARDLURE_HONEYPOT_PORT:-22}" \
+  SHARDLURE_ADMIN_PORT="${SHARDLURE_ADMIN_PORT:-2222}" \
+  SHARDLURE_DASH_PORT="${SHARDLURE_DASH_PORT:-8080}" \
+  SHARDLURE_ADMIN_IPS="${SHARDLURE_ADMIN_IPS:-}" \
+  python3 <<'PY'
 import os
 import shutil
 import subprocess

@@ -282,6 +282,35 @@ if [[ "$COWRIE" -eq 1 ]]; then
     chown -R cowrie:cowrie "$COWRIE_HOME"
     log "cowrie installed at $COWRIE_HOME"
   fi
+
+  # -- cowrie.cfg override --------------------------------------------------
+  # Without this, cowrie falls back to cowrie.cfg.dist defaults: port 2222
+  # regardless of --honeypot-port, and a jsonlog path we'd only tail
+  # correctly by coincidence. cowrie.cfg is read as an override on top of
+  # cowrie.cfg.dist, so a minimal managed file is enough. Only write it when
+  # absent or when we own it (marker), so hand-edits survive re-runs.
+  COWRIE_CFG="$COWRIE_HOME/etc/cowrie.cfg"
+  CFG_MARKER="# managed by shardlure install.sh"
+  if [[ ! -f "$COWRIE_CFG" ]] || grep -qF "$CFG_MARKER" "$COWRIE_CFG"; then
+    cat > "$COWRIE_CFG" <<CFG
+$CFG_MARKER
+# Hand-edit freely, but remove the marker line above so re-running the
+# installer does not overwrite your changes.
+
+[ssh]
+listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0
+
+[output_jsonlog]
+enabled = true
+logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json
+CFG
+    chown cowrie:cowrie "$COWRIE_CFG"
+    log "cowrie.cfg written (ssh port $HONEYPOT_PORT, jsonlog enabled)"
+  else
+    log "cowrie.cfg exists and is not managed by this installer — leaving it alone."
+    log "  ensure it contains: [ssh] listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0"
+    log "  and [output_jsonlog] logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json"
+  fi
 fi
 
 # -- write cowrie.service now that we know the entry-point layout ----------

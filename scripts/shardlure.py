@@ -598,6 +598,12 @@ def write_config(admin_ips: list[str], admin_port: int, honeypot_port: int, dash
         "cowrie:",
         f"  home: {COWRIE_HOME}",
         f"  json_log: {COWRIE_LOG}",
+        # config.Default() leaves geoip disabled; without this section a box
+        # installed via this script had the globe/country stats silently off
+        # while install.sh boxes had them on.
+        "geoip:",
+        "  enabled: true",
+        "  insecure_http: true",
     ])
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
 
