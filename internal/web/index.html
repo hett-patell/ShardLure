@@ -784,7 +784,9 @@ async function refresh() {
 refresh();
 refreshCapture();
 setInterval(refresh, 5000);
-setInterval(refreshCapture, 2000);
+// 5s, not 2s: capture data can only change on the 5s ingest tick, and
+// CaptureSummary aggregates the whole artifacts table per call.
+setInterval(refreshCapture, 5000);
 window.addEventListener('resize', function() { drawSpark(sparkData); });
 </script>
 </body>

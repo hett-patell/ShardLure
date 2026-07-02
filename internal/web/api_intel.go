@@ -962,7 +962,9 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uploads, err := s.st.ListBazaarUploads(limit)
+	// One LEFT JOIN query instead of a GetArtifactBySHA point query per
+	// upload row (the frontend polls this with limit=1000).
+	uploads, err := s.st.ListBazaarUploadsWithArtifacts(limit)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -988,9 +990,9 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 			Status:     u.ResponseStatus,
 			MBURL:      u.MBURL,
 		}
-		if art, err := s.st.GetArtifactBySHA(u.SHA256); err == nil && art != nil {
-			row.SizeBytes = art.SizeBytes
-			row.SrcIP = art.SrcIP
+		if u.SizeBytes > 0 || u.SrcIP != "" || u.LocalPath != "" {
+			row.SizeBytes = u.SizeBytes
+			row.SrcIP = u.SrcIP
 			classifyMu.Lock()
 			cls, cached := classifyCache[u.SHA256]
 			classifyMu.Unlock()
@@ -998,9 +1000,9 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 				row.Family = cls.Family
 				row.FileKind = cls.FileKind
 				row.Tags = cls.Tags
-			} else if art.LocalPath != "" {
-				if _, serr := os.Stat(art.LocalPath); serr == nil {
-					if cls, cerr := bazaar.Classify(art.LocalPath); cerr == nil {
+			} else if u.LocalPath != "" {
+				if _, serr := os.Stat(u.LocalPath); serr == nil {
+					if cls, cerr := bazaar.Classify(u.LocalPath); cerr == nil {
 						classifyMu.Lock()
 						if len(classifyCache) >= 500 {
 							for k := range classifyCache {

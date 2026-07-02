@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/netmatch"
@@ -35,6 +36,20 @@ type SafeFetcher struct {
 	// TestLoopback allows loopback targets (unit tests only).
 	TestLoopback bool
 	Client       *http.Client
+
+	// adminSet is the parsed AdminIPs matcher, built once. blockedIP runs
+	// per dial and per resolved DNS answer; rebuilding the set (string +
+	// CIDR parsing, map allocs) on every call was pure per-request waste.
+	adminSetOnce sync.Once
+	adminSet     *netmatch.Set
+}
+
+// adminMatcher returns the lazily-built AdminIPs matcher. Lazy (rather than
+// set in NewSafeFetcher) so zero-value construction in tests keeps working;
+// AdminIPs must not be mutated after first use.
+func (f *SafeFetcher) adminMatcher() *netmatch.Set {
+	f.adminSetOnce.Do(func() { f.adminSet = netmatch.New(f.AdminIPs) })
+	return f.adminSet
 }
 
 func NewSafeFetcher(evidenceDir string, maxBytes int64, timeout time.Duration, adminIPs []string) *SafeFetcher {
@@ -88,7 +103,7 @@ func (f *SafeFetcher) safeDial(ctx context.Context, network, address string) (ne
 	}
 	// Literal IP: validate once, dial directly.
 	if ip := net.ParseIP(host); ip != nil {
-		if blockedIP(ip, f.AdminIPs, f.TestLoopback) {
+		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
 			return nil, fmt.Errorf("blocked target %s", ip)
 		}
 		var d net.Dialer
@@ -100,7 +115,7 @@ func (f *SafeFetcher) safeDial(ctx context.Context, network, address string) (ne
 		return nil, fmt.Errorf("dns lookup %s: %w", host, err)
 	}
 	for _, ip := range ips {
-		if blockedIP(ip, f.AdminIPs, f.TestLoopback) {
+		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
 			// Any blocked answer in the set is fatal: an attacker
 			// who controls DNS could otherwise rotate through good
 			// and bad IPs and the runtime might pick a bad one.
@@ -115,7 +130,6 @@ func (f *SafeFetcher) safeDial(ctx context.Context, network, address string) (ne
 }
 
 func (f *SafeFetcher) assertSafeURL(raw string) error {
-	adminIPs := f.AdminIPs
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
@@ -130,7 +144,7 @@ func (f *SafeFetcher) assertSafeURL(raw string) error {
 		return fmt.Errorf("missing host")
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if blockedIP(ip, adminIPs, f.TestLoopback) {
+		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
 			return fmt.Errorf("blocked target %s", ip)
 		}
 		return nil
@@ -143,7 +157,7 @@ func (f *SafeFetcher) assertSafeURL(raw string) error {
 		return fmt.Errorf("no addresses for %s", host)
 	}
 	for _, ip := range ips {
-		if blockedIP(ip, adminIPs, f.TestLoopback) {
+		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
 			return fmt.Errorf("blocked resolved target %s", ip)
 		}
 	}
@@ -177,7 +191,7 @@ var reservedRanges = func() []*net.IPNet {
 	return out
 }()
 
-func blockedIP(ip net.IP, adminIPs []string, allowLoopback bool) bool {
+func blockedIP(ip net.IP, admin *netmatch.Set, allowLoopback bool) bool {
 	// Unspecified (0.0.0.0 / ::) connects to localhost on Linux, so it must be
 	// blocked unless loopback is explicitly allowed (tests only).
 	if ip.IsUnspecified() {
@@ -200,14 +214,12 @@ func blockedIP(ip net.IP, adminIPs []string, allowLoopback bool) bool {
 	// Second layer for IPv4-in-IPv6 translation/transition addresses: if the
 	// embedded IPv4 is itself blocked (loopback/private/etc.), block the v6
 	// form too, even for a translation prefix not enumerated above.
-	if v4 := embeddedV4(ip); v4 != nil && blockedIP(v4, adminIPs, allowLoopback) {
+	if v4 := embeddedV4(ip); v4 != nil && blockedIP(v4, admin, allowLoopback) {
 		return true
 	}
-	// adminIPs entries may be bare IPs or CIDR ranges. The old loop compared
-	// only ip.Equal(net.ParseIP(a)), so a CIDR entry parsed to nil and matched
-	// nothing — meaning an admin range was NOT exempted from being a fetch
-	// target. netmatch handles both forms.
-	return netmatch.New(adminIPs).HasIP(ip)
+	// admin entries may be bare IPs or CIDR ranges (netmatch handles both) —
+	// admin addresses are never legitimate fetch targets.
+	return admin.HasIP(ip)
 }
 
 // embeddedV4 extracts the IPv4 address embedded in an IPv4-in-IPv6 translation

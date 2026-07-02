@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -361,6 +362,25 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			return err
 		}
 	}
+
+	// v10: replace the single-column idx_events_actor with a composite
+	// (actor_id, ts). IterateEventsByActorIDs runs `WHERE actor_id IN (...)
+	// ORDER BY ts ASC` on every 5s live tick; with the single-column index
+	// SQLite re-sorted each touched actor's FULL history through a temp
+	// B-tree per tick (verified via EXPLAIN QUERY PLAN). The composite
+	// serves rows pre-sorted, and turns LastCommandByActor's LIMIT 1 into
+	// a backwards index walk instead of a sort-everything.
+	if current < 10 {
+		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_ts ON events(actor_id, ts)`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_events_actor`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (10, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -661,6 +681,46 @@ func (s *Store) GetActor(id string) (*models.Actor, error) {
 
 func (s *Store) ActorUsers(id string) ([]models.ActorUser, error) {
 	return s.ActorUsersLimit(id, 30)
+}
+
+// ActorUsersForActors returns the top-N usernames per actor for a batch of
+// actor IDs in ONE query. The /api/intel handler previously issued one
+// ActorUsersLimit query per listed actor (80 point queries per poll).
+// The window function needs SQLite 3.25+; modernc.org/sqlite bundles 3.4x.
+func (s *Store) ActorUsersForActors(ids []string, perActor int) (map[string][]models.ActorUser, error) {
+	if len(ids) == 0 {
+		return map[string][]models.ActorUser{}, nil
+	}
+	if perActor <= 0 {
+		perActor = 8
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, perActor)
+	q := `
+SELECT actor_id, username, count FROM (
+  SELECT actor_id, username, count,
+         ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY count DESC, username) AS rn
+  FROM actor_users WHERE actor_id IN (` + strings.Join(placeholders, ",") + `)
+) WHERE rn <= ? ORDER BY actor_id, count DESC`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]models.ActorUser, len(ids))
+	for rows.Next() {
+		var u models.ActorUser
+		if err := rows.Scan(&u.ActorID, &u.Username, &u.Count); err != nil {
+			return nil, err
+		}
+		out[u.ActorID] = append(out[u.ActorID], u)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ActorUsersLimit(id string, limit int) ([]models.ActorUser, error) {

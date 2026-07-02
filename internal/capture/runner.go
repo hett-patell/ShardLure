@@ -21,6 +21,17 @@ type Runner struct {
 	cfg        config.Config
 	fetch      *SafeFetcher
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
+
+	// doneKeys remembers url-keys already confirmed recorded (either found
+	// in the DB or written by us) so steady-state ticks stop re-issuing an
+	// ArtifactURLRecorded COUNT query per URL/file/event, every 5 seconds,
+	// forever. The DB stays the source of truth — the memo only shortcuts
+	// keys we've already checked once this process lifetime. Keys are only
+	// added on terminal outcomes, so a transient failure is retried.
+	doneKeys map[string]struct{}
+	// ttySessionBound remembers tty url-keys whose artifact row has a
+	// session id stamped, ending the per-tick backfill lookups for them.
+	ttySessionBound map[string]struct{}
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
@@ -38,7 +49,25 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 			time.Duration(capCfg.TimeoutSec)*time.Second,
 			cfg.AdminIPs,
 		),
+		doneKeys:        map[string]struct{}{},
+		ttySessionBound: map[string]struct{}{},
 	}
+}
+
+// urlKeyDone reports whether key is already recorded, consulting the
+// in-memory memo before the DB and memoizing a positive DB answer.
+func (r *Runner) urlKeyDone(key string) (bool, error) {
+	if _, ok := r.doneKeys[key]; ok {
+		return true, nil
+	}
+	exists, err := r.st.ArtifactURLRecorded(key)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		r.doneKeys[key] = struct{}{}
+	}
+	return exists, nil
 }
 
 // Run processes recent command events and syncs Cowrie download artifacts.
@@ -136,7 +165,12 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 			continue
 		}
 		urlKey := "cowrie-tty:" + name
-		exists, err := r.st.ArtifactURLRecorded(urlKey)
+		// Session already bound for this transcript: nothing left to do,
+		// skip the per-tick DB round-trips entirely.
+		if _, bound := r.ttySessionBound[urlKey]; bound {
+			continue
+		}
+		exists, err := r.urlKeyDone(urlKey)
 		if err != nil {
 			return n, err
 		}
@@ -145,8 +179,11 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 			// session binding existed have empty session_id. Try
 			// to resolve and stamp it so the intel session view can
 			// surface the transcript. We just LOOK UP -- no copy.
+			// Once stamped, the memo above ends these lookups.
 			if sid, _ := r.st.SessionIDForCowrieTTYShasum(name); sid != "" {
-				_ = r.st.SetArtifactSessionByURL(urlKey, sid)
+				if err := r.st.SetArtifactSessionByURL(urlKey, sid); err == nil {
+					r.ttySessionBound[urlKey] = struct{}{}
+				}
 			}
 			continue
 		}
@@ -182,6 +219,10 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 			Status:    "fetched",
 		}); err != nil {
 			return n, err
+		}
+		r.doneKeys[urlKey] = struct{}{}
+		if sessionID != "" {
+			r.ttySessionBound[urlKey] = struct{}{}
 		}
 		n++
 	}
@@ -221,7 +262,7 @@ func (r *Runner) fetchFromCommands(ctx context.Context) (int, error) {
 	var n int
 	for _, e := range events {
 		for _, rawURL := range ExtractURLs(e.Command) {
-			exists, err := r.st.ArtifactURLRecorded(rawURL)
+			exists, err := r.urlKeyDone(rawURL)
 			if err != nil || exists {
 				continue
 			}
@@ -253,6 +294,9 @@ func (r *Runner) fetchFromCommands(ctx context.Context) (int, error) {
 			if err := r.st.UpsertArtifact(art); err != nil {
 				return n, err
 			}
+			// The row exists in the DB from here on (success or failure),
+			// which is exactly what ArtifactURLRecorded would report.
+			r.doneKeys[rawURL] = struct{}{}
 			if art.Status == "fetched" {
 				n++
 			}
@@ -283,7 +327,7 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 		// filename, which we already have, so an already-archived download
 		// can be skipped without re-reading and re-hashing it every tick.
 		urlKey := "cowrie-download:" + ent.Name()
-		exists, err := r.st.ArtifactURLRecorded(urlKey)
+		exists, err := r.urlKeyDone(urlKey)
 		if err != nil || exists {
 			continue
 		}
@@ -306,6 +350,7 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 		}); err != nil {
 			return n, err
 		}
+		r.doneKeys[urlKey] = struct{}{}
 		n++
 	}
 	return n, nil
@@ -334,7 +379,7 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		if urlKey == "" {
 			urlKey = "cowrie-event:" + fmt.Sprint(e.ID)
 		}
-		exists, err := r.st.ArtifactURLRecorded(urlKey)
+		exists, err := r.urlKeyDone(urlKey)
 		if err != nil || exists {
 			continue
 		}
@@ -368,6 +413,7 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		}); err != nil {
 			return n, err
 		}
+		r.doneKeys[urlKey] = struct{}{}
 		n++
 	}
 	return n, nil

@@ -1627,8 +1627,16 @@ async function refresh() {
 
 refresh();
 refreshCapture();
-setInterval(refresh, 5000);
-setInterval(refreshCapture, 2000);
+// Gate the two heaviest pollers on the overview tab being visible —
+// /api/intel is the most expensive endpoint on the server, and firing it
+// while the operator sits on the red/blue tab was pure waste. 5s for
+// capture too: data can only change on the 5s ingest tick.
+function overviewActive() {
+  const v = document.getElementById('view-overview');
+  return !v || v.classList.contains('active');
+}
+setInterval(function(){ if (overviewActive()) refresh(); }, 5000);
+setInterval(function(){ if (overviewActive()) refreshCapture(); }, 5000);
 window.addEventListener('resize', function() {
   if (window._lastHeatmap) drawHeatmap(window._lastHeatmap);
 });
@@ -1676,6 +1684,20 @@ function bindChipGroup(attr, key) {
   });
 }
 bindChipGroup('window', 'window');
+
+// onWindowChange registers a per-slice refresher for window-chip clicks,
+// guarded on the slice's tab being visible. Without the guard one chip
+// click fanned out ~10 concurrent fetches — one per slice — most of them
+// for hidden tabs (each slice re-fetches on tab activation anyway, so
+// nothing is lost by skipping hidden ones).
+function onWindowChange(viewId, fn) {
+  document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+    c.addEventListener('click', function() {
+      const v = document.getElementById(viewId);
+      if (v && v.classList.contains('active')) fn();
+    });
+  });
+}
 
 const searchInput = document.getElementById('search-input');
 let searchTimer = 0;
@@ -1800,9 +1822,7 @@ setActiveView = function(name) {
   _origSetActive(name);
   if (name === 'blue') refreshMitre();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshMitre);
-});
+onWindowChange('view-blue', refreshMitre);
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshMitre();
 }, 30000);
@@ -1986,9 +2006,7 @@ setActiveView = function(name) {
   _setActiveForSessions(name);
   if (name === 'blue') refreshSessions();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshSessions);
-});
+onWindowChange('view-blue', refreshSessions);
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshSessions();
 }, 30000);
@@ -2064,9 +2082,7 @@ setActiveView = function(name) {
   _setActiveForIOC(name);
   if (name === 'blue') refreshIOC();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshIOC);
-});
+onWindowChange('view-blue', refreshIOC);
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshIOC();
 }, 30000);
@@ -2230,9 +2246,7 @@ setActiveView = function(name) {
   _setActiveForTTP(name);
   if (name === 'red') refreshTTP();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshTTP);
-});
+onWindowChange('view-red', refreshTTP);
 setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshTTP();
 }, 30000);
@@ -2391,6 +2405,10 @@ async function refreshPayloads() {
       var bd = await br.json();
       (bd.uploads || []).forEach(function(u) { freshSet[u.sha256] = u.mbUrl || true; });
       _bazaarSharedSet = freshSet;
+      // Render the bazaar panel from this same response — it used to run
+      // its own overlapping 30s limit=1000 + limit=30 pollers of the same
+      // endpoint.
+      if (typeof renderBazaar === 'function') renderBazaar(bd);
     }
     renderPayloads(pd);
   } catch (_) {}
@@ -2473,9 +2491,7 @@ setActiveView = function(name) {
   _setActiveForPayloads(name);
   if (name === 'red') refreshPayloads();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshPayloads);
-});
+onWindowChange('view-red', refreshPayloads);
 setInterval(function() {
   if (_uploadAllRunning) return;
   if (document.getElementById('view-red').classList.contains('active')) refreshPayloads();
@@ -2538,9 +2554,7 @@ setActiveView = function(name) {
   _setActiveForWL(name);
   if (name === 'red') refreshWordlist();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshWordlist);
-});
+onWindowChange('view-red', refreshWordlist);
 setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshWordlist();
 }, 30000);
@@ -2634,9 +2648,7 @@ setActiveView = function(name) {
     setTimeout(refreshGraph, 50);
   }
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', function() { setTimeout(refreshGraph, 50); });
-});
+onWindowChange('view-red', function() { setTimeout(refreshGraph, 50); });
 setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshGraph();
 }, 60000);
@@ -2704,9 +2716,7 @@ setActiveView = function(name) {
   _setActiveForReplay(name);
   if (name === 'red') loadReplaySessions();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', loadReplaySessions);
-});
+onWindowChange('view-red', loadReplaySessions);
 if (readTabFromHash() === 'red') loadReplaySessions();
 
 function escAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
@@ -2790,9 +2800,7 @@ setActiveView = function(name) {
   _setActiveForDeobf(name);
   if (name === 'red') refreshDeobf();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshDeobf);
-});
+onWindowChange('view-red', refreshDeobf);
 // Auto-refresh once a minute, but bail out if the operator looks
 // busy reading the panel: scrolled away from the top, or has an
 // active text selection inside the rows. Replacing innerHTML in
@@ -2846,19 +2854,12 @@ function renderBazaar(d) {
   }).join('');
 }
 
-// Wire into tab switching (monkey-patch chain)
-var _setActiveViewPreBazaar = setActiveView;
-setActiveView = function(name) {
-  _setActiveViewPreBazaar(name);
-  if (name === 'red') refreshBazaar();
-};
-
-// Poll every 30s when red tab is active
-setInterval(function() {
-  if (!document.getElementById('view-red').classList.contains('active')) return;
-  refreshBazaar();
-}, 30000);
-if (readTabFromHash() === 'red') refreshBazaar();
+// No poller or tab hook here: refreshPayloads (same red tab, 30s poll)
+// already fetches the full upload list and now renders the bazaar panel
+// from that response — running a second overlapping poller of the same
+// endpoint (limit=1000 there, limit=30 here) doubled the load for nothing.
+// refreshBazaar remains as the cheap limit=30 refresh after manual upload
+// actions.
 
 // ==== Widget functions ================================================
 

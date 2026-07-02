@@ -63,6 +63,69 @@ type Server struct {
 	// pollers of the same window collapse onto one scan.
 	eventsMu    sync.Mutex
 	eventsCache map[int]windowedEvents
+
+	// statsCache memoizes the whole-table aggregates both /api/dashboard and
+	// /api/intel recompute on every 5s poll per open tab: COUNT(*) over
+	// events, COUNT(DISTINCT src_ip), and the unbounded kind/source GROUP
+	// BYs. On a multi-million-row DB these were the dominant recurring
+	// load; the data only changes on the 5s ingest tick, so a short TTL is
+	// invisible to the operator.
+	statsMu     sync.Mutex
+	statsCached *summaryStats
+	statsAt     time.Time
+}
+
+type summaryStats struct {
+	Events       int
+	Actors       int
+	UniqueIPs    int
+	Countries    int
+	KindCounts   []store.LabelCount
+	SourceCounts []store.LabelCount
+}
+
+const statsTTL = 10 * time.Second
+
+// summaryStatsCached returns the memoized whole-table aggregates,
+// recomputing at most once per statsTTL.
+func (s *Server) summaryStatsCached() (*summaryStats, error) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if s.statsCached != nil && time.Since(s.statsAt) < statsTTL {
+		return s.statsCached, nil
+	}
+	ec, err := s.st.EventCount()
+	if err != nil {
+		return s.statsCached, err
+	}
+	ac, err := s.st.ActorCount()
+	if err != nil {
+		return s.statsCached, err
+	}
+	ips, err := s.st.UniqueIPCount()
+	if err != nil {
+		return s.statsCached, err
+	}
+	// Best-effort; 0 on error keeps the panel alive.
+	countries, _ := s.st.DistinctGeoCountryCount()
+	kinds, err := s.st.CountsByKind()
+	if err != nil {
+		return s.statsCached, err
+	}
+	sources, err := s.st.CountsBySource()
+	if err != nil {
+		return s.statsCached, err
+	}
+	s.statsCached = &summaryStats{
+		Events:       ec,
+		Actors:       ac,
+		UniqueIPs:    ips,
+		Countries:    countries,
+		KindCounts:   kinds,
+		SourceCounts: sources,
+	}
+	s.statsAt = time.Now()
+	return s.statsCached, nil
 }
 
 type windowedEvents struct {
@@ -566,9 +629,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
-	uniqueIPs, _ := s.st.UniqueIPCount()
-	ec, _ := s.st.EventCount()
-	ac, _ := s.st.ActorCount()
+	var ec, ac, uniqueIPs int
+	if stats, err := s.summaryStatsCached(); err == nil {
+		ec, ac, uniqueIPs = stats.Events, stats.Actors, stats.UniqueIPs
+	}
 
 	resp := dashboardResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -588,7 +652,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, row := range topIPs {
 		geoIPs = append(geoIPs, row.Key)
 	}
-	s.geo.prefetch(geoIPs, 5*time.Second)
+	// Fire-and-forget: blocking this 5s-polled handler on outbound geo
+	// lookups stalled the response up to the whole poll interval when a
+	// batch of new IPs appeared. The frontend renders "resolving…" for
+	// missing geo and the next poll picks up the cached result; prefetch
+	// dedupes in-flight lookups so overlapping polls are safe.
+	go s.geo.prefetch(geoIPs, 5*time.Second)
 
 	for _, a := range actors {
 		card := actorCard{

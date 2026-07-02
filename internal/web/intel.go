@@ -104,36 +104,25 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	ec, err := s.st.EventCount()
-	if err != nil {
-		httpError(w, "intel", err, http.StatusInternalServerError)
-		return
-	}
-	ac, err := s.st.ActorCount()
-	if err != nil {
-		httpError(w, "intel", err, http.StatusInternalServerError)
-		return
-	}
-	uniqueIPs, err := s.st.UniqueIPCount()
+	// Whole-table aggregates come from the shared TTL cache: this endpoint
+	// is polled every 5s per open tab and each of these was a full-table
+	// scan/aggregation.
+	stats, err := s.summaryStatsCached()
 	if err != nil {
 		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
 
 	now := time.Now()
-	// Countries was never set here, so the Overview stat always showed 0 even
-	// though /api/dashboard reported a real count. Use the geo-cache-wide
-	// distinct-CC count (best-effort; 0 on error keeps the panel alive).
-	countries, _ := s.st.DistinctGeoCountryCount()
 	resp := intelResponse{
 		GeneratedAt:   now.UTC().Format(time.RFC3339),
 		StartedAt:     s.startedAt.UTC().Format(time.RFC3339),
 		UptimeSeconds: int64(now.Sub(s.startedAt).Seconds()),
 		Summary: summaryBlock{
-			EventCount: ec,
-			ActorCount: ac,
-			UniqueIPs:  uniqueIPs,
-			Countries:  countries,
+			EventCount: stats.Events,
+			ActorCount: stats.Actors,
+			UniqueIPs:  stats.UniqueIPs,
+			Countries:  stats.Countries,
 		},
 	}
 	// Attack Geography: true hits-by-country over ALL events (was recomputed
@@ -154,12 +143,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	kinds, err := s.st.CountsByKind()
-	if err != nil {
-		httpError(w, "intel", err, http.StatusInternalServerError)
-		return
-	}
-	for _, k := range kinds {
+	for _, k := range stats.KindCounts {
 		resp.KindCounts = append(resp.KindCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
@@ -181,12 +165,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		resp.PlaybookCounts = append(resp.PlaybookCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
-	sources, err := s.st.CountsBySource()
-	if err != nil {
-		httpError(w, "intel", err, http.StatusInternalServerError)
-		return
-	}
-	for _, k := range sources {
+	for _, k := range stats.SourceCounts {
 		resp.SourceCounts = append(resp.SourceCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
@@ -209,10 +188,24 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	geoIPs := make([]string, 0, len(actors))
+	actorIDs := make([]string, 0, len(actors))
 	for _, a := range actors {
 		geoIPs = append(geoIPs, a.PrimaryIP)
+		actorIDs = append(actorIDs, a.ID)
 	}
-	s.geo.prefetch(geoIPs, 5*time.Second)
+	// Fire-and-forget: both frontends render "resolving…" for missing geo,
+	// so blocking this 5s-polled handler on outbound lookups (up to the
+	// whole poll interval during an attack wave) buys nothing. prefetch
+	// dedupes in-flight lookups, so overlapping polls are safe.
+	go s.geo.prefetch(geoIPs, 5*time.Second)
+
+	// One window-function query for all actors' top users instead of one
+	// point query per actor (was ~80 queries per poll).
+	usersByActor, err := s.st.ActorUsersForActors(actorIDs, 8)
+	if err != nil {
+		httpError(w, "intel", err, http.StatusInternalServerError)
+		return
+	}
 
 	for _, a := range actors {
 		row := intelActorRow{
@@ -239,12 +232,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 				row.CC = g.CC
 			}
 		}
-		users, err := s.st.ActorUsersLimit(a.ID, 8)
-		if err != nil {
-			httpError(w, "intel", err, http.StatusInternalServerError)
-			return
-		}
-		for _, u := range users {
+		for _, u := range usersByActor[a.ID] {
 			row.TopUsers = append(row.TopUsers, topUserRow{User: u.Username, Hits: u.Count})
 		}
 		resp.Actors = append(resp.Actors, row)

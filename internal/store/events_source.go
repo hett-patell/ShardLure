@@ -58,22 +58,17 @@ FROM events WHERE source=? ORDER BY ts ASC`, source)
 // ids is chunked to stay under SQLite's parameter limit. An empty ids is a
 // no-op. fn follows the same contract as IterateEventsBySource.
 func (s *Store) IterateEventsByActorIDs(ids []string, fn func(*models.Event) error) error {
-	const chunk = 400
-	for i := 0; i < len(ids); i += chunk {
-		end := i + chunk
-		if end > len(ids) {
-			end = len(ids)
-		}
-		batch := ids[i:end]
-		placeholders := make([]string, len(batch))
-		args := make([]any, len(batch))
-		for j, id := range batch {
-			placeholders[j] = "?"
-			args[j] = id
-		}
-		q := `SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id
-FROM events WHERE actor_id IN (` + joinComma(placeholders) + `) ORDER BY ts ASC`
-		rows, err := s.db.Query(q, args...)
+	// One equality query per actor rather than a chunked IN-list: with the
+	// composite idx_events_actor_ts, `actor_id = ? ORDER BY ts` streams rows
+	// pre-sorted straight off the index, while `actor_id IN (...) ORDER BY
+	// ts` still forces a temp B-tree sort of all matched rows per chunk
+	// (verified via EXPLAIN QUERY PLAN). Callers only need ts order WITHIN
+	// each actor (the collectors key clusters by actor), and the touched-ID
+	// set per live tick is small, so per-ID queries are the cheaper shape.
+	const q = `SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id
+FROM events WHERE actor_id = ? ORDER BY ts ASC`
+	for _, id := range ids {
+		rows, err := s.db.Query(q, id)
 		if err != nil {
 			return err
 		}
@@ -98,15 +93,4 @@ FROM events WHERE actor_id IN (` + joinComma(placeholders) + `) ORDER BY ts ASC`
 		}
 	}
 	return nil
-}
-
-func joinComma(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += ","
-		}
-		out += p
-	}
-	return out
 }
