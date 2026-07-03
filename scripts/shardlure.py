@@ -513,39 +513,85 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
         ssh_listen_set = True
     if not ssh_listen_set:
         out.extend(["", "[ssh]", f"listen_endpoints = {endpoint}"])
-    # Append any of the non-[ssh] sections that are still missing. Each is
-    # guarded independently so a config that already has, say, [output_jsonlog]
-    # but not [honeypot] doesn't get [output_jsonlog] duplicated (which would
-    # trip configparser's DuplicateSectionError). [ssh] is handled above.
-    joined = "\n".join(out)
-    extra_sections = {
-        "[honeypot]": f"""[honeypot]
-hostname = prod-app-server-01
-sensor_name = prod-app-server-01
-log_path = {COWRIE_HOME}/var/log/cowrie
-state_path = {COWRIE_HOME}/var/lib/cowrie
-download_path = {COWRIE_HOME}/var/lib/cowrie/downloads
-contents_path = {COWRIE_HOME}/honeyfs
-data_path = {COWRIE_HOME}/src/cowrie/data
-etc_path = {COWRIE_HOME}/etc""",
-        "[shell]": f"""[shell]
-arch = linux-x64-lsb
-kernel_name = Linux
-kernel_version = 5.15.0-94-generic
-kernel_build_string = #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024
-hardware_platform = x86_64
-operating_system = GNU/Linux
-ssh_version = OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022
-filesystem = {COWRIE_HOME}/src/cowrie/data/fs.pickle""",
-        "[output_jsonlog]": f"""[output_jsonlog]
-enabled = true
-logfile = {COWRIE_HOME}/var/log/cowrie/cowrie.json""",
+    # Ensure required sections exist AND that each carries its required keys.
+    # Guaranteeing only the section header (the old behaviour) was a latent bug:
+    # the stealth persona template ships a [honeypot] with just hostname/
+    # sensor_name, so a header-only check left etc_path/log_path/state_path/
+    # contents_path/data_path and [shell] filesystem UNSET. Cowrie then silently
+    # ignored etc/userdb.txt (etc_path empty -> custom creds never applied) and
+    # could miss the bait fs.pickle (filesystem unset). We now merge any missing
+    # key into an existing section and only append a whole section when absent.
+    required = {
+        "honeypot": [
+            ("hostname", "prod-app-server-01"),
+            ("sensor_name", "prod-app-server-01"),
+            ("log_path", f"{COWRIE_HOME}/var/log/cowrie"),
+            ("state_path", f"{COWRIE_HOME}/var/lib/cowrie"),
+            ("download_path", f"{COWRIE_HOME}/var/lib/cowrie/downloads"),
+            ("contents_path", f"{COWRIE_HOME}/honeyfs"),
+            ("data_path", f"{COWRIE_HOME}/src/cowrie/data"),
+            ("etc_path", f"{COWRIE_HOME}/etc"),
+        ],
+        "shell": [
+            ("arch", "linux-x64-lsb"),
+            ("kernel_name", "Linux"),
+            ("kernel_version", "5.15.0-94-generic"),
+            ("kernel_build_string", "#104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024"),
+            ("hardware_platform", "x86_64"),
+            ("operating_system", "GNU/Linux"),
+            ("ssh_version", "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022"),
+            ("filesystem", f"{COWRIE_HOME}/src/cowrie/data/fs.pickle"),
+        ],
+        "output_jsonlog": [
+            ("enabled", "true"),
+            ("logfile", f"{COWRIE_HOME}/var/log/cowrie/cowrie.json"),
+        ],
     }
-    for header, body in extra_sections.items():
-        if header not in joined:
+
+    # Parse the current output into ordered sections so we can inject missing
+    # keys in place (rather than appending a duplicate header).
+    def section_of(line: str) -> str | None:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            return s[1:-1].lower()
+        return None
+
+    # Which keys already appear under each section?
+    present: dict[str, set[str]] = {}
+    cur = ""
+    for line in out:
+        sec = section_of(line)
+        if sec is not None:
+            cur = sec
+            present.setdefault(cur, set())
+            continue
+        s = line.strip()
+        if cur and s and not s.startswith("#") and "=" in s:
+            present.setdefault(cur, set()).add(s.split("=", 1)[0].strip().lower())
+
+    # Inject missing keys into existing sections by rebuilding line-by-line,
+    # emitting the additions right after the section header.
+    rebuilt: list[str] = []
+    cur = ""
+    for line in out:
+        rebuilt.append(line)
+        sec = section_of(line)
+        if sec is not None and sec in required:
+            have = present.get(sec, set())
+            for key, val in required[sec]:
+                if key not in have:
+                    rebuilt.append(f"{key} = {val}")
+                    have.add(key)
+    out = rebuilt
+
+    # Append any required section that was entirely absent.
+    joined_secs = {section_of(l) for l in out if section_of(l) is not None}
+    for sec, kvs in required.items():
+        if sec not in joined_secs:
             out.append("")
-            out.append(body)
-            joined += "\n" + body
+            out.append(f"[{sec}]")
+            out.extend(f"{k} = {v}" for k, v in kvs)
+
     return "\n".join(out).rstrip() + "\n"
 
 
