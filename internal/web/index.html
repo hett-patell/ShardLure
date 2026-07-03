@@ -616,7 +616,13 @@ function renderShellSessions(rows) {
     root.innerHTML = '<div class="empty">No sessions with shell access yet</div>';
     return;
   }
-  count.textContent = '(' + rows.length + ' in last 24h)';
+  // The server caps this list at 30 (server.go RecentShellSessions(-24h,30)),
+  // so on a busy box rows.length is the page size, NOT the 24h total. Disclose
+  // the cap rather than presenting 30 as the population (the honesty pattern
+  // the intel sessions/payload/graph widgets already follow).
+  count.textContent = rows.length >= 30
+    ? '(newest ' + rows.length + ' shell sessions · last 24h)'
+    : '(' + rows.length + ' shell session' + (rows.length === 1 ? '' : 's') + ' · last 24h)';
   rows.forEach(function(r) {
     const row = document.createElement('a');
     row.className = 'row sess-row';
