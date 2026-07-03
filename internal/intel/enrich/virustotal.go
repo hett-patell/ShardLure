@@ -1,10 +1,8 @@
 package enrich
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strconv"
 )
 
@@ -28,20 +26,24 @@ type vtResp struct {
 	} `json:"data"`
 }
 
-func fetchVirusTotal(ctx context.Context, hc *http.Client, ip string) (Result, error) {
-	key := envKey("SHARDLURE_VT_KEY")
-	if key == "" {
-		return Result{Configured: false, Verdict: "unknown"}, nil
-	}
+var virusTotalSpec = providerSpec{
+	envVar: "SHARDLURE_VT_KEY",
+	buildReq: func(ip, key string) (string, map[string]string) {
+		return "https://www.virustotal.com/api/v3/ip_addresses/" + ip,
+			map[string]string{
+				"Accept":   "application/json",
+				"x-apikey": key,
+			}
+	},
+	parse: parseVirusTotal,
+}
 
-	url := "https://www.virustotal.com/api/v3/ip_addresses/" + ip
+// parseVirusTotal maps the v3 IP payload onto a Result. Split out from the
+// HTTP wrapper so it can be unit-tested without a network round-trip.
+func parseVirusTotal(raw []byte, ip string) Result {
 	var parsed vtResp
-	raw, err := httpJSON(ctx, hc, url, map[string]string{
-		"Accept":   "application/json",
-		"x-apikey": key,
-	}, &parsed)
-	if err != nil {
-		return Result{Configured: true}, err
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return Result{Configured: true, Error: err.Error()}
 	}
 
 	a := parsed.Data.Attributes
@@ -83,5 +85,5 @@ func fetchVirusTotal(ctx context.Context, hc *http.Client, ip string) (Result, e
 		Summary:    summary,
 		URL:        "https://www.virustotal.com/gui/ip-address/" + ip,
 		Raw:        json.RawMessage(raw),
-	}, nil
+	}
 }

@@ -1,6 +1,0 @@
-import base64
-from pathlib import Path
-src = Path(__file__).resolve().parent / "shardlure.py"
-out = Path(__file__).resolve().parent / "shardlure.py.b64"
-out.write_text(base64.b64encode(src.read_bytes()).decode("ascii"))
-print("wrote", out, "bytes", out.stat().st_size)

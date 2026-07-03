@@ -405,7 +405,20 @@ def apply_stealth_persona(honeypot_port: int) -> None:
         )
     userdb = persona / "userdb.txt"
     if userdb.is_file():
-        shutil.copy2(userdb, COWRIE_HOME / "etc/userdb.txt")
+        # Cowrie reads userdb.txt as STRICT ASCII (auth.py uses
+        # read_text(encoding="ascii")); a single non-ASCII byte makes the whole
+        # userdb load throw and cowrie silently falls back to built-in defaults
+        # — so our bait credentials would never apply. Validate here and strip
+        # any stray non-ASCII rather than shipping a userdb cowrie can't read.
+        raw = userdb.read_bytes()
+        try:
+            raw.decode("ascii")
+            clean = raw
+        except UnicodeDecodeError:
+            log("warning: persona userdb.txt has non-ASCII bytes; stripping them "
+                "(cowrie reads userdb as strict ASCII and would otherwise ignore it)")
+            clean = raw.decode("utf-8", "ignore").encode("ascii", "ignore")
+        (COWRIE_HOME / "etc/userdb.txt").write_bytes(clean)
     ensure_cowrie_filesystem()
     plant_bait_files()
     keydir = COWRIE_HOME / "var/lib/cowrie"
@@ -452,6 +465,8 @@ def plant_bait_files() -> None:
         return
 
     def fs(cmd: str) -> None:
+        # mkdir on an existing dir (and similar) is a benign non-zero exit;
+        # fsctl prints its own diagnostics, so no extra handling here.
         run([str(fsctl), str(pickle_path), cmd])
 
     for d in (
@@ -461,18 +476,16 @@ def plant_bait_files() -> None:
         "/var/backups", "/var/backups/nightly",
         "/etc/nginx", "/etc/nginx/sites-available",
     ):
-        cp = run([str(fsctl), str(pickle_path), f"mkdir {d}"])
-        if cp.returncode != 0:
-            pass
+        fs(f"mkdir {d}")
     for hostfile in bait_src.rglob("*"):
         if not hostfile.is_file():
             continue
         rel = hostfile.relative_to(bait_src)
         vpath = f"/{rel.as_posix()}"
-        run([str(fsctl), str(pickle_path), f"touch {vpath}"])
+        fs(f"touch {vpath}")
         dst = honeyfs / rel
         if dst.is_file():
-            run([str(fsctl), str(pickle_path), f"load {vpath} {dst}"])
+            fs(f"load {vpath} {dst}")
     dst_pickle = COWRIE_HOME / "var/lib/cowrie/fs.pickle"
     if pickle_path.exists():
         shutil.copy2(pickle_path, dst_pickle)
@@ -513,39 +526,85 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
         ssh_listen_set = True
     if not ssh_listen_set:
         out.extend(["", "[ssh]", f"listen_endpoints = {endpoint}"])
-    # Append any of the non-[ssh] sections that are still missing. Each is
-    # guarded independently so a config that already has, say, [output_jsonlog]
-    # but not [honeypot] doesn't get [output_jsonlog] duplicated (which would
-    # trip configparser's DuplicateSectionError). [ssh] is handled above.
-    joined = "\n".join(out)
-    extra_sections = {
-        "[honeypot]": f"""[honeypot]
-hostname = prod-app-server-01
-sensor_name = prod-app-server-01
-log_path = {COWRIE_HOME}/var/log/cowrie
-state_path = {COWRIE_HOME}/var/lib/cowrie
-download_path = {COWRIE_HOME}/var/lib/cowrie/downloads
-contents_path = {COWRIE_HOME}/honeyfs
-data_path = {COWRIE_HOME}/src/cowrie/data
-etc_path = {COWRIE_HOME}/etc""",
-        "[shell]": f"""[shell]
-arch = linux-x64-lsb
-kernel_name = Linux
-kernel_version = 5.15.0-94-generic
-kernel_build_string = #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024
-hardware_platform = x86_64
-operating_system = GNU/Linux
-ssh_version = OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022
-filesystem = {COWRIE_HOME}/src/cowrie/data/fs.pickle""",
-        "[output_jsonlog]": f"""[output_jsonlog]
-enabled = true
-logfile = {COWRIE_HOME}/var/log/cowrie/cowrie.json""",
+    # Ensure required sections exist AND that each carries its required keys.
+    # Guaranteeing only the section header (the old behaviour) was a latent bug:
+    # the stealth persona template ships a [honeypot] with just hostname/
+    # sensor_name, so a header-only check left etc_path/log_path/state_path/
+    # contents_path/data_path and [shell] filesystem UNSET. Cowrie then silently
+    # ignored etc/userdb.txt (etc_path empty -> custom creds never applied) and
+    # could miss the bait fs.pickle (filesystem unset). We now merge any missing
+    # key into an existing section and only append a whole section when absent.
+    required = {
+        "honeypot": [
+            ("hostname", "prod-app-server-01"),
+            ("sensor_name", "prod-app-server-01"),
+            ("log_path", f"{COWRIE_HOME}/var/log/cowrie"),
+            ("state_path", f"{COWRIE_HOME}/var/lib/cowrie"),
+            ("download_path", f"{COWRIE_HOME}/var/lib/cowrie/downloads"),
+            ("contents_path", f"{COWRIE_HOME}/honeyfs"),
+            ("data_path", f"{COWRIE_HOME}/src/cowrie/data"),
+            ("etc_path", f"{COWRIE_HOME}/etc"),
+        ],
+        "shell": [
+            ("arch", "linux-x64-lsb"),
+            ("kernel_name", "Linux"),
+            ("kernel_version", "5.15.0-94-generic"),
+            ("kernel_build_string", "#104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024"),
+            ("hardware_platform", "x86_64"),
+            ("operating_system", "GNU/Linux"),
+            ("ssh_version", "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022"),
+            ("filesystem", f"{COWRIE_HOME}/src/cowrie/data/fs.pickle"),
+        ],
+        "output_jsonlog": [
+            ("enabled", "true"),
+            ("logfile", f"{COWRIE_HOME}/var/log/cowrie/cowrie.json"),
+        ],
     }
-    for header, body in extra_sections.items():
-        if header not in joined:
+
+    # Parse the current output into ordered sections so we can inject missing
+    # keys in place (rather than appending a duplicate header).
+    def section_of(line: str) -> str | None:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            return s[1:-1].lower()
+        return None
+
+    # Which keys already appear under each section?
+    present: dict[str, set[str]] = {}
+    cur = ""
+    for line in out:
+        sec = section_of(line)
+        if sec is not None:
+            cur = sec
+            present.setdefault(cur, set())
+            continue
+        s = line.strip()
+        if cur and s and not s.startswith("#") and "=" in s:
+            present.setdefault(cur, set()).add(s.split("=", 1)[0].strip().lower())
+
+    # Inject missing keys into existing sections by rebuilding line-by-line,
+    # emitting the additions right after the section header.
+    rebuilt: list[str] = []
+    cur = ""
+    for line in out:
+        rebuilt.append(line)
+        sec = section_of(line)
+        if sec is not None and sec in required:
+            have = present.get(sec, set())
+            for key, val in required[sec]:
+                if key not in have:
+                    rebuilt.append(f"{key} = {val}")
+                    have.add(key)
+    out = rebuilt
+
+    # Append any required section that was entirely absent.
+    joined_secs = {section_of(l) for l in out if section_of(l) is not None}
+    for sec, kvs in required.items():
+        if sec not in joined_secs:
             out.append("")
-            out.append(body)
-            joined += "\n" + body
+            out.append(f"[{sec}]")
+            out.extend(f"{k} = {v}" for k, v in kvs)
+
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -598,6 +657,12 @@ def write_config(admin_ips: list[str], admin_port: int, honeypot_port: int, dash
         "cowrie:",
         f"  home: {COWRIE_HOME}",
         f"  json_log: {COWRIE_LOG}",
+        # config.Default() leaves geoip disabled; without this section a box
+        # installed via this script had the globe/country stats silently off
+        # while install.sh boxes had them on.
+        "geoip:",
+        "  enabled: true",
+        "  insecure_http: true",
     ])
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
 
@@ -662,8 +727,37 @@ def open_firewall(honeypot_port: int, admin_port: int, dash_port: int) -> None:
     cp = run(["ufw", "status"], capture_output=True, text=True)
     if "active" not in (cp.stdout or "").lower():
         return
-    for port in (honeypot_port, admin_port, dash_port):
+    # The honeypot MUST be world-reachable (that's the point) and the admin
+    # SSH port is key-only, so both open publicly. The DASHBOARD is different:
+    # it exposes attacker IPs, captured payloads, and the bait-file layout with
+    # no built-in auth unless SHARDLURE_DASH_TOKEN is set — so it must NOT be
+    # opened to the internet. Bind it to the Tailscale interface when present
+    # (the intended admin path); otherwise leave it firewalled and reachable
+    # only via localhost / an SSH tunnel. An operator who genuinely wants it
+    # public can `ufw allow 8080/tcp` themselves after setting a token.
+    for port in (honeypot_port, admin_port):
         run(["ufw", "allow", f"{port}/tcp"])
+    ts_iface = _tailscale_iface()
+    if ts_iface:
+        run(["ufw", "allow", "in", "on", ts_iface, "to", "any", "port", str(dash_port), "proto", "tcp"])
+        log(f"dashboard port {dash_port} allowed on {ts_iface} only (not public)")
+    else:
+        log(f"dashboard port {dash_port} left firewalled (no tailscale iface); "
+            f"reach it via: ssh -L {dash_port}:127.0.0.1:{dash_port} -p {admin_port} <user>@<host>")
+
+
+def _tailscale_iface() -> str:
+    """Return the Tailscale interface name (usually tailscale0) if this host is
+    on a tailnet, else ''. Used to scope the dashboard firewall rule."""
+    if not shutil.which("tailscale"):
+        return ""
+    cp = run(["tailscale", "ip", "-4"], capture_output=True, text=True)
+    if not (cp.stdout or "").strip():
+        return ""
+    # tailscale0 is the near-universal name; confirm it exists before returning.
+    if Path("/sys/class/net/tailscale0").exists():
+        return "tailscale0"
+    return ""
 
 
 def print_summary(admin_port: int, honeypot_port: int, dash_port: int) -> None:
@@ -676,9 +770,14 @@ def print_summary(admin_port: int, honeypot_port: int, dash_port: int) -> None:
     print("\nShardLure is running\n====================")
     print(f"Honeypot SSH (Cowrie): 0.0.0.0:{honeypot_port}")
     print(f"Admin SSH (real):      0.0.0.0:{admin_port}  (key-only)")
-    print(f"Dashboard:             http://127.0.0.1:{dash_port}")
+    print(f"Dashboard:             http://127.0.0.1:{dash_port}  (not public — see below)")
     if tsurl:
         print(f"Tailscale dashboard:   http://{tsurl}:{dash_port}")
+    else:
+        print(f"  reach the dashboard via an SSH tunnel:")
+        print(f"    ssh -L {dash_port}:127.0.0.1:{dash_port} -p {admin_port} {user}@<host-ip>")
+    print("  (the dashboard is firewalled off the public internet; set")
+    print("   SHARDLURE_DASH_TOKEN + `ufw allow " + str(dash_port) + "/tcp` if you want it exposed)")
     print("\nIMPORTANT: open a NEW terminal and verify admin SSH before closing this one:")
     print(f"  ssh -p {admin_port} {user}@<host-ip>")
     print("\nServices:")

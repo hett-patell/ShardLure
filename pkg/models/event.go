@@ -18,10 +18,12 @@ const (
 	KindAccepted    EventKind = "accepted"
 	KindConnect     EventKind = "connect"
 	// KindClientVersion is Cowrie's cowrie.client.version — the SSH client
-	// banner/identity announcement (carries hassh + ssh_client). It co-occurs
-	// with KindConnect at session start, so it is tracked separately rather
-	// than folded into KindConnect, which would double-count every session as
-	// two connections (inflating event counts, attempt rates, and probe score).
+	// banner/identity announcement (carries the client's `version` string in
+	// ssh_client; the HASSH fingerprint is a SEPARATE cowrie.client.kex event,
+	// stamped onto session events during ingest). It co-occurs with KindConnect
+	// at session start, so it is tracked separately rather than folded into
+	// KindConnect, which would double-count every session as two connections
+	// (inflating event counts, attempt rates, and probe score).
 	KindClientVersion EventKind = "client_version"
 	KindCommand       EventKind = "command"
 	KindFileUp        EventKind = "file_upload"
@@ -41,7 +43,6 @@ type Event struct {
 	SessionID string
 	HASSH     string
 	SSHClient string
-	JA4       string
 	Command   string
 	SHA256    string
 	Filename  string
@@ -73,14 +74,6 @@ type Actor struct {
 	// actor.journalProbeScore from the event mix and attempt rate.
 	ProbeScore int
 	Notes      string
-}
-
-type ActorIP struct {
-	ActorID   string
-	IP        string
-	FirstSeen time.Time
-	LastSeen  time.Time
-	Count     int
 }
 
 type ActorUser struct {

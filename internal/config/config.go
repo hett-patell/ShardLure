@@ -199,22 +199,6 @@ func DefaultConfigPath() string {
 	return filepath.Join(userDataDir(), "shardlure.yaml")
 }
 
-func (c Config) Save(path string) error {
-	if path == "" {
-		path = DefaultConfigPath()
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	b, err := yaml.Marshal(c)
-	if err != nil {
-		return err
-	}
-	// 0600: the config can carry the abuse.ch Auth-Key (intel.bazaar.api_key)
-	// and admin_ips that reveal private network topology. Owner-only.
-	return os.WriteFile(path, b, 0o600)
-}
-
 func (c Config) DBPath() string {
 	return filepath.Join(c.DataDir, "shardlure.db")
 }

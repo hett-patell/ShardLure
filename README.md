@@ -1,7 +1,7 @@
 # ShardLure
 
 [![Release](https://img.shields.io/github/v/release/hett-patell/ShardLure?color=blue)](https://github.com/hett-patell/ShardLure/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/networkshard/shardlure)](https://goreportcard.com/report/github.com/networkshard/shardlure)
 [![Stars](https://img.shields.io/github/stars/hett-patell/ShardLure?style=social)](https://github.com/hett-patell/ShardLure/stargazers)
 
@@ -369,6 +369,8 @@ never blocks the others.
 
 `shardlure share bazaar` submits captured payloads to [abuse.ch MalwareBazaar](https://bazaar.abuse.ch/). Each upload is automatically classified (ELF arch, static-vs-dynamic linkage, scripting language, and a short list of well-known family fingerprints — RedTail, Mirai, Komari, Traffmonetizer, XMRig, c3pool) and tagged. abuse.ch's server-side analysis (YARA, ClamAV, telfhash) then bolts on the heavy-duty signatures.
 
+Before anything is sent, every candidate passes a **submission-policy gate** (`internal/intel/bazaar/vet.go`) that enforces MalwareBazaar's rules locally so a benign, junk, or stale file never touches the API (repeat violations get accounts banned). It **hard-rejects**: SSH keys and other benign content, files under 64 bytes, TTY transcripts, and anything older than 10 days (measured from first observation, not import time). It **accepts as confirmed malware** on any of three signals — structural (any ELF/PE executable), signature (a recognised family/malware tag), or **provenance** (a non-benign script/binary the attacker *fetched or uploaded in-session* via `curl|sh`/`wget`/`scp` — malicious even with no known family, so novel droppers still get through). This same gate runs for both the CLI and the dashboard button; the dashboard also throttles submissions server-side (~2s apart) so a scripted caller can't spam the API.
+
 **Setup**
 
 1. Sign up at <https://auth.abuse.ch/> and copy your Auth-Key.
@@ -410,7 +412,7 @@ You can also share payloads from the web dashboard: open the payload inspector m
 | `--anonymous` | false | submit without attribution to your account |
 | `--status` | – | list past uploads from `bazaar_uploads` instead of uploading |
 
-**Why MalwareBazaar?** It's the de-facto sharing hub for honeypot-captured Linux malware. Their submission policy (no PUPs/adware, no file infectors, samples must be <10 days old) is enforced both client-side (the share subcommand respects `freshness_days`) and server-side. Repeated violations get accounts banned — see `internal/intel/bazaar/client.go` for the fatal-status handling that halts the run on `user_blacklisted`.
+**Why MalwareBazaar?** It's the de-facto sharing hub for honeypot-captured Linux malware. Their submission policy (confirmed malware only, no PUPs/adware, no file infectors, samples must be <10 days old) is enforced by the vetting gate described above before any upload, and again server-side by abuse.ch. Repeated violations get accounts banned — see `internal/intel/bazaar/vet.go` for the policy gate and `internal/intel/bazaar/client.go` for the fatal-status handling that halts the run on `user_blacklisted`. `--since` defaults from `intel.bazaar.freshness_days`.
 
 ## Architecture
 
@@ -626,7 +628,7 @@ A: They're convincing to bots. A human auditing them for 30 seconds would clock 
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+GPL-3.0 - see [LICENSE](LICENSE).
 
 ---
 

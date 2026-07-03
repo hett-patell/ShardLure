@@ -80,7 +80,6 @@ type accumulator struct {
 	srcs        setBuilder
 	actors      setBuilder
 	sample      string
-	sampleSeen  bool
 }
 
 func (a *accumulator) record(ts time.Time, source, actorID, sample string) {
@@ -98,7 +97,6 @@ func (a *accumulator) record(ts time.Time, source, actorID, sample string) {
 	// connection-only events).
 	if sample != "" {
 		a.sample = sample
-		a.sampleSeen = true
 	}
 }
 
@@ -112,9 +110,7 @@ func (a *accumulator) seal(kind Kind, value string) Indicator {
 		Sources:   a.srcs.slice(),
 		Actors:    a.actors.slice(),
 	}
-	if a.sampleSeen {
-		ind.SampleCommand = a.sample
-	}
+	ind.SampleCommand = a.sample
 	return ind
 }
 
@@ -192,17 +188,5 @@ func Collect(events []*models.Event, kinds []Kind) []Indicator {
 		}
 		return out[i].Value < out[j].Value
 	})
-	return out
-}
-
-// FilterByKind returns only the indicators of the requested kind.
-// Convenience for the /api/ioc/csv?kind=ip handler.
-func FilterByKind(in []Indicator, k Kind) []Indicator {
-	out := make([]Indicator, 0, len(in))
-	for _, ind := range in {
-		if ind.Kind == k {
-			out = append(out, ind)
-		}
-	}
 	return out
 }

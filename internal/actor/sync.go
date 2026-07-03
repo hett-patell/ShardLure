@@ -94,15 +94,6 @@ var (
 	liveCollectorAdmin *netmatch.Set
 )
 
-// resetLiveCollectorForTest clears process-wide state. Lowercase by
-// design - test files in the same package call it directly.
-func resetLiveCollectorForTest() {
-	liveCollectorMu.Lock()
-	liveCollector = nil
-	liveCollectorAdmin = nil
-	liveCollectorMu.Unlock()
-}
-
 // LiveJournalCollectorStats returns a snapshot of the live
 // collector's resident size for the /debug/runtime endpoint.
 // Returns zeroes when the collector has not been initialised yet
@@ -128,10 +119,14 @@ func LiveJournalCollectorStats() (ips, lru, max, users int) {
 }
 
 // adminSetsEqual is a cheap structural comparison used to detect the
-// "different admin set across goroutines" misuse. It compares by canonical
-// content (Key) rather than pointer identity, so two AdminSet() results built
-// from the same config entries are treated as equal.
+// "different admin set across goroutines" misuse. The live tail passes the
+// identical *Set on every call, so the pointer fast-path eliminates the
+// sort+join in Key() from the per-event steady state; content comparison is
+// kept for callers that rebuild an equivalent set from the same config.
 func adminSetsEqual(a, b *netmatch.Set) bool {
+	if a == b {
+		return true
+	}
 	return a.Key() == b.Key()
 }
 
@@ -170,13 +165,12 @@ func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) err
 		c.hydrate(e.SrcIP, stored)
 	}
 
-	agg, userCount := c.addAndFinalize(e)
-	if agg == nil {
+	a, ipStat, userCount := c.addAndFinalize(e)
+	if a == nil {
 		return nil
 	}
-	ipStat := agg.IPs[e.SrcIP]
 	return st.UpsertJournalActorAtomic(
-		agg.Actor,
+		a,
 		e.SrcIP, ipStat.First, ipStat.Last, ipStat.Count,
 		e.Username, userCount,
 	)
@@ -233,15 +227,17 @@ func (c *liveJournalCollector) hydrate(ip string, stored store.JournalIPStats) {
 	c.evictIfNeededLocked(now)
 }
 
-// addAndFinalize records one event and returns the AggregatedActor
-// + the post-update username count for the event's username. The
-// returned actor's user map is a copy (safe for the caller to hold
-// after the collector mutates).
-func (c *liveJournalCollector) addAndFinalize(e *models.Event) (*AggregatedActor, int) {
+// addAndFinalize records one event and returns the rebuilt Actor row, the
+// per-IP stat snapshot, and the post-update username count for the event's
+// username. It deliberately returns scalars/value types only — the previous
+// version built a full AggregatedActor per event, copying the entire per-IP
+// users map (up to maxUsers entries) and allocating a one-entry IPs map that
+// the caller immediately unpacked and discarded.
+func (c *liveJournalCollector) addAndFinalize(e *models.Event) (*models.Actor, IPStat, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.admin.Has(e.SrcIP) {
-		return nil, 0
+		return nil, IPStat{}, 0
 	}
 	now := c.now()
 	ent, ok := c.byIP[e.SrcIP]
@@ -277,10 +273,9 @@ func (c *liveJournalCollector) addAndFinalize(e *models.Event) (*AggregatedActor
 			userCount = ent.stats.Users[liveUserOverflowKey]
 		}
 	}
-	// copyUsers=true: the returned actor must not alias the
-	// collector's storage; the next event could mutate it.
-	agg := buildJournalActor(e.SrcIP, &ent.stats, true)
-	return agg, userCount
+	a := journalActor(e.SrcIP, &ent.stats)
+	ipStat := IPStat{Count: ent.stats.Count, First: ent.stats.First, Last: ent.stats.Last}
+	return a, ipStat, userCount
 }
 
 // bumpUserLocked increments the per-IP username counter, rolling
@@ -370,42 +365,4 @@ func capUsersMap(in map[string]int, n int) map[string]int {
 		out[liveUserOverflowKey] = overflow
 	}
 	return out
-}
-
-// SyncJournalIP is kept as a backfill helper for paths that need to
-// rebuild an actor from the full event history (e.g. one-shot CLI
-// commands that import old logs). Live tailing must use
-// SyncJournalEvent instead.
-//
-// Deprecated: prefer SyncJournalEvent for streaming ingest.
-func SyncJournalIP(st *store.Store, ip string, admin *netmatch.Set) error {
-	events, err := st.EventsByIP(ip, 0)
-	if err != nil {
-		return err
-	}
-	if len(events) == 0 {
-		return nil
-	}
-	ptrs := make([]*models.Event, len(events))
-	copy(ptrs, events)
-	actors := BuildFromJournal(ptrs, admin)
-	if len(actors) == 0 {
-		return nil
-	}
-	a := actors[0]
-	if err := st.UpsertActor(a); err != nil {
-		return err
-	}
-	users := map[string]int{}
-	for _, e := range ptrs {
-		if e.Username != "" {
-			users[e.Username]++
-		}
-	}
-	for u, c := range users {
-		if err := st.UpsertActorUser(a.ID, u, c); err != nil {
-			return err
-		}
-	}
-	return st.UpsertActorIP(a.ID, ip, a.FirstSeen, a.LastSeen, len(ptrs))
 }

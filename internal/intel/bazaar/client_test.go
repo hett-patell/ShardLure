@@ -70,7 +70,7 @@ func TestUploadSuccess(t *testing.T) {
 	if !res.IsAccepted() {
 		t.Errorf("IsAccepted should be true for inserted")
 	}
-	if res.IsDuplicate() {
+	if res.Status == "file_already_known" {
 		t.Errorf("IsDuplicate should be false for inserted")
 	}
 	if !strings.HasSuffix(res.SampleURL, "/"+sha+"/") {
@@ -106,7 +106,7 @@ func TestUploadDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if !res.IsDuplicate() {
+	if res.Status != "file_already_known" {
 		t.Errorf("IsDuplicate should be true")
 	}
 	if !res.IsAccepted() {

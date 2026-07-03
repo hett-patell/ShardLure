@@ -1,10 +1,8 @@
 package enrich
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 )
 
@@ -28,21 +26,16 @@ type otxResp struct {
 	City    string `json:"city"`
 }
 
-func fetchOTX(ctx context.Context, hc *http.Client, ip string) (Result, error) {
-	key := envKey("SHARDLURE_OTX_KEY")
-	if key == "" {
-		return Result{Configured: false, Verdict: "unknown"}, nil
-	}
-	url := "https://otx.alienvault.com/api/v1/indicators/IPv4/" + ip + "/general"
-	// out=nil: parseOTX owns the decode (avoids a redundant double-decode).
-	raw, err := httpJSON(ctx, hc, url, map[string]string{
-		"Accept":        "application/json",
-		"X-OTX-API-KEY": key,
-	}, nil)
-	if err != nil {
-		return Result{Configured: true}, err
-	}
-	return parseOTX(raw, ip), nil
+var otxSpec = providerSpec{
+	envVar: "SHARDLURE_OTX_KEY",
+	buildReq: func(ip, key string) (string, map[string]string) {
+		return "https://otx.alienvault.com/api/v1/indicators/IPv4/" + ip + "/general",
+			map[string]string{
+				"Accept":        "application/json",
+				"X-OTX-API-KEY": key,
+			}
+	},
+	parse: parseOTX,
 }
 
 // parseOTX maps the OTX general response onto a Result. Split out for testing.

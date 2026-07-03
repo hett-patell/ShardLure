@@ -93,15 +93,7 @@ func main() {
 		}
 		fmt.Printf("serving live dashboard on http://127.0.0.1%s\n", addr)
 		if tailscaleHint {
-			if ip := tailscaleIPv4(); ip != "" {
-				if p := addrPort(addr); p > 0 {
-					fmt.Printf("tailscale url: http://%s:%d\n", ip, p)
-				} else {
-					fmt.Printf("tailscale url: http://%s%s (could not parse port from %q)\n", ip, addr, addr)
-				}
-			} else {
-				fmt.Println("tailscale ip not found on this host (interface tailscale0 missing)")
-			}
+			printTailscaleURL(addr)
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
@@ -137,8 +129,13 @@ func cmdIngest(st *store.Store, cfg config.Config, args []string) {
 	mode, path := args[0], args[1]
 	replace := false
 	for _, a := range args[2:] {
-		if a == "--replace" {
+		switch a {
+		case "--replace":
 			replace = true
+		default:
+			// Fatal, not ignored: a typo like --repalce silently flipped the
+			// run from replace to append, double-counting on re-ingest.
+			fatal(fmt.Errorf("unknown ingest flag: %q (supported: --replace)", a))
 		}
 	}
 	switch mode {
@@ -192,6 +189,8 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 	tailscaleHint := false
 	for _, a := range args {
 		switch {
+		case a == "" || a == " ":
+			continue
 		case a == "--no-journal":
 			journalSSH = false
 		case a == "--tailscale":
@@ -203,7 +202,12 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 			if d, err := time.ParseDuration(v); err == nil && d > 0 {
 				interval = d
 			}
-		case strings.HasPrefix(a, ":") || strings.Contains(a, "."):
+		case strings.HasPrefix(a, "--"):
+			fatal(fmt.Errorf("unknown live flag: %q (supported: --no-journal --tailscale --cowrie=PATH --interval=DUR)", a))
+		default:
+			// Positional listen address. `web` accepts the same shape; keep
+			// them consistent — previously `live 8080` was silently ignored
+			// while `web 8080` worked.
 			addr = a
 		}
 	}
@@ -216,13 +220,7 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 	}
 	fmt.Printf("live wrapper: cowrie=%s journal=%v interval=%s dashboard=%s\n", cowriePath, journalSSH, interval, dashURL)
 	if tailscaleHint {
-		if ip := tailscaleIPv4(); ip != "" {
-			if p := addrPort(addr); p > 0 {
-				fmt.Printf("tailscale url: http://%s:%d\n", ip, p)
-			} else {
-				fmt.Printf("tailscale url: http://%s%s (could not parse port from %q)\n", ip, addr, addr)
-			}
-		}
+		printTailscaleURL(addr)
 	}
 
 	if journalSSH {
@@ -453,7 +451,7 @@ Usage:
   shardlure run
   shardlure status
   shardlure ioc
-  shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 10d] [--anonymous] [--status]
+  shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 240h] [--anonymous] [--status]
 
 Config: ~/.local/share/shardlure/ or -config shardlure.yaml
 `)
@@ -462,6 +460,21 @@ Config: ~/.local/share/shardlure/ or -config shardlure.yaml
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "error: %v\n", err)
 	os.Exit(1)
+}
+
+// printTailscaleURL prints the dashboard's Tailscale URL for --tailscale.
+// Shared by the web and live subcommands (previously duplicated verbatim).
+func printTailscaleURL(addr string) {
+	ip := tailscaleIPv4()
+	if ip == "" {
+		fmt.Println("tailscale ip not found on this host (interface tailscale0 missing)")
+		return
+	}
+	if p := addrPort(addr); p > 0 {
+		fmt.Printf("tailscale url: http://%s:%d\n", ip, p)
+	} else {
+		fmt.Printf("tailscale url: http://%s%s (could not parse port from %q)\n", ip, addr, addr)
+	}
 }
 
 func tailscaleIPv4() string {

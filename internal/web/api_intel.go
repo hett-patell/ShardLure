@@ -908,9 +908,9 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
 	if err := ioc.WriteCSV(w, indicators); err != nil {
-		// Best-effort: header already written; nothing useful to surface to
-		// the browser, but we still log via the server's default writer.
-		_ = err
+		// Best-effort: header already written, so nothing can be surfaced
+		// to the browser — log for the operator instead.
+		log.Printf("api_intel: ioc csv write: %v", err)
 	}
 }
 
@@ -934,7 +934,8 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/vnd.oasis.stix+json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
 	if err := ioc.WriteSTIX(w, indicators); err != nil {
-		_ = err
+		// Header already written; log-only, same as the CSV handler.
+		log.Printf("api_intel: ioc stix write: %v", err)
 	}
 }
 
@@ -961,7 +962,9 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uploads, err := s.st.ListBazaarUploads(limit)
+	// One LEFT JOIN query instead of a GetArtifactBySHA point query per
+	// upload row (the frontend polls this with limit=1000).
+	uploads, err := s.st.ListBazaarUploadsWithArtifacts(limit)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -987,9 +990,9 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 			Status:     u.ResponseStatus,
 			MBURL:      u.MBURL,
 		}
-		if art, err := s.st.GetArtifactBySHA(u.SHA256); err == nil && art != nil {
-			row.SizeBytes = art.SizeBytes
-			row.SrcIP = art.SrcIP
+		if u.SizeBytes > 0 || u.SrcIP != "" || u.LocalPath != "" {
+			row.SizeBytes = u.SizeBytes
+			row.SrcIP = u.SrcIP
 			classifyMu.Lock()
 			cls, cached := classifyCache[u.SHA256]
 			classifyMu.Unlock()
@@ -997,9 +1000,9 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 				row.Family = cls.Family
 				row.FileKind = cls.FileKind
 				row.Tags = cls.Tags
-			} else if art.LocalPath != "" {
-				if _, serr := os.Stat(art.LocalPath); serr == nil {
-					if cls, cerr := bazaar.Classify(art.LocalPath); cerr == nil {
+			} else if u.LocalPath != "" {
+				if _, serr := os.Stat(u.LocalPath); serr == nil {
+					if cls, cerr := bazaar.Classify(u.LocalPath); cerr == nil {
 						classifyMu.Lock()
 						if len(classifyCache) >= 500 {
 							for k := range classifyCache {
@@ -1095,21 +1098,46 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	observed := art.TS
+	if observed.IsZero() {
+		observed = art.CreatedAt
+	}
 	cand := bazaar.Candidate{
 		SHA256: art.SHA256, LocalPath: art.LocalPath, SizeBytes: art.SizeBytes,
-		URL: art.URL, SrcIP: art.SrcIP, SessionID: art.SessionID, CreatedAt: art.CreatedAt,
+		URL: art.URL, CreatedAt: art.CreatedAt,
+		Origin: art.Origin, ObservedAt: observed,
 	}
 	rec := &bazaarRecorderAdapter{st: s.st}
 	var result *bazaar.Result
+	var skipReason string
 	opts := bazaar.Options{
 		APIKey:    s.bazaarKey,
 		Endpoint:  s.bazaarEndpoint,
 		ExtraTags: s.bazaarTags,
 		MaxBytes:  s.bazaarMaxBytes,
-		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, _ error) {
+		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, err error) {
 			result = r
+			// For a Vet/pre-flight skip, Share reports status="skipped" with
+			// the human reason in err. Capture it so the operator sees WHY
+			// (stale / benign / unconfirmed) instead of a bare "skipped".
+			if r != nil && r.Status == "skipped" && err != nil {
+				skipReason = err.Error()
+			}
 		},
 	}
+
+	// Server-side submission throttle: enforce a minimum gap between MB
+	// uploads process-wide so a scripted/looped caller can't spam the API
+	// (MB bans repeat offenders). Vet-skipped samples never reach the network
+	// inside Share, so the occasional extra sub-second wait on a skip is
+	// harmless. Held only for the brief sleep, released before the network IO.
+	s.bazaarMu.Lock()
+	const minBazaarGap = 2 * time.Second
+	if wait := minBazaarGap - time.Since(s.lastBazaarAt); s.lastBazaarAt.After(time.Time{}) && wait > 0 {
+		time.Sleep(wait)
+	}
+	s.lastBazaarAt = time.Now()
+	s.bazaarMu.Unlock()
 
 	_, _, shareErr := bazaar.Share(r.Context(), rec, []bazaar.Candidate{cand}, opts)
 
@@ -1121,6 +1149,12 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	if result != nil {
 		resp.Status = result.Status
 		resp.MBURL = result.SampleURL
+		// Surface the local vet reason for a policy skip. It's honeypot-side
+		// policy text (stale / benign / unconfirmed) — no secrets or IPs — so
+		// it's safe to return, unlike upstream MB errors handled below.
+		if result.Status == "skipped" && skipReason != "" {
+			resp.Error = skipReason
+		}
 	} else if shareErr != nil {
 		// Log the real upstream (MalwareBazaar) error server-side; return a
 		// generic message so an admin-API response can't leak API tokens,

@@ -1,10 +1,8 @@
 package enrich
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	urlpkg "net/url"
 	"strings"
 )
@@ -31,22 +29,17 @@ type ipqsResp struct {
 	RecentAbuse bool   `json:"recent_abuse"`
 }
 
-func fetchIPQualityScore(ctx context.Context, hc *http.Client, ip string) (Result, error) {
-	key := envKey("SHARDLURE_IPQS_KEY")
-	if key == "" {
-		return Result{Configured: false, Verdict: "unknown"}, nil
-	}
+var ipqsSpec = providerSpec{
+	envVar: "SHARDLURE_IPQS_KEY",
 	// strictness=1 balances false positives. NOTE: IPQS's API only accepts the
 	// key as a URL path segment — it has no header-auth option — so unlike the
 	// other providers the key unavoidably appears in the request URL. Keep
 	// access logs for this host restricted accordingly.
-	url := "https://ipqualityscore.com/api/json/ip/" + key + "/" + urlpkg.PathEscape(ip) + "?strictness=1"
-	// out=nil: parseIPQS owns the decode (avoids a redundant double-decode).
-	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, nil)
-	if err != nil {
-		return Result{Configured: true}, err
-	}
-	return parseIPQS(raw, ip), nil
+	buildReq: func(ip, key string) (string, map[string]string) {
+		return "https://ipqualityscore.com/api/json/ip/" + key + "/" + urlpkg.PathEscape(ip) + "?strictness=1",
+			map[string]string{"Accept": "application/json"}
+	},
+	parse: parseIPQS,
 }
 
 // parseIPQS maps the IPQS response onto a Result. Split out for testing.

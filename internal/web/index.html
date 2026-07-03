@@ -616,7 +616,13 @@ function renderShellSessions(rows) {
     root.innerHTML = '<div class="empty">No sessions with shell access yet</div>';
     return;
   }
-  count.textContent = '(' + rows.length + ' in last 24h)';
+  // The server caps this list at 30 (server.go RecentShellSessions(-24h,30)),
+  // so on a busy box rows.length is the page size, NOT the 24h total. Disclose
+  // the cap rather than presenting 30 as the population (the honesty pattern
+  // the intel sessions/payload/graph widgets already follow).
+  count.textContent = rows.length >= 30
+    ? '(newest ' + rows.length + ' shell sessions · last 24h)'
+    : '(' + rows.length + ' shell session' + (rows.length === 1 ? '' : 's') + ' · last 24h)';
   rows.forEach(function(r) {
     const row = document.createElement('a');
     row.className = 'row sess-row';
@@ -766,7 +772,10 @@ async function refresh() {
   const arcs = points.slice(0, 80).map(function(p, idx) {
     return { startLat: p.lat, startLng: p.lng, endLat: home.lat, endLng: home.lon, idx: idx, n: p.n };
   });
-  const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2); }).join('|');
+  // Skip the arcsData reset when the arc set hasn't changed: re-setting it
+  // every 5s poll restarted the dash animations visibly.
+  const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2) + ':' + a.n; }).join('|');
+  if (arcKey === lastArcKey) return;
   globe.arcsData(arcs)
     .arcColor(function(){ return ['rgba(208,40,40,0.12)', 'rgba(208,40,40,0.95)']; })
     .arcStroke(function(a){ return Math.max(0.55, 0.55 + 1.1 * Math.sqrt((a.n || 0) / maxN)); })
@@ -781,7 +790,9 @@ async function refresh() {
 refresh();
 refreshCapture();
 setInterval(refresh, 5000);
-setInterval(refreshCapture, 2000);
+// 5s, not 2s: capture data can only change on the 5s ingest tick, and
+// CaptureSummary aggregates the whole artifacts table per call.
+setInterval(refreshCapture, 5000);
 window.addEventListener('resize', function() { drawSpark(sparkData); });
 </script>
 </body>

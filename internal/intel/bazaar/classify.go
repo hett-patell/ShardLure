@@ -56,6 +56,13 @@ func Classify(path string) (Classification, error) {
 	case bytes.HasPrefix(buf, []byte("MZ")):
 		c.FileKind = "PE executable"
 		c.Tags = append(c.Tags, "exe")
+	case isSSHKeyMaterial(buf):
+		// Attacker key material (an implanted authorized_keys pubkey, or a
+		// private key captured via SFTP) and honeypot bait keys are NOT
+		// malware — MB's policy forbids benign submissions. Tag so Vet can
+		// hard-reject. The archive holds several 389B/398B OpenSSH pubkeys.
+		c.FileKind = "SSH key"
+		c.Tags = append(c.Tags, "ssh-key")
 	case bytes.HasPrefix(buf, []byte("#!")):
 		classifyScript(buf, &c)
 	default:
@@ -281,6 +288,33 @@ func looksLikeShellWithSCPHeader(head []byte) bool {
 	// Second non-empty line is a shebang?
 	rest := strings.TrimLeft(s[nl+1:], "\r\n")
 	return strings.HasPrefix(rest, "#!")
+}
+
+// isSSHKeyMaterial detects OpenSSH public keys and PEM-armoured private keys
+// by their leading magic. These are benign (attacker-implanted authorized_keys
+// entries, bait host keys, captured key files) — never malware — so Vet uses
+// this to keep them out of MalwareBazaar. Checked before the shebang/script
+// sniffers because a key file has none of those markers and would otherwise
+// fall through to "unknown".
+func isSSHKeyMaterial(head []byte) bool {
+	for _, p := range [][]byte{
+		[]byte("ssh-rsa "),
+		[]byte("ssh-ed25519 "),
+		[]byte("ssh-dss "),
+		[]byte("ecdsa-sha2-"),
+		[]byte("sk-ssh-ed25519@"),
+		[]byte("sk-ecdsa-sha2-"),
+		[]byte("-----BEGIN OPENSSH PRIVATE KEY-----"),
+		[]byte("-----BEGIN RSA PRIVATE KEY-----"),
+		[]byte("-----BEGIN EC PRIVATE KEY-----"),
+		[]byte("-----BEGIN DSA PRIVATE KEY-----"),
+		[]byte("-----BEGIN PRIVATE KEY-----"),
+	} {
+		if bytes.HasPrefix(head, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // mostlyPrintable rejects binary blobs masquerading as scripts.

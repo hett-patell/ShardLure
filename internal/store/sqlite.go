@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,11 +36,13 @@ type Store struct {
 	onceEnrich    sync.Once
 	onceBazaar    sync.Once
 	onceTTY       sync.Once
+	onceSessHASSH sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
 	errArtifacts error
 	errEnrich    error
 	errBazaar    error
 	errTTY       error
+	errSessHASSH error
 }
 
 type sqlExecer interface {
@@ -101,7 +104,6 @@ CREATE TABLE IF NOT EXISTS events (
   session_id TEXT,
   hassh TEXT,
   ssh_client TEXT,
-  ja4 TEXT,
   command TEXT,
   sha256 TEXT,
   filename TEXT,
@@ -205,11 +207,9 @@ CREATE TABLE IF NOT EXISTS ingest_state (
 		}
 		// Create indexes that touch backfilled columns now that the
 		// columns are guaranteed to exist on this database.
-		const postIdx = `
-CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
-CREATE INDEX IF NOT EXISTS idx_events_identity ON events(source, kind, ts, src_ip, session_id, username, command);
-`
-		if _, err := s.db.Exec(postIdx); err != nil {
+		// (idx_events_identity — a 7-column covering index — used to be
+		// created here too; v9 drops it, so fresh installs skip it.)
+		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id)`); err != nil {
 			return err
 		}
 		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?)`, now); err != nil {
@@ -348,6 +348,41 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			return err
 		}
 	}
+
+	// v9: drop idx_events_identity. The 7-column covering index (including
+	// the attacker-controlled username/command columns) had exactly one
+	// designed reader — Store.EventExists — which was replaced by the
+	// batched ts-IN dedup and then removed. Both dedup paths deliberately
+	// avoid the index (its source= prefix triggers a full-source scan;
+	// see batchDedupCowrie), so the only thing it did was amplify every
+	// event INSERT, the hottest write in the system.
+	if current < 9 {
+		if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_events_identity`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (9, ?)`, now); err != nil {
+			return err
+		}
+	}
+
+	// v10: replace the single-column idx_events_actor with a composite
+	// (actor_id, ts). IterateEventsByActorIDs runs `WHERE actor_id IN (...)
+	// ORDER BY ts ASC` on every 5s live tick; with the single-column index
+	// SQLite re-sorted each touched actor's FULL history through a temp
+	// B-tree per tick (verified via EXPLAIN QUERY PLAN). The composite
+	// serves rows pre-sorted, and turns LastCommandByActor's LIMIT 1 into
+	// a backwards index walk instead of a sort-everything.
+	if current < 10 {
+		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_ts ON events(actor_id, ts)`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_events_actor`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (10, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -419,7 +454,6 @@ func (s *Store) ensureLegacyColumns() error {
 		{"session_id", `ALTER TABLE events ADD COLUMN session_id TEXT`},
 		{"hassh", `ALTER TABLE events ADD COLUMN hassh TEXT`},
 		{"ssh_client", `ALTER TABLE events ADD COLUMN ssh_client TEXT`},
-		{"ja4", `ALTER TABLE events ADD COLUMN ja4 TEXT`},
 		{"command", `ALTER TABLE events ADD COLUMN command TEXT`},
 		{"sha256", `ALTER TABLE events ADD COLUMN sha256 TEXT`},
 		{"filename", `ALTER TABLE events ADD COLUMN filename TEXT`},
@@ -461,10 +495,10 @@ func (s *Store) InsertEvent(e *models.Event) error {
 
 func insertEvent(db sqlExecer, e *models.Event) error {
 	res, err := db.Exec(`
-INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, ja4, command, sha256, filename, raw, actor_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.Kind, e.SrcIP, e.SrcPort,
-		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient, e.JA4,
+		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient,
 		e.Command, e.SHA256, e.Filename, e.Raw, e.ActorID)
 	if err != nil {
 		return err
@@ -499,12 +533,6 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
-func (s *Store) UpsertActorIP(actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return upsertActorIP(s.db, actorID, ip, firstSeen, lastSeen, count)
-}
-
 func upsertActorIP(db sqlExecer, actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
 	_, err := db.Exec(`
 INSERT INTO actor_ips (actor_id, ip, first_seen, last_seen, count) VALUES (?, ?, ?, ?, ?)
@@ -514,12 +542,6 @@ ON CONFLICT(actor_id, ip) DO UPDATE SET
   count=excluded.count`,
 		actorID, ip, firstSeen.UTC().Format(time.RFC3339Nano), lastSeen.UTC().Format(time.RFC3339Nano), count)
 	return err
-}
-
-func (s *Store) UpsertActorUser(actorID, user string, count int) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return upsertActorUser(s.db, actorID, user, count)
 }
 
 func upsertActorUser(db sqlExecer, actorID, user string, count int) error {
@@ -573,15 +595,11 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
-func (s *Store) ListActors(limit int) ([]models.Actor, error) {
-	q := `SELECT ` + actorColumns + ` FROM actors ORDER BY last_seen DESC`
-	var rows *sql.Rows
-	var err error
-	if limit > 0 {
-		rows, err = s.db.Query(q+" LIMIT ?", limit)
-	} else {
-		rows, err = s.db.Query(q)
-	}
+// queryActors runs a `SELECT <actorColumns> FROM actors ...` query and scans
+// the rows. Shared by the three list variants below so a future actor-column
+// change stays single-site.
+func (s *Store) queryActors(q string, args ...any) ([]models.Actor, error) {
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -595,6 +613,14 @@ func (s *Store) ListActors(limit int) ([]models.Actor, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) ListActors(limit int) ([]models.Actor, error) {
+	q := `SELECT ` + actorColumns + ` FROM actors ORDER BY last_seen DESC`
+	if limit > 0 {
+		return s.queryActors(q+" LIMIT ?", limit)
+	}
+	return s.queryActors(q)
 }
 
 // TopActorsByEvents returns actors ordered by total event_count — the actual
@@ -606,21 +632,8 @@ func (s *Store) TopActorsByEvents(limit int) ([]models.Actor, error) {
 	if limit <= 0 {
 		limit = 14
 	}
-	rows, err := s.db.Query(`SELECT `+actorColumns+`
+	return s.queryActors(`SELECT `+actorColumns+`
 FROM actors ORDER BY event_count DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []models.Actor
-	for rows.Next() {
-		var a models.Actor
-		if err := scanActorRow(rows, &a); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
 }
 
 // TopActorsByRate returns the actors with the highest attempts_per_hour. The
@@ -632,22 +645,9 @@ func (s *Store) TopActorsByRate(limit int) ([]models.Actor, error) {
 	if limit <= 0 {
 		limit = 8
 	}
-	rows, err := s.db.Query(`SELECT `+actorColumns+`
+	return s.queryActors(`SELECT `+actorColumns+`
 FROM actors WHERE attempts_per_hour > 0
 ORDER BY attempts_per_hour DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []models.Actor
-	for rows.Next() {
-		var a models.Actor
-		if err := scanActorRow(rows, &a); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
 }
 
 func (s *Store) GetActor(id string) (*models.Actor, error) {
@@ -661,6 +661,46 @@ func (s *Store) GetActor(id string) (*models.Actor, error) {
 
 func (s *Store) ActorUsers(id string) ([]models.ActorUser, error) {
 	return s.ActorUsersLimit(id, 30)
+}
+
+// ActorUsersForActors returns the top-N usernames per actor for a batch of
+// actor IDs in ONE query. The /api/intel handler previously issued one
+// ActorUsersLimit query per listed actor (80 point queries per poll).
+// The window function needs SQLite 3.25+; modernc.org/sqlite bundles 3.4x.
+func (s *Store) ActorUsersForActors(ids []string, perActor int) (map[string][]models.ActorUser, error) {
+	if len(ids) == 0 {
+		return map[string][]models.ActorUser{}, nil
+	}
+	if perActor <= 0 {
+		perActor = 8
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, perActor)
+	q := `
+SELECT actor_id, username, count FROM (
+  SELECT actor_id, username, count,
+         ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY count DESC, username) AS rn
+  FROM actor_users WHERE actor_id IN (` + strings.Join(placeholders, ",") + `)
+) WHERE rn <= ? ORDER BY actor_id, count DESC`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]models.ActorUser, len(ids))
+	for rows.Next() {
+		var u models.ActorUser
+		if err := rows.Scan(&u.ActorID, &u.Username, &u.Count); err != nil {
+			return nil, err
+		}
+		out[u.ActorID] = append(out[u.ActorID], u)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ActorUsersLimit(id string, limit int) ([]models.ActorUser, error) {
@@ -691,8 +731,8 @@ func (s *Store) ActorUsersLimit(id string, limit int) ([]models.ActorUser, error
 // columns needed by the TUI live-feed and the web dashboard recent list
 // (id, ts, source, kind, src_ip, username, command, actor_id, raw).
 // Fields not selected (src_port, password, session_id, hassh, ssh_client,
-// ja4, sha256, filename) are left at their zero value. If you need a
-// full event row use EventsByIP or EventsBySource instead.
+// sha256, filename) are left at their zero value. If you need full event
+// rows use EventsSince or IterateEventsBySource instead.
 func (s *Store) RecentEvents(limit int) ([]models.Event, error) {
 	rows, err := s.db.Query(`
 SELECT id, ts, source, kind, src_ip, username, command, actor_id, raw FROM events ORDER BY ts DESC LIMIT ?`, limit)

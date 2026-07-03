@@ -64,10 +64,9 @@ type Technique struct {
 // Command). Keeping both in one struct lets the classifier walk the
 // catalogue once per event.
 type matcher struct {
-	kinds    map[models.EventKind]struct{}
-	substr   []string         // any of (lowercased substring on cmd)
-	rx       []*regexp.Regexp // any of (full command)
-	allowAll bool             // matches every event, used for connect baseline
+	kinds  map[models.EventKind]struct{}
+	substr []string         // any of (lowercased substring on cmd)
+	rx     []*regexp.Regexp // any of (full command)
 }
 
 func techniques() []Technique {
@@ -228,12 +227,10 @@ func kindSet(ks ...models.EventKind) map[models.EventKind]struct{} {
 
 // match returns true if the event satisfies any of the matchers attached
 // to a Technique. The two cheap paths (kind and substring) run first.
-func (t Technique) match(e *models.Event) bool {
-	cmd := strings.ToLower(e.Command)
+// cmd must be the event's Command already lowercased — the caller lowers
+// it once per event instead of once per technique (~19x per event).
+func (t Technique) match(e *models.Event, cmd string) bool {
 	for _, m := range t.matchers {
-		if m.allowAll {
-			return true
-		}
 		if len(m.kinds) > 0 {
 			if _, ok := m.kinds[e.Kind]; ok {
 				return true

@@ -50,9 +50,6 @@ func (s *Store) BazaarUploadRecorded(sha string) (bool, error) {
 	}
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(1) FROM bazaar_uploads WHERE sha256=?`, sha).Scan(&n)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
 	return n > 0, err
 }
 
@@ -148,6 +145,57 @@ func (s *Store) ListBazaarUploads(limit int) ([]BazaarUpload, error) {
 		var u BazaarUpload
 		var tsStr string
 		if err := rows.Scan(&u.SHA256, &tsStr, &u.ResponseStatus, &u.MBURL); err != nil {
+			return nil, err
+		}
+		if t, perr := time.Parse(time.RFC3339Nano, tsStr); perr == nil {
+			u.UploadedAt = t
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// BazaarUploadWithArtifact is an upload row joined to its artifact metadata
+// (zero values when the artifact row is gone, e.g. after evidence pruning).
+type BazaarUploadWithArtifact struct {
+	BazaarUpload
+	SizeBytes int64
+	SrcIP     string
+	LocalPath string
+}
+
+// ListBazaarUploadsWithArtifacts is ListBazaarUploads joined to the
+// artifacts table in one query. The dashboard handler previously issued one
+// GetArtifactBySHA point query per upload row — up to 1000 per poll.
+func (s *Store) ListBazaarUploadsWithArtifacts(limit int) ([]BazaarUploadWithArtifact, error) {
+	if err := s.ensureBazaarUploadsTable(); err != nil {
+		return nil, err
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	q := `
+SELECT u.sha256, u.uploaded_at, u.response_status, COALESCE(u.mb_url, ''),
+       COALESCE(a.size_bytes, 0), COALESCE(a.src_ip, ''), COALESCE(a.local_path, '')
+FROM bazaar_uploads u
+LEFT JOIN artifacts a ON a.sha256 = u.sha256
+ORDER BY u.uploaded_at DESC`
+	args := []interface{}{}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BazaarUploadWithArtifact
+	for rows.Next() {
+		var u BazaarUploadWithArtifact
+		var tsStr string
+		if err := rows.Scan(&u.SHA256, &tsStr, &u.ResponseStatus, &u.MBURL,
+			&u.SizeBytes, &u.SrcIP, &u.LocalPath); err != nil {
 			return nil, err
 		}
 		if t, perr := time.Parse(time.RFC3339Nano, tsStr); perr == nil {

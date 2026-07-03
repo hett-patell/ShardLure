@@ -77,7 +77,7 @@ type cluster struct {
 	techs    map[string]struct{}
 }
 
-func (c *cluster) record(e *models.Event) {
+func (c *cluster) record(e *models.Event, techs []string) {
 	c.count++
 	if e.ActorID != "" {
 		c.actors[actor.TrimActorPrefix(e.ActorID)] = struct{}{}
@@ -102,7 +102,7 @@ func (c *cluster) record(e *models.Event) {
 			c.samples = append(c.samples, e.Command)
 		}
 	}
-	for _, t := range mitre.ClassifyOne(e) {
+	for _, t := range techs {
 		c.techs[t] = struct{}{}
 	}
 }
@@ -110,15 +110,38 @@ func (c *cluster) record(e *models.Event) {
 // Harvest clusters commands across the given events. limit caps the
 // returned rows; pass 0 for no limit. Events without a command are
 // silently skipped.
+//
+// Honeypot command streams are massively repetitive (that's the premise of
+// this package), so both the 8-regex Normalise pass and the ~19-matcher
+// MITRE classification are memoized by the raw command within a call —
+// otherwise a 7-day window with tens of thousands of duplicate commands
+// re-ran every regex per event. The classification memo is keyed on
+// (kind, command) because mitre matchers dispatch on both.
 func Harvest(events []*models.Event, limit int) []Row {
 	bags := map[string]*cluster{}
+	normMemo := map[string]string{}
+	type classKey struct {
+		kind models.EventKind
+		cmd  string
+	}
+	classMemo := map[classKey][]string{}
 	for _, e := range events {
 		if e == nil || e.Command == "" {
 			continue
 		}
-		tmpl := Normalise(e.Command)
+		tmpl, ok := normMemo[e.Command]
+		if !ok {
+			tmpl = Normalise(e.Command)
+			normMemo[e.Command] = tmpl
+		}
 		if tmpl == "" {
 			continue
+		}
+		ck := classKey{e.Kind, e.Command}
+		techs, ok := classMemo[ck]
+		if !ok {
+			techs = mitre.ClassifyOne(e)
+			classMemo[ck] = techs
 		}
 		c := bags[tmpl]
 		if c == nil {
@@ -129,7 +152,7 @@ func Harvest(events []*models.Event, limit int) []Row {
 			}
 			bags[tmpl] = c
 		}
-		c.record(e)
+		c.record(e, techs)
 	}
 
 	rows := make([]Row, 0, len(bags))

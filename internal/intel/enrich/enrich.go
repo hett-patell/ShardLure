@@ -130,30 +130,35 @@ func (r *Resolver) LookupAll(ctx context.Context, ip string) []Result {
 	// timeout, so seven in series could take ~7×timeout (~42s worst case) for a
 	// single enrichment request. Results are written into fixed indices so the
 	// returned order stays stable (the dashboard renders them in this order).
-	type job struct {
-		source string
-		fetch  fetchFn
-	}
-	jobs := []job{
-		{ProviderAbuseIPDB, fetchAbuseIPDB},
-		{ProviderVirusTotal, fetchVirusTotal},
-		{ProviderGreyNoise, fetchGreyNoise},
-		{ProviderShodan, fetchShodan},
-		{ProviderOTX, fetchOTX},
-		{ProviderIPQS, fetchIPQualityScore},
-		{ProviderIPinfo, fetchIPinfo},
-	}
-	out := make([]Result, len(jobs))
+	out := make([]Result, len(providers))
 	var wg sync.WaitGroup
-	wg.Add(len(jobs))
-	for i, j := range jobs {
-		go func(i int, j job) {
+	wg.Add(len(providers))
+	for i, p := range providers {
+		go func(i int, p provider) {
 			defer wg.Done()
-			out[i] = r.lookup(ctx, ip, j.source, j.fetch)
-		}(i, j)
+			out[i] = r.lookup(ctx, ip, p.source, p.spec.fetch)
+		}(i, p)
 	}
 	wg.Wait()
 	return out
+}
+
+// provider pairs a cache/UI source name with its declarative spec. Adding
+// provider #8 is one spec in its own file plus one row here — the fetch
+// pipeline, key gating, 404 handling and caching are all shared.
+type provider struct {
+	source string
+	spec   providerSpec
+}
+
+var providers = []provider{
+	{ProviderAbuseIPDB, abuseIPDBSpec},
+	{ProviderVirusTotal, virusTotalSpec},
+	{ProviderGreyNoise, greyNoiseSpec},
+	{ProviderShodan, shodanSpec},
+	{ProviderOTX, otxSpec},
+	{ProviderIPQS, ipqsSpec},
+	{ProviderIPinfo, ipinfoSpec},
 }
 
 // lookup is the shared cache-then-fetch path for any provider.
@@ -225,6 +230,57 @@ func decodeResult(payload string) Result {
 }
 
 type fetchFn func(ctx context.Context, hc *http.Client, ip string) (Result, error)
+
+// providerSpec declaratively describes one IP-reputation provider so the
+// shared fetch pipeline below can drive all seven identically:
+// env-key gate → build request → HTTP GET → status handling (incl. the
+// 404-means-no-data special case) → parse. Each provider file supplies a
+// spec plus a pure parse function, keeping every provider unit-testable
+// without a network round-trip.
+type providerSpec struct {
+	// envVar names the environment variable holding the provider's API
+	// key. "" means the endpoint is keyless (community/free) and the
+	// provider is always "configured".
+	envVar string
+	// keyOptional marks providers whose endpoint works without a key but
+	// will use one when present (GreyNoise community). Such providers are
+	// always 'configured': Configured=true signals "we can query this
+	// provider" rather than "you've supplied a key".
+	keyOptional bool
+	// buildReq returns the request URL and headers for one lookup. key is
+	// "" for keyless providers or when an optional key is unset.
+	buildReq func(ip, key string) (url string, headers map[string]string)
+	// parse maps a raw 2xx response body onto a Result.
+	parse func(raw []byte, ip string) Result
+	// notFound, when non-nil, converts a 404 response into a clean Result
+	// for providers where 404 means "no data for this IP", not an error.
+	notFound func(ip string) Result
+}
+
+// fetch is the shared provider pipeline; its method value satisfies fetchFn.
+func (s providerSpec) fetch(ctx context.Context, hc *http.Client, ip string) (Result, error) {
+	var key string
+	if s.envVar != "" {
+		key = envKey(s.envVar)
+		if key == "" && !s.keyOptional {
+			// Missing required key: report "not configured" without ever
+			// touching the network, so the UI can prompt the operator to
+			// add one.
+			return Result{Configured: false, Verdict: "unknown"}, nil
+		}
+	}
+	url, headers := s.buildReq(ip, key)
+	// out=nil: spec.parse owns the decode (httpJSON skips the unmarshal),
+	// avoiding a redundant double-decode of the body.
+	raw, err := httpJSON(ctx, hc, url, headers, nil)
+	if err != nil {
+		if s.notFound != nil && isHTTPStatus(err, http.StatusNotFound) {
+			return s.notFound(ip), nil
+		}
+		return Result{Configured: true}, err
+	}
+	return s.parse(raw, ip), nil
+}
 
 // helpers shared across providers --------------------------------
 

@@ -46,6 +46,13 @@ type Server struct {
 	// live process has been running (and spot an unexpected restart).
 	startedAt time.Time
 
+	// bazaarMu + lastBazaarAt throttle actual MalwareBazaar submissions
+	// process-wide. The frontend paces "Upload All" at 2.5s, but that's UX
+	// only and bypassable (curl the endpoint in a loop); this server-side
+	// floor guarantees we never machine-gun the MB API regardless of client.
+	bazaarMu     sync.Mutex
+	lastBazaarAt time.Time
+
 	// countriesCache memoizes the (relatively expensive) full-table
 	// hits-by-country aggregation, which both /api/dashboard and /api/intel
 	// render on every poll. The result changes slowly, so a few-second TTL
@@ -63,6 +70,69 @@ type Server struct {
 	// pollers of the same window collapse onto one scan.
 	eventsMu    sync.Mutex
 	eventsCache map[int]windowedEvents
+
+	// statsCache memoizes the whole-table aggregates both /api/dashboard and
+	// /api/intel recompute on every 5s poll per open tab: COUNT(*) over
+	// events, COUNT(DISTINCT src_ip), and the unbounded kind/source GROUP
+	// BYs. On a multi-million-row DB these were the dominant recurring
+	// load; the data only changes on the 5s ingest tick, so a short TTL is
+	// invisible to the operator.
+	statsMu     sync.Mutex
+	statsCached *summaryStats
+	statsAt     time.Time
+}
+
+type summaryStats struct {
+	Events       int
+	Actors       int
+	UniqueIPs    int
+	Countries    int
+	KindCounts   []store.LabelCount
+	SourceCounts []store.LabelCount
+}
+
+const statsTTL = 10 * time.Second
+
+// summaryStatsCached returns the memoized whole-table aggregates,
+// recomputing at most once per statsTTL.
+func (s *Server) summaryStatsCached() (*summaryStats, error) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if s.statsCached != nil && time.Since(s.statsAt) < statsTTL {
+		return s.statsCached, nil
+	}
+	ec, err := s.st.EventCount()
+	if err != nil {
+		return s.statsCached, err
+	}
+	ac, err := s.st.ActorCount()
+	if err != nil {
+		return s.statsCached, err
+	}
+	ips, err := s.st.UniqueIPCount()
+	if err != nil {
+		return s.statsCached, err
+	}
+	// Best-effort; 0 on error keeps the panel alive.
+	countries, _ := s.st.DistinctGeoCountryCount()
+	kinds, err := s.st.CountsByKind()
+	if err != nil {
+		return s.statsCached, err
+	}
+	sources, err := s.st.CountsBySource()
+	if err != nil {
+		return s.statsCached, err
+	}
+	s.statsCached = &summaryStats{
+		Events:       ec,
+		Actors:       ac,
+		UniqueIPs:    ips,
+		Countries:    countries,
+		KindCounts:   kinds,
+		SourceCounts: sources,
+	}
+	s.statsAt = time.Now()
+	return s.statsCached, nil
 }
 
 type windowedEvents struct {
@@ -209,41 +279,41 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	}
 }
 
-func (s *Server) Run() error {
-	return s.RunContext(context.Background())
-}
-
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
 func (s *Server) RunContext(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/intel", s.handleIntelPage)
-	mux.HandleFunc("/api/intel", s.handleIntel)
-	mux.HandleFunc("/api/intel/mitre", s.handleIntelMitre)
-	mux.HandleFunc("/api/intel/sessions", s.handleIntelSessions)
-	mux.HandleFunc("/api/intel/session", s.handleIntelSession)
-	mux.HandleFunc("/api/intel/enrich", s.handleIntelEnrich)
-	mux.HandleFunc("/api/intel/ttp", s.handleIntelTTP)
-	mux.HandleFunc("/api/intel/payloads", s.handleIntelPayloads)
-	mux.HandleFunc("/api/intel/payload", s.handleIntelPayload)
-	mux.HandleFunc("/api/intel/wordlist", s.handleIntelWordlist)
-	mux.HandleFunc("/api/intel/graph", s.handleIntelGraph)
-	mux.HandleFunc("/api/intel/replay", s.handleIntelReplay)
-	mux.HandleFunc("/api/intel/deobf", s.handleIntelDeobf)
-	mux.HandleFunc("/api/intel/bazaar", s.handleIntelBazaar)
-	mux.HandleFunc("/api/intel/bazaar/upload", s.handleBazaarUpload)
-	mux.HandleFunc("/api/intel/timeline", s.handleIntelTimeline)
+	// Every /api/* route is registered through s.guard so the auth check
+	// lives in ONE place — a new handler cannot forget it. Handlers keep
+	// their own inner requireDashboardAuth calls harmlessly (it's
+	// idempotent), but the guard is what enforces.
+	mux.HandleFunc("/intel", s.handleIntelPage) // page route: token-in-query allowed, see requirePageAuth
+	mux.HandleFunc("/api/intel", s.guard(s.handleIntel))
+	mux.HandleFunc("/api/intel/mitre", s.guard(s.handleIntelMitre))
+	mux.HandleFunc("/api/intel/sessions", s.guard(s.handleIntelSessions))
+	mux.HandleFunc("/api/intel/session", s.guard(s.handleIntelSession))
+	mux.HandleFunc("/api/intel/enrich", s.guard(s.handleIntelEnrich))
+	mux.HandleFunc("/api/intel/ttp", s.guard(s.handleIntelTTP))
+	mux.HandleFunc("/api/intel/payloads", s.guard(s.handleIntelPayloads))
+	mux.HandleFunc("/api/intel/payload", s.guard(s.handleIntelPayload))
+	mux.HandleFunc("/api/intel/wordlist", s.guard(s.handleIntelWordlist))
+	mux.HandleFunc("/api/intel/graph", s.guard(s.handleIntelGraph))
+	mux.HandleFunc("/api/intel/replay", s.guard(s.handleIntelReplay))
+	mux.HandleFunc("/api/intel/deobf", s.guard(s.handleIntelDeobf))
+	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
+	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
+	mux.HandleFunc("/api/intel/timeline", s.guard(s.handleIntelTimeline))
 	mux.HandleFunc("/vendor/vis-network.min.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 		_, _ = w.Write(visNetworkJS)
 	})
-	mux.HandleFunc("/api/ioc/list", s.handleIOCList)
-	mux.HandleFunc("/api/ioc/csv", s.handleIOCCSV)
-	mux.HandleFunc("/api/ioc/stix", s.handleIOCSTIX)
-	mux.HandleFunc("/api/actor", s.handleActorDetail)
-	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/api/dashboard", s.handleDashboard)
-	mux.HandleFunc("/api/capture", s.handleCapture)
+	mux.HandleFunc("/api/ioc/list", s.guard(s.handleIOCList))
+	mux.HandleFunc("/api/ioc/csv", s.guard(s.handleIOCCSV))
+	mux.HandleFunc("/api/ioc/stix", s.guard(s.handleIOCSTIX))
+	mux.HandleFunc("/api/actor", s.guard(s.handleActorDetail))
+	mux.HandleFunc("/", s.handleIndex) // page route
+	mux.HandleFunc("/api/dashboard", s.guard(s.handleDashboard))
+	mux.HandleFunc("/api/capture", s.guard(s.handleCapture))
 
 	// Diagnostic endpoints: net/http/pprof + a small RSS/cache
 	// stats handler. All gated behind the same dashboard token used
@@ -570,9 +640,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
-	uniqueIPs, _ := s.st.UniqueIPCount()
-	ec, _ := s.st.EventCount()
-	ac, _ := s.st.ActorCount()
+	var ec, ac, uniqueIPs int
+	if stats, err := s.summaryStatsCached(); err == nil {
+		ec, ac, uniqueIPs = stats.Events, stats.Actors, stats.UniqueIPs
+	}
 
 	resp := dashboardResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -592,7 +663,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, row := range topIPs {
 		geoIPs = append(geoIPs, row.Key)
 	}
-	s.geo.prefetch(geoIPs, 5*time.Second)
+	// Fire-and-forget: blocking this 5s-polled handler on outbound geo
+	// lookups stalled the response up to the whole poll interval when a
+	// batch of new IPs appeared. The frontend renders "resolving…" for
+	// missing geo and the next poll picks up the cached result; prefetch
+	// dedupes in-flight lookups so overlapping polls are safe.
+	go s.geo.prefetch(geoIPs, 5*time.Second)
 
 	for _, a := range actors {
 		card := actorCard{

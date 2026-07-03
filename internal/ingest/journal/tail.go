@@ -41,6 +41,17 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 		if e.Kind == models.KindAccepted && admin.Has(e.SrcIP) {
 			continue
 		}
+		if e.Kind == models.KindAccepted {
+			// Match batch-ingest semantics (persistJournalEvents): a
+			// non-allowlisted success is stored as telemetry but gets no
+			// ActorID and never forms an attacker actor. Stamping and
+			// syncing it here created actor state that the next batch
+			// rebuild silently reversed.
+			if err := st.InsertEvent(e); err != nil {
+				fmt.Fprintf(os.Stderr, "journal tail insert failed: %v\n", err)
+			}
+			continue
+		}
 		e.ActorID = actor.JournalActorID(e.SrcIP)
 		if err := st.InsertEvent(e); err != nil {
 			fmt.Fprintf(os.Stderr, "journal tail insert failed: %v\n", err)

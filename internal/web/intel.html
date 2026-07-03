@@ -775,11 +775,15 @@
 
   /* ── Widget: timeline ── */
   .tl-feed { max-height: 260px; overflow: auto; }
-  .tl-row { display: grid; grid-template-columns: 42px 74px 96px 1fr; gap: 5px; padding: 3px 0; border-bottom: 1px dotted var(--line); align-items: baseline; font: 10.5px var(--mono); }
+  /* kind column was 74px — too narrow for FAILED_PASSWORD / CLIENT_VERSION,
+     so the label overflowed into the IP column and rows read as collided.
+     Widen it and clamp every cell to its track so nothing bleeds across. */
+  .tl-row { display: grid; grid-template-columns: 42px 116px 116px minmax(0,1fr); gap: 5px 8px; padding: 3px 0; border-bottom: 1px dotted var(--line); align-items: baseline; font: 10.5px var(--mono); }
+  .tl-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .tl-time { color: var(--dim-2); }
   .tl-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; }
   .tl-ip { color: var(--accent-2); }
-  .tl-body { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-body { color: var(--text); }
   .tl-cmd { color: var(--good); }
 
   /* ── Widget: credentials ── */
@@ -840,11 +844,7 @@
       <span class="chip on" data-window="24h">24h</span>
       <span class="chip" data-window="7d">7d</span>
       <span class="chip" data-window="30d">30d</span>
-      <span class="chip-sep">·</span>
-      <span class="chip-sep">source:</span>
-      <span class="chip on" data-source="all">all</span>
-      <span class="chip" data-source="journal">journal</span>
-      <span class="chip" data-source="cowrie">cowrie</span>
+      <span class="chip" data-window="90d">90d</span>
       <span class="chip-sep">·</span>
       <input class="search" id="search-input" placeholder="search IP / user / command…" />
     </div>
@@ -1632,14 +1632,22 @@ async function refresh() {
 
 refresh();
 refreshCapture();
-setInterval(refresh, 5000);
-setInterval(refreshCapture, 2000);
+// Gate the two heaviest pollers on the overview tab being visible —
+// /api/intel is the most expensive endpoint on the server, and firing it
+// while the operator sits on the red/blue tab was pure waste. 5s for
+// capture too: data can only change on the 5s ingest tick.
+function overviewActive() {
+  const v = document.getElementById('view-overview');
+  return !v || v.classList.contains('active');
+}
+setInterval(function(){ if (overviewActive()) refresh(); }, 5000);
+setInterval(function(){ if (overviewActive()) refreshCapture(); }, 5000);
 window.addEventListener('resize', function() {
   if (window._lastHeatmap) drawHeatmap(window._lastHeatmap);
 });
 
 /* ==== Slice A: tabs, sticky filter bar, search ==== */
-const Filters = { window: '24h', source: 'all', search: '' };
+const Filters = { window: '24h', search: '' };
 
 function setActiveView(name) {
   document.querySelectorAll('.tab').forEach(function(t) {
@@ -1681,7 +1689,20 @@ function bindChipGroup(attr, key) {
   });
 }
 bindChipGroup('window', 'window');
-bindChipGroup('source', 'source');
+
+// onWindowChange registers a per-slice refresher for window-chip clicks,
+// guarded on the slice's tab being visible. Without the guard one chip
+// click fanned out ~10 concurrent fetches — one per slice — most of them
+// for hidden tabs (each slice re-fetches on tab activation anyway, so
+// nothing is lost by skipping hidden ones).
+function onWindowChange(viewId, fn) {
+  document.querySelectorAll('.chip[data-window]').forEach(function(c) {
+    c.addEventListener('click', function() {
+      const v = document.getElementById(viewId);
+      if (v && v.classList.contains('active')) fn();
+    });
+  });
+}
 
 const searchInput = document.getElementById('search-input');
 let searchTimer = 0;
@@ -1806,9 +1827,7 @@ setActiveView = function(name) {
   _origSetActive(name);
   if (name === 'blue') refreshMitre();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshMitre);
-});
+onWindowChange('view-blue', refreshMitre);
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshMitre();
 }, 30000);
@@ -1845,15 +1864,6 @@ function fmtOffset(ms) {
   const m = Math.floor(s / 60);
   return '+' + m + 'm' + (s % 60).toFixed(0) + 's';
 }
-function relTime(iso) {
-  const t = new Date(iso).getTime();
-  const d = (Date.now() - t) / 1000;
-  if (d < 60) return Math.floor(d) + 's ago';
-  if (d < 3600) return Math.floor(d / 60) + 'm ago';
-  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
-  return Math.floor(d / 86400) + 'd ago';
-}
-
 function renderSessions(data) {
   const list = document.getElementById('sessions-list');
   const meta = document.getElementById('sessions-meta');
@@ -2001,9 +2011,7 @@ setActiveView = function(name) {
   _setActiveForSessions(name);
   if (name === 'blue') refreshSessions();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshSessions);
-});
+onWindowChange('view-blue', refreshSessions);
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshSessions();
 }, 30000);
@@ -2021,7 +2029,13 @@ function renderIOC(data) {
   const tb = document.querySelector('#ioc-table tbody');
   const meta = document.getElementById('ioc-meta');
   var iwin = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
-  meta.textContent = fmt(data.total) + ' indicators · ' + IOC.kind + ' · ' + iwin + ' window';
+  // The table is capped server-side (limit=50); disclose "top N of M" when
+  // truncated so the header total isn't read as the on-screen row count. The
+  // CSV/STIX exports return the full set. (Same honesty pattern as the
+  // sessions/payload/graph widgets.)
+  var iocShown = (data.indicators || []).length, iocTotal = data.total || 0;
+  meta.textContent = (iocShown < iocTotal ? ('top ' + fmt(iocShown) + ' of ' + fmt(iocTotal)) : fmt(iocTotal)) +
+    ' indicators · ' + IOC.kind + ' · ' + iwin + ' window';
 
   if (!data.indicators || data.indicators.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no indicators in window</div></td></tr>';
@@ -2079,9 +2093,7 @@ setActiveView = function(name) {
   _setActiveForIOC(name);
   if (name === 'blue') refreshIOC();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshIOC);
-});
+onWindowChange('view-blue', refreshIOC);
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshIOC();
 }, 30000);
@@ -2245,9 +2257,7 @@ setActiveView = function(name) {
   _setActiveForTTP(name);
   if (name === 'red') refreshTTP();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshTTP);
-});
+onWindowChange('view-red', refreshTTP);
 setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshTTP();
 }, 30000);
@@ -2293,13 +2303,21 @@ function renderPayloads(data) {
     const fanTitle = occ + 'x captured · ' + (p.urlCount || 0) + ' urls · ' + ips + ' ips · ' + actors + ' actors · ' + (p.sessionCount || 0) + ' sessions';
     const fan = '<span class="' + fanClass + '" title="' + escHtml(fanTitle) + '">' + occ + 'x · ' + ips + 'ip</span>';
     var shareBtn;
-    if (sha === '—' || !p.hasLocal) {
-      shareBtn = '<span style="color:var(--dim-2)">—</span>';
-    } else if (_bazaarSharedSet[sha]) {
+    if (_bazaarSharedSet[sha]) {
       var mbLink = typeof _bazaarSharedSet[sha] === 'string' ? _bazaarSharedSet[sha] : '';
       shareBtn = mbLink ? '<a href="' + safeUrl(mbLink) + '" target="_blank" rel="noopener" class="bz-btn ok" style="text-decoration:none" onclick="event.stopPropagation()">✓ shared</a>' : '<span class="bz-btn ok">✓ shared</span>';
-    } else {
+    } else if (isUploadEligible(p)) {
       shareBtn = '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>';
+    } else {
+      // Not MB-eligible (tiny/junk, tty transcript, non-download origin, or no
+      // local file). Show why instead of a share button the server would only
+      // reject — this is what fixed the "share on all 92" anomaly.
+      var why = (sha === '—' || !p.hasLocal) ? 'no file'
+        : ((p.origin || '').indexOf('download') === -1) ? 'not a download'
+        : ((p.sizeBytes || 0) <= 1024) ? 'too small'
+        : ((p.status || '') !== 'fetched') ? p.status
+        : 'ineligible';
+      shareBtn = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar: ' + escHtml(why) + '">— ' + escHtml(why) + '</span>';
     }
     html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="' + (p.hasLocal ? '1' : '0') + '">' +
       '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
@@ -2324,23 +2342,32 @@ function renderPayloads(data) {
   renderPending(data);
 }
 
-// isPending reports whether a payload row is actually eligible to ship to
-// MalwareBazaar and not yet uploaded. This MUST mirror the server's share
-// filter (store.ArtifactsForShare / BazaarUploadStats), otherwise this widget
-// over-counts versus the "MalwareBazaar sharing" panel's pending stat: that
-// panel counts only fetched, >1 KiB, download-origin binaries not yet uploaded.
-// A TTY transcript, a sub-1 KiB script, or a quarantine fetch has a local file
-// and a sha but will never be uploaded, so it is NOT pending here.
-//
-// (One honest difference remains: this widget is scoped to the selected time
-// window, while the panel stat is all-history — see renderPending's label.)
-function isPending(p) {
+// isUploadEligible reports whether a payload row COULD be shipped to
+// MalwareBazaar at all — mirroring the server's share filter
+// (store.ArtifactsForShare) and the Vet gate's cheap structural checks:
+// a local file, fetched status, >1 KiB, and a download-ish origin. A TTY
+// transcript, sub-1 KiB junk/pubkey, or non-download artifact will always be
+// skipped server-side, so the library must NOT offer a share button for it
+// (that button was the 92-vs-2 anomaly: it appeared on all hasLocal rows,
+// including 60 tiny files and 22 tty transcripts that can never upload).
+// Deliberately does NOT consider already-shared state — callers layer that on.
+function isUploadEligible(p) {
   var sha = p.sha256 || '';
   if (!sha || sha === '—' || !p.hasLocal) return false;
-  if (_bazaarSharedSet[sha]) return false;
   if ((p.status || '') !== 'fetched') return false;       // server: status='fetched'
   if ((p.sizeBytes || 0) <= 1024) return false;            // server: size_bytes > 1024
   if ((p.origin || '').indexOf('download') === -1) return false; // server: origin LIKE '%download%'
+  return true;
+}
+
+// isPending is isUploadEligible AND not-yet-uploaded, scoped to the selected
+// window. Drives the "Pending uploads" panel.
+//
+// (One honest difference from the all-history "MalwareBazaar sharing → pending"
+// stat remains: this widget is time-window scoped — see renderPending's label.)
+function isPending(p) {
+  if (!isUploadEligible(p)) return false;
+  if (_bazaarSharedSet[p.sha256]) return false;
   return true;
 }
 
@@ -2406,6 +2433,10 @@ async function refreshPayloads() {
       var bd = await br.json();
       (bd.uploads || []).forEach(function(u) { freshSet[u.sha256] = u.mbUrl || true; });
       _bazaarSharedSet = freshSet;
+      // Render the bazaar panel from this same response — it used to run
+      // its own overlapping 30s limit=1000 + limit=30 pollers of the same
+      // endpoint.
+      if (typeof renderBazaar === 'function') renderBazaar(bd);
     }
     renderPayloads(pd);
   } catch (_) {}
@@ -2470,7 +2501,23 @@ function renderPayloadDetail(d) {
     (insp.truncated ? '<span class="pm-k">scan</span><span class="pm-v">truncated at 64KB</span>' : '') +
     '</div>';
 
-  var bzBtn = d.sha256 ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><button class="bz-btn" onclick="uploadToBazaar(\''+escHtml(d.sha256)+'\',this)">▲ Share to MalwareBazaar</button></div>' : '';
+  // Only offer Share when the payload is actually MB-eligible (same gate as
+  // the library table + server Vet). The detail modal only opens for artifacts
+  // with a local file, so hasLocal is implied true here. Ineligible payloads
+  // (tty transcript, sub-1KiB, non-download origin) show the reason instead of
+  // a Share button the server would only skip.
+  var bzInner;
+  if (!d.sha256) {
+    bzInner = '';
+  } else if (_bazaarSharedSet[d.sha256]) {
+    bzInner = '<span class="bz-btn ok">✓ shared to MalwareBazaar</span>';
+  } else if (isUploadEligible({sha256: d.sha256, hasLocal: true, status: d.status, sizeBytes: d.sizeBytes, origin: d.origin})) {
+    bzInner = '<button class="bz-btn" onclick="uploadToBazaar(\''+escHtml(d.sha256)+'\',this)">▲ Share to MalwareBazaar</button>';
+  } else {
+    var w = ((d.origin||'').indexOf('download')===-1) ? 'not a download' : ((d.sizeBytes||0)<=1024) ? 'too small' : ((d.status||'')!=='fetched') ? (d.status||'not fetched') : 'ineligible';
+    bzInner = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar">not eligible for MalwareBazaar: '+escHtml(w)+'</span>';
+  }
+  var bzBtn = bzInner ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">'+bzInner+'</div>' : '';
   document.getElementById('pm-body').innerHTML = mismatchBlock + grid + errBlock + stringsBlock + hexBlock + bzBtn;
 }
 
@@ -2488,9 +2535,7 @@ setActiveView = function(name) {
   _setActiveForPayloads(name);
   if (name === 'red') refreshPayloads();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshPayloads);
-});
+onWindowChange('view-red', refreshPayloads);
 setInterval(function() {
   if (_uploadAllRunning) return;
   if (document.getElementById('view-red').classList.contains('active')) refreshPayloads();
@@ -2553,9 +2598,7 @@ setActiveView = function(name) {
   _setActiveForWL(name);
   if (name === 'red') refreshWordlist();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshWordlist);
-});
+onWindowChange('view-red', refreshWordlist);
 setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshWordlist();
 }, 30000);
@@ -2649,9 +2692,7 @@ setActiveView = function(name) {
     setTimeout(refreshGraph, 50);
   }
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', function() { setTimeout(refreshGraph, 50); });
-});
+onWindowChange('view-red', function() { setTimeout(refreshGraph, 50); });
 setInterval(function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshGraph();
 }, 60000);
@@ -2719,9 +2760,7 @@ setActiveView = function(name) {
   _setActiveForReplay(name);
   if (name === 'red') loadReplaySessions();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', loadReplaySessions);
-});
+onWindowChange('view-red', loadReplaySessions);
 if (readTabFromHash() === 'red') loadReplaySessions();
 
 function escAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
@@ -2805,9 +2844,7 @@ setActiveView = function(name) {
   _setActiveForDeobf(name);
   if (name === 'red') refreshDeobf();
 };
-document.querySelectorAll('.chip[data-window]').forEach(function(c) {
-  c.addEventListener('click', refreshDeobf);
-});
+onWindowChange('view-red', refreshDeobf);
 // Auto-refresh once a minute, but bail out if the operator looks
 // busy reading the panel: scrolled away from the top, or has an
 // active text selection inside the rows. Replacing innerHTML in
@@ -2861,19 +2898,12 @@ function renderBazaar(d) {
   }).join('');
 }
 
-// Wire into tab switching (monkey-patch chain)
-var _setActiveViewPreBazaar = setActiveView;
-setActiveView = function(name) {
-  _setActiveViewPreBazaar(name);
-  if (name === 'red') refreshBazaar();
-};
-
-// Poll every 30s when red tab is active
-setInterval(function() {
-  if (!document.getElementById('view-red').classList.contains('active')) return;
-  refreshBazaar();
-}, 30000);
-if (readTabFromHash() === 'red') refreshBazaar();
+// No poller or tab hook here: refreshPayloads (same red tab, 30s poll)
+// already fetches the full upload list and now renders the bazaar panel
+// from that response — running a second overlapping poller of the same
+// endpoint (limit=1000 there, limit=30 here) doubled the load for nothing.
+// refreshBazaar remains as the cheap limit=30 refresh after manual upload
+// actions.
 
 // ==== Widget functions ================================================
 
@@ -2898,10 +2928,17 @@ function renderGeo(countries) {
 function renderGauge(summary, intentCounts, kindCounts) {
   if (!summary) return;
   var ev = summary.eventCount||0, ac = summary.actorCount||0, ips = summary.uniqueIps||0;
-  var dep = 0, probe = 0;
+  var dep = 0, probe = 0, classifiable = 0;
   (intentCounts||[]).forEach(function(r){
     if(r.label==='deploy') dep=r.hits;
     if(r.label==='probe') probe=r.hits;
+    // Aggression denominator = actors whose intent was actually DETERMINED.
+    // CountsByIntent includes an 'unknown' bucket (journal failed-login actors
+    // have intent='unknown', a real stored value, not empty) — those can never
+    // be 'deploy', so counting them would re-dilute the score exactly as the
+    // old deploy/allActors did. Exclude 'unknown' so the ratio is deploy over
+    // {probe, proxy, deploy, mixed} — the cowrie actors with real intent.
+    if(r.label && r.label!=='unknown') classifiable += (r.hits||0);
   });
   var cmdCount = 0, dlCount = 0;
   (kindCounts||[]).forEach(function(r){
@@ -2914,8 +2951,15 @@ function renderGauge(summary, intentCounts, kindCounts) {
   var volScore = ev > 0 ? Math.min(25, Math.round(Math.log10(ev) * 5)) : 0;
   // diversity: unique IPs — 10=5, 50=12, 200=18, 1000=22, 5000=25
   var divScore = ips > 0 ? Math.min(25, Math.round(Math.log10(ips) * 6.7)) : 0;
-  // aggression: deploy ratio among actors — 0%=0, 10%=8, 30%=15, 50%+=25
-  var depRatio = ac > 0 ? dep / ac : 0;
+  // aggression: deploy ratio among CLASSIFIABLE actors — 0%=0, 10%=8, 30%=15,
+  // 50%+=25. Denominator is intent-classifiable actors, NOT all actors:
+  // journal actors are failed-login-only (no command/payload telemetry) so
+  // their intent is always 'unknown' and can never be 'deploy'. Dividing by
+  // ALL actors let a pile of journal brute-forcers structurally suppress the
+  // aggression score on a cowrie-active deployment. Fall back to total actors
+  // only if intent data is entirely absent.
+  var agrDenom = classifiable > 0 ? classifiable : ac;
+  var depRatio = agrDenom > 0 ? dep / agrDenom : 0;
   var agrScore = Math.min(25, Math.round(depRatio * 50));
   // weaponization: file downloads + commands relative to events
   var weapRatio = ev > 0 ? (cmdCount + dlCount * 3) / ev : 0;
@@ -2994,7 +3038,9 @@ function renderTimeline(events) {
   var el=document.getElementById('tl-feed');
   var meta=document.getElementById('tl-meta');
   if(!el)return;
-  if(meta)meta.textContent=events.length+' events';
+  // Fetch caps at limit=40; when full, say "latest 40" so it doesn't read as
+  // the true last-hour total.
+  if(meta)meta.textContent=(events.length>=40?'latest '+events.length:events.length+' events');
   if(!events.length){el.innerHTML='<div class="empty">No events in the last hour</div>';return}
   el.innerHTML=events.map(function(e){
     var kc=(typeof kindColors!=='undefined'&&kindColors[e.kind])?kindColors[e.kind]:'var(--dim)';
@@ -3005,18 +3051,19 @@ function renderTimeline(events) {
 
 var _uploadAllRunning = false;
 async function uploadAllToBazaar(masterBtn) {
-  var rows = document.querySelectorAll('#payloads-table tbody tr[data-sha][data-has-local="1"]');
-  if (!rows.length) { masterBtn.textContent = 'no local payloads'; return; }
-  var shas = [];
-  for (var i = 0; i < rows.length; i++) {
-    var sha = rows[i].dataset.sha;
-    if (!sha || sha === '—' || _bazaarSharedSet[sha]) continue;
-    shas.push(sha);
-  }
-  if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ all shared'; return; }
+  // Drive the sha list from the canonical payload data through isPending —
+  // NOT a DOM scrape of data-has-local rows. data-has-local is set on every
+  // local row (incl. sub-1KiB junk, pubkeys, tty transcripts, non-download
+  // origins) the server always rejects; scraping it here re-created the exact
+  // 92-vs-2 anomaly the per-row button was fixed for. isPending mirrors the
+  // server's ArtifactsForShare + Vet eligibility. (Same approach as
+  // uploadAllPending.)
+  var data = _lastPayloadData;
+  var shas = (data && data.rows ? data.rows : []).filter(isPending).map(function(p){ return p.sha256; });
+  if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ nothing eligible to share'; return; }
   _uploadAllRunning = true;
   masterBtn.disabled = true;
-  var total = shas.length, done = 0, ok = 0, skip = 0, fail = 0;
+  var total = shas.length, done = 0, ok = 0, skip = 0, policy = 0, fail = 0;
   masterBtn.textContent = '0/' + total + ' uploading…';
   for (var j = 0; j < shas.length; j++) {
     var sha = shas[j];
@@ -3032,6 +3079,12 @@ async function uploadAllToBazaar(masterBtn) {
       } else if (d.status === 'already_shared') {
         skip++; _bazaarSharedSet[sha] = d.mbUrl || true;
         if (liveBtn) { liveBtn.className = 'bz-btn ok'; liveBtn.textContent = '✓ shared'; }
+      } else if (d.status === 'skipped') {
+        // Policy skip (stale / benign / unconfirmed) — NOT a failure. The
+        // sample never touched the MB API. Show why so the operator learns
+        // the submission policy rather than seeing a red error.
+        policy++;
+        if (liveBtn) { liveBtn.className = 'bz-btn'; liveBtn.textContent = '– ' + (d.error || 'skipped'); liveBtn.title = d.error || 'skipped by MB policy'; }
       } else {
         fail++;
         if (liveBtn) { liveBtn.className = 'bz-btn err'; liveBtn.textContent = '✗ ' + (d.error || d.status); }
@@ -3047,6 +3100,7 @@ async function uploadAllToBazaar(masterBtn) {
   masterBtn.className = fail ? 'bz-btn err' : 'bz-btn ok';
   var msg = ok + ' new';
   if (skip) msg += ', ' + skip + ' known';
+  if (policy) msg += ', ' + policy + ' skipped (policy)';
   if (fail) msg += ', ' + fail + ' failed';
   masterBtn.textContent = '✓ ' + msg;
   masterBtn.disabled = false;
@@ -3064,7 +3118,7 @@ async function uploadAllPending(masterBtn) {
   if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ nothing pending'; return; }
   _uploadAllRunning = true;
   masterBtn.disabled = true;
-  var total = shas.length, done = 0, ok = 0, skip = 0, fail = 0;
+  var total = shas.length, done = 0, ok = 0, skip = 0, policy = 0, fail = 0;
   masterBtn.textContent = '0/' + total + ' uploading…';
   for (var j = 0; j < shas.length; j++) {
     var sha = shas[j];
@@ -3082,6 +3136,9 @@ async function uploadAllPending(masterBtn) {
       } else if (d.status === 'already_shared') {
         skip++; _bazaarSharedSet[sha] = d.mbUrl || true;
         liveBtns.forEach(function(b){ b.className = 'bz-btn ok'; b.textContent = '✓ shared'; });
+      } else if (d.status === 'skipped') {
+        policy++;
+        liveBtns.forEach(function(b){ b.className = 'bz-btn'; b.textContent = '– ' + (d.error || 'skipped'); b.title = d.error || 'skipped by MB policy'; });
       } else {
         fail++;
         liveBtns.forEach(function(b){ b.className = 'bz-btn err'; b.textContent = '✗ ' + (d.error || d.status); });
@@ -3097,6 +3154,7 @@ async function uploadAllPending(masterBtn) {
   masterBtn.className = fail ? 'bz-btn err' : 'bz-btn ok';
   var msg = ok + ' new';
   if (skip) msg += ', ' + skip + ' known';
+  if (policy) msg += ', ' + policy + ' skipped (policy)';
   if (fail) msg += ', ' + fail + ' failed';
   masterBtn.textContent = '✓ ' + msg;
   masterBtn.disabled = false;
@@ -3119,7 +3177,7 @@ async function uploadToBazaar(sha,btn) {
       _bazaarSharedSet[sha] = d.mbUrl || true;
       if (_lastPayloadData) renderPending(_lastPayloadData);
     } else if (d.status === 'skipped') {
-      btn.disabled = false; btn.textContent = 'skipped'; btn.style.color = 'var(--warn)';
+      btn.disabled = false; btn.textContent = '– ' + (d.error || 'skipped'); btn.title = d.error || 'skipped by MB policy'; btn.style.color = 'var(--warn)';
     } else {
       btn.className = 'bz-btn err'; btn.textContent = '✗ ' + (d.error || d.status);
     }

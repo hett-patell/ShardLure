@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/networkshard/shardlure/internal/netmatch"
 )
 
 func TestSafeFetcherStoresSample(t *testing.T) {
@@ -198,7 +200,7 @@ func TestBlockedIPReservedRanges(t *testing.T) {
 		}
 	}
 	// adminIPs CIDR is also blocked (operator range must not be fetched).
-	if !blockedIP(net.ParseIP("203.0.113.10"), []string{"203.0.113.0/24"}, false) {
+	if !blockedIP(net.ParseIP("203.0.113.10"), netmatch.New([]string{"203.0.113.0/24"}), false) {
 		t.Error("blockedIP should block an IP inside an admin CIDR range")
 	}
 }

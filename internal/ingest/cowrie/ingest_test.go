@@ -547,6 +547,88 @@ func TestIncrementalRebuildMatchesFullRebuild(t *testing.T) {
 	}
 }
 
+// TestHASSHClustersAcrossIPs is the end-to-end guard for the headline
+// "same actor across N IPs" feature. Real cowrie emits the HASSH fingerprint
+// ONLY on cowrie.client.kex — never on the login/command events — so the
+// ingest must capture it from kex and stamp it onto the session's events
+// before clustering. Two different source IPs sharing one HASSH must collapse
+// into a single cowrie:<hassh> actor; a distinct HASSH stays separate.
+func TestHASSHClustersAcrossIPs(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+
+	// Two sessions from two IPs share hasshAAA; a third IP has hasshBBB.
+	// hassh appears ONLY on the kex line, exactly as cowrie emits it.
+	lines := []string{
+		`{"eventid":"cowrie.client.kex","timestamp":"2026-07-03T10:00:00.000000Z","src_ip":"1.1.1.1","session":"sA","hassh":"hasshAAA"}`,
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-07-03T10:00:01.000000Z","src_ip":"1.1.1.1","username":"root","session":"sA"}`,
+		`{"eventid":"cowrie.command.input","timestamp":"2026-07-03T10:00:02.000000Z","src_ip":"1.1.1.1","input":"uname -a","session":"sA"}`,
+		`{"eventid":"cowrie.client.kex","timestamp":"2026-07-03T10:05:00.000000Z","src_ip":"2.2.2.2","session":"sB","hassh":"hasshAAA"}`,
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-07-03T10:05:01.000000Z","src_ip":"2.2.2.2","username":"admin","session":"sB"}`,
+		`{"eventid":"cowrie.client.kex","timestamp":"2026-07-03T10:09:00.000000Z","src_ip":"3.3.3.3","session":"sC","hassh":"hasshBBB"}`,
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-07-03T10:09:01.000000Z","src_ip":"3.3.3.3","username":"root","session":"sC"}`,
+	}
+	path := filepath.Join(t.TempDir(), "cowrie.json")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IngestFile(st, path, nil, true); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	actors := snapshotActors(t, st)
+	if _, ok := actors["cowrie:hasshAAA"]; !ok {
+		t.Fatalf("expected a HASSH-keyed actor cowrie:hasshAAA, got actors: %+v", actors)
+	}
+	if _, ok := actors["cowrie:hasshBBB"]; !ok {
+		t.Fatalf("expected a HASSH-keyed actor cowrie:hasshBBB, got actors: %+v", actors)
+	}
+	// The two IPs sharing hasshAAA must NOT have produced per-IP actors.
+	for id := range actors {
+		if id == "cowrie:1.1.1.1" || id == "cowrie:2.2.2.2" || id == "cowrie:3.3.3.3" {
+			t.Errorf("event clustered by IP (%s) instead of HASSH — stamping failed: %+v", id, actors)
+		}
+	}
+	// The shared-HASSH actor aggregates both sessions' non-kex events
+	// (2 from sA: login+command, 1 from sB: login = 3).
+	if a := actors["cowrie:hasshAAA"]; a.EventCount != 3 {
+		t.Errorf("cowrie:hasshAAA EventCount = %d, want 3 (both IPs' events merged)", a.EventCount)
+	}
+}
+
+// TestHASSHStampedFromEarlierBatch guards the cross-tick case: the kex event
+// arrives in one live tick and the session's commands in a later tick. The
+// persisted session->hassh index must let the later batch recover the
+// fingerprint so its events still cluster with the first.
+func TestHASSHStampedFromEarlierBatch(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+	path := filepath.Join(t.TempDir(), "cowrie.json")
+
+	// Tick 1: only the kex (fingerprint) for session sX.
+	if err := os.WriteFile(path, []byte(
+		`{"eventid":"cowrie.client.kex","timestamp":"2026-07-03T11:00:00.000000Z","src_ip":"9.9.9.9","session":"sX","hassh":"hasshLATE"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	// Tick 2: the session's real events, with NO hassh on the line.
+	appendLine(t, path, `{"eventid":"cowrie.login.failed","timestamp":"2026-07-03T11:00:05.000000Z","src_ip":"9.9.9.9","username":"root","session":"sX"}`)
+	appendLine(t, path, `{"eventid":"cowrie.command.input","timestamp":"2026-07-03T11:00:06.000000Z","src_ip":"9.9.9.9","input":"id","session":"sX"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+
+	actors := snapshotActors(t, st)
+	if _, ok := actors["cowrie:hasshLATE"]; !ok {
+		t.Fatalf("later-batch events did not recover HASSH from the persisted index; actors: %+v", actors)
+	}
+	if _, ok := actors["cowrie:9.9.9.9"]; ok {
+		t.Errorf("session fell back to IP clustering despite a persisted HASSH binding: %+v", actors)
+	}
+}
+
 // TestParseReaderOversizedUnterminatedTailNotConsumed: a giant final line with
 // no newline is an incomplete write — it must be neither parsed nor consumed,
 // so the offset stays put until cowrie finishes the line.

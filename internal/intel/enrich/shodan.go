@@ -1,10 +1,8 @@
 package enrich
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 )
 
@@ -27,25 +25,23 @@ type shodanResp struct {
 	Vulns     []string `json:"vulns"`
 }
 
-func fetchShodan(ctx context.Context, hc *http.Client, ip string) (Result, error) {
-	url := "https://internetdb.shodan.io/" + ip
-	// out=nil: parseShodan owns the decode (httpJSON skips the unmarshal),
-	// avoiding a redundant double-decode of the body.
-	raw, err := httpJSON(ctx, hc, url, map[string]string{"Accept": "application/json"}, nil)
-	if err != nil {
-		// 404 = Shodan has no record of this IP. Common and benign for a
-		// freshly-seen attacker; surface it as a clean "no observations".
-		if isHTTPStatus(err, http.StatusNotFound) {
-			return Result{
-				Configured: true,
-				Verdict:    "unknown",
-				Summary:    "no Shodan observations",
-				URL:        "https://www.shodan.io/host/" + ip,
-			}, nil
+var shodanSpec = providerSpec{
+	// Keyless endpoint — always 'configured'.
+	buildReq: func(ip, _ string) (string, map[string]string) {
+		return "https://internetdb.shodan.io/" + ip,
+			map[string]string{"Accept": "application/json"}
+	},
+	parse: parseShodan,
+	// 404 = Shodan has no record of this IP. Common and benign for a
+	// freshly-seen attacker; surface it as a clean "no observations".
+	notFound: func(ip string) Result {
+		return Result{
+			Configured: true,
+			Verdict:    "unknown",
+			Summary:    "no Shodan observations",
+			URL:        "https://www.shodan.io/host/" + ip,
 		}
-		return Result{Configured: true}, err
-	}
-	return parseShodan(raw, ip), nil
+	},
 }
 
 // parseShodan maps the InternetDB payload onto a Result. Split out from the

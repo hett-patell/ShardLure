@@ -2,6 +2,7 @@ package mitre
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -31,8 +32,9 @@ func Classify(events []*models.Event) []Hit {
 		}
 	}
 	for _, e := range events {
+		cmd := strings.ToLower(e.Command)
 		for i := range cat {
-			if cat[i].match(e) {
+			if cat[i].match(e, cmd) {
 				h := idx[cat[i].ID]
 				h.Count++
 				if e.ActorID != "" {
@@ -62,9 +64,10 @@ func Classify(events []*models.Event) []Hit {
 // can show TTP tags inline.
 func ClassifyOne(e *models.Event) []string {
 	cat := techniques()
+	cmd := strings.ToLower(e.Command)
 	var out []string
 	for i := range cat {
-		if cat[i].match(e) {
+		if cat[i].match(e, cmd) {
 			out = append(out, cat[i].ID)
 		}
 	}
@@ -107,8 +110,9 @@ func CoverageGrid(hits []Hit) []GridTactic {
 		}
 		byTactic[t.Tactic] = append(byTactic[t.Tactic], gt)
 	}
-	out := make([]GridTactic, 0, len(AllTactics()))
-	for _, tac := range AllTactics() {
+	tactics := AllTactics()
+	out := make([]GridTactic, 0, len(tactics))
+	for _, tac := range tactics {
 		// Include every tactic, even ones with no catalogued techniques.
 		// Keeps grid columns aligned and signals 'we can't see this'
 		// rather than 'this tactic does not exist'.

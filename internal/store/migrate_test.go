@@ -102,7 +102,7 @@ func TestLegacyBackfillUpgradesV0DB(t *testing.T) {
 
 	required := []string{
 		"src_port", "password", "session_id", "hassh",
-		"ssh_client", "ja4", "command", "sha256",
+		"ssh_client", "command", "sha256",
 		"filename", "raw", "actor_id",
 	}
 	cols, err := tableColumns(s, "events")
