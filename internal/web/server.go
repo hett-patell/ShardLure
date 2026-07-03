@@ -46,6 +46,13 @@ type Server struct {
 	// live process has been running (and spot an unexpected restart).
 	startedAt time.Time
 
+	// bazaarMu + lastBazaarAt throttle actual MalwareBazaar submissions
+	// process-wide. The frontend paces "Upload All" at 2.5s, but that's UX
+	// only and bypassable (curl the endpoint in a loop); this server-side
+	// floor guarantees we never machine-gun the MB API regardless of client.
+	bazaarMu     sync.Mutex
+	lastBazaarAt time.Time
+
 	// countriesCache memoizes the (relatively expensive) full-table
 	// hits-by-country aggregation, which both /api/dashboard and /api/intel
 	// render on every poll. The result changes slowly, so a few-second TTL

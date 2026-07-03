@@ -3007,7 +3007,7 @@ async function uploadAllToBazaar(masterBtn) {
   if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ all shared'; return; }
   _uploadAllRunning = true;
   masterBtn.disabled = true;
-  var total = shas.length, done = 0, ok = 0, skip = 0, fail = 0;
+  var total = shas.length, done = 0, ok = 0, skip = 0, policy = 0, fail = 0;
   masterBtn.textContent = '0/' + total + ' uploading…';
   for (var j = 0; j < shas.length; j++) {
     var sha = shas[j];
@@ -3023,6 +3023,12 @@ async function uploadAllToBazaar(masterBtn) {
       } else if (d.status === 'already_shared') {
         skip++; _bazaarSharedSet[sha] = d.mbUrl || true;
         if (liveBtn) { liveBtn.className = 'bz-btn ok'; liveBtn.textContent = '✓ shared'; }
+      } else if (d.status === 'skipped') {
+        // Policy skip (stale / benign / unconfirmed) — NOT a failure. The
+        // sample never touched the MB API. Show why so the operator learns
+        // the submission policy rather than seeing a red error.
+        policy++;
+        if (liveBtn) { liveBtn.className = 'bz-btn'; liveBtn.textContent = '– ' + (d.error || 'skipped'); liveBtn.title = d.error || 'skipped by MB policy'; }
       } else {
         fail++;
         if (liveBtn) { liveBtn.className = 'bz-btn err'; liveBtn.textContent = '✗ ' + (d.error || d.status); }
@@ -3038,6 +3044,7 @@ async function uploadAllToBazaar(masterBtn) {
   masterBtn.className = fail ? 'bz-btn err' : 'bz-btn ok';
   var msg = ok + ' new';
   if (skip) msg += ', ' + skip + ' known';
+  if (policy) msg += ', ' + policy + ' skipped (policy)';
   if (fail) msg += ', ' + fail + ' failed';
   masterBtn.textContent = '✓ ' + msg;
   masterBtn.disabled = false;
@@ -3055,7 +3062,7 @@ async function uploadAllPending(masterBtn) {
   if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ nothing pending'; return; }
   _uploadAllRunning = true;
   masterBtn.disabled = true;
-  var total = shas.length, done = 0, ok = 0, skip = 0, fail = 0;
+  var total = shas.length, done = 0, ok = 0, skip = 0, policy = 0, fail = 0;
   masterBtn.textContent = '0/' + total + ' uploading…';
   for (var j = 0; j < shas.length; j++) {
     var sha = shas[j];
@@ -3073,6 +3080,9 @@ async function uploadAllPending(masterBtn) {
       } else if (d.status === 'already_shared') {
         skip++; _bazaarSharedSet[sha] = d.mbUrl || true;
         liveBtns.forEach(function(b){ b.className = 'bz-btn ok'; b.textContent = '✓ shared'; });
+      } else if (d.status === 'skipped') {
+        policy++;
+        liveBtns.forEach(function(b){ b.className = 'bz-btn'; b.textContent = '– ' + (d.error || 'skipped'); b.title = d.error || 'skipped by MB policy'; });
       } else {
         fail++;
         liveBtns.forEach(function(b){ b.className = 'bz-btn err'; b.textContent = '✗ ' + (d.error || d.status); });
@@ -3088,6 +3098,7 @@ async function uploadAllPending(masterBtn) {
   masterBtn.className = fail ? 'bz-btn err' : 'bz-btn ok';
   var msg = ok + ' new';
   if (skip) msg += ', ' + skip + ' known';
+  if (policy) msg += ', ' + policy + ' skipped (policy)';
   if (fail) msg += ', ' + fail + ' failed';
   masterBtn.textContent = '✓ ' + msg;
   masterBtn.disabled = false;
@@ -3110,7 +3121,7 @@ async function uploadToBazaar(sha,btn) {
       _bazaarSharedSet[sha] = d.mbUrl || true;
       if (_lastPayloadData) renderPending(_lastPayloadData);
     } else if (d.status === 'skipped') {
-      btn.disabled = false; btn.textContent = 'skipped'; btn.style.color = 'var(--warn)';
+      btn.disabled = false; btn.textContent = '– ' + (d.error || 'skipped'); btn.title = d.error || 'skipped by MB policy'; btn.style.color = 'var(--warn)';
     } else {
       btn.className = 'bz-btn err'; btn.textContent = '✗ ' + (d.error || d.status);
     }

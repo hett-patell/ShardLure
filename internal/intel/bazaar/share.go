@@ -25,6 +25,16 @@ type Candidate struct {
 	SizeBytes int64
 	URL       string // attacker-supplied URL recovered from the cowrie session, if any
 	CreatedAt time.Time
+	// Origin is the artifact provenance (quarantine_fetch, cowrie_download,
+	// cowrie_file_download, cowrie_tty). Vet uses it as a behavioural malware
+	// signal: a script/binary FETCHED during an attacker session is malicious
+	// by provenance even with no known family.
+	Origin string
+	// ObservedAt is when the sample was FIRST seen in the honeypot (event ts),
+	// NOT when our capture runner registered the artifact row (that's
+	// CreatedAt, which is "now" for re-imported archives). Vet enforces MB's
+	// 10-day freshness rule against this.
+	ObservedAt time.Time
 }
 
 // UploadRecorder is the slice of *store.Store we depend on. Kept
@@ -135,6 +145,19 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
+			}
+			continue
+		}
+
+		// MalwareBazaar submission-policy gate. Runs AFTER classify (it needs
+		// the file kind/family) but BEFORE any network call — so a benign,
+		// junk, or stale sample is skipped locally and never touches the MB
+		// API. This is the single enforcement point for both the CLI and the
+		// dashboard upload button.
+		if ok, reason := Vet(cand, cls, time.Now()); !ok {
+			skipped++
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, cls, &Result{Status: "skipped"}, errors.New(reason))
 			}
 			continue
 		}

@@ -166,12 +166,22 @@ func collectShareCandidates(st *store.Store, singleSHA string, since time.Durati
 }
 
 func artifactToCandidate(a store.Artifact) bazaar.Candidate {
+	// ObservedAt drives MB's 10-day freshness check: use the event ts (when
+	// the attacker actually dropped the sample), falling back to CreatedAt
+	// only when ts is unknown. CreatedAt is capture-registration time, which
+	// for a re-imported archive is "now" and would wrongly look fresh.
+	observed := a.TS
+	if observed.IsZero() {
+		observed = a.CreatedAt
+	}
 	return bazaar.Candidate{
-		SHA256:    a.SHA256,
-		LocalPath: a.LocalPath,
-		SizeBytes: a.SizeBytes,
-		URL:       a.URL,
-		CreatedAt: a.CreatedAt,
+		SHA256:     a.SHA256,
+		LocalPath:  a.LocalPath,
+		SizeBytes:  a.SizeBytes,
+		URL:        a.URL,
+		CreatedAt:  a.CreatedAt,
+		Origin:     a.Origin,
+		ObservedAt: observed,
 	}
 }
 

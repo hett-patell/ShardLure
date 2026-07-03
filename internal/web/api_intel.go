@@ -1098,21 +1098,46 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	observed := art.TS
+	if observed.IsZero() {
+		observed = art.CreatedAt
+	}
 	cand := bazaar.Candidate{
 		SHA256: art.SHA256, LocalPath: art.LocalPath, SizeBytes: art.SizeBytes,
 		URL: art.URL, CreatedAt: art.CreatedAt,
+		Origin: art.Origin, ObservedAt: observed,
 	}
 	rec := &bazaarRecorderAdapter{st: s.st}
 	var result *bazaar.Result
+	var skipReason string
 	opts := bazaar.Options{
 		APIKey:    s.bazaarKey,
 		Endpoint:  s.bazaarEndpoint,
 		ExtraTags: s.bazaarTags,
 		MaxBytes:  s.bazaarMaxBytes,
-		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, _ error) {
+		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, err error) {
 			result = r
+			// For a Vet/pre-flight skip, Share reports status="skipped" with
+			// the human reason in err. Capture it so the operator sees WHY
+			// (stale / benign / unconfirmed) instead of a bare "skipped".
+			if r != nil && r.Status == "skipped" && err != nil {
+				skipReason = err.Error()
+			}
 		},
 	}
+
+	// Server-side submission throttle: enforce a minimum gap between MB
+	// uploads process-wide so a scripted/looped caller can't spam the API
+	// (MB bans repeat offenders). Vet-skipped samples never reach the network
+	// inside Share, so the occasional extra sub-second wait on a skip is
+	// harmless. Held only for the brief sleep, released before the network IO.
+	s.bazaarMu.Lock()
+	const minBazaarGap = 2 * time.Second
+	if wait := minBazaarGap - time.Since(s.lastBazaarAt); s.lastBazaarAt.After(time.Time{}) && wait > 0 {
+		time.Sleep(wait)
+	}
+	s.lastBazaarAt = time.Now()
+	s.bazaarMu.Unlock()
 
 	_, _, shareErr := bazaar.Share(r.Context(), rec, []bazaar.Candidate{cand}, opts)
 
@@ -1124,6 +1149,12 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	if result != nil {
 		resp.Status = result.Status
 		resp.MBURL = result.SampleURL
+		// Surface the local vet reason for a policy skip. It's honeypot-side
+		// policy text (stale / benign / unconfirmed) — no secrets or IPs — so
+		// it's safe to return, unlike upstream MB errors handled below.
+		if result.Status == "skipped" && skipReason != "" {
+			resp.Error = skipReason
+		}
 	} else if shareErr != nil {
 		// Log the real upstream (MalwareBazaar) error server-side; return a
 		// generic message so an admin-API response can't leak API tokens,
