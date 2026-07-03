@@ -2906,10 +2906,14 @@ function renderGeo(countries) {
 function renderGauge(summary, intentCounts, kindCounts) {
   if (!summary) return;
   var ev = summary.eventCount||0, ac = summary.actorCount||0, ips = summary.uniqueIps||0;
-  var dep = 0, probe = 0;
+  var dep = 0, probe = 0, classifiable = 0;
   (intentCounts||[]).forEach(function(r){
     if(r.label==='deploy') dep=r.hits;
     if(r.label==='probe') probe=r.hits;
+    // CountsByIntent only returns actors with a non-empty intent, so summing
+    // its hits gives the count of actors whose intent could actually be
+    // classified — the correct aggression denominator (see below).
+    classifiable += (r.hits||0);
   });
   var cmdCount = 0, dlCount = 0;
   (kindCounts||[]).forEach(function(r){
@@ -2922,8 +2926,15 @@ function renderGauge(summary, intentCounts, kindCounts) {
   var volScore = ev > 0 ? Math.min(25, Math.round(Math.log10(ev) * 5)) : 0;
   // diversity: unique IPs — 10=5, 50=12, 200=18, 1000=22, 5000=25
   var divScore = ips > 0 ? Math.min(25, Math.round(Math.log10(ips) * 6.7)) : 0;
-  // aggression: deploy ratio among actors — 0%=0, 10%=8, 30%=15, 50%+=25
-  var depRatio = ac > 0 ? dep / ac : 0;
+  // aggression: deploy ratio among CLASSIFIABLE actors — 0%=0, 10%=8, 30%=15,
+  // 50%+=25. Denominator is intent-classifiable actors, NOT all actors:
+  // journal actors are failed-login-only (no command/payload telemetry) so
+  // their intent is always 'unknown' and can never be 'deploy'. Dividing by
+  // ALL actors let a pile of journal brute-forcers structurally suppress the
+  // aggression score on a cowrie-active deployment. Fall back to total actors
+  // only if intent data is entirely absent.
+  var agrDenom = classifiable > 0 ? classifiable : ac;
+  var depRatio = agrDenom > 0 ? dep / agrDenom : 0;
   var agrScore = Math.min(25, Math.round(depRatio * 50));
   // weaponization: file downloads + commands relative to events
   var weapRatio = ev > 0 ? (cmdCount + dlCount * 3) / ev : 0;
