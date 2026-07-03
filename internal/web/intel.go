@@ -206,6 +206,11 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
 	}
+	// Last command per actor in one batched query so the actor table's
+	// "Last cmd" column is populated (it was permanently blank — handleIntel
+	// never set LastCommand, only the detail endpoint did). Best-effort: on
+	// error just leave the column empty rather than failing the whole panel.
+	lastCmdByActor, _ := s.st.LastCommandsForActors(actorIDs)
 
 	for _, a := range actors {
 		row := intelActorRow{
@@ -235,6 +240,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		for _, u := range usersByActor[a.ID] {
 			row.TopUsers = append(row.TopUsers, topUserRow{User: u.Username, Hits: u.Count})
 		}
+		row.LastCommand = lastCmdByActor[a.ID]
 		resp.Actors = append(resp.Actors, row)
 	}
 

@@ -2029,7 +2029,13 @@ function renderIOC(data) {
   const tb = document.querySelector('#ioc-table tbody');
   const meta = document.getElementById('ioc-meta');
   var iwin = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
-  meta.textContent = fmt(data.total) + ' indicators · ' + IOC.kind + ' · ' + iwin + ' window';
+  // The table is capped server-side (limit=50); disclose "top N of M" when
+  // truncated so the header total isn't read as the on-screen row count. The
+  // CSV/STIX exports return the full set. (Same honesty pattern as the
+  // sessions/payload/graph widgets.)
+  var iocShown = (data.indicators || []).length, iocTotal = data.total || 0;
+  meta.textContent = (iocShown < iocTotal ? ('top ' + fmt(iocShown) + ' of ' + fmt(iocTotal)) : fmt(iocTotal)) +
+    ' indicators · ' + IOC.kind + ' · ' + iwin + ' window';
 
   if (!data.indicators || data.indicators.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no indicators in window</div></td></tr>';
@@ -2495,7 +2501,23 @@ function renderPayloadDetail(d) {
     (insp.truncated ? '<span class="pm-k">scan</span><span class="pm-v">truncated at 64KB</span>' : '') +
     '</div>';
 
-  var bzBtn = d.sha256 ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><button class="bz-btn" onclick="uploadToBazaar(\''+escHtml(d.sha256)+'\',this)">▲ Share to MalwareBazaar</button></div>' : '';
+  // Only offer Share when the payload is actually MB-eligible (same gate as
+  // the library table + server Vet). The detail modal only opens for artifacts
+  // with a local file, so hasLocal is implied true here. Ineligible payloads
+  // (tty transcript, sub-1KiB, non-download origin) show the reason instead of
+  // a Share button the server would only skip.
+  var bzInner;
+  if (!d.sha256) {
+    bzInner = '';
+  } else if (_bazaarSharedSet[d.sha256]) {
+    bzInner = '<span class="bz-btn ok">✓ shared to MalwareBazaar</span>';
+  } else if (isUploadEligible({sha256: d.sha256, hasLocal: true, status: d.status, sizeBytes: d.sizeBytes, origin: d.origin})) {
+    bzInner = '<button class="bz-btn" onclick="uploadToBazaar(\''+escHtml(d.sha256)+'\',this)">▲ Share to MalwareBazaar</button>';
+  } else {
+    var w = ((d.origin||'').indexOf('download')===-1) ? 'not a download' : ((d.sizeBytes||0)<=1024) ? 'too small' : ((d.status||'')!=='fetched') ? (d.status||'not fetched') : 'ineligible';
+    bzInner = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar">not eligible for MalwareBazaar: '+escHtml(w)+'</span>';
+  }
+  var bzBtn = bzInner ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">'+bzInner+'</div>' : '';
   document.getElementById('pm-body').innerHTML = mismatchBlock + grid + errBlock + stringsBlock + hexBlock + bzBtn;
 }
 
@@ -3013,7 +3035,9 @@ function renderTimeline(events) {
   var el=document.getElementById('tl-feed');
   var meta=document.getElementById('tl-meta');
   if(!el)return;
-  if(meta)meta.textContent=events.length+' events';
+  // Fetch caps at limit=40; when full, say "latest 40" so it doesn't read as
+  // the true last-hour total.
+  if(meta)meta.textContent=(events.length>=40?'latest '+events.length:events.length+' events');
   if(!events.length){el.innerHTML='<div class="empty">No events in the last hour</div>';return}
   el.innerHTML=events.map(function(e){
     var kc=(typeof kindColors!=='undefined'&&kindColors[e.kind])?kindColors[e.kind]:'var(--dim)';
@@ -3024,15 +3048,16 @@ function renderTimeline(events) {
 
 var _uploadAllRunning = false;
 async function uploadAllToBazaar(masterBtn) {
-  var rows = document.querySelectorAll('#payloads-table tbody tr[data-sha][data-has-local="1"]');
-  if (!rows.length) { masterBtn.textContent = 'no local payloads'; return; }
-  var shas = [];
-  for (var i = 0; i < rows.length; i++) {
-    var sha = rows[i].dataset.sha;
-    if (!sha || sha === '—' || _bazaarSharedSet[sha]) continue;
-    shas.push(sha);
-  }
-  if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ all shared'; return; }
+  // Drive the sha list from the canonical payload data through isPending —
+  // NOT a DOM scrape of data-has-local rows. data-has-local is set on every
+  // local row (incl. sub-1KiB junk, pubkeys, tty transcripts, non-download
+  // origins) the server always rejects; scraping it here re-created the exact
+  // 92-vs-2 anomaly the per-row button was fixed for. isPending mirrors the
+  // server's ArtifactsForShare + Vet eligibility. (Same approach as
+  // uploadAllPending.)
+  var data = _lastPayloadData;
+  var shas = (data && data.rows ? data.rows : []).filter(isPending).map(function(p){ return p.sha256; });
+  if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ nothing eligible to share'; return; }
   _uploadAllRunning = true;
   masterBtn.disabled = true;
   var total = shas.length, done = 0, ok = 0, skip = 0, policy = 0, fail = 0;

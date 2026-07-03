@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -162,4 +163,44 @@ SELECT command FROM events
 WHERE actor_id=? AND command IS NOT NULL AND command != ''
 ORDER BY ts DESC LIMIT 1`, actorID).Scan(&cmd)
 	return cmd, err
+}
+
+// LastCommandsForActors returns the most recent non-empty command per actor
+// for a batch of actor IDs in ONE query — so the /api/intel actor list can
+// fill its "Last cmd" column without an N+1 (or leaving it permanently blank,
+// which it was: handleIntel never called the per-actor version). Mirrors
+// ActorUsersForActors' window-function approach; actors with no command event
+// are simply absent from the map. Uses idx_events_actor_ts for the ordering.
+func (s *Store) LastCommandsForActors(ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `
+SELECT actor_id, command FROM (
+  SELECT actor_id, command,
+         ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY ts DESC) AS rn
+  FROM events
+  WHERE actor_id IN (` + strings.Join(placeholders, ",") + `)
+    AND command IS NOT NULL AND command != ''
+) WHERE rn = 1`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, cmd string
+		if err := rows.Scan(&id, &cmd); err != nil {
+			return nil, err
+		}
+		out[id] = cmd
+	}
+	return out, rows.Err()
 }
