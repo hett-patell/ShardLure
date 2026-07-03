@@ -1,12 +1,55 @@
-# Realistic weak creds — avoid *:* catch-alls (honeypot tell)
-root:x:root
+# Realistic weak creds. ASCII ONLY: cowrie reads userdb.txt as strict ASCII
+# (auth.py: read_text(encoding="ascii")), so a single non-ASCII byte -- e.g. a
+# unicode em-dash in a comment -- makes the whole userdb load throw and cowrie
+# silently reverts to built-in defaults, so NONE of these creds apply. Keep
+# every line 7-bit ASCII. Avoid a '*:*' catch-all (accept-everything is a
+# honeypot tell that fingerprinting bots probe for).
+#
+# Format: user:x:password   '!'=deny   '*'=any   '/regex/'=match. First match
+# wins. Passwords below are the ones real botnets most frequently brute-force
+# (mined from captured cowrie login attempts), so sessions reach post-auth
+# where the useful telemetry (commands, payloads, tty replays) is.
+
+# Deny obvious honeypot-detection probe strings first.
+*:x:!/honeypot|cowrie|thisisnotarealpassword/i
+
+# Top real brute-forced passwords for root (the #1 targeted account).
+root:x:3245gs5662d34
+root:x:345gs5662d34
+root:x:smo@@kkklss
+root:x:LeitboGi0ro
+root:x:123@@@
 root:x:123456
 root:x:password
-ubuntu:x:ubuntu
+root:x:admin
+root:x:admin123
+root:x:root
+root:x:1234
+root:x:12345
+root:x:12345678
+root:x:P@ssw0rd
+root:x:1qaz@WSX
+root:x:Huawei@123
+
+# Other frequently targeted service / default accounts.
 admin:x:admin
-deploy:x:deploy
+admin:x:admin123
+admin:x:123456
+admin:x:password
+ubuntu:x:ubuntu
+ubuntu:x:123456
+user:x:user
+test:x:test
 oracle:x:oracle
+postgres:x:postgres
+ftpuser:x:ftpuser
+mysql:x:mysql
+sol:x:sol
+solana:x:solana
 git:x:git
+deploy:x:deploy
 tomcat:x:tomcat
 jenkins:x:jenkins
-test:x:test
+ubnt:x:ubnt
+guest:x:*
+debian:x:*

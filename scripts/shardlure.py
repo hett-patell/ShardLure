@@ -405,7 +405,20 @@ def apply_stealth_persona(honeypot_port: int) -> None:
         )
     userdb = persona / "userdb.txt"
     if userdb.is_file():
-        shutil.copy2(userdb, COWRIE_HOME / "etc/userdb.txt")
+        # Cowrie reads userdb.txt as STRICT ASCII (auth.py uses
+        # read_text(encoding="ascii")); a single non-ASCII byte makes the whole
+        # userdb load throw and cowrie silently falls back to built-in defaults
+        # — so our bait credentials would never apply. Validate here and strip
+        # any stray non-ASCII rather than shipping a userdb cowrie can't read.
+        raw = userdb.read_bytes()
+        try:
+            raw.decode("ascii")
+            clean = raw
+        except UnicodeDecodeError:
+            log("warning: persona userdb.txt has non-ASCII bytes; stripping them "
+                "(cowrie reads userdb as strict ASCII and would otherwise ignore it)")
+            clean = raw.decode("utf-8", "ignore").encode("ascii", "ignore")
+        (COWRIE_HOME / "etc/userdb.txt").write_bytes(clean)
     ensure_cowrie_filesystem()
     plant_bait_files()
     keydir = COWRIE_HOME / "var/lib/cowrie"
