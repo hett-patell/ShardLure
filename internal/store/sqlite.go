@@ -593,15 +593,11 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
-func (s *Store) ListActors(limit int) ([]models.Actor, error) {
-	q := `SELECT ` + actorColumns + ` FROM actors ORDER BY last_seen DESC`
-	var rows *sql.Rows
-	var err error
-	if limit > 0 {
-		rows, err = s.db.Query(q+" LIMIT ?", limit)
-	} else {
-		rows, err = s.db.Query(q)
-	}
+// queryActors runs a `SELECT <actorColumns> FROM actors ...` query and scans
+// the rows. Shared by the three list variants below so a future actor-column
+// change stays single-site.
+func (s *Store) queryActors(q string, args ...any) ([]models.Actor, error) {
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -615,6 +611,14 @@ func (s *Store) ListActors(limit int) ([]models.Actor, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) ListActors(limit int) ([]models.Actor, error) {
+	q := `SELECT ` + actorColumns + ` FROM actors ORDER BY last_seen DESC`
+	if limit > 0 {
+		return s.queryActors(q+" LIMIT ?", limit)
+	}
+	return s.queryActors(q)
 }
 
 // TopActorsByEvents returns actors ordered by total event_count — the actual
@@ -626,21 +630,8 @@ func (s *Store) TopActorsByEvents(limit int) ([]models.Actor, error) {
 	if limit <= 0 {
 		limit = 14
 	}
-	rows, err := s.db.Query(`SELECT `+actorColumns+`
+	return s.queryActors(`SELECT `+actorColumns+`
 FROM actors ORDER BY event_count DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []models.Actor
-	for rows.Next() {
-		var a models.Actor
-		if err := scanActorRow(rows, &a); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
 }
 
 // TopActorsByRate returns the actors with the highest attempts_per_hour. The
@@ -652,22 +643,9 @@ func (s *Store) TopActorsByRate(limit int) ([]models.Actor, error) {
 	if limit <= 0 {
 		limit = 8
 	}
-	rows, err := s.db.Query(`SELECT `+actorColumns+`
+	return s.queryActors(`SELECT `+actorColumns+`
 FROM actors WHERE attempts_per_hour > 0
 ORDER BY attempts_per_hour DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []models.Actor
-	for rows.Next() {
-		var a models.Actor
-		if err := scanActorRow(rows, &a); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
 }
 
 func (s *Store) GetActor(id string) (*models.Actor, error) {

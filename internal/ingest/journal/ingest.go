@@ -162,36 +162,32 @@ func buildJournalActorsFromDB(st *store.Store, fresh []*models.Event, admin *net
 }
 
 // batchDedupJournal returns the subset of candidates that does NOT match an
-// existing row in the events table, along with the duplicate count. The
-// previous implementation issued one EventExists round-trip per candidate
-// (N+1 query). This batches by ts (the most selective column for journal
-// ingest because journalctl times are second-precision and unique per line)
-// and disambiguates the rest in Go.
+// existing row in the events table, along with the duplicate count. Batches
+// by ts (the most selective column for journal ingest because journalctl
+// times are second-precision and unique per line) via the shared
+// store.IterateEventIdentitiesByTS — which owns the planner workaround that
+// previously lived in two diverging copies (this one had regressed into a
+// full-source scan; the cowrie copy hadn't).
+//
+// Journal events carry no session id, so SessionID is "" on both sides of
+// the identity comparison and never mismatches.
 func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.Event, int, error) {
 	if len(candidates) == 0 {
 		return nil, 0, nil
 	}
-	// Collect unique ts values from the candidate set.
 	tsSet := make(map[string]struct{}, len(candidates))
 	for _, e := range candidates {
 		tsSet[e.TS.UTC().Format(time.RFC3339Nano)] = struct{}{}
 	}
-	// SQLite limits IN-list size; chunk to be safe.
-	const chunk = 400
 	tsList := make([]string, 0, len(tsSet))
 	for t := range tsSet {
 		tsList = append(tsList, t)
 	}
-	existing := make(map[journalIdentity]struct{}, len(tsList))
-	for i := 0; i < len(tsList); i += chunk {
-		end := i + chunk
-		if end > len(tsList) {
-			end = len(tsList)
-		}
-		batch := tsList[i:end]
-		if err := loadExistingJournalIdentities(st, batch, existing); err != nil {
-			return nil, 0, err
-		}
+	existing := make(map[store.EventIdentity]struct{}, len(tsList))
+	if err := st.IterateEventIdentitiesByTS(models.SourceJournal, tsList, func(id store.EventIdentity) {
+		existing[id] = struct{}{}
+	}); err != nil {
+		return nil, 0, err
 	}
 	fresh := make([]*models.Event, 0, len(candidates))
 	dupes := 0
@@ -208,54 +204,14 @@ func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.E
 	return fresh, dupes, nil
 }
 
-type journalIdentity struct {
-	TS       string
-	Kind     models.EventKind
-	IP       string
-	Username string
-	Command  string
-}
-
-func identityForEvent(e *models.Event) journalIdentity {
-	return journalIdentity{
+func identityForEvent(e *models.Event) store.EventIdentity {
+	return store.EventIdentity{
 		TS:       e.TS.UTC().Format(time.RFC3339Nano),
 		Kind:     e.Kind,
-		IP:       e.SrcIP,
+		SrcIP:    e.SrcIP,
 		Username: e.Username,
 		Command:  e.Command,
 	}
-}
-
-func loadExistingJournalIdentities(st *store.Store, tsBatch []string, into map[journalIdentity]struct{}) error {
-	if len(tsBatch) == 0 {
-		return nil
-	}
-	placeholders := make([]string, len(tsBatch))
-	args := make([]any, 0, len(tsBatch))
-	for i, t := range tsBatch {
-		placeholders[i] = "?"
-		args = append(args, t)
-	}
-	// Filter on ts only, NOT source — same planner pathology the cowrie
-	// dedup already works around (see batchDedupCowrie): a `source=?`
-	// constraint makes SQLite pick a source-prefixed index and scan every
-	// journal row in the table per chunk, while `ts IN (...)` alone is
-	// point lookups on idx_events_ts (verified via EXPLAIN QUERY PLAN).
-	// The source filter is re-applied in Go.
-	query := "SELECT source, ts, kind, src_ip, username, command FROM events WHERE ts IN (" +
-		strings.Join(placeholders, ",") + ")"
-	return st.QueryRows(query, args, func(scan func(...any) error) error {
-		var src string
-		var id journalIdentity
-		if err := scan(&src, &id.TS, &id.Kind, &id.IP, &id.Username, &id.Command); err != nil {
-			return err
-		}
-		if src != string(models.SourceJournal) {
-			return nil
-		}
-		into[id] = struct{}{}
-		return nil
-	})
 }
 
 func freshAttackOnly(events []*models.Event) []*models.Event {

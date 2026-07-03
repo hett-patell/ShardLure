@@ -275,34 +275,38 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
 func (s *Server) RunContext(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/intel", s.handleIntelPage)
-	mux.HandleFunc("/api/intel", s.handleIntel)
-	mux.HandleFunc("/api/intel/mitre", s.handleIntelMitre)
-	mux.HandleFunc("/api/intel/sessions", s.handleIntelSessions)
-	mux.HandleFunc("/api/intel/session", s.handleIntelSession)
-	mux.HandleFunc("/api/intel/enrich", s.handleIntelEnrich)
-	mux.HandleFunc("/api/intel/ttp", s.handleIntelTTP)
-	mux.HandleFunc("/api/intel/payloads", s.handleIntelPayloads)
-	mux.HandleFunc("/api/intel/payload", s.handleIntelPayload)
-	mux.HandleFunc("/api/intel/wordlist", s.handleIntelWordlist)
-	mux.HandleFunc("/api/intel/graph", s.handleIntelGraph)
-	mux.HandleFunc("/api/intel/replay", s.handleIntelReplay)
-	mux.HandleFunc("/api/intel/deobf", s.handleIntelDeobf)
-	mux.HandleFunc("/api/intel/bazaar", s.handleIntelBazaar)
-	mux.HandleFunc("/api/intel/bazaar/upload", s.handleBazaarUpload)
-	mux.HandleFunc("/api/intel/timeline", s.handleIntelTimeline)
+	// Every /api/* route is registered through s.guard so the auth check
+	// lives in ONE place — a new handler cannot forget it. Handlers keep
+	// their own inner requireDashboardAuth calls harmlessly (it's
+	// idempotent), but the guard is what enforces.
+	mux.HandleFunc("/intel", s.handleIntelPage) // page route: token-in-query allowed, see requirePageAuth
+	mux.HandleFunc("/api/intel", s.guard(s.handleIntel))
+	mux.HandleFunc("/api/intel/mitre", s.guard(s.handleIntelMitre))
+	mux.HandleFunc("/api/intel/sessions", s.guard(s.handleIntelSessions))
+	mux.HandleFunc("/api/intel/session", s.guard(s.handleIntelSession))
+	mux.HandleFunc("/api/intel/enrich", s.guard(s.handleIntelEnrich))
+	mux.HandleFunc("/api/intel/ttp", s.guard(s.handleIntelTTP))
+	mux.HandleFunc("/api/intel/payloads", s.guard(s.handleIntelPayloads))
+	mux.HandleFunc("/api/intel/payload", s.guard(s.handleIntelPayload))
+	mux.HandleFunc("/api/intel/wordlist", s.guard(s.handleIntelWordlist))
+	mux.HandleFunc("/api/intel/graph", s.guard(s.handleIntelGraph))
+	mux.HandleFunc("/api/intel/replay", s.guard(s.handleIntelReplay))
+	mux.HandleFunc("/api/intel/deobf", s.guard(s.handleIntelDeobf))
+	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
+	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
+	mux.HandleFunc("/api/intel/timeline", s.guard(s.handleIntelTimeline))
 	mux.HandleFunc("/vendor/vis-network.min.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 		_, _ = w.Write(visNetworkJS)
 	})
-	mux.HandleFunc("/api/ioc/list", s.handleIOCList)
-	mux.HandleFunc("/api/ioc/csv", s.handleIOCCSV)
-	mux.HandleFunc("/api/ioc/stix", s.handleIOCSTIX)
-	mux.HandleFunc("/api/actor", s.handleActorDetail)
-	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/api/dashboard", s.handleDashboard)
-	mux.HandleFunc("/api/capture", s.handleCapture)
+	mux.HandleFunc("/api/ioc/list", s.guard(s.handleIOCList))
+	mux.HandleFunc("/api/ioc/csv", s.guard(s.handleIOCCSV))
+	mux.HandleFunc("/api/ioc/stix", s.guard(s.handleIOCSTIX))
+	mux.HandleFunc("/api/actor", s.guard(s.handleActorDetail))
+	mux.HandleFunc("/", s.handleIndex) // page route
+	mux.HandleFunc("/api/dashboard", s.guard(s.handleDashboard))
+	mux.HandleFunc("/api/capture", s.guard(s.handleCapture))
 
 	// Diagnostic endpoints: net/http/pprof + a small RSS/cache
 	// stats handler. All gated behind the same dashboard token used

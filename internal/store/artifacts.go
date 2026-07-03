@@ -155,6 +155,36 @@ FROM artifacts`)
 // falls within the window. limit caps the rows; pass 0 for default.
 // Used by the payload library view to scope the UI to a meaningful
 // recent slice rather than the entire artifact history.
+// artifactColumns is the canonical SELECT list for an artifacts row,
+// NULL-hardened with COALESCE. Kept in one place so every artifact query
+// stays in sync with scanArtifact below — the NULL-hardening commit had to
+// apply the identical COALESCE edit to four hand-written copies of this
+// list, which is exactly the drift this removes.
+const artifactColumns = `id, COALESCE(ts,''), COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), COALESCE(size_bytes,0), origin, status, COALESCE(detail,''), COALESCE(created_at,'')`
+
+// oneRowScanner abstracts *sql.Row / *sql.Rows for scanArtifact. (Distinct
+// from dashboard.go's rowScanner, which is a full rows-iterator interface.)
+type oneRowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanArtifact reads one artifactColumns row. CreatedAt falls back to TS
+// for legacy rows recorded before created_at existed.
+func scanArtifact(r oneRowScanner) (Artifact, error) {
+	var a Artifact
+	var ts, created string
+	if err := r.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
+		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		return Artifact{}, err
+	}
+	a.TS, _ = parseTime(ts)
+	a.CreatedAt, _ = parseTime(created)
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = a.TS
+	}
+	return a, nil
+}
+
 func (s *Store) ListArtifactsSince(since time.Time, limit int) ([]Artifact, error) {
 	if limit <= 0 {
 		limit = 200
@@ -163,7 +193,7 @@ func (s *Store) ListArtifactsSince(since time.Time, limit int) ([]Artifact, erro
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
+SELECT `+artifactColumns+`
 FROM artifacts
 WHERE COALESCE(ts, created_at) >= ?
 ORDER BY COALESCE(ts, created_at) DESC
@@ -174,16 +204,9 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 	defer rows.Close()
 	var out []Artifact
 	for rows.Next() {
-		var a Artifact
-		var ts, created string
-		if err := rows.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
-			&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		a, err := scanArtifact(rows)
+		if err != nil {
 			return nil, err
-		}
-		a.TS, _ = parseTime(ts)
-		a.CreatedAt, _ = parseTime(created)
-		if a.CreatedAt.IsZero() {
-			a.CreatedAt = a.TS
 		}
 		out = append(out, a)
 	}
@@ -335,9 +358,7 @@ func (s *Store) ArtifactsForShare(since time.Time) ([]Artifact, error) {
 	}
 	cutoff := since.UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.Query(`
-SELECT id, COALESCE(ts, ''), COALESCE(src_ip, ''), COALESCE(session_id, ''), COALESCE(actor_id, ''),
-       url, COALESCE(local_path, ''), COALESCE(sha256, ''), COALESCE(size_bytes, 0),
-       origin, status, COALESCE(detail, ''), created_at
+SELECT `+artifactColumns+`
 FROM artifacts
 WHERE status='fetched'
   AND size_bytes > 1024
@@ -355,21 +376,14 @@ ORDER BY COALESCE(created_at, ts) DESC`, cutoff)
 	seen := map[string]bool{}
 	var out []Artifact
 	for rows.Next() {
-		var a Artifact
-		var ts, created string
-		if err := rows.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
-			&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		a, err := scanArtifact(rows)
+		if err != nil {
 			return nil, err
 		}
 		if seen[a.SHA256] {
 			continue
 		}
 		seen[a.SHA256] = true
-		a.TS, _ = parseTime(ts)
-		a.CreatedAt, _ = parseTime(created)
-		if a.CreatedAt.IsZero() {
-			a.CreatedAt = a.TS
-		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -383,21 +397,14 @@ func (s *Store) GetArtifactBySHA(sha256 string) (*Artifact, error) {
 		return nil, err
 	}
 	row := s.db.QueryRow(`
-SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
+SELECT `+artifactColumns+`
 FROM artifacts
 WHERE sha256=?
 ORDER BY COALESCE(ts, created_at) DESC
 LIMIT 1`, sha256)
-	var a Artifact
-	var ts, created string
-	if err := row.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
-		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+	a, err := scanArtifact(row)
+	if err != nil {
 		return nil, err
-	}
-	a.TS, _ = parseTime(ts)
-	a.CreatedAt, _ = parseTime(created)
-	if a.CreatedAt.IsZero() {
-		a.CreatedAt = a.TS
 	}
 	return &a, nil
 }
@@ -489,24 +496,17 @@ func (s *Store) CowrieTTYArtifactForSession(sessionID string) (*Artifact, error)
 		return nil, err
 	}
 	row := s.db.QueryRow(`
-SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
+SELECT `+artifactColumns+`
 FROM artifacts
 WHERE session_id=? AND origin='cowrie_tty'
 ORDER BY COALESCE(ts, created_at) DESC
 LIMIT 1`, sessionID)
-	var a Artifact
-	var ts, created string
-	if err := row.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
-		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+	a, err := scanArtifact(row)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
-	}
-	a.TS, _ = parseTime(ts)
-	a.CreatedAt, _ = parseTime(created)
-	if a.CreatedAt.IsZero() {
-		a.CreatedAt = a.TS
 	}
 	return &a, nil
 }
@@ -519,7 +519,7 @@ func (s *Store) ListRecentArtifacts(limit int) ([]Artifact, error) {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), size_bytes, origin, status, COALESCE(detail,''), created_at
+SELECT `+artifactColumns+`
 FROM artifacts
 ORDER BY created_at DESC
 LIMIT ?`, limit)
@@ -529,16 +529,9 @@ LIMIT ?`, limit)
 	defer rows.Close()
 	var out []Artifact
 	for rows.Next() {
-		var a Artifact
-		var ts, created string
-		if err := rows.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
-			&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		a, err := scanArtifact(rows)
+		if err != nil {
 			return nil, err
-		}
-		a.TS, _ = parseTime(ts)
-		a.CreatedAt, _ = parseTime(created)
-		if a.CreatedAt.IsZero() {
-			a.CreatedAt = a.TS
 		}
 		out = append(out, a)
 	}

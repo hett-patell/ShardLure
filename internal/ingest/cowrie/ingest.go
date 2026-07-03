@@ -165,10 +165,11 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	return res, nil
 }
 
-// batchDedupCowrie filters events that already exist in the DB. Identity
-// matches store.EventExists (source, kind, ts, src_ip, session_id,
-// username, command). Uses a single IN-list query over ts to avoid the
-// previous N+1 EventExists pattern.
+// batchDedupCowrie filters events that already exist in the DB. Identity is
+// the (ts, kind, src_ip, session_id, username, command) tuple. Batches by ts
+// via the shared store.IterateEventIdentitiesByTS, which owns the SQLite
+// planner workaround (filter on ts only, re-apply source in Go) that
+// previously lived here as one of two diverging copies.
 func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Event, error) {
 	if len(candidates) == 0 {
 		return nil, nil
@@ -181,53 +182,21 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 	for t := range tsSet {
 		tsList = append(tsList, t)
 	}
-	existing := make(map[cowrieIdentity]struct{}, len(tsList))
-	const chunk = 400
-	for i := 0; i < len(tsList); i += chunk {
-		end := i + chunk
-		if end > len(tsList) {
-			end = len(tsList)
-		}
-		batch := tsList[i:end]
-		placeholders := make([]string, len(batch))
-		args := make([]any, 0, len(batch))
-		for j, t := range batch {
-			placeholders[j] = "?"
-			args = append(args, t)
-		}
-		// Filter on ts only, NOT source. Any `source=...` constraint (param or
-		// literal) makes SQLite pick the covering idx_events_identity on the
-		// source= prefix and scan EVERY cowrie row in the table; `ts IN (...)`
-		// alone uses idx_events_ts as point lookups (both verified via EXPLAIN
-		// QUERY PLAN). We re-apply the source filter in Go so semantics are
-		// unchanged — a non-cowrie row sharing a ts can't match a cowrie
-		// candidate's identity tuple anyway, but filtering keeps it exact.
-		query := "SELECT source, ts, kind, src_ip, session_id, username, command FROM events WHERE ts IN (" +
-			strings.Join(placeholders, ",") + ")"
-		if err := st.QueryRows(query, args, func(scan func(...any) error) error {
-			var src string
-			var id cowrieIdentity
-			if err := scan(&src, &id.TS, &id.Kind, &id.IP, &id.Session, &id.Username, &id.Command); err != nil {
-				return err
-			}
-			if src != string(models.SourceCowrie) {
-				return nil
-			}
-			existing[id] = struct{}{}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
+	existing := make(map[store.EventIdentity]struct{}, len(tsList))
+	if err := st.IterateEventIdentitiesByTS(models.SourceCowrie, tsList, func(id store.EventIdentity) {
+		existing[id] = struct{}{}
+	}); err != nil {
+		return nil, err
 	}
 	out := make([]*models.Event, 0, len(candidates))
 	for _, e := range candidates {
-		id := cowrieIdentity{
-			TS:       e.TS.UTC().Format(time.RFC3339Nano),
-			Kind:     e.Kind,
-			IP:       e.SrcIP,
-			Session:  e.SessionID,
-			Username: e.Username,
-			Command:  e.Command,
+		id := store.EventIdentity{
+			TS:        e.TS.UTC().Format(time.RFC3339Nano),
+			Kind:      e.Kind,
+			SrcIP:     e.SrcIP,
+			SessionID: e.SessionID,
+			Username:  e.Username,
+			Command:   e.Command,
 		}
 		if _, ok := existing[id]; ok {
 			continue
@@ -246,15 +215,6 @@ func persistTTYBindings(st *store.Store, bindings []ttyBinding) {
 	for _, b := range bindings {
 		_ = st.RecordCowrieTTYBinding(b.SHA, b.SessionID, b.TS)
 	}
-}
-
-type cowrieIdentity struct {
-	TS       string
-	Kind     models.EventKind
-	IP       string
-	Session  string
-	Username string
-	Command  string
 }
 
 // BackfillRotatedLogs ingests cowrie.json.* siblings (historical rotated logs).
