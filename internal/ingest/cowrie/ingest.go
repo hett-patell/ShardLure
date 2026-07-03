@@ -70,7 +70,8 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	if err != nil {
 		return nil, err
 	}
-	persistTTYBindings(st, bindings)
+	persistBindings(st, bindings)
+	stampHASSH(st, events, bindings)
 	res, err := persistEvents(st, events, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
@@ -125,7 +126,11 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	if err != nil {
 		return nil, err
 	}
-	persistTTYBindings(st, bindings)
+	persistBindings(st, bindings)
+	// Stamp HASSH before dedup/cluster so actor IDs are keyed by fingerprint,
+	// not IP. Persisted first so a session whose kex landed in an earlier tail
+	// can still be recovered from the index below.
+	stampHASSH(st, events, bindings)
 
 	// Advance offset by exactly the bytes the scanner consumed, not by
 	// fi.Size(): cowrie may have appended more bytes between Stat() and
@@ -207,13 +212,59 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 	return out, nil
 }
 
-// persistTTYBindings stores cowrie ttylog sha->session bindings so the
-// capture pass can stamp session_id onto cowrie-tty artifacts. Best
-// effort: a write failure here is logged via the store's normal error
-// path but does not block event ingest.
-func persistTTYBindings(st *store.Store, bindings []ttyBinding) {
-	for _, b := range bindings {
+// persistBindings stores the side-channel bindings a parse pass produced:
+// the ttylog sha->session map (so the capture pass can stamp session_id onto
+// cowrie-tty artifacts) and the session->HASSH map (so a later batch's events
+// for the same session can still recover the fingerprint). Best effort: a
+// write failure is surfaced via the store's normal error path but does not
+// block event ingest.
+func persistBindings(st *store.Store, bindings sideBindings) {
+	for _, b := range bindings.tty {
 		_ = st.RecordCowrieTTYBinding(b.SHA, b.SessionID, b.TS)
+	}
+	for sid, h := range bindings.hassh {
+		_ = st.RecordSessionHASSH(sid, h)
+	}
+}
+
+// stampHASSH fills in e.HASSH for events whose own line didn't carry it.
+// cowrie emits hassh only on cowrie.client.kex, so every login/command event
+// arrives with HASSH="". We first apply the bindings seen in THIS parse pass
+// (the common live case: kex + commands in one tail), then fall back to the
+// persisted session->hassh index for sessions whose kex landed in an earlier
+// batch. Without this the actor builder never sees a HASSH and clusters every
+// cowrie actor by IP — defeating the cross-IP fingerprint premise.
+func stampHASSH(st *store.Store, events []*models.Event, bindings sideBindings) {
+	// Which sessions still need a hassh after applying this pass's bindings?
+	needLookup := map[string]struct{}{}
+	for _, e := range events {
+		if e == nil || e.HASSH != "" || e.SessionID == "" {
+			continue
+		}
+		if h, ok := bindings.hassh[e.SessionID]; ok {
+			e.HASSH = h
+			continue
+		}
+		needLookup[e.SessionID] = struct{}{}
+	}
+	if len(needLookup) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(needLookup))
+	for sid := range needLookup {
+		ids = append(ids, sid)
+	}
+	persisted, err := st.HASSHForSessions(ids)
+	if err != nil || len(persisted) == 0 {
+		return // best-effort: fall back to IP clustering for these sessions
+	}
+	for _, e := range events {
+		if e == nil || e.HASSH != "" || e.SessionID == "" {
+			continue
+		}
+		if h, ok := persisted[e.SessionID]; ok {
+			e.HASSH = h
+		}
 	}
 }
 
@@ -338,6 +389,28 @@ type ttyBinding struct {
 	TS        time.Time
 }
 
+// sideBindings are the non-event facts a parse pass extracts from cowrie
+// lines that we don't store as events: the ttylog sha->session map, and the
+// session->HASSH map (cowrie emits hassh only on cowrie.client.kex, which
+// carries no useful event kind, but the fingerprint must reach the session's
+// login/command events for actor clustering).
+type sideBindings struct {
+	tty   []ttyBinding
+	hassh map[string]string // session id -> hassh
+}
+
+func (b *sideBindings) addHASSH(sessionID, hassh string) {
+	if sessionID == "" || hassh == "" {
+		return
+	}
+	if b.hassh == nil {
+		b.hassh = map[string]string{}
+	}
+	if _, ok := b.hassh[sessionID]; !ok {
+		b.hassh[sessionID] = hassh
+	}
+}
+
 // headSignature fingerprints the first bytes of a file so the append-mode
 // reader can detect copytruncate-style rotation (truncate-in-place + regrow,
 // which keeps the inode). Uses ReadAt so the file's read cursor is untouched.
@@ -404,9 +477,9 @@ func readLineBounded(br *bufio.Reader, max int) (lineChunk, error) {
 //     offset stays before it and it is re-read once cowrie finishes the line.
 //   - true (full-replace of a complete static file): the trailing line is a
 //     legitimate final record and is parsed.
-func parseReader(r io.Reader, processFinalPartial bool) ([]*models.Event, int, int64, []ttyBinding, error) {
+func parseReader(r io.Reader, processFinalPartial bool) ([]*models.Event, int, int64, sideBindings, error) {
 	var out []*models.Event
-	var bindings []ttyBinding
+	var bindings sideBindings
 	var skipped int
 	var consumed int64
 
@@ -488,22 +561,29 @@ func parseReader(r io.Reader, processFinalPartial bool) ([]*models.Event, int, i
 }
 
 // decodeCowrieLine unmarshals one JSON line into a cowrieLine. It also captures
-// the cowrie.log.closed sha->session sidechannel binding (appended to *bindings)
-// rather than surfacing it as a top-level event, to keep MITRE/IOC/UI free of
-// cowrie's own log-rotation noise. Returns ok=false on malformed JSON.
-func decodeCowrieLine(line string, bindings *[]ttyBinding) (cowrieLine, bool) {
+// two side-channel bindings that are NOT surfaced as events (keeping MITRE/
+// IOC/UI free of cowrie's log-rotation and key-exchange noise):
+//   - cowrie.log.closed:  ttylog sha -> session
+//   - cowrie.client.kex:  session -> HASSH (the ONLY event carrying hassh;
+//     the fingerprint is stamped onto the session's real events downstream)
+//
+// Returns ok=false on malformed JSON.
+func decodeCowrieLine(line string, bindings *sideBindings) (cowrieLine, bool) {
 	var rec cowrieLine
 	if err := json.Unmarshal([]byte(line), &rec); err != nil {
 		return cowrieLine{}, false
 	}
 	if rec.EventID == "cowrie.log.closed" && rec.SHA256 != "" && rec.Session != "" {
 		if ts, ok := parseTS(rec.Timestamp); ok {
-			*bindings = append(*bindings, ttyBinding{
+			bindings.tty = append(bindings.tty, ttyBinding{
 				SHA:       strings.ToLower(strings.TrimSpace(rec.SHA256)),
 				SessionID: rec.Session,
 				TS:        ts,
 			})
 		}
+	}
+	if rec.EventID == "cowrie.client.kex" && rec.HASSH != "" && rec.Session != "" {
+		bindings.addHASSH(rec.Session, strings.TrimSpace(rec.HASSH))
 	}
 	return rec, true
 }
@@ -597,13 +677,19 @@ func mapKind(eventID string) (models.EventKind, bool) {
 		// banner (hassh/ssh_client). Kept as its own kind so it is not counted
 		// as a second connect for the same session. See KindClientVersion.
 		return models.KindClientVersion, true
-	case "cowrie.command.input":
+	case "cowrie.command.input", "cowrie.command.failed":
+		// command.failed is a command cowrie doesn't emulate — often the most
+		// interesting attacker input; it carries the same `input` field.
 		return models.KindCommand, true
 	case "cowrie.session.file_upload":
 		return models.KindFileUp, true
-	case "cowrie.session.file_download":
+	case "cowrie.session.file_download", "cowrie.session.file_download.failed":
+		// The .failed variant still names the attacker's malware URL, a
+		// valuable IOC even when the fetch didn't complete.
 		return models.KindFileDown, true
-	case "cowrie.direct-tcpip.request", "cowrie.tunnel.local", "cowrie.tunnel.remote":
+	case "cowrie.direct-tcpip.request", "cowrie.direct-tcpip.redirect", "cowrie.direct-tcpip.tunnel":
+		// Real cowrie forwarding eventids. (The former "cowrie.tunnel.local/
+		// remote" cases matched nothing — those eventids don't exist in cowrie.)
 		return models.KindTunnel, true
 	default:
 		return "", false
@@ -615,10 +701,17 @@ func parseTS(s string) (time.Time, bool) {
 	if s == "" {
 		return time.Time{}, false
 	}
-	// RFC3339Nano accepts every timestamp cowrie emits (fractional-second
-	// and plain "Z" forms are strict subsets of it).
-	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return t.UTC(), true
+	// RFC3339Nano covers cowrie's default UTC output (it sets timezone=UTC,
+	// emitting a trailing "Z"). But when an operator sets timezone=system,
+	// cowrie formats with strftime %z, producing a numeric offset WITHOUT a
+	// colon ("2026-07-03T14:05:06.123456+0200") that RFC3339Nano rejects —
+	// which would silently drop EVERY event. Fall back to the no-colon layout
+	// so a misconfigured timezone degrades to nothing worse than local-offset
+	// timestamps (normalized to UTC on return).
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999-0700"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), true
+		}
 	}
 	return time.Time{}, false
 }
