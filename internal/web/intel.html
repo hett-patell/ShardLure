@@ -775,11 +775,15 @@
 
   /* ── Widget: timeline ── */
   .tl-feed { max-height: 260px; overflow: auto; }
-  .tl-row { display: grid; grid-template-columns: 42px 74px 96px 1fr; gap: 5px; padding: 3px 0; border-bottom: 1px dotted var(--line); align-items: baseline; font: 10.5px var(--mono); }
+  /* kind column was 74px — too narrow for FAILED_PASSWORD / CLIENT_VERSION,
+     so the label overflowed into the IP column and rows read as collided.
+     Widen it and clamp every cell to its track so nothing bleeds across. */
+  .tl-row { display: grid; grid-template-columns: 42px 116px 116px minmax(0,1fr); gap: 5px 8px; padding: 3px 0; border-bottom: 1px dotted var(--line); align-items: baseline; font: 10.5px var(--mono); }
+  .tl-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .tl-time { color: var(--dim-2); }
   .tl-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; }
   .tl-ip { color: var(--accent-2); }
-  .tl-body { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-body { color: var(--text); }
   .tl-cmd { color: var(--good); }
 
   /* ── Widget: credentials ── */
