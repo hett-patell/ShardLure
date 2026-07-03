@@ -2,6 +2,8 @@ package ioc
 
 import (
 	"bytes"
+	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +93,6 @@ func TestWriteSTIX(t *testing.T) {
 	out := buf.String()
 	mustHave := []string{
 		`"type": "bundle"`,
-		`"spec_version": "2.1"`,
 		`"type": "identity"`,
 		`"type": "indicator"`,
 		"[ipv4-addr:value = '1.2.3.4']",
@@ -103,6 +104,73 @@ func TestWriteSTIX(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("STIX missing %q", want)
 		}
+	}
+}
+
+// TestWriteSTIXSpecShape parses the bundle and asserts STIX 2.1 structural
+// compliance rather than substring-matching: the 2.1 Bundle carries ONLY
+// type+id (spec_version was removed from the bundle in 2.1 and belongs on
+// each object), every object needs a v-prefixed id and spec_version=2.1,
+// and indicators need pattern/pattern_type/valid_from.
+func TestWriteSTIXSpecShape(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	indicators := []Indicator{
+		{Kind: KindIP, Value: "1.2.3.4", FirstSeen: t0, LastSeen: t0, Count: 3, Sources: []string{"cowrie"}},
+		{Kind: KindUser, Value: "root", FirstSeen: t0, LastSeen: t0, Count: 5, Sources: []string{"cowrie"}},
+	}
+	var buf bytes.Buffer
+	if err := WriteSTIX(&buf, indicators); err != nil {
+		t.Fatal(err)
+	}
+
+	var bundle struct {
+		Type        string           `json:"type"`
+		ID          string           `json:"id"`
+		SpecVersion *string          `json:"spec_version"` // pointer so we can detect its presence
+		Objects     []map[string]any `json:"objects"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &bundle); err != nil {
+		t.Fatalf("bundle is not valid JSON: %v", err)
+	}
+	if bundle.Type != "bundle" {
+		t.Errorf("bundle type = %q, want bundle", bundle.Type)
+	}
+	if !strings.HasPrefix(bundle.ID, "bundle--") {
+		t.Errorf("bundle id %q missing bundle-- prefix", bundle.ID)
+	}
+	// The 2.1 Bundle object MUST NOT have spec_version.
+	if bundle.SpecVersion != nil {
+		t.Errorf("STIX 2.1 bundle must not carry spec_version (got %q)", *bundle.SpecVersion)
+	}
+
+	// STIX 2.1 ids are `type--<RFC4122 UUID>`. v4 (random, e.g. the fixed
+	// identity) and v5 (name-based, our deterministic indicator ids) are
+	// both valid, so accept version nibble 4 or 5.
+	idRe := regexp.MustCompile(`^[a-z0-9-]+--[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	sawIndicator := false
+	for i, o := range bundle.Objects {
+		typ, _ := o["type"].(string)
+		id, _ := o["id"].(string)
+		if !idRe.MatchString(id) {
+			t.Errorf("object %d (%s) has non-v5-UUID id %q", i, typ, id)
+		}
+		if o["spec_version"] != "2.1" {
+			t.Errorf("object %d (%s) spec_version = %v, want 2.1", i, typ, o["spec_version"])
+		}
+		if typ == "indicator" {
+			sawIndicator = true
+			for _, req := range []string{"pattern", "pattern_type", "valid_from", "created", "modified"} {
+				if _, ok := o[req]; !ok {
+					t.Errorf("indicator %q missing required property %q", id, req)
+				}
+			}
+			if o["pattern_type"] != "stix" {
+				t.Errorf("indicator pattern_type = %v, want stix", o["pattern_type"])
+			}
+		}
+	}
+	if !sawIndicator {
+		t.Error("bundle contained no indicator objects")
 	}
 }
 

@@ -33,11 +33,15 @@ const (
 	stixIdentityName    = "ShardLure"
 )
 
+// stixBundle is a STIX 2.1 Bundle. Note: unlike STIX 2.0, the 2.1 Bundle
+// object has ONLY `type` and `id` — `spec_version` was removed from the
+// bundle and now lives on each contained object (see stixObject). Emitting
+// it on the bundle makes strict 2.1 validators (e.g. cti-stix-validator)
+// flag the file.
 type stixBundle struct {
-	Type        string       `json:"type"`
-	ID          string       `json:"id"`
-	SpecVersion string       `json:"spec_version"`
-	Objects     []stixObject `json:"objects"`
+	Type    string       `json:"type"`
+	ID      string       `json:"id"`
+	Objects []stixObject `json:"objects"`
 }
 
 type stixObject struct {
@@ -108,10 +112,9 @@ func WriteSTIX(w io.Writer, indicators []Indicator) error {
 
 	bundleID := "bundle--" + uuidFromSeed("shardlure-bundle-"+idSeed.String())
 	bundle := stixBundle{
-		Type:        "bundle",
-		ID:          bundleID,
-		SpecVersion: stixSpecVersion,
-		Objects:     objects,
+		Type:    "bundle",
+		ID:      bundleID,
+		Objects: objects,
 	}
 
 	enc := json.NewEncoder(w)
