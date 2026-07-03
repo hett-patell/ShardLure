@@ -668,8 +668,37 @@ def open_firewall(honeypot_port: int, admin_port: int, dash_port: int) -> None:
     cp = run(["ufw", "status"], capture_output=True, text=True)
     if "active" not in (cp.stdout or "").lower():
         return
-    for port in (honeypot_port, admin_port, dash_port):
+    # The honeypot MUST be world-reachable (that's the point) and the admin
+    # SSH port is key-only, so both open publicly. The DASHBOARD is different:
+    # it exposes attacker IPs, captured payloads, and the bait-file layout with
+    # no built-in auth unless SHARDLURE_DASH_TOKEN is set — so it must NOT be
+    # opened to the internet. Bind it to the Tailscale interface when present
+    # (the intended admin path); otherwise leave it firewalled and reachable
+    # only via localhost / an SSH tunnel. An operator who genuinely wants it
+    # public can `ufw allow 8080/tcp` themselves after setting a token.
+    for port in (honeypot_port, admin_port):
         run(["ufw", "allow", f"{port}/tcp"])
+    ts_iface = _tailscale_iface()
+    if ts_iface:
+        run(["ufw", "allow", "in", "on", ts_iface, "to", "any", "port", str(dash_port), "proto", "tcp"])
+        log(f"dashboard port {dash_port} allowed on {ts_iface} only (not public)")
+    else:
+        log(f"dashboard port {dash_port} left firewalled (no tailscale iface); "
+            f"reach it via: ssh -L {dash_port}:127.0.0.1:{dash_port} -p {admin_port} <user>@<host>")
+
+
+def _tailscale_iface() -> str:
+    """Return the Tailscale interface name (usually tailscale0) if this host is
+    on a tailnet, else ''. Used to scope the dashboard firewall rule."""
+    if not shutil.which("tailscale"):
+        return ""
+    cp = run(["tailscale", "ip", "-4"], capture_output=True, text=True)
+    if not (cp.stdout or "").strip():
+        return ""
+    # tailscale0 is the near-universal name; confirm it exists before returning.
+    if Path("/sys/class/net/tailscale0").exists():
+        return "tailscale0"
+    return ""
 
 
 def print_summary(admin_port: int, honeypot_port: int, dash_port: int) -> None:
@@ -682,9 +711,14 @@ def print_summary(admin_port: int, honeypot_port: int, dash_port: int) -> None:
     print("\nShardLure is running\n====================")
     print(f"Honeypot SSH (Cowrie): 0.0.0.0:{honeypot_port}")
     print(f"Admin SSH (real):      0.0.0.0:{admin_port}  (key-only)")
-    print(f"Dashboard:             http://127.0.0.1:{dash_port}")
+    print(f"Dashboard:             http://127.0.0.1:{dash_port}  (not public — see below)")
     if tsurl:
         print(f"Tailscale dashboard:   http://{tsurl}:{dash_port}")
+    else:
+        print(f"  reach the dashboard via an SSH tunnel:")
+        print(f"    ssh -L {dash_port}:127.0.0.1:{dash_port} -p {admin_port} {user}@<host-ip>")
+    print("  (the dashboard is firewalled off the public internet; set")
+    print("   SHARDLURE_DASH_TOKEN + `ufw allow " + str(dash_port) + "/tcp` if you want it exposed)")
     print("\nIMPORTANT: open a NEW terminal and verify admin SSH before closing this one:")
     print(f"  ssh -p {admin_port} {user}@<host-ip>")
     print("\nServices:")
