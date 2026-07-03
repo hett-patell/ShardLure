@@ -2932,10 +2932,13 @@ function renderGauge(summary, intentCounts, kindCounts) {
   (intentCounts||[]).forEach(function(r){
     if(r.label==='deploy') dep=r.hits;
     if(r.label==='probe') probe=r.hits;
-    // CountsByIntent only returns actors with a non-empty intent, so summing
-    // its hits gives the count of actors whose intent could actually be
-    // classified — the correct aggression denominator (see below).
-    classifiable += (r.hits||0);
+    // Aggression denominator = actors whose intent was actually DETERMINED.
+    // CountsByIntent includes an 'unknown' bucket (journal failed-login actors
+    // have intent='unknown', a real stored value, not empty) — those can never
+    // be 'deploy', so counting them would re-dilute the score exactly as the
+    // old deploy/allActors did. Exclude 'unknown' so the ratio is deploy over
+    // {probe, proxy, deploy, mixed} — the cowrie actors with real intent.
+    if(r.label && r.label!=='unknown') classifiable += (r.hits||0);
   });
   var cmdCount = 0, dlCount = 0;
   (kindCounts||[]).forEach(function(r){
