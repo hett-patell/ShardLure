@@ -2297,13 +2297,21 @@ function renderPayloads(data) {
     const fanTitle = occ + 'x captured · ' + (p.urlCount || 0) + ' urls · ' + ips + ' ips · ' + actors + ' actors · ' + (p.sessionCount || 0) + ' sessions';
     const fan = '<span class="' + fanClass + '" title="' + escHtml(fanTitle) + '">' + occ + 'x · ' + ips + 'ip</span>';
     var shareBtn;
-    if (sha === '—' || !p.hasLocal) {
-      shareBtn = '<span style="color:var(--dim-2)">—</span>';
-    } else if (_bazaarSharedSet[sha]) {
+    if (_bazaarSharedSet[sha]) {
       var mbLink = typeof _bazaarSharedSet[sha] === 'string' ? _bazaarSharedSet[sha] : '';
       shareBtn = mbLink ? '<a href="' + safeUrl(mbLink) + '" target="_blank" rel="noopener" class="bz-btn ok" style="text-decoration:none" onclick="event.stopPropagation()">✓ shared</a>' : '<span class="bz-btn ok">✓ shared</span>';
-    } else {
+    } else if (isUploadEligible(p)) {
       shareBtn = '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>';
+    } else {
+      // Not MB-eligible (tiny/junk, tty transcript, non-download origin, or no
+      // local file). Show why instead of a share button the server would only
+      // reject — this is what fixed the "share on all 92" anomaly.
+      var why = (sha === '—' || !p.hasLocal) ? 'no file'
+        : ((p.origin || '').indexOf('download') === -1) ? 'not a download'
+        : ((p.sizeBytes || 0) <= 1024) ? 'too small'
+        : ((p.status || '') !== 'fetched') ? p.status
+        : 'ineligible';
+      shareBtn = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar: ' + escHtml(why) + '">— ' + escHtml(why) + '</span>';
     }
     html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="' + (p.hasLocal ? '1' : '0') + '">' +
       '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
@@ -2328,23 +2336,32 @@ function renderPayloads(data) {
   renderPending(data);
 }
 
-// isPending reports whether a payload row is actually eligible to ship to
-// MalwareBazaar and not yet uploaded. This MUST mirror the server's share
-// filter (store.ArtifactsForShare / BazaarUploadStats), otherwise this widget
-// over-counts versus the "MalwareBazaar sharing" panel's pending stat: that
-// panel counts only fetched, >1 KiB, download-origin binaries not yet uploaded.
-// A TTY transcript, a sub-1 KiB script, or a quarantine fetch has a local file
-// and a sha but will never be uploaded, so it is NOT pending here.
-//
-// (One honest difference remains: this widget is scoped to the selected time
-// window, while the panel stat is all-history — see renderPending's label.)
-function isPending(p) {
+// isUploadEligible reports whether a payload row COULD be shipped to
+// MalwareBazaar at all — mirroring the server's share filter
+// (store.ArtifactsForShare) and the Vet gate's cheap structural checks:
+// a local file, fetched status, >1 KiB, and a download-ish origin. A TTY
+// transcript, sub-1 KiB junk/pubkey, or non-download artifact will always be
+// skipped server-side, so the library must NOT offer a share button for it
+// (that button was the 92-vs-2 anomaly: it appeared on all hasLocal rows,
+// including 60 tiny files and 22 tty transcripts that can never upload).
+// Deliberately does NOT consider already-shared state — callers layer that on.
+function isUploadEligible(p) {
   var sha = p.sha256 || '';
   if (!sha || sha === '—' || !p.hasLocal) return false;
-  if (_bazaarSharedSet[sha]) return false;
   if ((p.status || '') !== 'fetched') return false;       // server: status='fetched'
   if ((p.sizeBytes || 0) <= 1024) return false;            // server: size_bytes > 1024
   if ((p.origin || '').indexOf('download') === -1) return false; // server: origin LIKE '%download%'
+  return true;
+}
+
+// isPending is isUploadEligible AND not-yet-uploaded, scoped to the selected
+// window. Drives the "Pending uploads" panel.
+//
+// (One honest difference from the all-history "MalwareBazaar sharing → pending"
+// stat remains: this widget is time-window scoped — see renderPending's label.)
+function isPending(p) {
+  if (!isUploadEligible(p)) return false;
+  if (_bazaarSharedSet[p.sha256]) return false;
   return true;
 }
 
