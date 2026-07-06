@@ -174,11 +174,20 @@ func (s *Store) ListBazaarUploadsWithArtifacts(limit int) ([]BazaarUploadWithArt
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
+	// Collapse the artifacts side to ONE row per sha256 before joining. A
+	// single payload is frequently captured under several artifact rows (same
+	// bytes fetched via cowrie_download AND cowrie_file_download, or re-hosted
+	// at multiple URLs), so a plain LEFT JOIN fanned each upload into N rows —
+	// double-counting the sharing history and throwing off the row limit.
+	// MAX() picks a stable representative for the display-only size/ip/path.
 	q := `
 SELECT u.sha256, u.uploaded_at, u.response_status, COALESCE(u.mb_url, ''),
        COALESCE(a.size_bytes, 0), COALESCE(a.src_ip, ''), COALESCE(a.local_path, '')
 FROM bazaar_uploads u
-LEFT JOIN artifacts a ON a.sha256 = u.sha256
+LEFT JOIN (
+  SELECT sha256, MAX(size_bytes) AS size_bytes, MAX(src_ip) AS src_ip, MAX(local_path) AS local_path
+  FROM artifacts WHERE sha256 != '' GROUP BY sha256
+) a ON a.sha256 = u.sha256
 ORDER BY u.uploaded_at DESC`
 	args := []interface{}{}
 	if limit > 0 {
