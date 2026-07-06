@@ -357,6 +357,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
 	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
 	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
+	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
 	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guard(s.handleAbuseIPDBSuggestions))
 	mux.HandleFunc("/api/intel/tunnels", s.guard(s.handleIntelTunnels))
 	mux.HandleFunc("/api/intel/timeline", s.guard(s.handleIntelTimeline))

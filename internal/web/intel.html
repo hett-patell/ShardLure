@@ -1085,6 +1085,7 @@
         <div class="panel-head">
           <h2>Suggested AbuseIPDB reports</h2>
           <span class="meta" id="abuse-suggest-meta">ranked by report priority</span>
+          <button class="bz-btn" id="abuse-report-all-btn" onclick="reportAllSuggested(this)" style="margin-left:auto;display:none">⚑ Report All</button>
         </div>
         <div class="panel-body">
         <div id="abuse-suggest-note" class="abuse-note" style="display:none"></div>
@@ -2167,6 +2168,10 @@ function renderAbuseSuggest(data) {
   const note = document.getElementById('abuse-suggest-note');
   const list = data.suggestions || [];
   meta.textContent = (data.total || 0) + ' candidates · ranked by report priority';
+  // The "Report All" button appears only when reporting is armed AND there is
+  // at least one candidate to report.
+  const allBtn = document.getElementById('abuse-report-all-btn');
+  if (allBtn) allBtn.style.display = (data.enabled && list.length) ? '' : 'none';
   // When reporting isn't armed, the list is advisory only — say so once.
   if (!data.enabled) {
     note.style.display = 'block';
@@ -2223,6 +2228,34 @@ async function reportSuggested(btn) {
     btn.disabled = false;
     btn.textContent = '⚑ report';
     btn.title = 'request failed';
+  }
+}
+
+// reportAllSuggested batch-reports every currently-suggested brute-forcer via
+// the server-side orchestrator (which vets, dedups, paces and halts on 429).
+// Confirms first — this is a live, public, multi-IP action.
+async function reportAllSuggested(btn) {
+  const meta = document.getElementById('abuse-suggest-meta');
+  if (!window.confirm('Report ALL suggested IPs to AbuseIPDB now? This is a live, public action attributed to your account.')) return;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'reporting…';
+  try {
+    const r = await fetch('/api/intel/abuseipdb/report-all?_=' + Date.now(), { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function(){ return {}; });
+    if (d.status === 'ok' || d.status === 'partial') {
+      meta.textContent = 'reported ' + (d.reported || 0) + ' · skipped ' + (d.skipped || 0) +
+        (d.status === 'partial' ? ' · some failed (see logs)' : '');
+      // Refresh so reported IPs drop out of the list (dedup window).
+      setTimeout(refreshAbuseSuggest, 800);
+    } else {
+      meta.textContent = d.error || d.status || 'report-all failed';
+    }
+  } catch (e) {
+    meta.textContent = 'request failed';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
   }
 }
 

@@ -815,6 +815,27 @@ func (s *Store) GetActorByPrimaryIP(ip string) (*models.Actor, error) {
 	return &a, nil
 }
 
+// GetReportableActorByIP returns the BEST actor row for reporting an IP, not
+// just the most-recent one. A single IP can have two actor rows — one per
+// source (cowrie vs journal) — because the two ingest paths cluster
+// independently. GetActorByPrimaryIP picks by last_seen, which can return a
+// low-signal "unknown" cowrie row while a journal row for the SAME IP is a
+// confirmed brute-forcer. Reporting is about the IP, so pick the row most
+// likely to pass the report vet: highest probe_score, then most events. This
+// is the resolver the report/suggestions paths use so the widget's eligibility
+// and the report action agree on the same evidence.
+func (s *Store) GetReportableActorByIP(ip string) (*models.Actor, error) {
+	row := s.db.QueryRow(`SELECT `+actorColumns+`
+FROM actors WHERE primary_ip=?
+ORDER BY probe_score DESC, event_count DESC, last_seen DESC
+LIMIT 1`, ip)
+	var a models.Actor
+	if err := scanActorRow(row, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
 func (s *Store) EventCount() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)

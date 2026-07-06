@@ -1300,7 +1300,12 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	act, err := s.st.GetActorByPrimaryIP(ip)
+	// Resolve to the BEST reportable actor row for this IP, not merely the
+	// most-recent. An IP can have both a cowrie and a journal actor row; the
+	// journal row is often the confirmed brute-forcer while the cowrie row is
+	// "unknown". Picking by last_seen (GetActorByPrimaryIP) would vet-reject a
+	// genuinely reportable IP, contradicting the suggestions widget.
+	act, err := s.st.GetReportableActorByIP(ip)
 	if err != nil || act == nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "no actor for that IP"})
@@ -1372,6 +1377,97 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 		resp.Error = "report failed — see server logs"
 	default:
 		resp.Status = "skipped"
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ==== /api/intel/abuseipdb/report-all =============================
+
+type reportAllResponse struct {
+	Status   string `json:"status"`
+	Reported int    `json:"reported"`
+	Skipped  int    `json:"skipped"`
+	Error    string `json:"error,omitempty"`
+}
+
+// handleAbuseIPDBReportAll reports every currently-suggested brute-forcer in
+// one batch, reusing the abuseipdb.Report orchestrator (which vets each
+// candidate, dedups against the re-report window, paces the POSTs, and halts
+// cleanly on a 429). Same gating as the single-report path: opt-in + key.
+func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if !s.abuseEnabled {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "AbuseIPDB reporting is disabled"})
+		return
+	}
+	if s.abuseKey == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "AbuseIPDB API key not configured"})
+		return
+	}
+
+	// Build the candidate set from the same ranked suggestions the widget shows
+	// (Vet + dedup happen inside Report, so we don't pre-filter here beyond
+	// resolving each IP to its best reportable actor row).
+	actors, err := s.st.TopActorsByRate(1000)
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	seen := map[string]bool{}
+	cands := make([]abuseipdb.ReportCandidate, 0, len(actors))
+	for _, a := range actors {
+		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
+			continue
+		}
+		seen[a.PrimaryIP] = true
+		// Resolve to the best reportable row for the IP so a low-signal cowrie
+		// row doesn't mask a confirmed journal row (see GetReportableActorByIP).
+		best, berr := s.st.GetReportableActorByIP(a.PrimaryIP)
+		if berr != nil || best == nil {
+			best = &a
+		}
+		cands = append(cands, abuseipdb.ReportCandidate{
+			SrcIP:           best.PrimaryIP,
+			Playbook:        best.Playbook,
+			ProbeScore:      best.ProbeScore,
+			EventCount:      best.EventCount,
+			UniqueUsers:     best.UniqueUsers,
+			AttemptsPerHour: best.AttemptsPerHour,
+		})
+	}
+
+	// Serialize batch reporting process-wide with the single-report throttle so
+	// a click here can't race a click on a per-row button into an API flood.
+	s.abuseReportMu.Lock()
+	defer s.abuseReportMu.Unlock()
+
+	opts := abuseipdb.Options{
+		APIKey:     s.abuseKey,
+		Endpoint:   s.abuseEndpoint,
+		Categories: s.abuseCategories,
+		Comment:    s.abuseComment,
+		MinProbe:   s.abuseMinProbe,
+		Rewindow:   s.abuseRewindow,
+		Admin:      s.abuseAdmin,
+	}
+	rec := &abuseReportRecorderAdapter{st: s.st}
+	reported, skipped, ferr := abuseipdb.Report(r.Context(), rec, cands, opts)
+	s.lastAbuseReportAt = time.Now()
+
+	resp := reportAllResponse{Status: "ok", Reported: reported, Skipped: skipped}
+	if ferr != nil {
+		log.Printf("web: abuseipdb report-all: %v", ferr)
+		resp.Status = "partial"
+		resp.Error = "some reports failed — see server logs"
 	}
 	json.NewEncoder(w).Encode(resp)
 }
