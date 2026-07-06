@@ -73,6 +73,10 @@
   .stat .num.accent { color: var(--accent); }
   .stat .num.blue { color: var(--accent-2); }
   .stat .label { color: var(--dim); font-size: 10px; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+  /* Scroll container for long tables inside a panel, so a big result set
+     stays compact instead of stretching the panel (and leaving a tall empty
+     column beside it in the 2-col grid). Header stays put; body scrolls. */
+  .table-scroll { max-height: 440px; overflow: auto; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
   .grid .full { grid-column: 1 / -1; }
@@ -1052,7 +1056,7 @@
         </div>
       </section>
 
-      <section class="panel panel-collapse" id="panel-ioc">
+      <section class="panel full panel-collapse" id="panel-ioc">
         <div class="panel-head" onclick="this.parentElement.classList.toggle('collapsed')">
           <h2>IOC export</h2>
           <span class="meta" id="ioc-meta">STIX 2.1 · CSV</span>
@@ -1070,6 +1074,7 @@
             <a class="ioc-dl" id="ioc-dl-stix" href="/api/ioc/stix?window=24h" download onclick="event.stopPropagation()">download STIX bundle</a>
           </div>
         </div>
+        <div class="table-scroll">
         <table class="dense" id="ioc-table">
           <thead>
             <tr><th>value</th><th class="num">count</th><th>first</th><th>last</th><th>actors</th></tr>
@@ -1078,6 +1083,7 @@
             <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
           </tbody>
         </table>
+        </div>
         </div>
       </section>
 
@@ -1110,7 +1116,7 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-enrich">
+      <section class="panel full" id="panel-enrich">
         <div class="panel-head">
           <h2>Threat intel enrichment</h2>
           <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo</span>
@@ -1302,7 +1308,7 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-bazaar">
+      <section class="panel full" id="panel-bazaar">
         <div class="panel-head">
           <h2>MalwareBazaar sharing</h2>
           <span class="meta" id="bazaar-meta">abuse.ch threat intel exchange</span>
