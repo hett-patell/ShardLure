@@ -953,6 +953,10 @@
       <div class="detail" id="actor-detail">
         <h3 id="detail-title">Actor detail</h3>
         <div class="kv" id="detail-kv"></div>
+        <div id="detail-actions" style="display:none;margin:8px 0">
+          <button class="bz-btn" id="report-abuseipdb-btn" onclick="reportActorToAbuseIPDB(this)">⚑ Report to AbuseIPDB</button>
+          <span id="report-abuseipdb-status" style="margin-left:8px;font-size:11px;color:var(--dim)"></span>
+        </div>
         <div class="cmd-list" id="detail-cmds"></div>
       </div>
     </section>
@@ -1521,6 +1525,20 @@ async function loadActorDetail(id) {
     (a.hassh ? '<span>HASSH</span><strong>' + esc(a.hassh) + '</strong>' : '') +
     (a.sshClient ? '<span>SSH client</span><strong>' + esc(a.sshClient) + '</strong>' : '') +
     (a.lastCommand ? '<span>Last command</span><strong style="color:var(--good)">' + esc(a.lastCommand) + '</strong>' : '');
+  // AbuseIPDB report button: shown only when the backend says this actor is
+  // eligible (reporting armed + passes the Vet gate + not already reported).
+  const actions = document.getElementById('detail-actions');
+  const rptStatus = document.getElementById('report-abuseipdb-status');
+  const rptBtn = document.getElementById('report-abuseipdb-btn');
+  rptStatus.textContent = '';
+  if (d.reportEligible && a.ip) {
+    actions.style.display = 'block';
+    rptBtn.disabled = false;
+    rptBtn.dataset.ip = a.ip;
+  } else {
+    actions.style.display = 'none';
+    rptBtn.dataset.ip = '';
+  }
   const cmds = d.commands || [];
   const events = d.events || [];
   let html = '';
@@ -1539,6 +1557,40 @@ async function loadActorDetail(id) {
     }).join('');
   }
   document.getElementById('detail-cmds').innerHTML = html || '<span class="empty">No activity recorded for this actor.</span>';
+}
+
+// reportActorToAbuseIPDB POSTs the currently-open actor's IP to the reporting
+// endpoint. The backend re-runs the full Vet gate, so this is safe even if the
+// button somehow shows for an ineligible actor.
+async function reportActorToAbuseIPDB(btn) {
+  const ip = btn.dataset.ip;
+  const status = document.getElementById('report-abuseipdb-status');
+  if (!ip) return;
+  btn.disabled = true;
+  status.style.color = 'var(--dim)';
+  status.textContent = 'reporting…';
+  try {
+    const r = await fetch('/api/intel/abuseipdb/report?ip=' + encodeURIComponent(ip) + '&_=' + Date.now(),
+      { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function(){ return {}; });
+    if (d.status === 'reported') {
+      status.style.color = 'var(--good)';
+      status.textContent = 'reported ✓';
+      btn.style.display = 'none';
+    } else if (d.status === 'already_reported') {
+      status.style.color = 'var(--dim)';
+      status.textContent = 'already reported recently';
+      btn.style.display = 'none';
+    } else {
+      status.style.color = 'var(--red-team)';
+      status.textContent = (d.error || d.status || 'failed');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    status.style.color = 'var(--red-team)';
+    status.textContent = 'request failed';
+    btn.disabled = false;
+  }
 }
 
 function renderActors(actors) {

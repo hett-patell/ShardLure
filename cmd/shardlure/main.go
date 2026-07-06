@@ -114,6 +114,8 @@ func main() {
 		cmdIOC(st)
 	case "share":
 		cmdShare(st, cfg, args[1:])
+	case "report":
+		cmdReport(st, cfg, args[1:])
 	case "version":
 		fmt.Printf("shardlure %s (commit %s)\n", version, commit)
 	default:
@@ -331,6 +333,14 @@ func webOptions(cfg config.Config) web.Options {
 		BazaarEndpoint:  cfg.Intel.Bazaar.Endpoint,
 		BazaarTags:      cfg.Intel.Bazaar.Tags,
 		BazaarMaxBytes:  cfg.Intel.Bazaar.MaxBytes,
+
+		AbuseReportEnabled: cfg.Intel.AbuseIPDB.ReportEnabled,
+		AbuseEndpoint:      cfg.Intel.AbuseIPDB.Endpoint,
+		AbuseCategories:    cfg.Intel.AbuseIPDB.Categories,
+		AbuseMinProbe:      cfg.Intel.AbuseIPDB.MinProbeScore,
+		AbuseRewindowHours: cfg.Intel.AbuseIPDB.RewindowHours,
+		AbuseComment:       cfg.Intel.AbuseIPDB.Comment,
+		AdminIPs:           cfg.AdminIPs,
 	}
 }
 
@@ -452,6 +462,7 @@ Usage:
   shardlure status
   shardlure ioc
   shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 240h] [--anonymous] [--status]
+  shardlure report abuseipdb [--dry-run] [--limit N] [--min-probe 60] [--status]
 
 Config: ~/.local/share/shardlure/ or -config shardlure.yaml
 `)

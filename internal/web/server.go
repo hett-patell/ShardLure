@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -41,6 +42,19 @@ type Server struct {
 	bazaarEndpoint string
 	bazaarTags     []string
 	bazaarMaxBytes int64
+
+	// AbuseIPDB reporting (opt-in, off unless abuseReportEnabled AND
+	// abuseKey present). abuseAdmin hard-rejects admin IPs in Vet; the rest
+	// mirror the config knobs. Reporting is the only outbound WRITE surface
+	// the dashboard exposes beyond bazaar, so it carries the same throttle.
+	abuseKey        string
+	abuseEndpoint   string
+	abuseEnabled    bool
+	abuseCategories []int
+	abuseMinProbe   int
+	abuseRewindow   time.Duration
+	abuseComment    string
+	abuseAdmin      *netmatch.Set
 	// startedAt marks when this Server was constructed; surfaced as the
 	// dashboard "uptime" so the operator can tell at a glance how long the
 	// live process has been running (and spot an unexpected restart).
@@ -52,6 +66,12 @@ type Server struct {
 	// floor guarantees we never machine-gun the MB API regardless of client.
 	bazaarMu     sync.Mutex
 	lastBazaarAt time.Time
+
+	// abuseReportMu + lastAbuseReportAt throttle AbuseIPDB /report POSTs
+	// process-wide, the same defense as bazaar: the per-actor button is
+	// bypassable, so a server-side floor guarantees we never spam the API.
+	abuseReportMu     sync.Mutex
+	lastAbuseReportAt time.Time
 
 	// countriesCache memoizes the (relatively expensive) full-table
 	// hits-by-country aggregation, which both /api/dashboard and /api/intel
@@ -220,6 +240,17 @@ type Options struct {
 	BazaarEndpoint  string
 	BazaarTags      []string
 	BazaarMaxBytes  int64
+
+	// AbuseIPDB opt-in reporting. AbuseReportEnabled + a key (from
+	// SHARDLURE_ABUSEIPDB_KEY, reused from enrichment) are both required to
+	// arm the dashboard "Report" button. AdminIPs feed the Vet hard-reject.
+	AbuseReportEnabled bool
+	AbuseEndpoint      string
+	AbuseCategories    []int
+	AbuseMinProbe      int
+	AbuseRewindowHours int
+	AbuseComment       string
+	AdminIPs           []string
 }
 
 func New(st *store.Store, addr string, opts ...Options) *Server {
@@ -265,17 +296,41 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	if bzMax <= 0 {
 		bzMax = 33 << 20
 	}
+
+	// AbuseIPDB reporting: reuse the same env key as enrichment /check. Off
+	// unless the operator both enabled it in config AND provided a key.
+	abuseKey := strings.TrimSpace(os.Getenv("SHARDLURE_ABUSEIPDB_KEY"))
+	abuseEndpoint := firstOpt.AbuseEndpoint
+	if abuseEndpoint == "" {
+		abuseEndpoint = "https://api.abuseipdb.com/api/v2/report"
+	}
+	abuseCats := firstOpt.AbuseCategories
+	if len(abuseCats) == 0 {
+		abuseCats = []int{18, 22}
+	}
+	abuseRewindow := time.Duration(firstOpt.AbuseRewindowHours) * time.Hour
+	if abuseRewindow <= 0 {
+		abuseRewindow = 24 * time.Hour
+	}
 	return &Server{
-		st:             st,
-		addr:           addr,
-		geo:            newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st),
-		dashboardAuth:  strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
-		home:           home,
-		bazaarKey:      bzKey,
-		bazaarEndpoint: bzEndpoint,
-		bazaarTags:     bzTags,
-		bazaarMaxBytes: bzMax,
-		startedAt:      time.Now(),
+		st:              st,
+		addr:            addr,
+		geo:             newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st),
+		dashboardAuth:   strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
+		home:            home,
+		bazaarKey:       bzKey,
+		bazaarEndpoint:  bzEndpoint,
+		bazaarTags:      bzTags,
+		bazaarMaxBytes:  bzMax,
+		abuseKey:        abuseKey,
+		abuseEndpoint:   abuseEndpoint,
+		abuseEnabled:    firstOpt.AbuseReportEnabled,
+		abuseCategories: abuseCats,
+		abuseMinProbe:   firstOpt.AbuseMinProbe,
+		abuseRewindow:   abuseRewindow,
+		abuseComment:    firstOpt.AbuseComment,
+		abuseAdmin:      netmatch.New(firstOpt.AdminIPs),
+		startedAt:       time.Now(),
 	}
 }
 
@@ -301,6 +356,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/deobf", s.guard(s.handleIntelDeobf))
 	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
 	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
+	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
 	mux.HandleFunc("/api/intel/tunnels", s.guard(s.handleIntelTunnels))
 	mux.HandleFunc("/api/intel/timeline", s.guard(s.handleIntelTimeline))
 	mux.HandleFunc("/vendor/vis-network.min.js", func(w http.ResponseWriter, r *http.Request) {

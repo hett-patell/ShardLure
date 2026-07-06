@@ -57,3 +57,25 @@ intel:
     # The share subcommand filters artifacts by this window unless
     # --since or --sha overrides it.
     freshness_days: 10
+  abuseipdb:
+    # Outbound REPORTING of confirmed brute-forcers to AbuseIPDB (the
+    # give-back to the community feed). OFF by default. Enrichment /check
+    # reads are unaffected by this and always work when the key is set.
+    #
+    # Reporting requires BOTH report_enabled: true AND the API key in the
+    # SHARDLURE_ABUSEIPDB_KEY env var (reused from enrichment /check — the
+    # key is never a config field). Never reports admin or private/reserved
+    # IPs, and only reports actors that pass the vetting gate (confirmed
+    # brute-force playbook + probe score + event/user floor).
+    report_enabled: false
+    # AbuseIPDB category IDs attached to every report. 18=SSH, 22=Brute-Force.
+    # See https://www.abuseipdb.com/categories
+    categories: [18, 22]
+    # Minimum actor ProbeScore (0-100) to report. 60 = high-confidence only.
+    min_probe_score: 60
+    # Hours before a reported IP may be reported again. AbuseIPDB permits
+    # re-reporting after 15 min; 24h keeps us well within fair use.
+    rewindow_hours: 24
+    # Optional operator suffix appended to the generated report comment. The
+    # generated comment carries NOTHING identifying the honeypot host/session.
+    comment: ""

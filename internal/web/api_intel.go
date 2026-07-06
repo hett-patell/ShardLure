@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
 	"github.com/networkshard/shardlure/internal/intel/deobf"
 	"github.com/networkshard/shardlure/internal/intel/enrich"
 	"github.com/networkshard/shardlure/internal/intel/graph"
@@ -1241,6 +1242,135 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		resp.Status = "error"
 		resp.Error = "share failed — see server logs"
 	} else {
+		resp.Status = "skipped"
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// abuseReportRecorderAdapter bridges store's AbuseReport API to the argument
+// list abuseipdb.ReportRecorder expects, keeping the abuseipdb package free of
+// any store import (mirrors bazaarRecorderAdapter).
+type abuseReportRecorderAdapter struct {
+	st *store.Store
+}
+
+func (a *abuseReportRecorderAdapter) AbuseIPDBReported(ip string, within time.Duration) (bool, error) {
+	return a.st.AbuseIPDBReported(ip, within)
+}
+
+func (a *abuseReportRecorderAdapter) RecordAbuseIPDBReport(ip, status string, score int, categories []int, at time.Time) error {
+	return a.st.RecordAbuseIPDBReport(ip, status, score, categories, at)
+}
+
+// handleAbuseIPDBReport reports a single confirmed brute-forcer (by primary IP)
+// to AbuseIPDB. Opt-in and gated: it requires both abuseEnabled (config
+// report_enabled) and a key (SHARDLURE_ABUSEIPDB_KEY). The Vet gate inside
+// abuseipdb.Report hard-rejects admin/private/reserved IPs and anything that
+// isn't a confirmed brute-force actor, so a mis-click can't file a bad report.
+func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+	if ip == "" {
+		http.Error(w, "missing ip", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	if !s.abuseEnabled {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "AbuseIPDB reporting is disabled (set intel.abuseipdb.report_enabled)"})
+		return
+	}
+	if s.abuseKey == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "AbuseIPDB API key not configured (SHARDLURE_ABUSEIPDB_KEY)"})
+		return
+	}
+
+	// Dedup early-out: if we reported this IP within the window, don't even
+	// build the candidate.
+	if already, _ := s.st.AbuseIPDBReported(ip, s.abuseRewindow); already {
+		json.NewEncoder(w).Encode(map[string]string{"status": "already_reported"})
+		return
+	}
+
+	act, err := s.st.GetActorByPrimaryIP(ip)
+	if err != nil || act == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "no actor for that IP"})
+		return
+	}
+	cand := abuseipdb.ReportCandidate{
+		SrcIP:           act.PrimaryIP,
+		Playbook:        act.Playbook,
+		ProbeScore:      act.ProbeScore,
+		EventCount:      act.EventCount,
+		UniqueUsers:     act.UniqueUsers,
+		AttemptsPerHour: act.AttemptsPerHour,
+	}
+
+	// Server-side throttle: enforce a minimum gap between /report POSTs
+	// process-wide so a scripted caller can't spam the API. Held only for the
+	// brief sleep, released before the network IO.
+	s.abuseReportMu.Lock()
+	const minAbuseGap = 2 * time.Second
+	if wait := minAbuseGap - time.Since(s.lastAbuseReportAt); s.lastAbuseReportAt.After(time.Time{}) && wait > 0 {
+		time.Sleep(wait)
+	}
+	s.lastAbuseReportAt = time.Now()
+	s.abuseReportMu.Unlock()
+
+	var skipReason string
+	var reportErr error
+	opts := abuseipdb.Options{
+		APIKey:     s.abuseKey,
+		Endpoint:   s.abuseEndpoint,
+		Categories: s.abuseCategories,
+		Comment:    s.abuseComment,
+		MinProbe:   s.abuseMinProbe,
+		Rewindow:   s.abuseRewindow,
+		Admin:      s.abuseAdmin,
+		OnProgress: func(_ abuseipdb.ReportCandidate, _ *abuseipdb.Result, err error) {
+			if err != nil {
+				// Vet skip reasons are honeypot-side policy text (no secrets/IPs
+				// beyond the one the operator clicked), safe to surface.
+				if strings.HasPrefix(err.Error(), "skip: ") {
+					skipReason = strings.TrimPrefix(err.Error(), "skip: ")
+				} else {
+					reportErr = err
+				}
+			}
+		},
+	}
+	rec := &abuseReportRecorderAdapter{st: s.st}
+	reported, _, ferr := abuseipdb.Report(r.Context(), rec, []abuseipdb.ReportCandidate{cand}, opts)
+
+	resp := struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}{}
+	switch {
+	case reported > 0:
+		resp.Status = "reported"
+	case skipReason != "":
+		resp.Status = "skipped"
+		resp.Error = skipReason
+	case reportErr != nil || ferr != nil:
+		// Log the real AbuseIPDB error; return generic so the admin-API
+		// response can't leak the key or upstream internals.
+		if ferr == nil {
+			ferr = reportErr
+		}
+		log.Printf("web: abuseipdb report: %v", ferr)
+		resp.Status = "error"
+		resp.Error = "report failed — see server logs"
+	default:
 		resp.Status = "skipped"
 	}
 	json.NewEncoder(w).Encode(resp)

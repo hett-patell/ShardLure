@@ -32,19 +32,21 @@ type Store struct {
 	// statement under writeMu, adding pointless lock contention on hot paths.
 	// A sync.Once per table runs the DDL exactly once; subsequent calls are a
 	// cheap atomic check with no lock.
-	onceArtifacts sync.Once
-	onceEnrich    sync.Once
-	onceBazaar    sync.Once
-	onceTTY       sync.Once
-	onceSessHASSH sync.Once
-	onceSessMeta  sync.Once
+	onceArtifacts   sync.Once
+	onceEnrich      sync.Once
+	onceBazaar      sync.Once
+	onceTTY         sync.Once
+	onceSessHASSH   sync.Once
+	onceSessMeta    sync.Once
+	onceAbuseReport sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
-	errArtifacts error
-	errEnrich    error
-	errBazaar    error
-	errTTY       error
-	errSessHASSH error
-	errSessMeta  error
+	errArtifacts   error
+	errEnrich      error
+	errBazaar      error
+	errTTY         error
+	errSessHASSH   error
+	errSessMeta    error
+	errAbuseReport error
 }
 
 type sqlExecer interface {
@@ -408,6 +410,27 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			}
 		}
 		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (11, ?)`, now); err != nil {
+			return err
+		}
+	}
+
+	// v12: abuseipdb_reports — the dedup/audit ledger for outbound AbuseIPDB
+	// reporting (identity-shaped, NOT purged by MaintenancePurge). Also created
+	// lazily via ensureAbuseReportsTable for hot DBs where this write contends;
+	// creating it here keeps a freshly-migrated DB consistent with the ladder.
+	if current < 12 {
+		if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS abuseipdb_reports (
+  ip          TEXT PRIMARY KEY,
+  reported_at TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  categories  TEXT,
+  abuse_score INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_abuseipdb_reports_ts ON abuseipdb_reports(reported_at);`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (12, ?)`, now); err != nil {
 			return err
 		}
 	}
