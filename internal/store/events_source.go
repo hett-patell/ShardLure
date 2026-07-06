@@ -27,7 +27,7 @@ func (s *Store) EventsBySource(source models.Source) ([]*models.Event, error) {
 //
 // Returning an error from fn aborts iteration and propagates the error.
 func (s *Store) IterateEventsBySource(source models.Source, fn func(*models.Event) error) error {
-	rows, err := s.db.Query(`SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, dst_ip, dst_port, raw, actor_id
+	rows, err := s.db.Query(`SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, raw, actor_id
 FROM events WHERE source=? ORDER BY ts ASC`, source)
 	if err != nil {
 		return err
@@ -65,7 +65,7 @@ func (s *Store) IterateEventsByActorIDs(ids []string, fn func(*models.Event) err
 	// (verified via EXPLAIN QUERY PLAN). Callers only need ts order WITHIN
 	// each actor (the collectors key clusters by actor), and the touched-ID
 	// set per live tick is small, so per-ID queries are the cheaper shape.
-	const q = `SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, dst_ip, dst_port, raw, actor_id
+	const q = `SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, raw, actor_id
 FROM events WHERE actor_id = ? ORDER BY ts ASC`
 	for _, id := range ids {
 		rows, err := s.db.Query(q, id)

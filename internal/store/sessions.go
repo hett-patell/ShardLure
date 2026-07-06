@@ -223,7 +223,7 @@ func (s *Store) SessionEvents(sessionID string) ([]*models.Event, error) {
 	// index and every session-detail click full-scanned the events table.
 	// Sessions are cowrie-only, so this doesn't drop rows.
 	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, dst_ip, dst_port, actor_id
+SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, actor_id
 FROM events WHERE source='cowrie' AND session_id=? ORDER BY ts ASC`, sessionID)
 	if err != nil {
 		return nil, err
