@@ -49,7 +49,7 @@ func NewClient(endpoint string) *Client {
 }
 
 // Submission is one report's payload. IP is the offender; Categories are the
-// AbuseIPDB category IDs (e.g. 18 SSH, 22 Brute-Force); Comment is the public
+// AbuseIPDB category IDs (e.g. 18 Brute-Force, 22 SSH); Comment is the public
 // note — it must carry NOTHING that identifies the honeypot host or session.
 type Submission struct {
 	IP         string

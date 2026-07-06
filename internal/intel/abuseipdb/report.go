@@ -58,7 +58,7 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		return 0, 0, ErrEmptyBatch
 	}
 	if len(opts.Categories) == 0 {
-		opts.Categories = []int{18, 22} // SSH, Brute-Force
+		opts.Categories = []int{18, 22} // 18=Brute-Force, 22=SSH
 	}
 	if opts.Rewindow == 0 {
 		opts.Rewindow = 24 * time.Hour

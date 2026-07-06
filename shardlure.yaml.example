@@ -68,7 +68,7 @@ intel:
     # IPs, and only reports actors that pass the vetting gate (confirmed
     # brute-force playbook + probe score + event/user floor).
     report_enabled: false
-    # AbuseIPDB category IDs attached to every report. 18=SSH, 22=Brute-Force.
+    # AbuseIPDB category IDs attached to every report. 18=Brute-Force, 22=SSH.
     # See https://www.abuseipdb.com/categories
     categories: [18, 22]
     # Minimum actor ProbeScore (0-100) to report. 60 = high-confidence only.

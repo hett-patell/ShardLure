@@ -96,7 +96,7 @@ type Config struct {
 			// https://api.abuseipdb.com/api/v2/report. Useful for tests.
 			Endpoint string `yaml:"endpoint"`
 			// Categories are the AbuseIPDB category IDs attached to every
-			// report. Defaults to [18, 22] (SSH, Brute-Force). See
+			// report. Defaults to [18, 22] (18=Brute-Force, 22=SSH). See
 			// https://www.abuseipdb.com/categories.
 			Categories []int `yaml:"categories"`
 			// MinProbeScore is the actor ProbeScore floor to report (0-100).
@@ -154,7 +154,7 @@ func Default() Config {
 	c.Intel.Bazaar.FreshnessDays = 10
 	c.Intel.AbuseIPDB.ReportEnabled = false
 	c.Intel.AbuseIPDB.Endpoint = "https://api.abuseipdb.com/api/v2/report"
-	c.Intel.AbuseIPDB.Categories = []int{18, 22} // SSH, Brute-Force
+	c.Intel.AbuseIPDB.Categories = []int{18, 22} // 18=Brute-Force, 22=SSH
 	c.Intel.AbuseIPDB.MinProbeScore = 60
 	c.Intel.AbuseIPDB.RewindowHours = 24
 	return c
