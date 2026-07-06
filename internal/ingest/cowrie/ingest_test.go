@@ -118,6 +118,38 @@ func TestToEventTunnelDst(t *testing.T) {
 	}
 }
 
+// TestDecodeSessionMetaBindings verifies cowrie.session.closed (duration_ms)
+// and cowrie.session.params (arch) are captured as session-keyed side-bindings
+// rather than events, and that they are NOT themselves emitted as events
+// (mapKind doesn't know them).
+func TestDecodeSessionMetaBindings(t *testing.T) {
+	var b sideBindings
+	closed := `{"eventid":"cowrie.session.closed","session":"s1","duration_ms":2267,"timestamp":"2026-07-06T00:00:07.234731Z","src_ip":"1.2.3.4"}`
+	params := `{"eventid":"cowrie.session.params","session":"s1","arch":"linux-x64-lsb","timestamp":"2026-07-06T00:05:30Z","src_ip":"1.2.3.4"}`
+
+	rec, ok := decodeCowrieLine(closed, &b)
+	if !ok {
+		t.Fatal("decode closed")
+	}
+	if _, isEvent := mapKind(rec.EventID); isEvent {
+		t.Fatalf("session.closed must not be an event kind")
+	}
+	if b.duration["s1"] != 2267 {
+		t.Fatalf("duration binding = %d, want 2267", b.duration["s1"])
+	}
+
+	rec, ok = decodeCowrieLine(params, &b)
+	if !ok {
+		t.Fatal("decode params")
+	}
+	if _, isEvent := mapKind(rec.EventID); isEvent {
+		t.Fatalf("session.params must not be an event kind")
+	}
+	if b.arch["s1"] != "linux-x64-lsb" {
+		t.Fatalf("arch binding = %q, want linux-x64-lsb", b.arch["s1"])
+	}
+}
+
 // TestMapKindConnectVsClientVersion guards against the regression where both
 // cowrie.session.connect and cowrie.client.version mapped to KindConnect,
 // double-counting every session as two connections. They must map to distinct

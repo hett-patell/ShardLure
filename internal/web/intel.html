@@ -382,6 +382,11 @@
   .sess-row .sess-num { color: var(--dim-2); text-align: right; }
   .sess-row .sess-ip { color: var(--accent-2); }
   .sess-row .sess-user { color: var(--text); }
+  .sess-row .sess-arch {
+    color: var(--dim-2); font-size: 9px; margin-left: 6px;
+    padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
+    vertical-align: middle;
+  }
   .sess-row .sess-dur, .sess-row .sess-when { color: var(--dim); text-align: right; }
   .sess-row .sess-n { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
   .sess-row .sess-c { color: var(--good); text-align: right; font-variant-numeric: tabular-nums; }
@@ -1911,12 +1916,17 @@ function renderSessions(data) {
     // s.id / s.ip / s.user are attacker-influenced (cowrie session id, source
     // IP, attempted SSH username) — escape before they touch innerHTML.
     const user = s.user ? esc(s.user) : '<span style="color:var(--dim-2)">—</span>';
+    // durExact marks a duration sourced from cowrie's session.closed duration_ms
+    // (counts the idle tail); the ~ prefix flags the MAX(ts)-MIN(ts) estimate.
+    const durTitle = s.durExact ? 'cowrie session.closed duration' : 'estimated from event span';
+    const durTxt = (s.durExact ? '' : '~') + fmtDur(s.durMs);
+    const arch = s.arch ? '<span class="sess-arch" title="client arch">' + esc(s.arch) + '</span>' : '';
     html += '<div class="sess-row" data-sid="' + esc(s.id) + '">' +
       '<span class="sess-num">' + (i + 1) + '</span>' +
       '<span class="sess-id">' + esc(s.id) + '</span>' +
       '<span class="sess-ip">' + esc(s.ip) + '</span>' +
-      '<span class="sess-user">' + user + '</span>' +
-      '<span class="sess-dur">' + fmtDur(s.durMs) + '</span>' +
+      '<span class="sess-user">' + user + arch + '</span>' +
+      '<span class="sess-dur" title="' + durTitle + '">' + durTxt + '</span>' +
       '<span class="sess-n" title="events">' + s.events + 'e</span>' +
       '<span class="sess-c" title="commands">' + s.commands + 'c</span>' +
       '</div>';
@@ -1965,8 +1975,12 @@ function safeUrl(u) {
 
 function renderSessionDetail(d) {
   document.getElementById('sm-title').textContent = 'session ' + d.id + ' · ' + d.ip + (d.user ? ' · ' + d.user : '');
-  const dur = new Date(d.end).getTime() - new Date(d.start).getTime();
-  document.getElementById('sm-sub').textContent = new Date(d.start).toUTCString() + ' · ' + fmtDur(dur) + ' · ' + d.lines.length + ' events';
+  // Prefer the server's duration (cowrie session.closed when durExact); fall
+  // back to the client-computed span only if the server sent nothing.
+  const dur = (d.durMs && d.durMs > 0) ? d.durMs : (new Date(d.end).getTime() - new Date(d.start).getTime());
+  const durTxt = (d.durMs && !d.durExact ? '~' : '') + fmtDur(dur);
+  const archTxt = d.arch ? ' · ' + d.arch : '';
+  document.getElementById('sm-sub').textContent = new Date(d.start).toUTCString() + ' · ' + durTxt + archTxt + ' · ' + d.lines.length + ' events';
   let html = '';
   d.lines.forEach(function(ln) {
     let txt = '';
@@ -1976,6 +1990,7 @@ function renderSessionDetail(d) {
     else if (ln.kind === 'accepted') txt = '*** authenticated as ' + escHtml(ln.user || '?') + ' ***';
     else if (ln.kind === 'connect') txt = '-- session opened --';
     else if (ln.kind === 'disconnect') txt = '-- session closed --';
+    else if (ln.kind === 'tunnel') txt = 'proxy → ' + escHtml(ln.dst || '?');
     else if (ln.sha256) txt = 'download ' + escHtml(ln.filename || '') + ' [' + ln.sha256.slice(0, 12) + ']';
     else txt = escHtml(ln.kind);
     const techs = (ln.techs || []).map(function(t) { return '<span class="tt">' + escHtml(t) + '</span>'; }).join('');

@@ -138,8 +138,12 @@ type sessionRow struct {
 	Start     string `json:"start"`
 	End       string `json:"end"`
 	DurMillis int64  `json:"durMs"`
-	Events    int    `json:"events"`
-	Commands  int    `json:"commands"`
+	// DurExact is true when durMs came from cowrie's session.closed duration_ms
+	// rather than the MAX(ts)-MIN(ts) fallback, so the UI can mark it precise.
+	DurExact bool   `json:"durExact,omitempty"`
+	Arch     string `json:"arch,omitempty"`
+	Events   int    `json:"events"`
+	Commands int    `json:"commands"`
 }
 
 func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
@@ -175,9 +179,17 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 		Returned:    len(sessions),
 	}
 	for _, sm := range sessions {
+		// Prefer cowrie's authoritative duration_ms (session.closed); it counts
+		// the idle tail before disconnect that MAX(ts)-MIN(ts) can't see. Fall
+		// back to the ts-delta when the closed event wasn't captured.
 		dur := sm.EndTS.Sub(sm.StartTS).Milliseconds()
 		if dur < 0 {
 			dur = 0
+		}
+		exact := false
+		if sm.DurationMs > 0 {
+			dur = sm.DurationMs
+			exact = true
 		}
 		resp.Sessions = append(resp.Sessions, sessionRow{
 			ID:        sm.ID,
@@ -189,6 +201,8 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 			Start:     sm.StartTS.UTC().Format(time.RFC3339),
 			End:       sm.EndTS.UTC().Format(time.RFC3339),
 			DurMillis: dur,
+			DurExact:  exact,
+			Arch:      sm.Arch,
 			Events:    sm.EventCount,
 			Commands:  sm.CmdCount,
 		})
@@ -200,6 +214,9 @@ type sessionDetailResponse struct {
 	ID         string             `json:"id"`
 	IP         string             `json:"ip"`
 	User       string             `json:"user,omitempty"`
+	Arch       string             `json:"arch,omitempty"`
+	DurMillis  int64              `json:"durMs,omitempty"`
+	DurExact   bool               `json:"durExact,omitempty"`
 	Start      string             `json:"start"`
 	End        string             `json:"end"`
 	Lines      []sessionEventRow  `json:"lines"`
@@ -218,14 +235,17 @@ type sessionTranscript struct {
 }
 
 type sessionEventRow struct {
-	TS       string   `json:"ts"`
-	OffsetMs int64    `json:"offsetMs"`
-	Kind     string   `json:"kind"`
-	User     string   `json:"user,omitempty"`
-	Command  string   `json:"command,omitempty"`
-	SHA256   string   `json:"sha256,omitempty"`
-	Filename string   `json:"filename,omitempty"`
-	Techs    []string `json:"techs,omitempty"`
+	TS       string `json:"ts"`
+	OffsetMs int64  `json:"offsetMs"`
+	Kind     string `json:"kind"`
+	User     string `json:"user,omitempty"`
+	Command  string `json:"command,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	// Dst is the proxy/pivot destination (host:port) on tunnel lines, so the
+	// timeline shows where the attacker forwarded to. Empty on other kinds.
+	Dst   string   `json:"dst,omitempty"`
+	Techs []string `json:"techs,omitempty"`
 }
 
 func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
@@ -269,6 +289,21 @@ func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
 		Start: events[0].TS.UTC().Format(time.RFC3339),
 		End:   events[len(events)-1].TS.UTC().Format(time.RFC3339),
 	}
+	// Header enrichment from the cowrie side-channel: real duration_ms + arch.
+	if meta, err := s.st.SessionMetaForSessions([]string{id}); err == nil {
+		if m, ok := meta[id]; ok {
+			resp.Arch = m.Arch
+			if m.DurationMs > 0 {
+				resp.DurMillis = m.DurationMs
+				resp.DurExact = true
+			}
+		}
+	}
+	if resp.DurMillis == 0 {
+		if d := events[len(events)-1].TS.Sub(events[0].TS).Milliseconds(); d > 0 {
+			resp.DurMillis = d
+		}
+	}
 	t0 := events[0].TS
 	for _, e := range events {
 		row := sessionEventRow{
@@ -280,6 +315,12 @@ func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
 			SHA256:   e.SHA256,
 			Filename: e.Filename,
 			Techs:    mitre.ClassifyOne(e),
+		}
+		if e.Kind == models.KindTunnel && e.DstIP != "" {
+			row.Dst = e.DstIP
+			if e.DstPort > 0 {
+				row.Dst = net.JoinHostPort(e.DstIP, strconv.Itoa(e.DstPort))
+			}
 		}
 		resp.Lines = append(resp.Lines, row)
 	}

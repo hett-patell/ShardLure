@@ -21,6 +21,12 @@ type SessionSummary struct {
 	EventCount int
 	CmdCount   int
 	ActorID    string
+	// DurationMs is cowrie's authoritative session length (cowrie.session.closed),
+	// 0 when not observed — the API then falls back to EndTS-StartTS. Arch is the
+	// negotiated client arch (cowrie.session.params), "" when not observed. Both
+	// are stamped from cowrie_session_meta after the group-by, not joined.
+	DurationMs int64
+	Arch       string
 }
 
 // ListSessions returns cowrie sessions whose latest event falls within
@@ -86,7 +92,39 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 		s.EndTS, _ = parseTime(endTS)
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.stampSessionMeta(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// stampSessionMeta fills DurationMs/Arch on each summary from the
+// cowrie_session_meta side-channel in one batched lookup. A missing binding
+// leaves the zero values (the API falls back to the ts-delta / "unknown").
+func (s *Store) stampSessionMeta(sums []SessionSummary) error {
+	if len(sums) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(sums))
+	for i := range sums {
+		if sums[i].ID != "" {
+			ids = append(ids, sums[i].ID)
+		}
+	}
+	meta, err := s.SessionMetaForSessions(ids)
+	if err != nil {
+		return err
+	}
+	for i := range sums {
+		if m, ok := meta[sums[i].ID]; ok {
+			sums[i].DurationMs = m.DurationMs
+			sums[i].Arch = m.Arch
+		}
+	}
+	return nil
 }
 
 // ShellSessionSummary is a SessionSummary plus the first shell command
@@ -153,7 +191,28 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 		}
 		out = append(out, sum)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Stamp duration/arch from the side-channel. ShellSessionSummary embeds
+	// SessionSummary by value, so mutate through the embedded field in place.
+	ids := make([]string, 0, len(out))
+	for i := range out {
+		if out[i].ID != "" {
+			ids = append(ids, out[i].ID)
+		}
+	}
+	meta, err := s.SessionMetaForSessions(ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if m, ok := meta[out[i].ID]; ok {
+			out[i].DurationMs = m.DurationMs
+			out[i].Arch = m.Arch
+		}
+	}
+	return out, nil
 }
 
 // SessionEvents returns every event in a session in chronological order.

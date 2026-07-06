@@ -37,12 +37,14 @@ type Store struct {
 	onceBazaar    sync.Once
 	onceTTY       sync.Once
 	onceSessHASSH sync.Once
+	onceSessMeta  sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
 	errArtifacts error
 	errEnrich    error
 	errBazaar    error
 	errTTY       error
 	errSessHASSH error
+	errSessMeta  error
 }
 
 type sqlExecer interface {
