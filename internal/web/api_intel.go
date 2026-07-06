@@ -1376,6 +1376,70 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// ==== /api/intel/abuseipdb/suggestions ============================
+
+type suggestionsResponse struct {
+	GeneratedAt string                 `json:"generatedAt"`
+	Enabled     bool                   `json:"enabled"` // reporting armed (report_enabled + key)
+	Total       int                    `json:"total"`
+	Suggestions []abuseipdb.Suggestion `json:"suggestions"`
+}
+
+// handleAbuseIPDBSuggestions ranks the highest-value report targets: vetted
+// brute-forcers scored by a composite priority (confidence + recency +
+// aggression + breadth + volume), already-reported IPs excluded. Read-only —
+// it never contacts AbuseIPDB. `enabled` tells the UI whether the per-row
+// Report button will work (reporting armed) or whether the list is advisory.
+func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	limit := 15
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 100 {
+		limit = n
+	}
+	// Pull the most-aggressive actors and let Suggest's Vet gate + scoring do
+	// the selection. 1000 is a generous ceiling; the vast majority never pass
+	// Vet, so the scored set is small.
+	actors, err := s.st.TopActorsByRate(1000)
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	inputs := make([]abuseipdb.SuggestInput, 0, len(actors))
+	for _, a := range actors {
+		if a.PrimaryIP == "" {
+			continue
+		}
+		inputs = append(inputs, abuseipdb.SuggestInput{
+			Cand: abuseipdb.ReportCandidate{
+				SrcIP:           a.PrimaryIP,
+				Playbook:        a.Playbook,
+				ProbeScore:      a.ProbeScore,
+				EventCount:      a.EventCount,
+				UniqueUsers:     a.UniqueUsers,
+				AttemptsPerHour: a.AttemptsPerHour,
+			},
+			LastSeen: a.LastSeen,
+		})
+	}
+	// Exclude IPs already reported within the re-report window so the list is
+	// always actionable. Closure hits the store per-candidate, but only for the
+	// handful that pass Vet (Suggest calls it after the gate).
+	alreadyReported := func(ip string) bool {
+		ok, _ := s.st.AbuseIPDBReported(ip, s.abuseRewindow)
+		return ok
+	}
+	sugg := abuseipdb.Suggest(inputs, s.abuseAdmin, s.abuseMinProbe, limit, time.Now(), alreadyReported)
+	_ = json.NewEncoder(w).Encode(suggestionsResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Enabled:     s.abuseEnabled && s.abuseKey != "",
+		Total:       len(sugg),
+		Suggestions: sugg,
+	})
+}
+
 // handleIntelTimeline returns recent events for the live timeline widget.
 func (s *Server) handleIntelTimeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDashboardAuth(w, r) {

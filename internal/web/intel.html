@@ -387,6 +387,25 @@
     padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
     vertical-align: middle;
   }
+  /* Suggested AbuseIPDB reports */
+  .abuse-note {
+    margin: 0 0 8px; padding: 6px 10px; font-size: 11px; color: var(--dim);
+    background: rgba(200,152,40,0.06); border-left: 2px solid var(--blue-team); border-radius: 3px;
+  }
+  .pri-badge {
+    display: inline-block; min-width: 22px; text-align: center; font-weight: 700;
+    font-variant-numeric: tabular-nums; padding: 1px 5px; border-radius: 4px; font-size: 11px;
+  }
+  .pri-badge.pri-hi  { color: #ff6b4a; background: rgba(216,64,40,0.14); border: 1px solid rgba(216,64,40,0.45); }
+  .pri-badge.pri-mid { color: var(--blue-team); background: rgba(200,152,40,0.12); border: 1px solid rgba(200,152,40,0.4); }
+  .pri-badge.pri-lo  { color: var(--dim); background: rgba(255,255,255,0.03); border: 1px solid var(--line); }
+  #abuse-suggest-table td.why { white-space: normal; }
+  #abuse-suggest-table .why-tag {
+    display: inline-block; font-size: 9px; color: var(--dim); margin: 1px 3px 1px 0;
+    padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px;
+  }
+  #abuse-suggest-table .sg-btn { padding: 2px 7px; font-size: 10px; }
+  #abuse-suggest-table .sg-disabled { color: var(--dim-2); }
   .sess-row .sess-dur, .sess-row .sess-when { color: var(--dim); text-align: right; }
   .sess-row .sess-n { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
   .sess-row .sess-c { color: var(--good); text-align: right; font-variant-numeric: tabular-nums; }
@@ -1057,6 +1076,34 @@
           </thead>
           <tbody>
             <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
+      <section class="panel full" id="panel-abuse-suggest">
+        <div class="panel-head">
+          <h2>Suggested AbuseIPDB reports</h2>
+          <span class="meta" id="abuse-suggest-meta">ranked by report priority</span>
+        </div>
+        <div class="panel-body">
+        <div id="abuse-suggest-note" class="abuse-note" style="display:none"></div>
+        <table class="dense" id="abuse-suggest-table">
+          <thead>
+            <tr>
+              <th style="width:34px" title="report priority 0-100">pri</th>
+              <th>ip</th>
+              <th>playbook</th>
+              <th class="num" title="our confidence this is a brute-forcer">probe</th>
+              <th class="num" title="attempts per hour">rate/h</th>
+              <th class="num" title="distinct usernames tried">users</th>
+              <th>why</th>
+              <th>last seen</th>
+              <th style="width:92px">action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="9"><div class="empty">loading…</div></td></tr>
           </tbody>
         </table>
         </div>
@@ -2106,6 +2153,96 @@ setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshSessions();
 }, 30000);
 if (readTabFromHash() === 'blue') refreshSessions();
+
+// ==== Suggested AbuseIPDB reports =================================
+function priClass(p) {
+  if (p >= 75) return 'pri-hi';
+  if (p >= 50) return 'pri-mid';
+  return 'pri-lo';
+}
+
+function renderAbuseSuggest(data) {
+  const tb = document.querySelector('#abuse-suggest-table tbody');
+  const meta = document.getElementById('abuse-suggest-meta');
+  const note = document.getElementById('abuse-suggest-note');
+  const list = data.suggestions || [];
+  meta.textContent = (data.total || 0) + ' candidates · ranked by report priority';
+  // When reporting isn't armed, the list is advisory only — say so once.
+  if (!data.enabled) {
+    note.style.display = 'block';
+    note.textContent = 'Reporting is disabled — this list is advisory. Enable intel.abuseipdb.report_enabled + set SHARDLURE_ABUSEIPDB_KEY to arm the Report buttons.';
+  } else {
+    note.style.display = 'none';
+  }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">no confirmed brute-forcers to suggest (or all already reported)</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(function(s) {
+    const reasons = (s.reasons || []).map(function(r){ return '<span class="why-tag">' + escHtml(r) + '</span>'; }).join('');
+    // The button is only functional when reporting is armed; otherwise show a
+    // disabled hint so the ranking is still useful as guidance.
+    const btn = data.enabled
+      ? '<button class="bz-btn sg-btn" data-ip="' + escHtml(s.srcIp) + '" onclick="reportSuggested(this)">⚑ report</button>'
+      : '<span class="sg-disabled" title="enable reporting to arm">—</span>';
+    return '<tr data-ip="' + escHtml(s.srcIp) + '">' +
+      '<td><span class="pri-badge ' + priClass(s.priority) + '">' + s.priority + '</span></td>' +
+      '<td class="ip">' + escHtml(s.srcIp) + '</td>' +
+      '<td>' + escHtml(s.playbook || '—') + '</td>' +
+      '<td class="num">' + s.probeScore + '</td>' +
+      '<td class="num">' + (s.attemptsPerHour ? s.attemptsPerHour.toFixed(0) : '0') + '</td>' +
+      '<td class="num">' + s.uniqueUsers + '</td>' +
+      '<td class="why">' + reasons + '</td>' +
+      '<td class="range">' + (s.lastSeen ? fmtShortTime(s.lastSeen) : '—') + '</td>' +
+      '<td>' + btn + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+// reportSuggested fires the same reporting endpoint the actor-detail button
+// uses. On success the row is struck through and the button removed.
+async function reportSuggested(btn) {
+  const ip = btn.dataset.ip;
+  if (!ip) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/api/intel/abuseipdb/report?ip=' + encodeURIComponent(ip) + '&_=' + Date.now(),
+      { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function(){ return {}; });
+    const row = btn.closest('tr');
+    if (d.status === 'reported' || d.status === 'already_reported') {
+      if (row) { row.style.opacity = '0.5'; row.style.textDecoration = 'line-through'; }
+      btn.replaceWith(document.createTextNode(d.status === 'reported' ? 'reported ✓' : 'already ✓'));
+    } else {
+      btn.disabled = false;
+      btn.textContent = '⚑ report';
+      btn.title = d.error || d.status || 'failed';
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '⚑ report';
+    btn.title = 'request failed';
+  }
+}
+
+async function refreshAbuseSuggest() {
+  try {
+    const r = await fetch('/api/intel/abuseipdb/suggestions?limit=15&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderAbuseSuggest(await r.json());
+  } catch (_) {}
+}
+
+const _setActiveForAbuse = setActiveView;
+setActiveView = function(name) {
+  _setActiveForAbuse(name);
+  if (name === 'blue') refreshAbuseSuggest();
+};
+setInterval(function() {
+  if (document.getElementById('view-blue').classList.contains('active')) refreshAbuseSuggest();
+}, 30000);
+if (readTabFromHash() === 'blue') refreshAbuseSuggest();
 
 // ==== Slice D: IOC export =========================================
 const IOC = { kind: 'ip' };
