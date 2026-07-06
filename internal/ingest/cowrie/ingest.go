@@ -50,6 +50,12 @@ type cowrieLine struct {
 	DstPath     string `json:"destfile"`
 	SHA256      string `json:"shasum"`
 	Fingerprint string `json:"fingerprint"`
+	// direct-tcpip (proxy/pivot) forwarding target. Cowrie emits these on
+	// cowrie.direct-tcpip.{request,data} — the address the attacker tried to
+	// tunnel THROUGH the honeypot to. DstPort is `any` because cowrie encodes
+	// ports inconsistently (number vs string) across event kinds, same as SrcPort.
+	DstIP   string `json:"dst_ip"`
+	DstPort any    `json:"dst_port"`
 }
 
 // IngestFile is the full-replace ingest: it parses the whole file and replaces
@@ -622,6 +628,15 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 	if sshClient == "" {
 		sshClient = r.Fingerprint
 	}
+	// dst_ip/dst_port only carry meaning on direct-tcpip (proxy/pivot) events;
+	// gate on the tunnel kind so a stray dst_* on some other cowrie eventid
+	// can't leak into the proxy-targets aggregate.
+	var dstIP string
+	var dstPort int
+	if kind == models.KindTunnel {
+		dstIP = clip(strings.TrimSpace(r.DstIP), maxFieldBytes)
+		dstPort = toInt(r.DstPort)
+	}
 	return &models.Event{
 		TS:        ts,
 		Source:    models.SourceCowrie,
@@ -636,6 +651,8 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 		Command:   clip(command, maxFieldBytes),
 		SHA256:    strings.TrimSpace(r.SHA256),
 		Filename:  clip(filename, maxFieldBytes),
+		DstIP:     dstIP,
+		DstPort:   dstPort,
 		Raw:       clip(raw, maxRawBytes),
 	}, true
 }

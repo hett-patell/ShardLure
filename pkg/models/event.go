@@ -46,8 +46,15 @@ type Event struct {
 	Command   string
 	SHA256    string
 	Filename  string
-	Raw       string
-	ActorID   string
+	// DstIP/DstPort are the forwarding destination on cowrie direct-tcpip
+	// (proxy/pivot) events — where the attacker tried to tunnel THROUGH the
+	// honeypot to. Empty/0 on all other event kinds. Kept as first-class
+	// fields rather than overloading Command/Filename (which feed Top
+	// Commands / IOC extraction).
+	DstIP   string
+	DstPort int
+	Raw     string
+	ActorID string
 }
 
 type Actor struct {

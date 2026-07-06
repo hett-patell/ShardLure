@@ -104,6 +104,9 @@ func TestLegacyBackfillUpgradesV0DB(t *testing.T) {
 		"src_port", "password", "session_id", "hassh",
 		"ssh_client", "command", "sha256",
 		"filename", "raw", "actor_id",
+		// v11: proxy/pivot forwarding destination, added by the versioned
+		// migration ladder (not the legacy backfill) on an already-open DB.
+		"dst_ip", "dst_port",
 	}
 	cols, err := tableColumns(s, "events")
 	if err != nil {

@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS events (
   command TEXT,
   sha256 TEXT,
   filename TEXT,
+  dst_ip TEXT,
+  dst_port INTEGER DEFAULT 0,
   raw TEXT,
   actor_id TEXT
 );
@@ -383,6 +385,30 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			return err
 		}
 	}
+
+	// v11: dst_ip/dst_port on events — the forwarding destination on cowrie
+	// direct-tcpip (proxy/pivot) events. Fresh DBs already have them from the
+	// base CREATE TABLE; guard each ADD COLUMN on a PRAGMA check so it's
+	// idempotent (ADD COLUMN errors if the column exists).
+	if current < 11 {
+		for _, c := range []struct{ name, ddl string }{
+			{"dst_ip", `ALTER TABLE events ADD COLUMN dst_ip TEXT`},
+			{"dst_port", `ALTER TABLE events ADD COLUMN dst_port INTEGER DEFAULT 0`},
+		} {
+			has, err := s.columnExists("events", c.name)
+			if err != nil {
+				return err
+			}
+			if !has {
+				if _, err := s.db.Exec(c.ddl); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (11, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -495,11 +521,11 @@ func (s *Store) InsertEvent(e *models.Event) error {
 
 func insertEvent(db sqlExecer, e *models.Event) error {
 	res, err := db.Exec(`
-INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, dst_ip, dst_port, raw, actor_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.Kind, e.SrcIP, e.SrcPort,
 		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient,
-		e.Command, e.SHA256, e.Filename, e.Raw, e.ActorID)
+		e.Command, e.SHA256, e.Filename, e.DstIP, e.DstPort, e.Raw, e.ActorID)
 	if err != nil {
 		return err
 	}

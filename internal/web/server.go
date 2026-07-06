@@ -301,6 +301,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/deobf", s.guard(s.handleIntelDeobf))
 	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
 	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
+	mux.HandleFunc("/api/intel/tunnels", s.guard(s.handleIntelTunnels))
 	mux.HandleFunc("/api/intel/timeline", s.guard(s.handleIntelTimeline))
 	mux.HandleFunc("/vendor/vis-network.min.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")

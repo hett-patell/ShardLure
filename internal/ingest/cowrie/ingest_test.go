@@ -74,6 +74,50 @@ func TestMapKindTunnel(t *testing.T) {
 	}
 }
 
+// TestToEventTunnelDst verifies a direct-tcpip event carries the forwarding
+// destination through to the Event, coercing the numeric port from either a
+// JSON number or a string (cowrie is inconsistent), and that a non-tunnel
+// event never gets dst fields populated even if the line carries them.
+func TestToEventTunnelDst(t *testing.T) {
+	rec := cowrieLine{
+		EventID:   "cowrie.direct-tcpip.request",
+		Timestamp: "2026-05-21T12:00:00.000000Z",
+		SrcIP:     "1.2.3.4",
+		Session:   "s1",
+		DstIP:     "62.210.131.144",
+		DstPort:   float64(2535), // JSON numbers decode to float64
+	}
+	e, ok := toEvent(rec, `{}`)
+	if !ok {
+		t.Fatal("expected parse")
+	}
+	if e.Kind != models.KindTunnel {
+		t.Fatalf("kind=%s", e.Kind)
+	}
+	if e.DstIP != "62.210.131.144" || e.DstPort != 2535 {
+		t.Fatalf("dst=%q:%d", e.DstIP, e.DstPort)
+	}
+
+	// String-encoded port must coerce too.
+	rec.DstPort = "53"
+	rec.DstIP = "1.1.1.1"
+	e2, _ := toEvent(rec, `{}`)
+	if e2.DstIP != "1.1.1.1" || e2.DstPort != 53 {
+		t.Fatalf("dst2=%q:%d", e2.DstIP, e2.DstPort)
+	}
+
+	// A non-tunnel event carrying stray dst_* must NOT leak them into the row.
+	rec.EventID = "cowrie.command.input"
+	rec.Input = "id"
+	e3, ok := toEvent(rec, `{}`)
+	if !ok {
+		t.Fatal("expected command parse")
+	}
+	if e3.DstIP != "" || e3.DstPort != 0 {
+		t.Fatalf("non-tunnel event leaked dst: %q:%d", e3.DstIP, e3.DstPort)
+	}
+}
+
 // TestMapKindConnectVsClientVersion guards against the regression where both
 // cowrie.session.connect and cowrie.client.version mapped to KindConnect,
 // double-counting every session as two connections. They must map to distinct

@@ -15,7 +15,9 @@
 package ioc
 
 import (
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,10 +29,11 @@ import (
 type Kind string
 
 const (
-	KindIP   Kind = "ip"
-	KindHash Kind = "hash"
-	KindURL  Kind = "url"
-	KindUser Kind = "user"
+	KindIP     Kind = "ip"
+	KindHash   Kind = "hash"
+	KindURL    Kind = "url"
+	KindUser   Kind = "user"
+	KindTunnel Kind = "tunnel"
 )
 
 // Indicator is a normalised IOC row: the same shape regardless of kind.
@@ -133,6 +136,7 @@ func Collect(events []*models.Event, kinds []Kind) []Indicator {
 		want[KindHash] = true
 		want[KindURL] = true
 		want[KindUser] = true
+		want[KindTunnel] = true
 	} else {
 		for _, k := range kinds {
 			want[k] = true
@@ -172,6 +176,17 @@ func Collect(events []*models.Event, kinds []Kind) []Indicator {
 			for _, u := range capture.ExtractURLs(e.Command) {
 				get(KindURL, u).record(e.TS, src, e.ActorID, e.Command)
 			}
+		}
+		if want[KindTunnel] && e.Kind == models.KindTunnel && e.DstIP != "" {
+			// The pivot destination attackers tried to reach THROUGH the
+			// honeypot. Keyed as host:port so the same host on two ports is two
+			// indicators; the sample carries the port for analyst context even
+			// when the CSV consumer ignores it.
+			val := e.DstIP
+			if e.DstPort > 0 {
+				val = net.JoinHostPort(e.DstIP, strconv.Itoa(e.DstPort))
+			}
+			get(KindTunnel, val).record(e.TS, src, e.ActorID, val)
 		}
 	}
 

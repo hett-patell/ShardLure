@@ -379,6 +379,43 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ==== /api/intel/tunnels ==========================================
+
+type tunnelsResponse struct {
+	GeneratedAt string               `json:"generatedAt"`
+	WindowHours int                  `json:"windowHours"`
+	Total       int                  `json:"total"`
+	Targets     []store.TunnelTarget `json:"targets"`
+}
+
+// handleIntelTunnels serves the proxy/pivot destinations attackers forwarded
+// to through the honeypot (cowrie direct-tcpip). Queries the store's grouped
+// aggregate directly rather than the windowed event cache — this is a small
+// GROUP BY, and the cache is tuned for the classifier's full-event consumers.
+func (s *Server) handleIntelTunnels(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	limit := 50
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
+		limit = n
+	}
+	targets, err := s.st.TopTunnelTargets(since, limit)
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(tunnelsResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+		Total:       len(targets),
+		Targets:     targets,
+	})
+}
+
 // ==== /api/intel/deobf ============================================
 
 type deobfRow struct {

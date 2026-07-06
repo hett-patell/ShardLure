@@ -1160,6 +1160,29 @@
         <div id="graph-canvas" class="graph-canvas"></div>
       </section>
 
+      <section class="panel" id="panel-tunnels">
+        <div class="panel-head">
+          <h2>Proxy targets</h2>
+          <span class="meta" id="tunnels-meta">direct-tcpip pivot destinations</span>
+        </div>
+        <div class="panel-body">
+        <table class="dense" id="tunnels-table">
+          <thead>
+            <tr>
+              <th>destination</th>
+              <th class="num">port</th>
+              <th class="num">hits</th>
+              <th class="num">actors</th>
+              <th>first → last</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
       <section class="panel" id="panel-replay">
         <div class="panel-head">
           <h2>Attack replay / synthesis</h2>
@@ -2255,13 +2278,45 @@ async function refreshTTP() {
 const _setActiveForTTP = setActiveView;
 setActiveView = function(name) {
   _setActiveForTTP(name);
-  if (name === 'red') refreshTTP();
+  if (name === 'red') { refreshTTP(); refreshTunnels(); }
 };
-onWindowChange('view-red', refreshTTP);
+onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); });
 setInterval(function() {
-  if (document.getElementById('view-red').classList.contains('active')) refreshTTP();
+  if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); }
 }, 30000);
-if (readTabFromHash() === 'red') refreshTTP();
+if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); }
+
+// ==== Proxy targets (direct-tcpip pivots) =========================
+function renderTunnels(data) {
+  const tb = document.querySelector('#tunnels-table tbody');
+  const meta = document.getElementById('tunnels-meta');
+  meta.textContent = (data.total || 0) + ' destinations · ' + data.windowHours + 'h window';
+  if (!data.targets || data.targets.length === 0) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no proxy/pivot attempts in window</div></td></tr>';
+    return;
+  }
+  let html = '';
+  data.targets.forEach(function(t) {
+    const range = fmtShortTime(t.firstSeen) + ' → ' + fmtShortTime(t.lastSeen);
+    html += '<tr>' +
+      '<td>' + escHtml(t.dstIp) + '</td>' +
+      '<td class="num">' + (t.dstPort > 0 ? t.dstPort : '—') + '</td>' +
+      '<td class="num">' + t.hits + '</td>' +
+      '<td class="num">' + t.uniqueActors + '</td>' +
+      '<td class="range">' + range + '</td>' +
+      '</tr>';
+  });
+  tb.innerHTML = html;
+}
+
+async function refreshTunnels() {
+  const window = Filters.window || '7d';
+  try {
+    const r = await fetch('/api/intel/tunnels?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderTunnels(await r.json());
+  } catch (_) {}
+}
 
 // ==== Slice G: payload library ====================================
 function fmtSize(b) {
