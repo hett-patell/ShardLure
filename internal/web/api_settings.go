@@ -67,14 +67,13 @@ var settingsRegistry = []settingMeta{
 	{Key: settings.KeyAbuseCategories, Kind: kindIntCSV, Label: "Categories"},
 	{Key: settings.KeyAbuseComment, Kind: kindText, Label: "Report comment"},
 
-	// --- globe / geo (non-secret) ---
+	// --- geolocation (non-secret) ---
+	// Only the geo-HTTP toggles are exposed here: they meaningfully enable /
+	// disable outbound attacker-IP geolocation. The globe's home origin
+	// (lat/lon/city/country) stays in shardlure.yaml — it's set once at deploy
+	// and editing it here duplicated config while barely affecting the globe.
 	{Key: settings.KeyGeoHTTP, Kind: kindBool, Label: "Geo lookups enabled"},
 	{Key: settings.KeyGeoInsecure, Kind: kindBool, Label: "Allow insecure geo HTTP"},
-	{Key: settings.KeyHomeLat, Kind: kindFloat, Label: "Home latitude"},
-	{Key: settings.KeyHomeLon, Kind: kindFloat, Label: "Home longitude"},
-	{Key: settings.KeyHomeCity, Kind: kindText, Label: "Home city"},
-	{Key: settings.KeyHomeCountry, Kind: kindText, Label: "Home country"},
-	{Key: settings.KeyHomeCC, Kind: kindText, Label: "Home country code"},
 }
 
 // metaFor looks up a setting's metadata; ok=false means the key is not on the
@@ -351,6 +350,89 @@ func (s *Server) testIPAPI(ctx context.Context, ip string) (bool, string) {
 		return true, "geo lookup succeeded"
 	}
 	return false, "geo lookup did not succeed (check key/plan)"
+}
+
+// providerArm describes whether one provider is ready to use, for the health
+// strip's armed/idle dots. Keyless providers are always armed.
+type providerArm struct {
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	Armed   bool   `json:"armed"`
+	Keyless bool   `json:"keyless,omitempty"`
+}
+
+// handleSettingsStatus returns read-only observability for the Settings tab:
+// a live-health strip (uptime, ingest freshness, counts, which providers are
+// armed, whether the dashboard token is set) plus AbuseIPDB reporting stats and
+// the recent report history. Everything here already exists elsewhere; this is
+// a single convenience aggregate so the panel needs one fetch.
+func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	events, _ := s.st.EventCount()
+	actors, _ := s.st.ActorCount()
+	ips, _ := s.st.UniqueIPCount()
+	lastEvent, _ := s.st.LatestEventTime()
+
+	// Provider armed-state: a keyed provider is armed when Has() is true; the
+	// two keyless ones (Shodan, GreyNoise-community) are always armed.
+	armed := []providerArm{
+		{Key: settings.KeyAbuseIPDB, Label: "AbuseIPDB", Armed: s.keys.Has(settings.KeyAbuseIPDB)},
+		{Key: settings.KeyVT, Label: "VirusTotal", Armed: s.keys.Has(settings.KeyVT)},
+		{Key: settings.KeyGreyNoise, Label: "GreyNoise", Armed: true, Keyless: true},
+		{Key: "shodan", Label: "Shodan", Armed: true, Keyless: true},
+		{Key: settings.KeyOTX, Label: "OTX", Armed: s.keys.Has(settings.KeyOTX)},
+		{Key: settings.KeyIPQS, Label: "IPQualityScore", Armed: s.keys.Has(settings.KeyIPQS)},
+		{Key: settings.KeyIPinfo, Label: "IPinfo", Armed: s.keys.Has(settings.KeyIPinfo)},
+		{Key: settings.KeyBazaar, Label: "MalwareBazaar", Armed: s.bazaarKeyLive() != ""},
+	}
+
+	stats, _ := s.st.AbuseReportStats()
+	reports, _ := s.st.ListAbuseReports(25)
+	type reportRow struct {
+		IP         string `json:"ip"`
+		ReportedAt string `json:"reportedAt"`
+		Status     string `json:"status"`
+		Score      int    `json:"score"`
+		Categories []int  `json:"categories"`
+	}
+	rows := make([]reportRow, 0, len(reports))
+	for _, rp := range reports {
+		rows = append(rows, reportRow{
+			IP:         rp.IP,
+			ReportedAt: rp.ReportedAt.UTC().Format(time.RFC3339),
+			Status:     rp.Status,
+			Score:      rp.AbuseScore,
+			Categories: rp.Categories,
+		})
+	}
+
+	lastEventStr := ""
+	if !lastEvent.IsZero() {
+		lastEventStr = lastEvent.UTC().Format(time.RFC3339)
+	}
+	lastReportStr := ""
+	if !stats.LastReportAt.IsZero() {
+		lastReportStr = stats.LastReportAt.UTC().Format(time.RFC3339)
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"generatedAt":   time.Now().UTC().Format(time.RFC3339),
+		"startedAt":     s.startedAt.UTC().Format(time.RFC3339),
+		"uptimeSeconds": int64(time.Since(s.startedAt).Seconds()),
+		"events":        events,
+		"actors":        actors,
+		"uniqueIps":     ips,
+		"lastEvent":     lastEventStr,
+		"tokenSet":      s.dashboardToken() != "",
+		"reportEnabled": s.abuseEnabledLive(),
+		"providers":     armed,
+		"abuse": map[string]any{
+			"totalReported": stats.TotalReported,
+			"lastReportAt":  lastReportStr,
+			"reports":       rows,
+		},
+	})
 }
 
 // handleTokenRotate mints a fresh dashboard token, persists it, and returns it

@@ -875,6 +875,21 @@ func (s *Store) ActorCount() (int, error) {
 	return n, err
 }
 
+// LatestEventTime returns the timestamp of the most recent event, or zero time
+// if there are no events. Used by the Settings health strip to show how fresh
+// ingest is ("last event 3s ago" vs a stalled feed).
+func (s *Store) LatestEventTime() (time.Time, error) {
+	var ts sql.NullString
+	if err := s.db.QueryRow(`SELECT MAX(ts) FROM events`).Scan(&ts); err != nil {
+		return time.Time{}, err
+	}
+	if !ts.Valid || ts.String == "" {
+		return time.Time{}, nil
+	}
+	t, _ := parseTime(ts.String)
+	return t, nil
+}
+
 // MaintenancePurge deletes rows older than retentionDays from the
 // four unbounded-growth tables: events, artifacts, ip_enrichment,
 // and cowrie_tty_index. Actor identity tables (actors, actor_ips,

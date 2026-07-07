@@ -892,6 +892,18 @@
     padding: 2px 6px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--dim);
   }
   .set-badge.set { color: var(--good); border-color: rgba(72,184,120,0.4); }
+  .set-health-flags { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+  .set-health-providers { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+  .sh-flag, .sh-prov {
+    display: inline-flex; align-items: center; gap: 6px;
+    font: 11px var(--mono); color: var(--dim);
+  }
+  .sh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim-2); flex: none; }
+  .sh-dot.on   { background: var(--good); box-shadow: 0 0 6px rgba(72,184,120,0.5); }
+  .sh-dot.off  { background: var(--dim-2); }
+  .sh-dot.warn { background: var(--warn); }
+  .set-health-stats .num { font-size: 20px; }
+  #sh-ingest.stale { color: var(--warn); }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
 </head>
@@ -1400,6 +1412,23 @@
       only a masked hint. Changes take effect on the next request.
     </div>
 
+    <!-- Live health strip -->
+    <section class="panel full" id="panel-set-health">
+      <div class="panel-head"><h2>Live status</h2>
+        <span class="meta" id="set-health-meta">—</span></div>
+      <div class="panel-body">
+        <div class="stats set-health-stats" style="grid-template-columns: repeat(5,1fr)">
+          <div class="stat"><div class="num accent" id="sh-events">—</div><div class="label">events</div></div>
+          <div class="stat"><div class="num blue" id="sh-actors">—</div><div class="label">actors</div></div>
+          <div class="stat"><div class="num accent" id="sh-ips">—</div><div class="label">unique IPs</div></div>
+          <div class="stat"><div class="num" id="sh-ingest">—</div><div class="label">last event</div></div>
+          <div class="stat"><div class="num" id="sh-uptime">—</div><div class="label">uptime</div></div>
+        </div>
+        <div class="set-health-flags" id="sh-flags"></div>
+        <div class="set-health-providers" id="sh-providers"></div>
+      </div>
+    </section>
+
     <div class="grid">
       <section class="panel full" id="panel-set-keys">
         <div class="panel-head"><h2>Provider API keys</h2>
@@ -1417,9 +1446,23 @@
         </div></div>
       </section>
 
+      <section class="panel full" id="panel-set-reports">
+        <div class="panel-head"><h2>AbuseIPDB report history</h2>
+          <span class="meta" id="set-reports-meta">recent submissions · read-only</span></div>
+        <div class="panel-body">
+          <table class="dense" id="set-reports-table">
+            <thead><tr>
+              <th>IP</th><th>reported (UTC)</th><th>status</th>
+              <th class="num">score</th><th>categories</th>
+            </tr></thead>
+            <tbody><tr><td colspan="5"><div class="empty">loading…</div></td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="panel full" id="panel-set-geo">
-        <div class="panel-head"><h2>Globe &amp; geolocation</h2>
-          <span class="meta">home origin · geo HTTP</span></div>
+        <div class="panel-head"><h2>Geolocation</h2>
+          <span class="meta">attacker-IP geo lookups · globe home origin is set in shardlure.yaml</span></div>
         <div class="panel-body"><div class="set-rows" id="set-geo-rows">
           <div class="empty">loading…</div>
         </div></div>
@@ -1925,12 +1968,8 @@ window.addEventListener('hashchange', function() {
 });
 
 // ── Settings panel ────────────────────────────────────────────────────────
+// (reuses the existing esc() helper defined earlier for HTML escaping)
 var _settingsLoaded = false;
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-  });
-}
 function srcLabel(src) {
   if (src === 'db') return '<span class="sl-src db">saved</span>';
   if (src === 'env') return '<span class="sl-src env">from env</span>';
@@ -1998,6 +2037,73 @@ async function loadSettings() {
     document.getElementById('set-keys-rows').innerHTML =
       '<div class="empty">failed to load settings: ' + esc(e.message) + '</div>';
   }
+  loadStatus(); // health strip + report history (independent fetch)
+}
+
+// loadStatus populates the read-only Live-status strip and the AbuseIPDB report
+// history from /api/settings/status. Failure here never blocks the editable
+// settings above.
+async function loadStatus() {
+  try {
+    var r = await fetch('/api/settings/status?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var d = await r.json();
+    // Health counters.
+    document.getElementById('sh-events').textContent = fmt(d.events);
+    document.getElementById('sh-actors').textContent = fmt(d.actors);
+    document.getElementById('sh-ips').textContent = fmt(d.uniqueIps);
+    document.getElementById('sh-uptime').textContent = fmtUptime(d.uptimeSeconds);
+    document.getElementById('set-health-meta').textContent =
+      'process up since ' + (d.startedAt ? new Date(d.startedAt).toLocaleString() : '—');
+    // Ingest freshness: warn (amber) if the last event is more than 5 min old.
+    var ing = document.getElementById('sh-ingest');
+    if (d.lastEvent) {
+      var ageSec = (Date.now() - new Date(d.lastEvent).getTime()) / 1000;
+      ing.textContent = ageSec < 90 ? Math.max(0, Math.round(ageSec)) + 's ago'
+        : fmtUptime(ageSec) + ' ago';
+      ing.classList.toggle('stale', ageSec > 300);
+      ing.title = new Date(d.lastEvent).toLocaleString();
+    } else { ing.textContent = 'none'; ing.classList.add('stale'); }
+    // Flags: dashboard token + reporting armed.
+    var flags = [];
+    flags.push(flagHTML(d.tokenSet, d.tokenSet ? 'dashboard token set' : 'no dashboard token (unauthenticated)', d.tokenSet ? 'on' : 'warn'));
+    flags.push(flagHTML(d.reportEnabled, d.reportEnabled ? 'AbuseIPDB reporting armed' : 'AbuseIPDB reporting off', d.reportEnabled ? 'on' : 'off'));
+    document.getElementById('sh-flags').innerHTML = flags.join('');
+    // Provider armed dots.
+    document.getElementById('sh-providers').innerHTML = (d.providers || []).map(function (p) {
+      var cls = p.armed ? 'on' : 'off';
+      var label = esc(p.label) + (p.keyless ? ' (keyless)' : (p.armed ? '' : ' — no key'));
+      return '<span class="sh-prov"><span class="sh-dot ' + cls + '"></span>' + label + '</span>';
+    }).join('');
+    // Report history.
+    renderReportHistory(d.abuse || {});
+  } catch (e) {
+    document.getElementById('set-health-meta').textContent = 'status unavailable: ' + esc(e.message);
+  }
+}
+function flagHTML(_on, label, dotClass) {
+  return '<span class="sh-flag"><span class="sh-dot ' + dotClass + '"></span>' + esc(label) + '</span>';
+}
+function renderReportHistory(abuse) {
+  var meta = document.getElementById('set-reports-meta');
+  var tb = document.querySelector('#set-reports-table tbody');
+  var rows = abuse.reports || [];
+  meta.textContent = (abuse.totalReported || 0) + ' total' +
+    (abuse.lastReportAt ? ' · last ' + fmtShortTime(abuse.lastReportAt) + ' UTC' : '') +
+    ' · read-only';
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no reports recorded yet</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(function (r) {
+    return '<tr>'
+      + '<td class="ip">' + esc(r.ip) + '</td>'
+      + '<td class="range">' + (r.reportedAt ? fmtShortTime(r.reportedAt) : '—') + '</td>'
+      + '<td>' + esc(r.status) + '</td>'
+      + '<td class="num">' + (r.score || 0) + '</td>'
+      + '<td>' + esc((r.categories || []).join(', ')) + '</td>'
+      + '</tr>';
+  }).join('');
 }
 function tokenRowHTML(s) {
   s = s || { set: false, hint: '', source: 'unset' };
@@ -2474,8 +2580,12 @@ function renderAbuseSuggest(data) {
   // When reporting isn't armed, the list is advisory only — say so once.
   if (!data.enabled) {
     note.style.display = 'block';
-    note.textContent = 'Reporting is disabled — this list is advisory. Enable intel.abuseipdb.report_enabled + set SHARDLURE_ABUSEIPDB_KEY to arm the Report buttons.';
-  } else {
+    note.dataset.sticky = '';
+    note.style.borderLeftColor = 'var(--blue-team)';
+    note.style.color = 'var(--dim)';
+    note.textContent = 'Reporting is disabled — this list is advisory. Enable it in Settings → AbuseIPDB reporting (or set intel.abuseipdb.report_enabled + the API key) to arm the Report buttons.';
+  } else if (note.dataset.sticky !== '1') {
+    // Only hide the note when it isn't holding a sticky Report result banner.
     note.style.display = 'none';
   }
   if (!list.length) {
@@ -2534,28 +2644,53 @@ async function reportSuggested(btn) {
 // the server-side orchestrator (which vets, dedups, paces and halts on 429).
 // Confirms first — this is a live, public, multi-IP action.
 async function reportAllSuggested(btn) {
-  const meta = document.getElementById('abuse-suggest-meta');
-  if (!window.confirm('Report ALL suggested IPs to AbuseIPDB now? This is a live, public action attributed to your account.')) return;
+  // Count exactly what's about to be sent so the operator confirms a number,
+  // not a vague "ALL". This is a live, public, per-IP action with account-strike
+  // stakes if abused, so the confirm names the count and destination.
+  const rows = document.querySelectorAll('#abuse-suggest-table tbody tr[data-ip]');
+  const n = rows.length;
+  if (!n) { showAbuseBanner('nothing to report — the suggestions list is empty.', 'warn'); return; }
+  if (!window.confirm('Report ' + n + ' IP' + (n === 1 ? '' : 's') + ' to AbuseIPDB now?\n\n' +
+      'This is a LIVE, public submission attributed to your account. Reported IPs drop off the list until the re-report window elapses.')) return;
   btn.disabled = true;
   const orig = btn.textContent;
   btn.textContent = 'reporting…';
+  showAbuseBanner('reporting ' + n + ' IP' + (n === 1 ? '' : 's') + '…', 'pending');
   try {
     const r = await fetch('/api/intel/abuseipdb/report-all?_=' + Date.now(), { method: 'POST', cache: 'no-store' });
     const d = await r.json().catch(function(){ return {}; });
     if (d.status === 'ok' || d.status === 'partial') {
-      meta.textContent = 'reported ' + (d.reported || 0) + ' · skipped ' + (d.skipped || 0) +
-        (d.status === 'partial' ? ' · some failed (see logs)' : '');
+      // Durable banner (survives the list auto-refresh below, which would wipe a
+      // message written to the meta line).
+      showAbuseBanner('✓ reported ' + (d.reported || 0) + ' · skipped ' + (d.skipped || 0) +
+        (d.status === 'partial' ? ' · some failed — check server logs' : '') +
+        ' · at ' + new Date().toLocaleTimeString(),
+        d.status === 'partial' ? 'warn' : 'ok');
       // Refresh so reported IPs drop out of the list (dedup window).
       setTimeout(refreshAbuseSuggest, 800);
     } else {
-      meta.textContent = d.error || d.status || 'report-all failed';
+      showAbuseBanner('✗ report-all failed: ' + (d.error || d.status || 'unknown'), 'bad');
     }
   } catch (e) {
-    meta.textContent = 'request failed';
+    showAbuseBanner('✗ request failed', 'bad');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
   }
+}
+
+// showAbuseBanner writes a durable, colour-coded result line into the suggest
+// panel's note element. Unlike the meta line, refreshAbuseSuggest() does not
+// overwrite it, so the outcome of a Report action stays visible.
+function showAbuseBanner(msg, kind) {
+  const note = document.getElementById('abuse-suggest-note');
+  if (!note) return;
+  note.style.display = 'block';
+  note.dataset.sticky = '1'; // tells renderAbuseSuggest not to clobber it
+  note.textContent = msg;
+  const c = { ok: 'var(--good)', bad: 'var(--accent)', warn: 'var(--blue-team)', pending: 'var(--dim)' }[kind] || 'var(--blue-team)';
+  note.style.borderLeftColor = c;
+  note.style.color = kind === 'pending' ? 'var(--dim)' : 'var(--text)';
 }
 
 async function refreshAbuseSuggest() {
@@ -2569,7 +2704,13 @@ async function refreshAbuseSuggest() {
 const _setActiveForAbuse = setActiveView;
 setActiveView = function(name) {
   _setActiveForAbuse(name);
-  if (name === 'blue') refreshAbuseSuggest();
+  if (name === 'blue') {
+    // Clear any lingering sticky Report banner from a previous visit so it
+    // isn't mistaken for a fresh result.
+    const note = document.getElementById('abuse-suggest-note');
+    if (note) note.dataset.sticky = '';
+    refreshAbuseSuggest();
+  }
 };
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshAbuseSuggest();

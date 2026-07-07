@@ -429,6 +429,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	// Settings panel: read masked snapshot, save/clear one setting, test a
 	// provider key, rotate the dashboard token. Guarded like every other /api.
 	mux.HandleFunc("/api/settings", s.guard(s.handleSettings))
+	mux.HandleFunc("/api/settings/status", s.guard(s.handleSettingsStatus))
 	mux.HandleFunc("/api/settings/save", s.guard(s.handleSettingsSave))
 	mux.HandleFunc("/api/settings/test", s.guard(s.handleSettingsTest))
 	mux.HandleFunc("/api/settings/token/rotate", s.guard(s.handleTokenRotate))
