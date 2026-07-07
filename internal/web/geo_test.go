@@ -2,22 +2,40 @@ package web
 
 import (
 	"container/list"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/settings"
+	"github.com/networkshard/shardlure/internal/store"
 )
 
-// newTestResolver builds a geoResolver wired for unit tests:
-// enabled-true so cache writes go through but http never fires
-// because the test calls putLocked() directly.
-func newTestResolver(max int, now func() time.Time) *geoResolver {
+// newTestResolver builds a geoResolver wired for unit tests: its keystore has
+// geo HTTP enabled (via an ip-api key) so isEnabled() is true and cached()
+// proceeds, but http never fires because the tests call putLocked() directly.
+func newTestResolver(t *testing.T, max int, now func() time.Time) *geoResolver {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "geo.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	keys, err := settings.Load(st)
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	// Enable geo HTTP: set the flag and a (dummy) ip-api key so geoHTTPAllowed
+	// returns true. No network is issued in these cache-only tests.
+	_ = keys.Set(settings.KeyGeoHTTP, "1")
+	_ = keys.Set(settings.KeyIPAPI, "test-key")
 	return &geoResolver{
 		cache:    map[string]*geoEntry{},
 		lru:      list.New(),
 		inflight: map[string]bool{},
-		enabled:  true,
 		maxSize:  max,
 		now:      now,
+		keys:     keys,
 	}
 }
 
@@ -26,7 +44,7 @@ func newTestResolver(max int, now func() time.Time) *geoResolver {
 // unbounded with every distinct attacker IP the dashboard rendered.
 func TestGeoResolverEvictsByLRU(t *testing.T) {
 	now := time.Now().UTC()
-	r := newTestResolver(8, func() time.Time { return now })
+	r := newTestResolver(t, 8, func() time.Time { return now })
 
 	for i := 0; i < 32; i++ {
 		ip := "203.0.113." + strconv.Itoa(i+1)
@@ -63,7 +81,7 @@ func TestGeoResolverEvictsByLRU(t *testing.T) {
 func TestGeoResolverSweepsExpired(t *testing.T) {
 	t0 := time.Now().UTC()
 	clock := t0
-	r := newTestResolver(64, func() time.Time { return clock })
+	r := newTestResolver(t, 64, func() time.Time { return clock })
 
 	// Insert 3 entries that expire after 1 minute.
 	for i := 0; i < 3; i++ {
@@ -96,7 +114,7 @@ func TestGeoResolverSweepsExpired(t *testing.T) {
 // aren't evicted by passing dashboard traffic.
 func TestGeoResolverCachedPromotesLRU(t *testing.T) {
 	now := time.Now().UTC()
-	r := newTestResolver(4, func() time.Time { return now })
+	r := newTestResolver(t, 4, func() time.Time { return now })
 
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"} {
 		r.mu.Lock()
@@ -123,7 +141,7 @@ func TestGeoResolverCachedPromotesLRU(t *testing.T) {
 // previous list element.
 func TestGeoResolverPutUpdatesInPlace(t *testing.T) {
 	now := time.Now().UTC()
-	r := newTestResolver(8, func() time.Time { return now })
+	r := newTestResolver(t, 8, func() time.Time { return now })
 
 	ip := "203.0.113.50"
 	r.mu.Lock()

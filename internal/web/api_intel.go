@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
 	"github.com/networkshard/shardlure/internal/intel/deobf"
 	"github.com/networkshard/shardlure/internal/intel/enrich"
 	"github.com/networkshard/shardlure/internal/intel/graph"
@@ -138,8 +139,12 @@ type sessionRow struct {
 	Start     string `json:"start"`
 	End       string `json:"end"`
 	DurMillis int64  `json:"durMs"`
-	Events    int    `json:"events"`
-	Commands  int    `json:"commands"`
+	// DurExact is true when durMs came from cowrie's session.closed duration_ms
+	// rather than the MAX(ts)-MIN(ts) fallback, so the UI can mark it precise.
+	DurExact bool   `json:"durExact,omitempty"`
+	Arch     string `json:"arch,omitempty"`
+	Events   int    `json:"events"`
+	Commands int    `json:"commands"`
 }
 
 func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
@@ -175,9 +180,17 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 		Returned:    len(sessions),
 	}
 	for _, sm := range sessions {
+		// Prefer cowrie's authoritative duration_ms (session.closed); it counts
+		// the idle tail before disconnect that MAX(ts)-MIN(ts) can't see. Fall
+		// back to the ts-delta when the closed event wasn't captured.
 		dur := sm.EndTS.Sub(sm.StartTS).Milliseconds()
 		if dur < 0 {
 			dur = 0
+		}
+		exact := false
+		if sm.DurationMs > 0 {
+			dur = sm.DurationMs
+			exact = true
 		}
 		resp.Sessions = append(resp.Sessions, sessionRow{
 			ID:        sm.ID,
@@ -189,6 +202,8 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 			Start:     sm.StartTS.UTC().Format(time.RFC3339),
 			End:       sm.EndTS.UTC().Format(time.RFC3339),
 			DurMillis: dur,
+			DurExact:  exact,
+			Arch:      sm.Arch,
 			Events:    sm.EventCount,
 			Commands:  sm.CmdCount,
 		})
@@ -200,6 +215,9 @@ type sessionDetailResponse struct {
 	ID         string             `json:"id"`
 	IP         string             `json:"ip"`
 	User       string             `json:"user,omitempty"`
+	Arch       string             `json:"arch,omitempty"`
+	DurMillis  int64              `json:"durMs,omitempty"`
+	DurExact   bool               `json:"durExact,omitempty"`
 	Start      string             `json:"start"`
 	End        string             `json:"end"`
 	Lines      []sessionEventRow  `json:"lines"`
@@ -218,14 +236,17 @@ type sessionTranscript struct {
 }
 
 type sessionEventRow struct {
-	TS       string   `json:"ts"`
-	OffsetMs int64    `json:"offsetMs"`
-	Kind     string   `json:"kind"`
-	User     string   `json:"user,omitempty"`
-	Command  string   `json:"command,omitempty"`
-	SHA256   string   `json:"sha256,omitempty"`
-	Filename string   `json:"filename,omitempty"`
-	Techs    []string `json:"techs,omitempty"`
+	TS       string `json:"ts"`
+	OffsetMs int64  `json:"offsetMs"`
+	Kind     string `json:"kind"`
+	User     string `json:"user,omitempty"`
+	Command  string `json:"command,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	// Dst is the proxy/pivot destination (host:port) on tunnel lines, so the
+	// timeline shows where the attacker forwarded to. Empty on other kinds.
+	Dst   string   `json:"dst,omitempty"`
+	Techs []string `json:"techs,omitempty"`
 }
 
 func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
@@ -269,6 +290,21 @@ func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
 		Start: events[0].TS.UTC().Format(time.RFC3339),
 		End:   events[len(events)-1].TS.UTC().Format(time.RFC3339),
 	}
+	// Header enrichment from the cowrie side-channel: real duration_ms + arch.
+	if meta, err := s.st.SessionMetaForSessions([]string{id}); err == nil {
+		if m, ok := meta[id]; ok {
+			resp.Arch = m.Arch
+			if m.DurationMs > 0 {
+				resp.DurMillis = m.DurationMs
+				resp.DurExact = true
+			}
+		}
+	}
+	if resp.DurMillis == 0 {
+		if d := events[len(events)-1].TS.Sub(events[0].TS).Milliseconds(); d > 0 {
+			resp.DurMillis = d
+		}
+	}
 	t0 := events[0].TS
 	for _, e := range events {
 		row := sessionEventRow{
@@ -280,6 +316,12 @@ func (s *Server) handleIntelSession(w http.ResponseWriter, r *http.Request) {
 			SHA256:   e.SHA256,
 			Filename: e.Filename,
 			Techs:    mitre.ClassifyOne(e),
+		}
+		if e.Kind == models.KindTunnel && e.DstIP != "" {
+			row.Dst = e.DstIP
+			if e.DstPort > 0 {
+				row.Dst = net.JoinHostPort(e.DstIP, strconv.Itoa(e.DstPort))
+			}
 		}
 		resp.Lines = append(resp.Lines, row)
 	}
@@ -376,6 +418,43 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 		WindowHours: windowHours,
 		Total:       total,
 		Rows:        rows,
+	})
+}
+
+// ==== /api/intel/tunnels ==========================================
+
+type tunnelsResponse struct {
+	GeneratedAt string               `json:"generatedAt"`
+	WindowHours int                  `json:"windowHours"`
+	Total       int                  `json:"total"`
+	Targets     []store.TunnelTarget `json:"targets"`
+}
+
+// handleIntelTunnels serves the proxy/pivot destinations attackers forwarded
+// to through the honeypot (cowrie direct-tcpip). Queries the store's grouped
+// aggregate directly rather than the windowed event cache — this is a small
+// GROUP BY, and the cache is tuned for the classifier's full-event consumers.
+func (s *Server) handleIntelTunnels(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	limit := 50
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
+		limit = n
+	}
+	targets, err := s.st.TopTunnelTargets(since, limit)
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(tunnelsResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		WindowHours: windowHours,
+		Total:       len(targets),
+		Targets:     targets,
 	})
 }
 
@@ -823,6 +902,7 @@ func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	resolver := enrich.NewResolver(s.st)
+	resolver.Keys = s.keys // live key source: dashboard-saved keys apply without restart
 	results := resolver.LookupAll(r.Context(), ip)
 
 	_ = json.NewEncoder(w).Encode(enrichResponse{
@@ -1079,7 +1159,8 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	if s.bazaarKey == "" {
+	bzKey := s.bazaarKeyLive()
+	if bzKey == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "bazaar API key not configured"})
 		return
@@ -1111,7 +1192,7 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	var result *bazaar.Result
 	var skipReason string
 	opts := bazaar.Options{
-		APIKey:    s.bazaarKey,
+		APIKey:    bzKey,
 		Endpoint:  s.bazaarEndpoint,
 		ExtraTags: s.bazaarTags,
 		MaxBytes:  s.bazaarMaxBytes,
@@ -1166,6 +1247,299 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		resp.Status = "skipped"
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+// abuseReportRecorderAdapter bridges store's AbuseReport API to the argument
+// list abuseipdb.ReportRecorder expects, keeping the abuseipdb package free of
+// any store import (mirrors bazaarRecorderAdapter).
+type abuseReportRecorderAdapter struct {
+	st *store.Store
+}
+
+func (a *abuseReportRecorderAdapter) AbuseIPDBReported(ip string, within time.Duration) (bool, error) {
+	return a.st.AbuseIPDBReported(ip, within)
+}
+
+func (a *abuseReportRecorderAdapter) RecordAbuseIPDBReport(ip, status string, score int, categories []int, at time.Time) error {
+	return a.st.RecordAbuseIPDBReport(ip, status, score, categories, at)
+}
+
+// handleAbuseIPDBReport reports a single confirmed brute-forcer (by primary IP)
+// to AbuseIPDB. Opt-in and gated: it requires both abuseEnabled (config
+// report_enabled) and a key (SHARDLURE_ABUSEIPDB_KEY). The Vet gate inside
+// abuseipdb.Report hard-rejects admin/private/reserved IPs and anything that
+// isn't a confirmed brute-force actor, so a mis-click can't file a bad report.
+func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+	if ip == "" {
+		http.Error(w, "missing ip", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	abuseKey := s.abuseKeyLive()
+	rewindow := s.abuseRewindowLive()
+	if !s.abuseEnabledLive() {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "AbuseIPDB reporting is disabled (set intel.abuseipdb.report_enabled)"})
+		return
+	}
+	if abuseKey == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "AbuseIPDB API key not configured (SHARDLURE_ABUSEIPDB_KEY)"})
+		return
+	}
+
+	// Dedup early-out: if we reported this IP within the window, don't even
+	// build the candidate.
+	if already, _ := s.st.AbuseIPDBReported(ip, rewindow); already {
+		json.NewEncoder(w).Encode(map[string]string{"status": "already_reported"})
+		return
+	}
+
+	// Resolve to the BEST reportable actor row for this IP, not merely the
+	// most-recent. An IP can have both a cowrie and a journal actor row; the
+	// journal row is often the confirmed brute-forcer while the cowrie row is
+	// "unknown". Picking by last_seen (GetActorByPrimaryIP) would vet-reject a
+	// genuinely reportable IP, contradicting the suggestions widget.
+	act, err := s.st.GetReportableActorByIP(ip)
+	if err != nil || act == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "no actor for that IP"})
+		return
+	}
+	cand := abuseipdb.ReportCandidate{
+		SrcIP:           act.PrimaryIP,
+		Playbook:        act.Playbook,
+		ProbeScore:      act.ProbeScore,
+		EventCount:      act.EventCount,
+		UniqueUsers:     act.UniqueUsers,
+		AttemptsPerHour: act.AttemptsPerHour,
+	}
+
+	// Server-side throttle: enforce a minimum gap between /report POSTs
+	// process-wide so a scripted caller can't spam the API. Held only for the
+	// brief sleep, released before the network IO.
+	s.abuseReportMu.Lock()
+	const minAbuseGap = 2 * time.Second
+	if wait := minAbuseGap - time.Since(s.lastAbuseReportAt); s.lastAbuseReportAt.After(time.Time{}) && wait > 0 {
+		time.Sleep(wait)
+	}
+	s.lastAbuseReportAt = time.Now()
+	s.abuseReportMu.Unlock()
+
+	var skipReason string
+	var reportErr error
+	opts := abuseipdb.Options{
+		APIKey:     abuseKey,
+		Endpoint:   s.abuseEndpoint,
+		Categories: s.abuseCategoriesLive(),
+		Comment:    s.abuseCommentLive(),
+		MinProbe:   s.abuseMinProbeLive(),
+		Rewindow:   rewindow,
+		Admin:      s.abuseAdmin,
+		OnProgress: func(_ abuseipdb.ReportCandidate, _ *abuseipdb.Result, err error) {
+			if err != nil {
+				// Vet skip reasons are honeypot-side policy text (no secrets/IPs
+				// beyond the one the operator clicked), safe to surface.
+				if strings.HasPrefix(err.Error(), "skip: ") {
+					skipReason = strings.TrimPrefix(err.Error(), "skip: ")
+				} else {
+					reportErr = err
+				}
+			}
+		},
+	}
+	rec := &abuseReportRecorderAdapter{st: s.st}
+	reported, _, ferr := abuseipdb.Report(r.Context(), rec, []abuseipdb.ReportCandidate{cand}, opts)
+
+	resp := struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}{}
+	switch {
+	case reported > 0:
+		resp.Status = "reported"
+	case skipReason != "":
+		resp.Status = "skipped"
+		resp.Error = skipReason
+	case reportErr != nil || ferr != nil:
+		// Log the real AbuseIPDB error; return generic so the admin-API
+		// response can't leak the key or upstream internals.
+		if ferr == nil {
+			ferr = reportErr
+		}
+		log.Printf("web: abuseipdb report: %v", ferr)
+		resp.Status = "error"
+		resp.Error = "report failed — see server logs"
+	default:
+		resp.Status = "skipped"
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ==== /api/intel/abuseipdb/report-all =============================
+
+type reportAllResponse struct {
+	Status   string `json:"status"`
+	Reported int    `json:"reported"`
+	Skipped  int    `json:"skipped"`
+	Error    string `json:"error,omitempty"`
+}
+
+// handleAbuseIPDBReportAll reports every currently-suggested brute-forcer in
+// one batch, reusing the abuseipdb.Report orchestrator (which vets each
+// candidate, dedups against the re-report window, paces the POSTs, and halts
+// cleanly on a 429). Same gating as the single-report path: opt-in + key.
+func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	abuseKey := s.abuseKeyLive()
+	if !s.abuseEnabledLive() {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "AbuseIPDB reporting is disabled"})
+		return
+	}
+	if abuseKey == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "AbuseIPDB API key not configured"})
+		return
+	}
+
+	// Build the candidate set from the same ranked suggestions the widget shows
+	// (Vet + dedup happen inside Report, so we don't pre-filter here beyond
+	// resolving each IP to its best reportable actor row).
+	actors, err := s.st.TopActorsByRate(1000)
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	seen := map[string]bool{}
+	cands := make([]abuseipdb.ReportCandidate, 0, len(actors))
+	for _, a := range actors {
+		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
+			continue
+		}
+		seen[a.PrimaryIP] = true
+		// Resolve to the best reportable row for the IP so a low-signal cowrie
+		// row doesn't mask a confirmed journal row (see GetReportableActorByIP).
+		best, berr := s.st.GetReportableActorByIP(a.PrimaryIP)
+		if berr != nil || best == nil {
+			best = &a
+		}
+		cands = append(cands, abuseipdb.ReportCandidate{
+			SrcIP:           best.PrimaryIP,
+			Playbook:        best.Playbook,
+			ProbeScore:      best.ProbeScore,
+			EventCount:      best.EventCount,
+			UniqueUsers:     best.UniqueUsers,
+			AttemptsPerHour: best.AttemptsPerHour,
+		})
+	}
+
+	// Serialize batch reporting process-wide with the single-report throttle so
+	// a click here can't race a click on a per-row button into an API flood.
+	s.abuseReportMu.Lock()
+	defer s.abuseReportMu.Unlock()
+
+	opts := abuseipdb.Options{
+		APIKey:     abuseKey,
+		Endpoint:   s.abuseEndpoint,
+		Categories: s.abuseCategoriesLive(),
+		Comment:    s.abuseCommentLive(),
+		MinProbe:   s.abuseMinProbeLive(),
+		Rewindow:   s.abuseRewindowLive(),
+		Admin:      s.abuseAdmin,
+	}
+	rec := &abuseReportRecorderAdapter{st: s.st}
+	reported, skipped, ferr := abuseipdb.Report(r.Context(), rec, cands, opts)
+	s.lastAbuseReportAt = time.Now()
+
+	resp := reportAllResponse{Status: "ok", Reported: reported, Skipped: skipped}
+	if ferr != nil {
+		log.Printf("web: abuseipdb report-all: %v", ferr)
+		resp.Status = "partial"
+		resp.Error = "some reports failed — see server logs"
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ==== /api/intel/abuseipdb/suggestions ============================
+
+type suggestionsResponse struct {
+	GeneratedAt string                 `json:"generatedAt"`
+	Enabled     bool                   `json:"enabled"` // reporting armed (report_enabled + key)
+	Total       int                    `json:"total"`
+	Suggestions []abuseipdb.Suggestion `json:"suggestions"`
+}
+
+// handleAbuseIPDBSuggestions ranks the highest-value report targets: vetted
+// brute-forcers scored by a composite priority (confidence + recency +
+// aggression + breadth + volume), already-reported IPs excluded. Read-only —
+// it never contacts AbuseIPDB. `enabled` tells the UI whether the per-row
+// Report button will work (reporting armed) or whether the list is advisory.
+func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDashboardAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	limit := 15
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 100 {
+		limit = n
+	}
+	// Pull the most-aggressive actors and let Suggest's Vet gate + scoring do
+	// the selection. 1000 is a generous ceiling; the vast majority never pass
+	// Vet, so the scored set is small.
+	actors, err := s.st.TopActorsByRate(1000)
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	inputs := make([]abuseipdb.SuggestInput, 0, len(actors))
+	for _, a := range actors {
+		if a.PrimaryIP == "" {
+			continue
+		}
+		inputs = append(inputs, abuseipdb.SuggestInput{
+			Cand: abuseipdb.ReportCandidate{
+				SrcIP:           a.PrimaryIP,
+				Playbook:        a.Playbook,
+				ProbeScore:      a.ProbeScore,
+				EventCount:      a.EventCount,
+				UniqueUsers:     a.UniqueUsers,
+				AttemptsPerHour: a.AttemptsPerHour,
+			},
+			LastSeen: a.LastSeen,
+		})
+	}
+	// Exclude IPs already reported within the re-report window so the list is
+	// always actionable. Closure hits the store per-candidate, but only for the
+	// handful that pass Vet (Suggest calls it after the gate).
+	rewindow := s.abuseRewindowLive()
+	alreadyReported := func(ip string) bool {
+		ok, _ := s.st.AbuseIPDBReported(ip, rewindow)
+		return ok
+	}
+	sugg := abuseipdb.Suggest(inputs, s.abuseAdmin, s.abuseMinProbeLive(), limit, time.Now(), alreadyReported)
+	_ = json.NewEncoder(w).Encode(suggestionsResponse{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Enabled:     s.abuseEnabledLive() && s.abuseKeyLive() != "",
+		Total:       len(sugg),
+		Suggestions: sugg,
+	})
 }
 
 // handleIntelTimeline returns recent events for the live timeline widget.

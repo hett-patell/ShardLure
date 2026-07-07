@@ -32,17 +32,21 @@ type Store struct {
 	// statement under writeMu, adding pointless lock contention on hot paths.
 	// A sync.Once per table runs the DDL exactly once; subsequent calls are a
 	// cheap atomic check with no lock.
-	onceArtifacts sync.Once
-	onceEnrich    sync.Once
-	onceBazaar    sync.Once
-	onceTTY       sync.Once
-	onceSessHASSH sync.Once
+	onceArtifacts   sync.Once
+	onceEnrich      sync.Once
+	onceBazaar      sync.Once
+	onceTTY         sync.Once
+	onceSessHASSH   sync.Once
+	onceSessMeta    sync.Once
+	onceAbuseReport sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
-	errArtifacts error
-	errEnrich    error
-	errBazaar    error
-	errTTY       error
-	errSessHASSH error
+	errArtifacts   error
+	errEnrich      error
+	errBazaar      error
+	errTTY         error
+	errSessHASSH   error
+	errSessMeta    error
+	errAbuseReport error
 }
 
 type sqlExecer interface {
@@ -107,6 +111,8 @@ CREATE TABLE IF NOT EXISTS events (
   command TEXT,
   sha256 TEXT,
   filename TEXT,
+  dst_ip TEXT,
+  dst_port INTEGER DEFAULT 0,
   raw TEXT,
   actor_id TEXT
 );
@@ -167,6 +173,15 @@ CREATE TABLE IF NOT EXISTS ingest_state (
   head_sig TEXT,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (source, path)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  -- Operator-editable runtime key/value store backing the dashboard Settings
+  -- panel (API keys, AbuseIPDB reporting knobs, geo/home). Values are plaintext
+  -- in an already-0600 DB; see internal/store/app_settings.go for the rationale.
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `
 	if _, err := s.db.Exec(schema); err != nil {
@@ -383,6 +398,69 @@ CREATE INDEX IF NOT EXISTS idx_actors_last_seen ON actors(last_seen);
 			return err
 		}
 	}
+
+	// v11: dst_ip/dst_port on events — the forwarding destination on cowrie
+	// direct-tcpip (proxy/pivot) events. Fresh DBs already have them from the
+	// base CREATE TABLE; guard each ADD COLUMN on a PRAGMA check so it's
+	// idempotent (ADD COLUMN errors if the column exists).
+	if current < 11 {
+		for _, c := range []struct{ name, ddl string }{
+			{"dst_ip", `ALTER TABLE events ADD COLUMN dst_ip TEXT`},
+			{"dst_port", `ALTER TABLE events ADD COLUMN dst_port INTEGER DEFAULT 0`},
+		} {
+			has, err := s.columnExists("events", c.name)
+			if err != nil {
+				return err
+			}
+			if !has {
+				if _, err := s.db.Exec(c.ddl); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (11, ?)`, now); err != nil {
+			return err
+		}
+	}
+
+	// v12: abuseipdb_reports — the dedup/audit ledger for outbound AbuseIPDB
+	// reporting (identity-shaped, NOT purged by MaintenancePurge). Also created
+	// lazily via ensureAbuseReportsTable for hot DBs where this write contends;
+	// creating it here keeps a freshly-migrated DB consistent with the ladder.
+	if current < 12 {
+		if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS abuseipdb_reports (
+  ip          TEXT PRIMARY KEY,
+  reported_at TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  categories  TEXT,
+  abuse_score INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_abuseipdb_reports_ts ON abuseipdb_reports(reported_at);`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (12, ?)`, now); err != nil {
+			return err
+		}
+	}
+
+	// v13: app_settings — operator-editable runtime key/value store backing the
+	// dashboard Settings panel (API keys, AbuseIPDB reporting knobs, geo/home).
+	// Plaintext values in an already-0600 DB; see internal/store/app_settings.go.
+	// Fresh DBs already have it from the base CREATE TABLE block above.
+	if current < 13 {
+		if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS app_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (13, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -495,11 +573,11 @@ func (s *Store) InsertEvent(e *models.Event) error {
 
 func insertEvent(db sqlExecer, e *models.Event) error {
 	res, err := db.Exec(`
-INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, raw, actor_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, dst_ip, dst_port, raw, actor_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.Kind, e.SrcIP, e.SrcPort,
 		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient,
-		e.Command, e.SHA256, e.Filename, e.Raw, e.ActorID)
+		e.Command, e.SHA256, e.Filename, e.DstIP, e.DstPort, e.Raw, e.ActorID)
 	if err != nil {
 		return err
 	}
@@ -764,6 +842,27 @@ func (s *Store) GetActorByPrimaryIP(ip string) (*models.Actor, error) {
 	return &a, nil
 }
 
+// GetReportableActorByIP returns the BEST actor row for reporting an IP, not
+// just the most-recent one. A single IP can have two actor rows — one per
+// source (cowrie vs journal) — because the two ingest paths cluster
+// independently. GetActorByPrimaryIP picks by last_seen, which can return a
+// low-signal "unknown" cowrie row while a journal row for the SAME IP is a
+// confirmed brute-forcer. Reporting is about the IP, so pick the row most
+// likely to pass the report vet: highest probe_score, then most events. This
+// is the resolver the report/suggestions paths use so the widget's eligibility
+// and the report action agree on the same evidence.
+func (s *Store) GetReportableActorByIP(ip string) (*models.Actor, error) {
+	row := s.db.QueryRow(`SELECT `+actorColumns+`
+FROM actors WHERE primary_ip=?
+ORDER BY probe_score DESC, event_count DESC, last_seen DESC
+LIMIT 1`, ip)
+	var a models.Actor
+	if err := scanActorRow(row, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
 func (s *Store) EventCount() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
@@ -774,6 +873,21 @@ func (s *Store) ActorCount() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM actors`).Scan(&n)
 	return n, err
+}
+
+// LatestEventTime returns the timestamp of the most recent event, or zero time
+// if there are no events. Used by the Settings health strip to show how fresh
+// ingest is ("last event 3s ago" vs a stalled feed).
+func (s *Store) LatestEventTime() (time.Time, error) {
+	var ts sql.NullString
+	if err := s.db.QueryRow(`SELECT MAX(ts) FROM events`).Scan(&ts); err != nil {
+		return time.Time{}, err
+	}
+	if !ts.Valid || ts.String == "" {
+		return time.Time{}, nil
+	}
+	t, _ := parseTime(ts.String)
+	return t, nil
 }
 
 // MaintenancePurge deletes rows older than retentionDays from the

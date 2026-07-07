@@ -85,6 +85,32 @@ type Config struct {
 			// submission policy).
 			FreshnessDays int `yaml:"freshness_days"`
 		} `yaml:"bazaar"`
+		AbuseIPDB struct {
+			// ReportEnabled is the master opt-in for outbound reporting of
+			// confirmed brute-forcers to AbuseIPDB. Reporting stays OFF unless
+			// this is true AND SHARDLURE_ABUSEIPDB_KEY is set (the API key is
+			// an env secret, reused from the enrichment /check path — never a
+			// config field). Enrichment /check reads are unaffected by this.
+			ReportEnabled bool `yaml:"report_enabled"`
+			// Endpoint overrides the report URL. Defaults to
+			// https://api.abuseipdb.com/api/v2/report. Useful for tests.
+			Endpoint string `yaml:"endpoint"`
+			// Categories are the AbuseIPDB category IDs attached to every
+			// report. Defaults to [18, 22] (18=Brute-Force, 22=SSH). See
+			// https://www.abuseipdb.com/categories.
+			Categories []int `yaml:"categories"`
+			// MinProbeScore is the actor ProbeScore floor to report (0-100).
+			// Defaults to 60 — only high-confidence brute-forcers.
+			MinProbeScore int `yaml:"min_probe_score"`
+			// RewindowHours is how long a reported IP is suppressed before it
+			// may be reported again (AbuseIPDB permits re-reporting after 15
+			// min; we default to 24h to stay well within fair use).
+			RewindowHours int `yaml:"rewindow_hours"`
+			// Comment is an operator-supplied suffix appended to the generated
+			// report comment. The generated comment carries NOTHING that
+			// identifies the honeypot host or session.
+			Comment string `yaml:"comment"`
+		} `yaml:"abuseipdb"`
 	} `yaml:"intel"`
 }
 
@@ -126,6 +152,11 @@ func Default() Config {
 	c.Intel.Bazaar.Tags = []string{"shardlure", "honeypot"}
 	c.Intel.Bazaar.MaxBytes = 32 << 20
 	c.Intel.Bazaar.FreshnessDays = 10
+	c.Intel.AbuseIPDB.ReportEnabled = false
+	c.Intel.AbuseIPDB.Endpoint = "https://api.abuseipdb.com/api/v2/report"
+	c.Intel.AbuseIPDB.Categories = []int{18, 22} // 18=Brute-Force, 22=SSH
+	c.Intel.AbuseIPDB.MinProbeScore = 60
+	c.Intel.AbuseIPDB.RewindowHours = 24
 	return c
 }
 
@@ -191,6 +222,12 @@ func (c Config) Validate() error {
 	}
 	if c.Intel.Bazaar.MaxBytes < 0 {
 		return fmt.Errorf("config: intel.bazaar.max_bytes must be >= 0, got %d", c.Intel.Bazaar.MaxBytes)
+	}
+	if c.Intel.AbuseIPDB.MinProbeScore < 0 || c.Intel.AbuseIPDB.MinProbeScore > 100 {
+		return fmt.Errorf("config: intel.abuseipdb.min_probe_score must be in 0-100, got %d", c.Intel.AbuseIPDB.MinProbeScore)
+	}
+	if c.Intel.AbuseIPDB.RewindowHours < 0 {
+		return fmt.Errorf("config: intel.abuseipdb.rewindow_hours must be >= 0, got %d", c.Intel.AbuseIPDB.RewindowHours)
 	}
 	return nil
 }

@@ -21,6 +21,12 @@ type SessionSummary struct {
 	EventCount int
 	CmdCount   int
 	ActorID    string
+	// DurationMs is cowrie's authoritative session length (cowrie.session.closed),
+	// 0 when not observed — the API then falls back to EndTS-StartTS. Arch is the
+	// negotiated client arch (cowrie.session.params), "" when not observed. Both
+	// are stamped from cowrie_session_meta after the group-by, not joined.
+	DurationMs int64
+	Arch       string
 }
 
 // ListSessions returns cowrie sessions whose latest event falls within
@@ -86,7 +92,39 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 		s.EndTS, _ = parseTime(endTS)
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.stampSessionMeta(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// stampSessionMeta fills DurationMs/Arch on each summary from the
+// cowrie_session_meta side-channel in one batched lookup. A missing binding
+// leaves the zero values (the API falls back to the ts-delta / "unknown").
+func (s *Store) stampSessionMeta(sums []SessionSummary) error {
+	if len(sums) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(sums))
+	for i := range sums {
+		if sums[i].ID != "" {
+			ids = append(ids, sums[i].ID)
+		}
+	}
+	meta, err := s.SessionMetaForSessions(ids)
+	if err != nil {
+		return err
+	}
+	for i := range sums {
+		if m, ok := meta[sums[i].ID]; ok {
+			sums[i].DurationMs = m.DurationMs
+			sums[i].Arch = m.Arch
+		}
+	}
+	return nil
 }
 
 // ShellSessionSummary is a SessionSummary plus the first shell command
@@ -153,7 +191,28 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 		}
 		out = append(out, sum)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Stamp duration/arch from the side-channel. ShellSessionSummary embeds
+	// SessionSummary by value, so mutate through the embedded field in place.
+	ids := make([]string, 0, len(out))
+	for i := range out {
+		if out[i].ID != "" {
+			ids = append(ids, out[i].ID)
+		}
+	}
+	meta, err := s.SessionMetaForSessions(ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if m, ok := meta[out[i].ID]; ok {
+			out[i].DurationMs = m.DurationMs
+			out[i].Arch = m.Arch
+		}
+	}
+	return out, nil
 }
 
 // SessionEvents returns every event in a session in chronological order.
@@ -164,7 +223,7 @@ func (s *Store) SessionEvents(sessionID string) ([]*models.Event, error) {
 	// index and every session-detail click full-scanned the events table.
 	// Sessions are cowrie-only, so this doesn't drop rows.
 	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, actor_id
+SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, actor_id
 FROM events WHERE source='cowrie' AND session_id=? ORDER BY ts ASC`, sessionID)
 	if err != nil {
 		return nil, err
@@ -176,7 +235,7 @@ FROM events WHERE source='cowrie' AND session_id=? ORDER BY ts ASC`, sessionID)
 		var ts, source, kind string
 		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
 			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.Command,
-			&e.SHA256, &e.Filename, &e.ActorID); err != nil {
+			&e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.ActorID); err != nil {
 			return nil, err
 		}
 		e.TS, _ = parseTime(ts)

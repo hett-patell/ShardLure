@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -147,6 +148,23 @@ func indicatorToSTIX(ind Indicator) (stixObject, bool) {
 		// the username is the only field we have.
 		pattern = "[user-account:account_login = '" + stixEsc(ind.Value) + "']"
 		labels = []string{"credential-attempt"}
+	case KindTunnel:
+		// Proxy/pivot destination (host:port) an attacker forwarded to through
+		// the honeypot. Value is host:port; the host may be an IPv4 literal or a
+		// domain, so pattern on network-traffic dst_ref with whichever SCO type
+		// fits. STIX 2.1 references the embedded SCO via dst_ref.type/.value.
+		host, port := splitTunnelValue(ind.Value)
+		refType := "domain-name"
+		if net.ParseIP(host) != nil {
+			refType = "ipv4-addr"
+		}
+		pattern = "[network-traffic:dst_ref.type = '" + refType +
+			"' AND network-traffic:dst_ref.value = '" + stixEsc(host) + "'"
+		if port > 0 {
+			pattern += " AND network-traffic:dst_port = " + strconv.Itoa(port)
+		}
+		pattern += "]"
+		labels = []string{"proxy-pivot"}
 	default:
 		return stixObject{}, false
 	}
@@ -176,6 +194,22 @@ func indicatorToSTIX(ind Indicator) (stixObject, bool) {
 		IndicatorTypes: []string{"malicious-activity"},
 		CreatedByRef:   stixIdentity,
 	}, true
+}
+
+// splitTunnelValue splits a tunnel IOC value ("host:port") back into its host
+// and numeric port. It tolerates a bare host (no port), an IPv6 literal in
+// brackets, and a non-numeric/absent port (returns 0). host is returned as-is
+// when the value can't be split so the pattern still carries the destination.
+func splitTunnelValue(v string) (host string, port int) {
+	h, p, err := net.SplitHostPort(v)
+	if err != nil {
+		return v, 0
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return h, 0
+	}
+	return h, n
 }
 
 func stixEsc(s string) string {

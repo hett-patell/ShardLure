@@ -73,6 +73,10 @@
   .stat .num.accent { color: var(--accent); }
   .stat .num.blue { color: var(--accent-2); }
   .stat .label { color: var(--dim); font-size: 10px; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+  /* Scroll container for long tables inside a panel, so a big result set
+     stays compact instead of stretching the panel (and leaving a tall empty
+     column beside it in the 2-col grid). Header stays put; body scrolls. */
+  .table-scroll { max-height: 440px; overflow: auto; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
   .grid .full { grid-column: 1 / -1; }
@@ -382,6 +386,30 @@
   .sess-row .sess-num { color: var(--dim-2); text-align: right; }
   .sess-row .sess-ip { color: var(--accent-2); }
   .sess-row .sess-user { color: var(--text); }
+  .sess-row .sess-arch {
+    color: var(--dim-2); font-size: 9px; margin-left: 6px;
+    padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
+    vertical-align: middle;
+  }
+  /* Suggested AbuseIPDB reports */
+  .abuse-note {
+    margin: 0 0 8px; padding: 6px 10px; font-size: 11px; color: var(--dim);
+    background: rgba(200,152,40,0.06); border-left: 2px solid var(--blue-team); border-radius: 3px;
+  }
+  .pri-badge {
+    display: inline-block; min-width: 22px; text-align: center; font-weight: 700;
+    font-variant-numeric: tabular-nums; padding: 1px 5px; border-radius: 4px; font-size: 11px;
+  }
+  .pri-badge.pri-hi  { color: #ff6b4a; background: rgba(216,64,40,0.14); border: 1px solid rgba(216,64,40,0.45); }
+  .pri-badge.pri-mid { color: var(--blue-team); background: rgba(200,152,40,0.12); border: 1px solid rgba(200,152,40,0.4); }
+  .pri-badge.pri-lo  { color: var(--dim); background: rgba(255,255,255,0.03); border: 1px solid var(--line); }
+  #abuse-suggest-table td.why { white-space: normal; }
+  #abuse-suggest-table .why-tag {
+    display: inline-block; font-size: 9px; color: var(--dim); margin: 1px 3px 1px 0;
+    padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px;
+  }
+  #abuse-suggest-table .sg-btn { padding: 2px 7px; font-size: 10px; }
+  #abuse-suggest-table .sg-disabled { color: var(--dim-2); }
   .sess-row .sess-dur, .sess-row .sess-when { color: var(--dim); text-align: right; }
   .sess-row .sess-n { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
   .sess-row .sess-c { color: var(--good); text-align: right; font-variant-numeric: tabular-nums; }
@@ -817,6 +845,65 @@
   .panel-collapse.collapsed .panel-head::after { transform: rotate(-90deg); }
   .panel-collapse .panel-body { max-height: 2000px; overflow: auto; transition: max-height 0.3s ease, opacity 0.2s; }
   .panel-collapse.collapsed .panel-body { max-height: 0; overflow: hidden; opacity: 0; padding: 0; }
+
+  /* ==== Settings tab ==== */
+  .set-note {
+    font: 12px/1.5 var(--sans); color: var(--dim); background: var(--glass);
+    border: 1px solid var(--line); border-left: 2px solid var(--accent-2);
+    border-radius: 4px; padding: 10px 12px; margin: 0 0 12px;
+  }
+  .set-note code { font: 11px var(--mono); color: var(--text); }
+  .set-rows { display: flex; flex-direction: column; gap: 2px; }
+  .set-row {
+    display: grid; grid-template-columns: 210px 1fr auto; gap: 10px;
+    align-items: center; padding: 8px 6px; border-bottom: 1px solid var(--line);
+  }
+  .set-row:last-child { border-bottom: 0; }
+  .set-label { display: flex; flex-direction: column; gap: 2px; }
+  .set-label .sl-name { font: 600 13px var(--sans); color: var(--text); }
+  .set-label .sl-src { font: 10px var(--mono); color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+  .set-label .sl-src.db  { color: var(--good); }
+  .set-label .sl-src.env { color: var(--accent-2); }
+  .set-control { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .set-control input[type=text], .set-control input[type=password], .set-control input[type=number] {
+    flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line-strong); border-radius: 4px; padding: 6px 8px;
+    font: 12px var(--mono);
+  }
+  .set-control input::placeholder { color: var(--dim-2); }
+  .set-hint { font: 11px var(--mono); color: var(--dim); white-space: nowrap; }
+  .set-actions { display: flex; gap: 6px; }
+  .set-btn {
+    font: 600 11px var(--sans); color: var(--text); background: var(--glass-2);
+    border: 1px solid var(--line-strong); border-radius: 4px; padding: 6px 10px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .set-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .set-btn.primary { border-color: rgba(208,40,40,0.45); color: var(--accent); background: rgba(208,40,40,0.08); }
+  .set-btn.danger:hover { border-color: var(--accent); color: var(--accent); }
+  .set-btn:disabled { opacity: .5; cursor: default; }
+  .set-test { font: 11px var(--mono); white-space: nowrap; margin-left: 4px; }
+  .set-test.ok  { color: var(--good); }
+  .set-test.bad { color: var(--accent); }
+  .set-test.pending { color: var(--dim); }
+  .set-toggle { display: inline-flex; align-items: center; gap: 6px; font: 12px var(--sans); color: var(--text); cursor: pointer; }
+  .set-badge {
+    font: 10px var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    padding: 2px 6px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--dim);
+  }
+  .set-badge.set { color: var(--good); border-color: rgba(72,184,120,0.4); }
+  .set-health-flags { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+  .set-health-providers { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+  .sh-flag, .sh-prov {
+    display: inline-flex; align-items: center; gap: 6px;
+    font: 11px var(--mono); color: var(--dim);
+  }
+  .sh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim-2); flex: none; }
+  .sh-dot.on   { background: var(--good); box-shadow: 0 0 6px rgba(72,184,120,0.5); }
+  .sh-dot.off  { background: var(--dim-2); }
+  .sh-dot.warn { background: var(--warn); }
+  .set-health-stats .num { font-size: 20px; }
+  #sh-ingest.stale { color: var(--warn); }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
 </head>
@@ -857,6 +944,7 @@
     <span class="tab active" data-view="overview"><span class="tdot"></span>Overview</span>
     <span class="tab blue" data-view="blue"><span class="tdot" style="background:var(--blue-team)"></span>Blue Team</span>
     <span class="tab red" data-view="red"><span class="tdot" style="background:var(--red-team)"></span>Red Team</span>
+    <span class="tab" data-view="settings"><span class="tdot" style="background:var(--dim)"></span>Settings</span>
   </div>
 
   <!-- ============ OVERVIEW TAB ============ -->
@@ -948,6 +1036,10 @@
       <div class="detail" id="actor-detail">
         <h3 id="detail-title">Actor detail</h3>
         <div class="kv" id="detail-kv"></div>
+        <div id="detail-actions" style="display:none;margin:8px 0">
+          <button class="bz-btn" id="report-abuseipdb-btn" onclick="reportActorToAbuseIPDB(this)">⚑ Report to AbuseIPDB</button>
+          <span id="report-abuseipdb-status" style="margin-left:8px;font-size:11px;color:var(--dim)"></span>
+        </div>
         <div class="cmd-list" id="detail-cmds"></div>
       </div>
     </section>
@@ -1024,7 +1116,7 @@
         </div>
       </section>
 
-      <section class="panel panel-collapse" id="panel-ioc">
+      <section class="panel full panel-collapse" id="panel-ioc">
         <div class="panel-head" onclick="this.parentElement.classList.toggle('collapsed')">
           <h2>IOC export</h2>
           <span class="meta" id="ioc-meta">STIX 2.1 · CSV</span>
@@ -1042,6 +1134,7 @@
             <a class="ioc-dl" id="ioc-dl-stix" href="/api/ioc/stix?window=24h" download onclick="event.stopPropagation()">download STIX bundle</a>
           </div>
         </div>
+        <div class="table-scroll">
         <table class="dense" id="ioc-table">
           <thead>
             <tr><th>value</th><th class="num">count</th><th>first</th><th>last</th><th>actors</th></tr>
@@ -1051,9 +1144,39 @@
           </tbody>
         </table>
         </div>
+        </div>
       </section>
 
-      <section class="panel" id="panel-enrich">
+      <section class="panel full" id="panel-abuse-suggest">
+        <div class="panel-head">
+          <h2>Suggested AbuseIPDB reports</h2>
+          <span class="meta" id="abuse-suggest-meta">ranked by report priority</span>
+          <button class="bz-btn" id="abuse-report-all-btn" onclick="reportAllSuggested(this)" style="margin-left:auto;display:none">⚑ Report All</button>
+        </div>
+        <div class="panel-body">
+        <div id="abuse-suggest-note" class="abuse-note" style="display:none"></div>
+        <table class="dense" id="abuse-suggest-table">
+          <thead>
+            <tr>
+              <th style="width:34px" title="report priority 0-100">pri</th>
+              <th>ip</th>
+              <th>playbook</th>
+              <th class="num" title="our confidence this is a brute-forcer">probe</th>
+              <th class="num" title="attempts per hour">rate/h</th>
+              <th class="num" title="distinct usernames tried">users</th>
+              <th>why</th>
+              <th>last seen</th>
+              <th style="width:92px">action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="9"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
+      <section class="panel full" id="panel-enrich">
         <div class="panel-head">
           <h2>Threat intel enrichment</h2>
           <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo</span>
@@ -1160,6 +1283,29 @@
         <div id="graph-canvas" class="graph-canvas"></div>
       </section>
 
+      <section class="panel" id="panel-tunnels">
+        <div class="panel-head">
+          <h2>Proxy targets</h2>
+          <span class="meta" id="tunnels-meta">direct-tcpip pivot destinations</span>
+        </div>
+        <div class="panel-body">
+        <table class="dense" id="tunnels-table">
+          <thead>
+            <tr>
+              <th>destination</th>
+              <th class="num">port</th>
+              <th class="num">hits</th>
+              <th class="num">actors</th>
+              <th>first → last</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
       <section class="panel" id="panel-replay">
         <div class="panel-head">
           <h2>Attack replay / synthesis</h2>
@@ -1222,7 +1368,7 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-bazaar">
+      <section class="panel full" id="panel-bazaar">
         <div class="panel-head">
           <h2>MalwareBazaar sharing</h2>
           <span class="meta" id="bazaar-meta">abuse.ch threat intel exchange</span>
@@ -1251,6 +1397,86 @@
 
     </div>
   </section><!-- /view-red -->
+
+  <!-- ============ SETTINGS TAB ============ -->
+  <section class="view" id="view-settings">
+    <div class="team-banner" style="border-color:var(--line-strong)">
+      <span class="tb-title">Settings</span>
+      <span class="tb-sub">API keys &amp; runtime configuration · saved to the local SQLite DB (0600) · applied live, no restart</span>
+    </div>
+
+    <div class="set-note">
+      Keys are stored in the honeypot's local database (already <code>chmod 0600</code>).
+      A value set here overrides the matching <code>SHARDLURE_*</code> environment
+      variable; clearing it reverts to the env value. Secrets are never shown back —
+      only a masked hint. Changes take effect on the next request.
+    </div>
+
+    <!-- Live health strip -->
+    <section class="panel full" id="panel-set-health">
+      <div class="panel-head"><h2>Live status</h2>
+        <span class="meta" id="set-health-meta">—</span></div>
+      <div class="panel-body">
+        <div class="stats set-health-stats" style="grid-template-columns: repeat(5,1fr)">
+          <div class="stat"><div class="num accent" id="sh-events">—</div><div class="label">events</div></div>
+          <div class="stat"><div class="num blue" id="sh-actors">—</div><div class="label">actors</div></div>
+          <div class="stat"><div class="num accent" id="sh-ips">—</div><div class="label">unique IPs</div></div>
+          <div class="stat"><div class="num" id="sh-ingest">—</div><div class="label">last event</div></div>
+          <div class="stat"><div class="num" id="sh-uptime">—</div><div class="label">uptime</div></div>
+        </div>
+        <div class="set-health-flags" id="sh-flags"></div>
+        <div class="set-health-providers" id="sh-providers"></div>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="panel full" id="panel-set-keys">
+        <div class="panel-head"><h2>Provider API keys</h2>
+          <span class="meta">enrichment · reporting · sharing</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-keys-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+
+      <section class="panel full" id="panel-set-abuse">
+        <div class="panel-head"><h2>AbuseIPDB reporting</h2>
+          <span class="meta">outbound reporting of confirmed brute-forcers</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-abuse-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+
+      <section class="panel full" id="panel-set-reports">
+        <div class="panel-head"><h2>AbuseIPDB report history</h2>
+          <span class="meta" id="set-reports-meta">recent submissions · read-only</span></div>
+        <div class="panel-body">
+          <table class="dense" id="set-reports-table">
+            <thead><tr>
+              <th>IP</th><th>reported (UTC)</th><th>status</th>
+              <th class="num">score</th><th>categories</th>
+            </tr></thead>
+            <tbody><tr><td colspan="5"><div class="empty">loading…</div></td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel full" id="panel-set-geo">
+        <div class="panel-head"><h2>Geolocation</h2>
+          <span class="meta">attacker-IP geo lookups · globe home origin is set in shardlure.yaml</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-geo-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+
+      <section class="panel full" id="panel-set-token">
+        <div class="panel-head"><h2>Dashboard token</h2>
+          <span class="meta">auth for this dashboard</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-token-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+    </div>
+  </section><!-- /view-settings -->
 </div>
 
 <!-- Payload library inspector modal (slice G) -->
@@ -1284,24 +1510,37 @@
 // it once (and remember it for this tab) so the JS fetch() calls below — and
 // the download links — carry it too. Without this, the page loads but every
 // data fetch 401s. No token set => DASH_TOKEN stays '' and nothing changes.
-const DASH_TOKEN = (function () {
+// currentToken is a mutable holder (not a const) so the Settings panel can
+// rotate the dashboard token in-session: after POST /api/settings/token/rotate
+// returns the new value, setDashToken() swaps it here and every subsequent
+// fetch/withToken uses it — the live session never 401s on its own rotation.
+var currentToken = (function () {
   try {
     var t = new URLSearchParams(location.search).get('token');
     if (t) { sessionStorage.setItem('shardlure_token', t); return t; }
     return sessionStorage.getItem('shardlure_token') || '';
   } catch (_) { return ''; }
 })();
+// DASH_TOKEN kept as a truthiness snapshot for the "was auth on at load?" gate
+// below; the actual value used per request is always the live currentToken.
+const DASH_TOKEN = currentToken;
+function setDashToken(t) {
+  currentToken = t || '';
+  try { sessionStorage.setItem('shardlure_token', currentToken); } catch (_) {}
+}
 // Insert ?token=… into a same-origin URL (used for <a href> downloads and the
 // page-nav links), before any #fragment, without duplicating an existing token.
 function withToken(url) {
-  if (!DASH_TOKEN) return url;
+  if (!currentToken) return url;
   var hash = '', u = String(url);
   var hi = u.indexOf('#');
   if (hi >= 0) { hash = u.slice(hi); u = u.slice(0, hi); }
   if (/[?&]token=/.test(u)) return u + hash;
-  return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DASH_TOKEN) + hash;
+  return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(currentToken) + hash;
 }
-// Wrap fetch so every same-origin /api/ request sends the Bearer token.
+// Wrap fetch so every same-origin /api/ request sends the Bearer token. Install
+// the wrapper whenever auth was on at load (DASH_TOKEN non-empty); it reads the
+// live currentToken each call so a rotation takes effect immediately.
 (function () {
   if (!DASH_TOKEN) return;
   var _fetch = window.fetch.bind(window);
@@ -1309,10 +1548,10 @@ function withToken(url) {
     try {
       var url = (typeof input === 'string') ? input : (input && input.url) || '';
       // Same-origin API path: a relative URL beginning with "/api/".
-      if (url.indexOf('/api/') === 0) {
+      if (url.indexOf('/api/') === 0 && currentToken) {
         init = init || {};
         var h = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
-        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + DASH_TOKEN);
+        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + currentToken);
         init.headers = h;
       }
     } catch (_) {}
@@ -1493,6 +1732,20 @@ async function loadActorDetail(id) {
     (a.hassh ? '<span>HASSH</span><strong>' + esc(a.hassh) + '</strong>' : '') +
     (a.sshClient ? '<span>SSH client</span><strong>' + esc(a.sshClient) + '</strong>' : '') +
     (a.lastCommand ? '<span>Last command</span><strong style="color:var(--good)">' + esc(a.lastCommand) + '</strong>' : '');
+  // AbuseIPDB report button: shown only when the backend says this actor is
+  // eligible (reporting armed + passes the Vet gate + not already reported).
+  const actions = document.getElementById('detail-actions');
+  const rptStatus = document.getElementById('report-abuseipdb-status');
+  const rptBtn = document.getElementById('report-abuseipdb-btn');
+  rptStatus.textContent = '';
+  if (d.reportEligible && a.ip) {
+    actions.style.display = 'block';
+    rptBtn.disabled = false;
+    rptBtn.dataset.ip = a.ip;
+  } else {
+    actions.style.display = 'none';
+    rptBtn.dataset.ip = '';
+  }
   const cmds = d.commands || [];
   const events = d.events || [];
   let html = '';
@@ -1511,6 +1764,40 @@ async function loadActorDetail(id) {
     }).join('');
   }
   document.getElementById('detail-cmds').innerHTML = html || '<span class="empty">No activity recorded for this actor.</span>';
+}
+
+// reportActorToAbuseIPDB POSTs the currently-open actor's IP to the reporting
+// endpoint. The backend re-runs the full Vet gate, so this is safe even if the
+// button somehow shows for an ineligible actor.
+async function reportActorToAbuseIPDB(btn) {
+  const ip = btn.dataset.ip;
+  const status = document.getElementById('report-abuseipdb-status');
+  if (!ip) return;
+  btn.disabled = true;
+  status.style.color = 'var(--dim)';
+  status.textContent = 'reporting…';
+  try {
+    const r = await fetch('/api/intel/abuseipdb/report?ip=' + encodeURIComponent(ip) + '&_=' + Date.now(),
+      { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function(){ return {}; });
+    if (d.status === 'reported') {
+      status.style.color = 'var(--good)';
+      status.textContent = 'reported ✓';
+      btn.style.display = 'none';
+    } else if (d.status === 'already_reported') {
+      status.style.color = 'var(--dim)';
+      status.textContent = 'already reported recently';
+      btn.style.display = 'none';
+    } else {
+      status.style.color = 'var(--red-team)';
+      status.textContent = (d.error || d.status || 'failed');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    status.style.color = 'var(--red-team)';
+    status.textContent = 'request failed';
+    btn.disabled = false;
+  }
 }
 
 function renderActors(actors) {
@@ -1664,15 +1951,260 @@ function setActiveView(name) {
 
 function readTabFromHash() {
   const m = /tab=([a-z]+)/.exec(location.hash || '');
-  return (m && ['overview','blue','red'].indexOf(m[1]) >= 0) ? m[1] : 'overview';
+  return (m && ['overview','blue','red','settings'].indexOf(m[1]) >= 0) ? m[1] : 'overview';
 }
 
 document.querySelectorAll('.tab').forEach(function(t) {
-  t.addEventListener('click', function(){ setActiveView(t.getAttribute('data-view')); });
+  t.addEventListener('click', function(){
+    var v = t.getAttribute('data-view');
+    setActiveView(v);
+    if (v === 'settings') loadSettings();
+  });
 });
 window.addEventListener('hashchange', function() {
-  setActiveView(readTabFromHash());
+  var v = readTabFromHash();
+  setActiveView(v);
+  if (v === 'settings') loadSettings();
 });
+
+// ── Settings panel ────────────────────────────────────────────────────────
+// (reuses the existing esc() helper defined earlier for HTML escaping)
+var _settingsLoaded = false;
+function srcLabel(src) {
+  if (src === 'db') return '<span class="sl-src db">saved</span>';
+  if (src === 'env') return '<span class="sl-src env">from env</span>';
+  return '<span class="sl-src">not set</span>';
+}
+// Render one secret row: masked hint + password input + Save/Clear/Test.
+function secretRowHTML(s) {
+  var test = s.testable
+    ? '<button class="set-btn" onclick="testProvider(\'' + esc(s.testable) + '\', this)">Test</button>'
+    : '';
+  return '<div class="set-row" data-key="' + esc(s.key) + '">'
+    + '<div class="set-label"><span class="sl-name">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-control">'
+    +   '<input type="password" placeholder="' + (s.set ? 'saved · ' + esc(s.hint) + ' — enter to replace' : 'not configured — paste key') + '" autocomplete="off" spellcheck="false">'
+    + '</div>'
+    + '<div class="set-actions">'
+    +   '<button class="set-btn primary" onclick="saveSecret(this)">Save</button>'
+    +   (s.set ? '<button class="set-btn danger" onclick="clearSetting(\'' + esc(s.key) + '\', this)">Clear</button>' : '')
+    +   test
+    +   '<span class="set-test"></span>'
+    + '</div></div>';
+}
+// Render one non-secret knob row by kind.
+function knobRowHTML(s) {
+  var ctrl;
+  if (s.kind === 'bool') {
+    var on = /^(1|true|yes|on)$/i.test(s.value || '');
+    ctrl = '<label class="set-toggle"><input type="checkbox" ' + (on ? 'checked' : '') + '> enabled</label>';
+  } else if (s.kind === 'int') {
+    ctrl = '<input type="number" value="' + esc(s.value) + '" placeholder="default">';
+  } else if (s.kind === 'float') {
+    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="default" inputmode="decimal">';
+  } else {
+    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="' + (s.kind === 'intcsv' ? 'e.g. 18,22' : 'default') + '">';
+  }
+  return '<div class="set-row" data-key="' + esc(s.key) + '" data-kind="' + esc(s.kind) + '">'
+    + '<div class="set-label"><span class="sl-name">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-control">' + ctrl + '</div>'
+    + '<div class="set-actions">'
+    +   '<button class="set-btn primary" onclick="saveKnob(this)">Save</button>'
+    +   '<span class="set-test"></span>'
+    + '</div></div>';
+}
+async function loadSettings() {
+  try {
+    var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var data = await r.json();
+    _settingsLoaded = true;
+    var buckets = { keys: [], abuse: [], geo: [], token: [] };
+    (data.settings || []).forEach(function (s) {
+      if (s.key === 'SHARDLURE_DASH_TOKEN') buckets.token.push(s);
+      else if (s.kind === 'secret') buckets.keys.push(s);
+      else if (s.key.indexOf('abuseipdb.') === 0) buckets.abuse.push(s);
+      else buckets.geo.push(s);
+    });
+    document.getElementById('set-keys-rows').innerHTML =
+      buckets.keys.map(secretRowHTML).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-abuse-rows').innerHTML =
+      buckets.abuse.map(knobRowHTML).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-geo-rows').innerHTML =
+      buckets.geo.map(knobRowHTML).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-token-rows').innerHTML = tokenRowHTML(buckets.token[0]);
+  } catch (e) {
+    document.getElementById('set-keys-rows').innerHTML =
+      '<div class="empty">failed to load settings: ' + esc(e.message) + '</div>';
+  }
+  loadStatus(); // health strip + report history (independent fetch)
+}
+
+// loadStatus populates the read-only Live-status strip and the AbuseIPDB report
+// history from /api/settings/status. Failure here never blocks the editable
+// settings above.
+async function loadStatus() {
+  try {
+    var r = await fetch('/api/settings/status?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var d = await r.json();
+    // Health counters.
+    document.getElementById('sh-events').textContent = fmt(d.events);
+    document.getElementById('sh-actors').textContent = fmt(d.actors);
+    document.getElementById('sh-ips').textContent = fmt(d.uniqueIps);
+    document.getElementById('sh-uptime').textContent = fmtUptime(d.uptimeSeconds);
+    document.getElementById('set-health-meta').textContent =
+      'process up since ' + (d.startedAt ? new Date(d.startedAt).toLocaleString() : '—');
+    // Ingest freshness: warn (amber) if the last event is more than 5 min old.
+    var ing = document.getElementById('sh-ingest');
+    if (d.lastEvent) {
+      var ageSec = (Date.now() - new Date(d.lastEvent).getTime()) / 1000;
+      ing.textContent = ageSec < 90 ? Math.max(0, Math.round(ageSec)) + 's ago'
+        : fmtUptime(ageSec) + ' ago';
+      ing.classList.toggle('stale', ageSec > 300);
+      ing.title = new Date(d.lastEvent).toLocaleString();
+    } else { ing.textContent = 'none'; ing.classList.add('stale'); }
+    // Flags: dashboard token + reporting armed.
+    var flags = [];
+    flags.push(flagHTML(d.tokenSet, d.tokenSet ? 'dashboard token set' : 'no dashboard token (unauthenticated)', d.tokenSet ? 'on' : 'warn'));
+    flags.push(flagHTML(d.reportEnabled, d.reportEnabled ? 'AbuseIPDB reporting armed' : 'AbuseIPDB reporting off', d.reportEnabled ? 'on' : 'off'));
+    document.getElementById('sh-flags').innerHTML = flags.join('');
+    // Provider armed dots.
+    document.getElementById('sh-providers').innerHTML = (d.providers || []).map(function (p) {
+      var cls = p.armed ? 'on' : 'off';
+      var label = esc(p.label) + (p.keyless ? ' (keyless)' : (p.armed ? '' : ' — no key'));
+      return '<span class="sh-prov"><span class="sh-dot ' + cls + '"></span>' + label + '</span>';
+    }).join('');
+    // Report history.
+    renderReportHistory(d.abuse || {});
+  } catch (e) {
+    document.getElementById('set-health-meta').textContent = 'status unavailable: ' + esc(e.message);
+  }
+}
+function flagHTML(_on, label, dotClass) {
+  return '<span class="sh-flag"><span class="sh-dot ' + dotClass + '"></span>' + esc(label) + '</span>';
+}
+function renderReportHistory(abuse) {
+  var meta = document.getElementById('set-reports-meta');
+  var tb = document.querySelector('#set-reports-table tbody');
+  var rows = abuse.reports || [];
+  meta.textContent = (abuse.totalReported || 0) + ' total' +
+    (abuse.lastReportAt ? ' · last ' + fmtShortTime(abuse.lastReportAt) + ' UTC' : '') +
+    ' · read-only';
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no reports recorded yet</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(function (r) {
+    return '<tr>'
+      + '<td class="ip">' + esc(r.ip) + '</td>'
+      + '<td class="range">' + (r.reportedAt ? fmtShortTime(r.reportedAt) : '—') + '</td>'
+      + '<td>' + esc(r.status) + '</td>'
+      + '<td class="num">' + (r.score || 0) + '</td>'
+      + '<td>' + esc((r.categories || []).join(', ')) + '</td>'
+      + '</tr>';
+  }).join('');
+}
+function tokenRowHTML(s) {
+  s = s || { set: false, hint: '', source: 'unset' };
+  return '<div class="set-row">'
+    + '<div class="set-label"><span class="sl-name">Auth token</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-control"><span class="set-hint">' + (s.set ? esc(s.hint) : 'no token — dashboard is unauthenticated') + '</span></div>'
+    + '<div class="set-actions">'
+    +   '<button class="set-btn primary" onclick="rotateToken(this)">Rotate</button>'
+    +   '<span class="set-test"></span>'
+    + '</div></div>';
+}
+async function postSetting(body) {
+  var r = await fetch('/api/settings/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  var data = {};
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok || data.status === 'error') throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+function rowResult(btn, ok, msg) {
+  var span = btn.closest('.set-row').querySelector('.set-test');
+  if (!span) return;
+  span.className = 'set-test ' + (ok ? 'ok' : 'bad');
+  span.textContent = msg;
+  if (ok) setTimeout(function () { span.textContent = ''; span.className = 'set-test'; }, 2500);
+}
+async function saveSecret(btn) {
+  var row = btn.closest('.set-row');
+  var key = row.getAttribute('data-key');
+  var input = row.querySelector('input');
+  var val = (input.value || '').trim();
+  if (!val) { rowResult(btn, false, 'enter a value'); return; }
+  btn.disabled = true;
+  try {
+    await postSetting({ key: key, value: val });
+    input.value = '';
+    rowResult(btn, true, 'saved');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
+async function saveKnob(btn) {
+  var row = btn.closest('.set-row');
+  var key = row.getAttribute('data-key');
+  var kind = row.getAttribute('data-kind');
+  var val;
+  if (kind === 'bool') {
+    val = row.querySelector('input[type=checkbox]').checked ? '1' : '0';
+  } else {
+    val = (row.querySelector('input').value || '').trim();
+  }
+  btn.disabled = true;
+  try {
+    // Empty non-bool value clears the knob (reverts to default).
+    if (kind !== 'bool' && val === '') await postSetting({ key: key, action: 'clear' });
+    else await postSetting({ key: key, value: val });
+    rowResult(btn, true, 'saved');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
+async function clearSetting(key, btn) {
+  btn.disabled = true;
+  try {
+    await postSetting({ key: key, action: 'clear' });
+    rowResult(btn, true, 'cleared');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
+async function testProvider(provider, btn) {
+  var span = btn.closest('.set-row').querySelector('.set-test');
+  span.className = 'set-test pending'; span.textContent = 'testing…';
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/settings/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: provider })
+    });
+    var data = await r.json();
+    span.className = 'set-test ' + (data.ok ? 'ok' : 'bad');
+    span.textContent = (data.ok ? '✓ ' : '✗ ') + (data.message || '');
+  } catch (e) {
+    span.className = 'set-test bad'; span.textContent = '✗ ' + e.message;
+  } finally { btn.disabled = false; }
+}
+async function rotateToken(btn) {
+  if (!confirm('Rotate the dashboard token? Other open tabs/devices will need the new token. This session stays logged in.')) return;
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/settings/token/rotate', { method: 'POST' });
+    var data = await r.json();
+    if (!r.ok || !data.token) throw new Error(data.error || ('HTTP ' + r.status));
+    setDashToken(data.token); // keep THIS session working with the new token
+    rowResult(btn, true, 'rotated');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
 
 function bindChipGroup(attr, key) {
   document.querySelectorAll('.chip[data-' + attr + ']').forEach(function(c) {
@@ -1744,6 +2276,7 @@ const __deepLinkSession = (function() {
   return m ? m[1] : '';
 })();
 setActiveView(readTabFromHash());
+if (readTabFromHash() === 'settings') loadSettings(); // deep-link straight to Settings
 if (__deepLinkSession) {
   // Defer one tick so openSession's modal markup is in the DOM.
   setTimeout(function() { openSession(__deepLinkSession); }, 0);
@@ -1888,12 +2421,17 @@ function renderSessions(data) {
     // s.id / s.ip / s.user are attacker-influenced (cowrie session id, source
     // IP, attempted SSH username) — escape before they touch innerHTML.
     const user = s.user ? esc(s.user) : '<span style="color:var(--dim-2)">—</span>';
+    // durExact marks a duration sourced from cowrie's session.closed duration_ms
+    // (counts the idle tail); the ~ prefix flags the MAX(ts)-MIN(ts) estimate.
+    const durTitle = s.durExact ? 'cowrie session.closed duration' : 'estimated from event span';
+    const durTxt = (s.durExact ? '' : '~') + fmtDur(s.durMs);
+    const arch = s.arch ? '<span class="sess-arch" title="client arch">' + esc(s.arch) + '</span>' : '';
     html += '<div class="sess-row" data-sid="' + esc(s.id) + '">' +
       '<span class="sess-num">' + (i + 1) + '</span>' +
       '<span class="sess-id">' + esc(s.id) + '</span>' +
       '<span class="sess-ip">' + esc(s.ip) + '</span>' +
-      '<span class="sess-user">' + user + '</span>' +
-      '<span class="sess-dur">' + fmtDur(s.durMs) + '</span>' +
+      '<span class="sess-user">' + user + arch + '</span>' +
+      '<span class="sess-dur" title="' + durTitle + '">' + durTxt + '</span>' +
       '<span class="sess-n" title="events">' + s.events + 'e</span>' +
       '<span class="sess-c" title="commands">' + s.commands + 'c</span>' +
       '</div>';
@@ -1942,8 +2480,12 @@ function safeUrl(u) {
 
 function renderSessionDetail(d) {
   document.getElementById('sm-title').textContent = 'session ' + d.id + ' · ' + d.ip + (d.user ? ' · ' + d.user : '');
-  const dur = new Date(d.end).getTime() - new Date(d.start).getTime();
-  document.getElementById('sm-sub').textContent = new Date(d.start).toUTCString() + ' · ' + fmtDur(dur) + ' · ' + d.lines.length + ' events';
+  // Prefer the server's duration (cowrie session.closed when durExact); fall
+  // back to the client-computed span only if the server sent nothing.
+  const dur = (d.durMs && d.durMs > 0) ? d.durMs : (new Date(d.end).getTime() - new Date(d.start).getTime());
+  const durTxt = (d.durMs && !d.durExact ? '~' : '') + fmtDur(dur);
+  const archTxt = d.arch ? ' · ' + d.arch : '';
+  document.getElementById('sm-sub').textContent = new Date(d.start).toUTCString() + ' · ' + durTxt + archTxt + ' · ' + d.lines.length + ' events';
   let html = '';
   d.lines.forEach(function(ln) {
     let txt = '';
@@ -1953,6 +2495,7 @@ function renderSessionDetail(d) {
     else if (ln.kind === 'accepted') txt = '*** authenticated as ' + escHtml(ln.user || '?') + ' ***';
     else if (ln.kind === 'connect') txt = '-- session opened --';
     else if (ln.kind === 'disconnect') txt = '-- session closed --';
+    else if (ln.kind === 'tunnel') txt = 'proxy → ' + escHtml(ln.dst || '?');
     else if (ln.sha256) txt = 'download ' + escHtml(ln.filename || '') + ' [' + ln.sha256.slice(0, 12) + ']';
     else txt = escHtml(ln.kind);
     const techs = (ln.techs || []).map(function(t) { return '<span class="tt">' + escHtml(t) + '</span>'; }).join('');
@@ -2016,6 +2559,163 @@ setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshSessions();
 }, 30000);
 if (readTabFromHash() === 'blue') refreshSessions();
+
+// ==== Suggested AbuseIPDB reports =================================
+function priClass(p) {
+  if (p >= 75) return 'pri-hi';
+  if (p >= 50) return 'pri-mid';
+  return 'pri-lo';
+}
+
+function renderAbuseSuggest(data) {
+  const tb = document.querySelector('#abuse-suggest-table tbody');
+  const meta = document.getElementById('abuse-suggest-meta');
+  const note = document.getElementById('abuse-suggest-note');
+  const list = data.suggestions || [];
+  meta.textContent = (data.total || 0) + ' candidates · ranked by report priority';
+  // The "Report All" button appears only when reporting is armed AND there is
+  // at least one candidate to report.
+  const allBtn = document.getElementById('abuse-report-all-btn');
+  if (allBtn) allBtn.style.display = (data.enabled && list.length) ? '' : 'none';
+  // When reporting isn't armed, the list is advisory only — say so once.
+  if (!data.enabled) {
+    note.style.display = 'block';
+    note.dataset.sticky = '';
+    note.style.borderLeftColor = 'var(--blue-team)';
+    note.style.color = 'var(--dim)';
+    note.textContent = 'Reporting is disabled — this list is advisory. Enable it in Settings → AbuseIPDB reporting (or set intel.abuseipdb.report_enabled + the API key) to arm the Report buttons.';
+  } else if (note.dataset.sticky !== '1') {
+    // Only hide the note when it isn't holding a sticky Report result banner.
+    note.style.display = 'none';
+  }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">no confirmed brute-forcers to suggest (or all already reported)</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(function(s) {
+    const reasons = (s.reasons || []).map(function(r){ return '<span class="why-tag">' + escHtml(r) + '</span>'; }).join('');
+    // The button is only functional when reporting is armed; otherwise show a
+    // disabled hint so the ranking is still useful as guidance.
+    const btn = data.enabled
+      ? '<button class="bz-btn sg-btn" data-ip="' + escHtml(s.srcIp) + '" onclick="reportSuggested(this)">⚑ report</button>'
+      : '<span class="sg-disabled" title="enable reporting to arm">—</span>';
+    return '<tr data-ip="' + escHtml(s.srcIp) + '">' +
+      '<td><span class="pri-badge ' + priClass(s.priority) + '">' + s.priority + '</span></td>' +
+      '<td class="ip">' + escHtml(s.srcIp) + '</td>' +
+      '<td>' + escHtml(s.playbook || '—') + '</td>' +
+      '<td class="num">' + s.probeScore + '</td>' +
+      '<td class="num">' + (s.attemptsPerHour ? s.attemptsPerHour.toFixed(0) : '0') + '</td>' +
+      '<td class="num">' + s.uniqueUsers + '</td>' +
+      '<td class="why">' + reasons + '</td>' +
+      '<td class="range">' + (s.lastSeen ? fmtShortTime(s.lastSeen) : '—') + '</td>' +
+      '<td>' + btn + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+// reportSuggested fires the same reporting endpoint the actor-detail button
+// uses. On success the row is struck through and the button removed.
+async function reportSuggested(btn) {
+  const ip = btn.dataset.ip;
+  if (!ip) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/api/intel/abuseipdb/report?ip=' + encodeURIComponent(ip) + '&_=' + Date.now(),
+      { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function(){ return {}; });
+    const row = btn.closest('tr');
+    if (d.status === 'reported' || d.status === 'already_reported') {
+      if (row) { row.style.opacity = '0.5'; row.style.textDecoration = 'line-through'; }
+      btn.replaceWith(document.createTextNode(d.status === 'reported' ? 'reported ✓' : 'already ✓'));
+    } else {
+      btn.disabled = false;
+      btn.textContent = '⚑ report';
+      btn.title = d.error || d.status || 'failed';
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '⚑ report';
+    btn.title = 'request failed';
+  }
+}
+
+// reportAllSuggested batch-reports every currently-suggested brute-forcer via
+// the server-side orchestrator (which vets, dedups, paces and halts on 429).
+// Confirms first — this is a live, public, multi-IP action.
+async function reportAllSuggested(btn) {
+  // Count exactly what's about to be sent so the operator confirms a number,
+  // not a vague "ALL". This is a live, public, per-IP action with account-strike
+  // stakes if abused, so the confirm names the count and destination.
+  const rows = document.querySelectorAll('#abuse-suggest-table tbody tr[data-ip]');
+  const n = rows.length;
+  if (!n) { showAbuseBanner('nothing to report — the suggestions list is empty.', 'warn'); return; }
+  if (!window.confirm('Report ' + n + ' IP' + (n === 1 ? '' : 's') + ' to AbuseIPDB now?\n\n' +
+      'This is a LIVE, public submission attributed to your account. Reported IPs drop off the list until the re-report window elapses.')) return;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'reporting…';
+  showAbuseBanner('reporting ' + n + ' IP' + (n === 1 ? '' : 's') + '…', 'pending');
+  try {
+    const r = await fetch('/api/intel/abuseipdb/report-all?_=' + Date.now(), { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function(){ return {}; });
+    if (d.status === 'ok' || d.status === 'partial') {
+      // Durable banner (survives the list auto-refresh below, which would wipe a
+      // message written to the meta line).
+      showAbuseBanner('✓ reported ' + (d.reported || 0) + ' · skipped ' + (d.skipped || 0) +
+        (d.status === 'partial' ? ' · some failed — check server logs' : '') +
+        ' · at ' + new Date().toLocaleTimeString(),
+        d.status === 'partial' ? 'warn' : 'ok');
+      // Refresh so reported IPs drop out of the list (dedup window).
+      setTimeout(refreshAbuseSuggest, 800);
+    } else {
+      showAbuseBanner('✗ report-all failed: ' + (d.error || d.status || 'unknown'), 'bad');
+    }
+  } catch (e) {
+    showAbuseBanner('✗ request failed', 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// showAbuseBanner writes a durable, colour-coded result line into the suggest
+// panel's note element. Unlike the meta line, refreshAbuseSuggest() does not
+// overwrite it, so the outcome of a Report action stays visible.
+function showAbuseBanner(msg, kind) {
+  const note = document.getElementById('abuse-suggest-note');
+  if (!note) return;
+  note.style.display = 'block';
+  note.dataset.sticky = '1'; // tells renderAbuseSuggest not to clobber it
+  note.textContent = msg;
+  const c = { ok: 'var(--good)', bad: 'var(--accent)', warn: 'var(--blue-team)', pending: 'var(--dim)' }[kind] || 'var(--blue-team)';
+  note.style.borderLeftColor = c;
+  note.style.color = kind === 'pending' ? 'var(--dim)' : 'var(--text)';
+}
+
+async function refreshAbuseSuggest() {
+  try {
+    const r = await fetch('/api/intel/abuseipdb/suggestions?limit=15&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderAbuseSuggest(await r.json());
+  } catch (_) {}
+}
+
+const _setActiveForAbuse = setActiveView;
+setActiveView = function(name) {
+  _setActiveForAbuse(name);
+  if (name === 'blue') {
+    // Clear any lingering sticky Report banner from a previous visit so it
+    // isn't mistaken for a fresh result.
+    const note = document.getElementById('abuse-suggest-note');
+    if (note) note.dataset.sticky = '';
+    refreshAbuseSuggest();
+  }
+};
+setInterval(function() {
+  if (document.getElementById('view-blue').classList.contains('active')) refreshAbuseSuggest();
+}, 30000);
+if (readTabFromHash() === 'blue') refreshAbuseSuggest();
 
 // ==== Slice D: IOC export =========================================
 const IOC = { kind: 'ip' };
@@ -2255,13 +2955,45 @@ async function refreshTTP() {
 const _setActiveForTTP = setActiveView;
 setActiveView = function(name) {
   _setActiveForTTP(name);
-  if (name === 'red') refreshTTP();
+  if (name === 'red') { refreshTTP(); refreshTunnels(); }
 };
-onWindowChange('view-red', refreshTTP);
+onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); });
 setInterval(function() {
-  if (document.getElementById('view-red').classList.contains('active')) refreshTTP();
+  if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); }
 }, 30000);
-if (readTabFromHash() === 'red') refreshTTP();
+if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); }
+
+// ==== Proxy targets (direct-tcpip pivots) =========================
+function renderTunnels(data) {
+  const tb = document.querySelector('#tunnels-table tbody');
+  const meta = document.getElementById('tunnels-meta');
+  meta.textContent = (data.total || 0) + ' destinations · ' + data.windowHours + 'h window';
+  if (!data.targets || data.targets.length === 0) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">no proxy/pivot attempts in window</div></td></tr>';
+    return;
+  }
+  let html = '';
+  data.targets.forEach(function(t) {
+    const range = fmtShortTime(t.firstSeen) + ' → ' + fmtShortTime(t.lastSeen);
+    html += '<tr>' +
+      '<td>' + escHtml(t.dstIp) + '</td>' +
+      '<td class="num">' + (t.dstPort > 0 ? t.dstPort : '—') + '</td>' +
+      '<td class="num">' + t.hits + '</td>' +
+      '<td class="num">' + t.uniqueActors + '</td>' +
+      '<td class="range">' + range + '</td>' +
+      '</tr>';
+  });
+  tb.innerHTML = html;
+}
+
+async function refreshTunnels() {
+  const window = Filters.window || '7d';
+  try {
+    const r = await fetch('/api/intel/tunnels?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderTunnels(await r.json());
+  } catch (_) {}
+}
 
 // ==== Slice G: payload library ====================================
 function fmtSize(b) {

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/netmatch"
+	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -32,15 +34,34 @@ func httpError(w http.ResponseWriter, where string, err error, code int) {
 }
 
 type Server struct {
-	st             *store.Store
-	addr           string
-	geo            *geoResolver
-	dashboardAuth  string
-	home           homePoint
-	bazaarKey      string
-	bazaarEndpoint string
-	bazaarTags     []string
-	bazaarMaxBytes int64
+	st   *store.Store
+	addr string
+	geo  *geoResolver
+	// keys is the live runtime keystore. Secrets (dashboard token, bazaar +
+	// abuseipdb API keys) and the tunable knobs below are read THROUGH it at
+	// request time so a value saved from the Settings panel takes effect
+	// without a restart. The *Default fields hold the startup-resolved
+	// fallbacks (config/Options/env) used when the keystore has no value.
+	keys             *settings.Keystore
+	homeDefault      homePoint
+	bazaarKeyDefault string // config intel.bazaar.api_key fallback (env/DB win)
+	bazaarEndpoint   string
+	bazaarTags       []string
+	bazaarMaxBytes   int64
+
+	// AbuseIPDB reporting (opt-in, off unless report-enabled AND a key is
+	// present). abuseAdmin hard-rejects admin IPs in Vet. The report knobs
+	// (enabled/min-probe/rewindow/categories/comment) are read live from the
+	// keystore via the accessors below; the *Default fields are the startup
+	// fallbacks. Reporting is the only outbound WRITE surface the dashboard
+	// exposes beyond bazaar, so it carries the same throttle.
+	abuseEndpoint          string
+	abuseEnabledDefault    bool
+	abuseCategoriesDefault []int
+	abuseMinProbeDefault   int
+	abuseRewindowDefault   time.Duration
+	abuseCommentDefault    string
+	abuseAdmin             *netmatch.Set
 	// startedAt marks when this Server was constructed; surfaced as the
 	// dashboard "uptime" so the operator can tell at a glance how long the
 	// live process has been running (and spot an unexpected restart).
@@ -52,6 +73,12 @@ type Server struct {
 	// floor guarantees we never machine-gun the MB API regardless of client.
 	bazaarMu     sync.Mutex
 	lastBazaarAt time.Time
+
+	// abuseReportMu + lastAbuseReportAt throttle AbuseIPDB /report POSTs
+	// process-wide, the same defense as bazaar: the per-actor button is
+	// bypassable, so a server-side floor guarantees we never spam the API.
+	abuseReportMu     sync.Mutex
+	lastAbuseReportAt time.Time
 
 	// countriesCache memoizes the (relatively expensive) full-table
 	// hits-by-country aggregation, which both /api/dashboard and /api/intel
@@ -220,9 +247,20 @@ type Options struct {
 	BazaarEndpoint  string
 	BazaarTags      []string
 	BazaarMaxBytes  int64
+
+	// AbuseIPDB opt-in reporting. AbuseReportEnabled + a key (from
+	// SHARDLURE_ABUSEIPDB_KEY, reused from enrichment) are both required to
+	// arm the dashboard "Report" button. AdminIPs feed the Vet hard-reject.
+	AbuseReportEnabled bool
+	AbuseEndpoint      string
+	AbuseCategories    []int
+	AbuseMinProbe      int
+	AbuseRewindowHours int
+	AbuseComment       string
+	AdminIPs           []string
 }
 
-func New(st *store.Store, addr string, opts ...Options) *Server {
+func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options) *Server {
 	if addr == "" {
 		addr = ":8080"
 	}
@@ -246,13 +284,11 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	if len(opts) > 0 {
 		firstOpt = opts[0]
 	}
-	bzKey := strings.TrimSpace(os.Getenv("SHARDLURE_BAZAAR_KEY"))
-	if bzKey == "" {
-		bzKey = strings.TrimSpace(os.Getenv("SHARDLURE_BAZAAR_API_KEY"))
-	}
-	if bzKey == "" {
-		bzKey = firstOpt.BazaarAPIKey
-	}
+	// Secrets (bazaar/abuseipdb keys, dashboard token) are NOT resolved here
+	// anymore — they're read live from the keystore at each use site, which
+	// already layers DB-over-env. main.go seeds the keystore from config/env
+	// so existing systemd deployments behave identically. Non-secret endpoints
+	// and defaults are still resolved once below.
 	bzEndpoint := firstOpt.BazaarEndpoint
 	if bzEndpoint == "" {
 		bzEndpoint = "https://mb-api.abuse.ch/api/v1/"
@@ -265,18 +301,102 @@ func New(st *store.Store, addr string, opts ...Options) *Server {
 	if bzMax <= 0 {
 		bzMax = 33 << 20
 	}
-	return &Server{
-		st:             st,
-		addr:           addr,
-		geo:            newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st),
-		dashboardAuth:  strings.TrimSpace(os.Getenv("SHARDLURE_DASH_TOKEN")),
-		home:           home,
-		bazaarKey:      bzKey,
-		bazaarEndpoint: bzEndpoint,
-		bazaarTags:     bzTags,
-		bazaarMaxBytes: bzMax,
-		startedAt:      time.Now(),
+
+	abuseEndpoint := firstOpt.AbuseEndpoint
+	if abuseEndpoint == "" {
+		abuseEndpoint = "https://api.abuseipdb.com/api/v2/report"
 	}
+	abuseCats := firstOpt.AbuseCategories
+	if len(abuseCats) == 0 {
+		abuseCats = []int{18, 22}
+	}
+	abuseRewindow := time.Duration(firstOpt.AbuseRewindowHours) * time.Hour
+	if abuseRewindow <= 0 {
+		abuseRewindow = 24 * time.Hour
+	}
+	return &Server{
+		st:                     st,
+		addr:                   addr,
+		keys:                   keys,
+		geo:                    newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st, keys),
+		homeDefault:            home,
+		bazaarKeyDefault:       firstOpt.BazaarAPIKey,
+		bazaarEndpoint:         bzEndpoint,
+		bazaarTags:             bzTags,
+		bazaarMaxBytes:         bzMax,
+		abuseEndpoint:          abuseEndpoint,
+		abuseEnabledDefault:    firstOpt.AbuseReportEnabled,
+		abuseCategoriesDefault: abuseCats,
+		abuseMinProbeDefault:   firstOpt.AbuseMinProbe,
+		abuseRewindowDefault:   abuseRewindow,
+		abuseCommentDefault:    firstOpt.AbuseComment,
+		abuseAdmin:             netmatch.New(firstOpt.AdminIPs),
+		startedAt:              time.Now(),
+	}
+}
+
+// ---- live setting accessors ---------------------------------------------
+// Each reads the keystore (DB-over-env) and falls back to the startup default
+// resolved in New(). These are the single read path for every secret/knob the
+// Settings panel can change, so a save takes effect on the next request.
+
+func (s *Server) bazaarKeyLive() string {
+	if k := s.keys.Get(settings.KeyBazaar); k != "" {
+		return k
+	}
+	if k := s.keys.Get(settings.KeyBazaarAlt); k != "" {
+		return k
+	}
+	return s.bazaarKeyDefault
+}
+
+func (s *Server) abuseKeyLive() string { return s.keys.Get(settings.KeyAbuseIPDB) }
+
+func (s *Server) dashboardToken() string { return s.keys.Get(settings.KeyDashToken) }
+
+func (s *Server) abuseEnabledLive() bool {
+	return s.keys.GetBool(settings.KeyAbuseReportEnabled, s.abuseEnabledDefault)
+}
+
+func (s *Server) abuseMinProbeLive() int {
+	return s.keys.GetInt(settings.KeyAbuseMinProbe, s.abuseMinProbeDefault)
+}
+
+func (s *Server) abuseRewindowLive() time.Duration {
+	if h := s.keys.GetInt(settings.KeyAbuseRewindowHours, 0); h > 0 {
+		return time.Duration(h) * time.Hour
+	}
+	return s.abuseRewindowDefault
+}
+
+func (s *Server) abuseCommentLive() string {
+	return s.keys.GetOr(settings.KeyAbuseComment, s.abuseCommentDefault)
+}
+
+func (s *Server) abuseCategoriesLive() []int {
+	return s.keys.GetIntCSV(settings.KeyAbuseCategories, s.abuseCategoriesDefault)
+}
+
+// homeLive builds the globe origin from the keystore, falling back per-field to
+// the startup default so a partial override still renders a coherent point.
+func (s *Server) homeLive() homePoint {
+	h := s.homeDefault
+	if v := s.keys.GetFloat(settings.KeyHomeLat, 0); v != 0 {
+		h.Lat = v
+	}
+	if v := s.keys.GetFloat(settings.KeyHomeLon, 0); v != 0 {
+		h.Lon = v
+	}
+	if v := s.keys.Get(settings.KeyHomeCity); v != "" {
+		h.City = v
+	}
+	if v := s.keys.Get(settings.KeyHomeCountry); v != "" {
+		h.Country = v
+	}
+	if v := s.keys.Get(settings.KeyHomeCC); v != "" {
+		h.CC = v
+	}
+	return h
 }
 
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
@@ -301,7 +421,18 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/deobf", s.guard(s.handleIntelDeobf))
 	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
 	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
+	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
+	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
+	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guard(s.handleAbuseIPDBSuggestions))
+	mux.HandleFunc("/api/intel/tunnels", s.guard(s.handleIntelTunnels))
 	mux.HandleFunc("/api/intel/timeline", s.guard(s.handleIntelTimeline))
+	// Settings panel: read masked snapshot, save/clear one setting, test a
+	// provider key, rotate the dashboard token. Guarded like every other /api.
+	mux.HandleFunc("/api/settings", s.guard(s.handleSettings))
+	mux.HandleFunc("/api/settings/status", s.guard(s.handleSettingsStatus))
+	mux.HandleFunc("/api/settings/save", s.guard(s.handleSettingsSave))
+	mux.HandleFunc("/api/settings/test", s.guard(s.handleSettingsTest))
+	mux.HandleFunc("/api/settings/token/rotate", s.guard(s.handleTokenRotate))
 	mux.HandleFunc("/vendor/vis-network.min.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
@@ -337,7 +468,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	// exports to the internet). Loopback / private / CGNAT (Tailscale) / and
 	// the bare ":port" / 0.0.0.0 "behind a firewall" case stay a warning, to
 	// preserve the documented "token is optional defense-in-depth" behavior.
-	if s.dashboardAuth == "" {
+	if s.dashboardToken() == "" {
 		if host := listenHostIP(s.addr); host != nil && isPublicIP(host) {
 			return fmt.Errorf("refusing to start: dashboard would bind a PUBLIC address (%s) with no "+
 				"SHARDLURE_DASH_TOKEN set — credential exports and pprof would be world-readable. "+
@@ -397,7 +528,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 // tokenMatches is the constant-time token comparison shared by the API
 // (header-only) and page (header or ?token=) auth gates.
 func (s *Server) tokenMatches(token string) bool {
-	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(token)), []byte(s.dashboardAuth)) == 1
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(token)), []byte(s.dashboardToken())) == 1
 }
 
 // listenHostIP returns the parsed IP a listen address binds to, or nil when the
@@ -438,7 +569,7 @@ func isPublicIP(ip net.IP) bool {
 // logs, Referer headers, and proxy logs. The dashboard's fetch wrapper always
 // sets the Authorization header, so these routes need nothing else.
 func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bool {
-	if s.dashboardAuth == "" {
+	if s.dashboardToken() == "" {
 		return true
 	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -461,7 +592,7 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 // browser (the page 401'd before any JS ran). Token-in-URL exposure is confined
 // to these two GETs; all data endpoints stay header-only above.
 func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
-	if s.dashboardAuth == "" {
+	if s.dashboardToken() == "" {
 		return true
 	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -651,7 +782,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			EventCount: ec,
 			ActorCount: ac,
 		},
-		Home: s.home,
+		Home: s.homeLive(),
 	}
 
 	countryStats := map[string]*topCountryRow{}

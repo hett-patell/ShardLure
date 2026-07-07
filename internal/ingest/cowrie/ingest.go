@@ -50,6 +50,17 @@ type cowrieLine struct {
 	DstPath     string `json:"destfile"`
 	SHA256      string `json:"shasum"`
 	Fingerprint string `json:"fingerprint"`
+	// direct-tcpip (proxy/pivot) forwarding target. Cowrie emits these on
+	// cowrie.direct-tcpip.{request,data} — the address the attacker tried to
+	// tunnel THROUGH the honeypot to. DstPort is `any` because cowrie encodes
+	// ports inconsistently (number vs string) across event kinds, same as SrcPort.
+	DstIP   string `json:"dst_ip"`
+	DstPort any    `json:"dst_port"`
+	// Session-enrichment side-channels (NOT surfaced as events): duration_ms
+	// rides on cowrie.session.closed, arch on cowrie.session.params. Captured
+	// as session-keyed bindings and joined onto the sessions view at read time.
+	DurationMs any    `json:"duration_ms"`
+	Arch       string `json:"arch"`
 }
 
 // IngestFile is the full-replace ingest: it parses the whole file and replaces
@@ -225,6 +236,12 @@ func persistBindings(st *store.Store, bindings sideBindings) {
 	for sid, h := range bindings.hassh {
 		_ = st.RecordSessionHASSH(sid, h)
 	}
+	for sid, ms := range bindings.duration {
+		_ = st.RecordSessionDuration(sid, ms)
+	}
+	for sid, arch := range bindings.arch {
+		_ = st.RecordSessionArch(sid, arch)
+	}
 }
 
 // stampHASSH fills in e.HASSH for events whose own line didn't carry it.
@@ -395,8 +412,10 @@ type ttyBinding struct {
 // carries no useful event kind, but the fingerprint must reach the session's
 // login/command events for actor clustering).
 type sideBindings struct {
-	tty   []ttyBinding
-	hassh map[string]string // session id -> hassh
+	tty      []ttyBinding
+	hassh    map[string]string // session id -> hassh
+	duration map[string]int64  // session id -> duration_ms (cowrie.session.closed)
+	arch     map[string]string // session id -> client arch (cowrie.session.params)
 }
 
 func (b *sideBindings) addHASSH(sessionID, hassh string) {
@@ -408,6 +427,31 @@ func (b *sideBindings) addHASSH(sessionID, hassh string) {
 	}
 	if _, ok := b.hassh[sessionID]; !ok {
 		b.hassh[sessionID] = hassh
+	}
+}
+
+func (b *sideBindings) addDuration(sessionID string, durationMs int64) {
+	if sessionID == "" || durationMs <= 0 {
+		return
+	}
+	if b.duration == nil {
+		b.duration = map[string]int64{}
+	}
+	// A session closes once; keep the first non-zero duration seen.
+	if _, ok := b.duration[sessionID]; !ok {
+		b.duration[sessionID] = durationMs
+	}
+}
+
+func (b *sideBindings) addArch(sessionID, arch string) {
+	if sessionID == "" || arch == "" {
+		return
+	}
+	if b.arch == nil {
+		b.arch = map[string]string{}
+	}
+	if _, ok := b.arch[sessionID]; !ok {
+		b.arch[sessionID] = arch
 	}
 }
 
@@ -585,6 +629,14 @@ func decodeCowrieLine(line string, bindings *sideBindings) (cowrieLine, bool) {
 	if rec.EventID == "cowrie.client.kex" && rec.HASSH != "" && rec.Session != "" {
 		bindings.addHASSH(rec.Session, strings.TrimSpace(rec.HASSH))
 	}
+	if rec.EventID == "cowrie.session.closed" && rec.Session != "" {
+		if ms := int64(toInt(rec.DurationMs)); ms > 0 {
+			bindings.addDuration(rec.Session, ms)
+		}
+	}
+	if rec.EventID == "cowrie.session.params" && rec.Session != "" {
+		bindings.addArch(rec.Session, strings.TrimSpace(rec.Arch))
+	}
 	return rec, true
 }
 
@@ -622,6 +674,15 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 	if sshClient == "" {
 		sshClient = r.Fingerprint
 	}
+	// dst_ip/dst_port only carry meaning on direct-tcpip (proxy/pivot) events;
+	// gate on the tunnel kind so a stray dst_* on some other cowrie eventid
+	// can't leak into the proxy-targets aggregate.
+	var dstIP string
+	var dstPort int
+	if kind == models.KindTunnel {
+		dstIP = clip(strings.TrimSpace(r.DstIP), maxFieldBytes)
+		dstPort = toInt(r.DstPort)
+	}
 	return &models.Event{
 		TS:        ts,
 		Source:    models.SourceCowrie,
@@ -636,6 +697,8 @@ func toEvent(r cowrieLine, raw string) (*models.Event, bool) {
 		Command:   clip(command, maxFieldBytes),
 		SHA256:    strings.TrimSpace(r.SHA256),
 		Filename:  clip(filename, maxFieldBytes),
+		DstIP:     dstIP,
+		DstPort:   dstPort,
 		Raw:       clip(raw, maxRawBytes),
 	}, true
 }

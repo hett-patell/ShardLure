@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -86,6 +87,11 @@ type actorDetailResponse struct {
 	Actor    intelActorRow `json:"actor"`
 	Commands []commandRow  `json:"commands"`
 	Events   []commandRow  `json:"events"`
+	// ReportEligible is true only when AbuseIPDB reporting is armed
+	// (report_enabled + key present) AND this actor passes the same Vet gate
+	// the report path enforces. The dashboard shows the "Report" button only
+	// when true, so a mis-click can't file a report the backend would reject.
+	ReportEligible bool `json:"reportEligible"`
 }
 
 func (s *Server) handleIntelPage(w http.ResponseWriter, r *http.Request) {
@@ -328,10 +334,32 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(cmds, func(i, j int) bool { return cmds[i].TS > cmds[j].TS })
 
+	// Compute AbuseIPDB report eligibility with the SAME Vet gate the report
+	// endpoint enforces, so the button only shows when a report would succeed.
+	reportEligible := false
+	if s.abuseEnabledLive() && s.abuseKeyLive() != "" {
+		ok, _ := abuseipdb.Vet(abuseipdb.ReportCandidate{
+			SrcIP:           a.PrimaryIP,
+			Playbook:        a.Playbook,
+			ProbeScore:      a.ProbeScore,
+			EventCount:      a.EventCount,
+			UniqueUsers:     a.UniqueUsers,
+			AttemptsPerHour: a.AttemptsPerHour,
+		}, s.abuseAdmin, s.abuseMinProbeLive())
+		if ok {
+			// Also hide the button if we already reported within the window,
+			// so the operator isn't offered a no-op.
+			if already, _ := s.st.AbuseIPDBReported(a.PrimaryIP, s.abuseRewindowLive()); !already {
+				reportEligible = true
+			}
+		}
+	}
+
 	_ = json.NewEncoder(w).Encode(actorDetailResponse{
-		Actor:    row,
-		Commands: cmds,
-		Events:   all,
+		Actor:          row,
+		Commands:       cmds,
+		Events:         all,
+		ReportEligible: reportEligible,
 	})
 }
 
