@@ -20,8 +20,8 @@ func TestMigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("currentSchemaVersion: %v", err)
 	}
-	if v < 5 {
-		t.Fatalf("expected version >= 5 after fresh open, got %d", v)
+	if v < 13 {
+		t.Fatalf("expected version >= 13 after fresh open, got %d", v)
 	}
 	if err := s1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -124,6 +124,44 @@ func TestLegacyBackfillUpgradesV0DB(t *testing.T) {
 	}
 	if v < 2 {
 		t.Errorf("expected v>=2 after legacy upgrade, got %d", v)
+	}
+}
+
+// TestAppSettingsRoundTrip confirms the v13 app_settings table exists on a
+// fresh DB and the CRUD helpers upsert/read/delete correctly.
+func TestAppSettingsRoundTrip(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "settings.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	if _, ok, err := s.GetAppSetting("missing"); err != nil || ok {
+		t.Fatalf("GetAppSetting(missing) = (_, %v, %v), want (_, false, nil)", ok, err)
+	}
+	if err := s.SetAppSetting("k", "v1"); err != nil {
+		t.Fatalf("SetAppSetting: %v", err)
+	}
+	if v, ok, err := s.GetAppSetting("k"); err != nil || !ok || v != "v1" {
+		t.Fatalf("GetAppSetting after set = (%q, %v, %v), want (v1, true, nil)", v, ok, err)
+	}
+	// Upsert overwrites.
+	if err := s.SetAppSetting("k", "v2"); err != nil {
+		t.Fatalf("SetAppSetting upsert: %v", err)
+	}
+	all, err := s.AllAppSettings()
+	if err != nil || all["k"] != "v2" {
+		t.Fatalf("AllAppSettings = %v (err %v), want k=v2", all, err)
+	}
+	// Delete reverts to absent; deleting a missing key is not an error.
+	if err := s.DeleteAppSetting("k"); err != nil {
+		t.Fatalf("DeleteAppSetting: %v", err)
+	}
+	if _, ok, _ := s.GetAppSetting("k"); ok {
+		t.Fatalf("GetAppSetting after delete: still present")
+	}
+	if err := s.DeleteAppSetting("k"); err != nil {
+		t.Fatalf("DeleteAppSetting(missing): %v", err)
 	}
 }
 

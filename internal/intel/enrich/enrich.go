@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,11 +73,23 @@ const (
 	ProviderIPinfo     = "ipinfo"
 )
 
+// KeyLookup is the minimal contract the Resolver needs to source provider API
+// keys. *settings.Keystore satisfies it. Declared here (rather than importing
+// settings) so enrich stays a leaf that imports only store — dodging any import
+// cycle and preserving the t.Setenv-based tests, which run with Keys == nil.
+type KeyLookup interface {
+	Get(key string) string
+}
+
 // Resolver coordinates cached lookups across all providers.
 type Resolver struct {
 	St   *store.Store
 	HTTP *http.Client
 	Now  func() time.Time
+	// Keys sources provider API keys at request time so a key saved from the
+	// dashboard takes effect without a restart. When nil, providers fall back
+	// to os.Getenv via envKey (the historical behaviour, still used by tests).
+	Keys KeyLookup
 }
 
 // NewResolver returns a Resolver bound to the given event store. The
@@ -133,10 +146,15 @@ func (r *Resolver) LookupAll(ctx context.Context, ip string) []Result {
 	out := make([]Result, len(providers))
 	var wg sync.WaitGroup
 	wg.Add(len(providers))
+	keyFn := r.keyFunc()
 	for i, p := range providers {
 		go func(i int, p provider) {
 			defer wg.Done()
-			out[i] = r.lookup(ctx, ip, p.source, p.spec.fetch)
+			// Bind the spec + key source into a fetchFn so lookup stays
+			// agnostic of how a key is resolved (and remains test-injectable).
+			out[i] = r.lookup(ctx, ip, p.source, func(ctx context.Context, hc *http.Client, ip string) (Result, error) {
+				return p.spec.fetch(ctx, hc, ip, keyFn)
+			})
 		}(i, p)
 	}
 	wg.Wait()
@@ -159,6 +177,16 @@ var providers = []provider{
 	{ProviderOTX, otxSpec},
 	{ProviderIPQS, ipqsSpec},
 	{ProviderIPinfo, ipinfoSpec},
+}
+
+// keyFunc returns the API-key resolver for this Resolver: the injected keystore
+// when present, else envKey (os.Getenv) so nil-Keys callers and tests behave as
+// before.
+func (r *Resolver) keyFunc() func(string) string {
+	if r.Keys != nil {
+		return r.Keys.Get
+	}
+	return envKey
 }
 
 // lookup is the shared cache-then-fetch path for any provider.
@@ -257,11 +285,13 @@ type providerSpec struct {
 	notFound func(ip string) Result
 }
 
-// fetch is the shared provider pipeline; its method value satisfies fetchFn.
-func (s providerSpec) fetch(ctx context.Context, hc *http.Client, ip string) (Result, error) {
+// fetch is the shared provider pipeline. keyFn resolves the provider's API key
+// (from the runtime keystore or os.Getenv); it is never nil (lookup supplies
+// envKey as the fallback).
+func (s providerSpec) fetch(ctx context.Context, hc *http.Client, ip string, keyFn func(string) string) (Result, error) {
 	var key string
 	if s.envVar != "" {
-		key = envKey(s.envVar)
+		key = strings.TrimSpace(keyFn(s.envVar))
 		if key == "" && !s.keyOptional {
 			// Missing required key: report "not configured" without ever
 			// touching the network, so the UI can prompt the operator to
@@ -340,6 +370,54 @@ func httpJSON(ctx context.Context, hc *http.Client, url string, headers map[stri
 // Centralised here so tests can stub via t.Setenv.
 func envKey(name string) string {
 	return os.Getenv(name)
+}
+
+// TestProvider performs a one-shot live lookup against a single provider using
+// keys as the API-key source, bypassing the 24h cache entirely (it calls the
+// provider's fetch directly, never touching the store). It is the backend of
+// the dashboard's per-provider "Test connection" button: it validates that the
+// currently-configured key is accepted, using a benign public test IP.
+//
+// Returns (ok, message). ok is true when the provider is reachable AND, for
+// keyed providers, the key is accepted (Configured && no error). message is a
+// short human-readable status that NEVER contains the key. keys may be nil, in
+// which case os.Getenv is used.
+func TestProvider(ctx context.Context, hc *http.Client, keys KeyLookup, source, testIP string) (bool, string) {
+	var spec *providerSpec
+	for i := range providers {
+		if providers[i].source == source {
+			spec = &providers[i].spec
+			break
+		}
+	}
+	if spec == nil {
+		return false, "unknown provider"
+	}
+	if testIP == "" {
+		testIP = "1.1.1.1"
+	}
+	if !safeForEnrichment(testIP) {
+		return false, "invalid test IP"
+	}
+	if hc == nil {
+		hc = &http.Client{Timeout: 6 * time.Second}
+	}
+	keyFn := envKey
+	if keys != nil {
+		keyFn = keys.Get
+	}
+
+	res, err := spec.fetch(ctx, hc, testIP, keyFn)
+	if err != nil {
+		return false, "unreachable: " + err.Error()
+	}
+	if !res.Configured {
+		return false, "no API key configured"
+	}
+	if res.Error != "" {
+		return false, "provider error: " + res.Error
+	}
+	return true, "key accepted; provider reachable"
 }
 
 // intPtr is a tiny helper so providers can pass a literal count

@@ -337,7 +337,7 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	// Compute AbuseIPDB report eligibility with the SAME Vet gate the report
 	// endpoint enforces, so the button only shows when a report would succeed.
 	reportEligible := false
-	if s.abuseEnabled && s.abuseKey != "" {
+	if s.abuseEnabledLive() && s.abuseKeyLive() != "" {
 		ok, _ := abuseipdb.Vet(abuseipdb.ReportCandidate{
 			SrcIP:           a.PrimaryIP,
 			Playbook:        a.Playbook,
@@ -345,11 +345,11 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 			EventCount:      a.EventCount,
 			UniqueUsers:     a.UniqueUsers,
 			AttemptsPerHour: a.AttemptsPerHour,
-		}, s.abuseAdmin, s.abuseMinProbe)
+		}, s.abuseAdmin, s.abuseMinProbeLive())
 		if ok {
 			// Also hide the button if we already reported within the window,
 			// so the operator isn't offered a no-op.
-			if already, _ := s.st.AbuseIPDBReported(a.PrimaryIP, s.abuseRewindow); !already {
+			if already, _ := s.st.AbuseIPDBReported(a.PrimaryIP, s.abuseRewindowLive()); !already {
 				reportEligible = true
 			}
 		}

@@ -21,6 +21,7 @@ import (
 	"github.com/networkshard/shardlure/internal/ingest/cowrie"
 	"github.com/networkshard/shardlure/internal/ingest/journal"
 	"github.com/networkshard/shardlure/internal/netmatch"
+	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/internal/web"
 	"github.com/networkshard/shardlure/tui"
@@ -67,6 +68,14 @@ func main() {
 	}
 	defer st.Close()
 
+	// Runtime keystore: dashboard-saved settings live in the DB and win over
+	// env vars; unset keys fall back to os.Getenv so existing env deployments
+	// are unaffected. Shared by the web server and enrichment resolver.
+	keys, err := settings.Load(st)
+	if err != nil {
+		fatal(err)
+	}
+
 	switch args[0] {
 	case "ingest":
 		cmdIngest(st, cfg, args[1:])
@@ -97,11 +106,11 @@ func main() {
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
-		if err := web.New(st, addr, webOptions(cfg)).RunContext(ctx); err != nil {
+		if err := web.New(st, keys, addr, webOptions(cfg)).RunContext(ctx); err != nil {
 			fatal(err)
 		}
 	case "live":
-		cmdLive(st, cfg, args[1:])
+		cmdLive(st, keys, cfg, args[1:])
 	case "run":
 		// syscall.Exec below replaces this process, so the deferred st.Close()
 		// in main() would never run; close the store now (the wrapper re-opens
@@ -177,7 +186,7 @@ func cmdIngest(st *store.Store, cfg config.Config, args []string) {
 	}
 }
 
-func cmdLive(st *store.Store, cfg config.Config, args []string) {
+func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args []string) {
 	addr := ":8080"
 	if cfg.Dashboard.Port > 0 {
 		addr = fmt.Sprintf(":%d", cfg.Dashboard.Port)
@@ -315,7 +324,7 @@ func cmdLive(st *store.Store, cfg config.Config, args []string) {
 		}
 	}()
 
-	if err := web.New(st, addr, webOptions(cfg)).RunContext(ctx); err != nil {
+	if err := web.New(st, keys, addr, webOptions(cfg)).RunContext(ctx); err != nil {
 		fatal(err)
 	}
 }

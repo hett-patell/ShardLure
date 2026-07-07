@@ -3,8 +3,34 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+
+	"github.com/networkshard/shardlure/internal/settings"
+	"github.com/networkshard/shardlure/internal/store"
 )
+
+// newAuthTestServer builds a Server whose keystore holds the given dashboard
+// token (empty = auth disabled). The token now lives in the keystore, not a
+// struct field, so tests seed it there.
+func newAuthTestServer(t *testing.T, token string) *Server {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	keys, err := settings.Load(st)
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	if token != "" {
+		if err := keys.Set(settings.KeyDashToken, token); err != nil {
+			t.Fatalf("seed token: %v", err)
+		}
+	}
+	return &Server{keys: keys}
+}
 
 // TestAuthGates is the regression guard for HIGH-2: a configured dashboard
 // token must NOT make the dashboard unreachable. Page routes accept ?token=
@@ -12,7 +38,7 @@ import (
 // the token never lands in an XHR URL / access log.
 func TestAuthGates(t *testing.T) {
 	const tok = "s3cret-token"
-	s := &Server{dashboardAuth: tok}
+	s := newAuthTestServer(t, tok)
 
 	req := func(target, header, query string) *http.Request {
 		r := httptest.NewRequest(http.MethodGet, target, nil)
@@ -101,7 +127,8 @@ func TestPublicBindClassification(t *testing.T) {
 
 // TestAuthDisabledAllowsAll: with no token configured, both gates are open.
 func TestAuthDisabledAllowsAll(t *testing.T) {
-	s := &Server{dashboardAuth: ""}
+	t.Setenv(settings.KeyDashToken, "") // ensure no env token leaks in
+	s := newAuthTestServer(t, "")
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	if !s.requirePageAuth(rec, r) || !s.requireDashboardAuth(rec, r) {

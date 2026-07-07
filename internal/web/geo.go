@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -52,11 +53,19 @@ type geoResolver struct {
 	inflight map[string]bool
 	http     *http.Client
 	sem      chan struct{}
-	enabled  bool
 	cfg      geoConfig
 	maxSize  int
-	now      func() time.Time // injectable for tests
-	st       *store.Store     // persists geo lookups across restarts
+	now      func() time.Time  // injectable for tests
+	st       *store.Store      // persists geo lookups across restarts
+	keys     *settings.Keystore // live source of geo flags + ip-api key
+}
+
+// isEnabled reports whether outbound geo HTTP is currently allowed. Evaluated
+// live (not frozen at construction) so toggling the geo flags from the Settings
+// panel takes effect without a restart. It is a couple of cheap string
+// compares, so calling it per lookup is fine.
+func (g *geoResolver) isEnabled() bool {
+	return geoEnabled(g.cfg, g.keys)
 }
 
 type geoConfig struct {
@@ -64,28 +73,41 @@ type geoConfig struct {
 	InsecureHTTP bool
 }
 
-func geoEnabled(cfg geoConfig) bool {
-	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) == "1" {
-		return geoHTTPAllowed(cfg)
-	}
-	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_HTTP")) == "0" {
+// geoEnabled and its helpers read the geo flags + ip-api key through the
+// keystore (DB value wins, else the SHARDLURE_* env fallback), so a change in
+// the Settings panel is honoured live. keys is never nil in production
+// (newGeoResolver always supplies one); a nil keys degrades to "disabled".
+func geoEnabled(cfg geoConfig, keys *settings.Keystore) bool {
+	if keys == nil {
 		return false
 	}
-	return cfg.Enabled && geoHTTPAllowed(cfg)
+	switch strings.TrimSpace(keys.Get(settings.KeyGeoHTTP)) {
+	case "1":
+		return geoHTTPAllowed(cfg, keys)
+	case "0":
+		return false
+	}
+	return cfg.Enabled && geoHTTPAllowed(cfg, keys)
 }
 
-func geoHTTPAllowed(cfg geoConfig) bool {
-	if strings.TrimSpace(os.Getenv("SHARDLURE_IPAPI_KEY")) != "" {
-		return true
-	}
-	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1" {
-		return true
+func geoHTTPAllowed(cfg geoConfig, keys *settings.Keystore) bool {
+	if keys != nil {
+		if strings.TrimSpace(keys.Get(settings.KeyIPAPI)) != "" {
+			return true
+		}
+		if strings.TrimSpace(keys.Get(settings.KeyGeoInsecure)) == "1" {
+			return true
+		}
 	}
 	return cfg.InsecureHTTP
 }
 
-func geoLookupURL(ip string, cfg geoConfig) string {
-	key := strings.TrimSpace(os.Getenv("SHARDLURE_IPAPI_KEY"))
+func geoLookupURL(ip string, cfg geoConfig, keys *settings.Keystore) string {
+	var key, insecure string
+	if keys != nil {
+		key = strings.TrimSpace(keys.Get(settings.KeyIPAPI))
+		insecure = strings.TrimSpace(keys.Get(settings.KeyGeoInsecure))
+	}
 	fields := "status,country,countryCode,city,lat,lon"
 	// Escape the IP into the path. Callers already validate it looks like an
 	// IP, but escaping is the correct defensive practice so a stray special
@@ -94,13 +116,13 @@ func geoLookupURL(ip string, cfg geoConfig) string {
 	if key != "" {
 		return fmt.Sprintf("https://pro.ip-api.com/json/%s?key=%s&fields=%s", esc, url.QueryEscape(key), fields)
 	}
-	if strings.TrimSpace(os.Getenv("SHARDLURE_GEO_INSECURE_HTTP")) == "1" || cfg.InsecureHTTP {
+	if insecure == "1" || cfg.InsecureHTTP {
 		return fmt.Sprintf("http://ip-api.com/json/%s?fields=%s", esc, fields)
 	}
 	return ""
 }
 
-func newGeoResolver(cfg geoConfig, st *store.Store) *geoResolver {
+func newGeoResolver(cfg geoConfig, st *store.Store, keys *settings.Keystore) *geoResolver {
 	if st != nil {
 		_ = st.EnsureEnrichmentTable()
 	}
@@ -110,11 +132,11 @@ func newGeoResolver(cfg geoConfig, st *store.Store) *geoResolver {
 		inflight: map[string]bool{},
 		http:     &http.Client{Timeout: 2500 * time.Millisecond},
 		sem:      make(chan struct{}, 6),
-		enabled:  geoEnabled(cfg),
 		cfg:      cfg,
 		maxSize:  geoCacheMaxEntries,
 		now:      time.Now,
 		st:       st,
+		keys:     keys,
 	}
 }
 
@@ -123,7 +145,7 @@ func newGeoResolver(cfg geoConfig, st *store.Store) *geoResolver {
 // lazily on the next put() so the cache size obeys the LRU cap even
 // if expiry sweeping never gets to them.
 func (g *geoResolver) cached(ip string) geoEntry {
-	if !g.enabled || isPrivateIP(ip) {
+	if !g.isEnabled() || isPrivateIP(ip) {
 		return geoEntry{}
 	}
 	g.mu.Lock()
@@ -221,7 +243,7 @@ func (g *geoResolver) putLocked(ip string, ent geoEntry) {
 
 // prefetch resolves geolocation for many IPs before building dashboard JSON.
 func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
-	if !g.enabled || budget <= 0 {
+	if !g.isEnabled() || budget <= 0 {
 		return
 	}
 	seen := map[string]struct{}{}
@@ -306,7 +328,7 @@ func (g *geoResolver) fetch(ip string) {
 	}
 	defer func() { <-g.sem }()
 
-	url := geoLookupURL(ip, g.cfg)
+	url := geoLookupURL(ip, g.cfg, g.keys)
 	if url == "" {
 		g.mu.Lock()
 		delete(g.inflight, ip)

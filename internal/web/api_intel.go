@@ -902,6 +902,7 @@ func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	resolver := enrich.NewResolver(s.st)
+	resolver.Keys = s.keys // live key source: dashboard-saved keys apply without restart
 	results := resolver.LookupAll(r.Context(), ip)
 
 	_ = json.NewEncoder(w).Encode(enrichResponse{
@@ -1158,7 +1159,8 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	if s.bazaarKey == "" {
+	bzKey := s.bazaarKeyLive()
+	if bzKey == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "bazaar API key not configured"})
 		return
@@ -1190,7 +1192,7 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	var result *bazaar.Result
 	var skipReason string
 	opts := bazaar.Options{
-		APIKey:    s.bazaarKey,
+		APIKey:    bzKey,
 		Endpoint:  s.bazaarEndpoint,
 		ExtraTags: s.bazaarTags,
 		MaxBytes:  s.bazaarMaxBytes,
@@ -1282,12 +1284,14 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	if !s.abuseEnabled {
+	abuseKey := s.abuseKeyLive()
+	rewindow := s.abuseRewindowLive()
+	if !s.abuseEnabledLive() {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "AbuseIPDB reporting is disabled (set intel.abuseipdb.report_enabled)"})
 		return
 	}
-	if s.abuseKey == "" {
+	if abuseKey == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "AbuseIPDB API key not configured (SHARDLURE_ABUSEIPDB_KEY)"})
 		return
@@ -1295,7 +1299,7 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 
 	// Dedup early-out: if we reported this IP within the window, don't even
 	// build the candidate.
-	if already, _ := s.st.AbuseIPDBReported(ip, s.abuseRewindow); already {
+	if already, _ := s.st.AbuseIPDBReported(ip, rewindow); already {
 		json.NewEncoder(w).Encode(map[string]string{"status": "already_reported"})
 		return
 	}
@@ -1334,12 +1338,12 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 	var skipReason string
 	var reportErr error
 	opts := abuseipdb.Options{
-		APIKey:     s.abuseKey,
+		APIKey:     abuseKey,
 		Endpoint:   s.abuseEndpoint,
-		Categories: s.abuseCategories,
-		Comment:    s.abuseComment,
-		MinProbe:   s.abuseMinProbe,
-		Rewindow:   s.abuseRewindow,
+		Categories: s.abuseCategoriesLive(),
+		Comment:    s.abuseCommentLive(),
+		MinProbe:   s.abuseMinProbeLive(),
+		Rewindow:   rewindow,
 		Admin:      s.abuseAdmin,
 		OnProgress: func(_ abuseipdb.ReportCandidate, _ *abuseipdb.Result, err error) {
 			if err != nil {
@@ -1403,12 +1407,13 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if !s.abuseEnabled {
+	abuseKey := s.abuseKeyLive()
+	if !s.abuseEnabledLive() {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "AbuseIPDB reporting is disabled"})
 		return
 	}
-	if s.abuseKey == "" {
+	if abuseKey == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "AbuseIPDB API key not configured"})
 		return
@@ -1451,12 +1456,12 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 	defer s.abuseReportMu.Unlock()
 
 	opts := abuseipdb.Options{
-		APIKey:     s.abuseKey,
+		APIKey:     abuseKey,
 		Endpoint:   s.abuseEndpoint,
-		Categories: s.abuseCategories,
-		Comment:    s.abuseComment,
-		MinProbe:   s.abuseMinProbe,
-		Rewindow:   s.abuseRewindow,
+		Categories: s.abuseCategoriesLive(),
+		Comment:    s.abuseCommentLive(),
+		MinProbe:   s.abuseMinProbeLive(),
+		Rewindow:   s.abuseRewindowLive(),
 		Admin:      s.abuseAdmin,
 	}
 	rec := &abuseReportRecorderAdapter{st: s.st}
@@ -1523,14 +1528,15 @@ func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Reque
 	// Exclude IPs already reported within the re-report window so the list is
 	// always actionable. Closure hits the store per-candidate, but only for the
 	// handful that pass Vet (Suggest calls it after the gate).
+	rewindow := s.abuseRewindowLive()
 	alreadyReported := func(ip string) bool {
-		ok, _ := s.st.AbuseIPDBReported(ip, s.abuseRewindow)
+		ok, _ := s.st.AbuseIPDBReported(ip, rewindow)
 		return ok
 	}
-	sugg := abuseipdb.Suggest(inputs, s.abuseAdmin, s.abuseMinProbe, limit, time.Now(), alreadyReported)
+	sugg := abuseipdb.Suggest(inputs, s.abuseAdmin, s.abuseMinProbeLive(), limit, time.Now(), alreadyReported)
 	_ = json.NewEncoder(w).Encode(suggestionsResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Enabled:     s.abuseEnabled && s.abuseKey != "",
+		Enabled:     s.abuseEnabledLive() && s.abuseKeyLive() != "",
 		Total:       len(sugg),
 		Suggestions: sugg,
 	})

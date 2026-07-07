@@ -845,6 +845,53 @@
   .panel-collapse.collapsed .panel-head::after { transform: rotate(-90deg); }
   .panel-collapse .panel-body { max-height: 2000px; overflow: auto; transition: max-height 0.3s ease, opacity 0.2s; }
   .panel-collapse.collapsed .panel-body { max-height: 0; overflow: hidden; opacity: 0; padding: 0; }
+
+  /* ==== Settings tab ==== */
+  .set-note {
+    font: 12px/1.5 var(--sans); color: var(--dim); background: var(--glass);
+    border: 1px solid var(--line); border-left: 2px solid var(--accent-2);
+    border-radius: 4px; padding: 10px 12px; margin: 0 0 12px;
+  }
+  .set-note code { font: 11px var(--mono); color: var(--text); }
+  .set-rows { display: flex; flex-direction: column; gap: 2px; }
+  .set-row {
+    display: grid; grid-template-columns: 210px 1fr auto; gap: 10px;
+    align-items: center; padding: 8px 6px; border-bottom: 1px solid var(--line);
+  }
+  .set-row:last-child { border-bottom: 0; }
+  .set-label { display: flex; flex-direction: column; gap: 2px; }
+  .set-label .sl-name { font: 600 13px var(--sans); color: var(--text); }
+  .set-label .sl-src { font: 10px var(--mono); color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+  .set-label .sl-src.db  { color: var(--good); }
+  .set-label .sl-src.env { color: var(--accent-2); }
+  .set-control { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .set-control input[type=text], .set-control input[type=password], .set-control input[type=number] {
+    flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line-strong); border-radius: 4px; padding: 6px 8px;
+    font: 12px var(--mono);
+  }
+  .set-control input::placeholder { color: var(--dim-2); }
+  .set-hint { font: 11px var(--mono); color: var(--dim); white-space: nowrap; }
+  .set-actions { display: flex; gap: 6px; }
+  .set-btn {
+    font: 600 11px var(--sans); color: var(--text); background: var(--glass-2);
+    border: 1px solid var(--line-strong); border-radius: 4px; padding: 6px 10px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .set-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .set-btn.primary { border-color: rgba(208,40,40,0.45); color: var(--accent); background: rgba(208,40,40,0.08); }
+  .set-btn.danger:hover { border-color: var(--accent); color: var(--accent); }
+  .set-btn:disabled { opacity: .5; cursor: default; }
+  .set-test { font: 11px var(--mono); white-space: nowrap; margin-left: 4px; }
+  .set-test.ok  { color: var(--good); }
+  .set-test.bad { color: var(--accent); }
+  .set-test.pending { color: var(--dim); }
+  .set-toggle { display: inline-flex; align-items: center; gap: 6px; font: 12px var(--sans); color: var(--text); cursor: pointer; }
+  .set-badge {
+    font: 10px var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    padding: 2px 6px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--dim);
+  }
+  .set-badge.set { color: var(--good); border-color: rgba(72,184,120,0.4); }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
 </head>
@@ -885,6 +932,7 @@
     <span class="tab active" data-view="overview"><span class="tdot"></span>Overview</span>
     <span class="tab blue" data-view="blue"><span class="tdot" style="background:var(--blue-team)"></span>Blue Team</span>
     <span class="tab red" data-view="red"><span class="tdot" style="background:var(--red-team)"></span>Red Team</span>
+    <span class="tab" data-view="settings"><span class="tdot" style="background:var(--dim)"></span>Settings</span>
   </div>
 
   <!-- ============ OVERVIEW TAB ============ -->
@@ -1337,6 +1385,55 @@
 
     </div>
   </section><!-- /view-red -->
+
+  <!-- ============ SETTINGS TAB ============ -->
+  <section class="view" id="view-settings">
+    <div class="team-banner" style="border-color:var(--line-strong)">
+      <span class="tb-title">Settings</span>
+      <span class="tb-sub">API keys &amp; runtime configuration · saved to the local SQLite DB (0600) · applied live, no restart</span>
+    </div>
+
+    <div class="set-note">
+      Keys are stored in the honeypot's local database (already <code>chmod 0600</code>).
+      A value set here overrides the matching <code>SHARDLURE_*</code> environment
+      variable; clearing it reverts to the env value. Secrets are never shown back —
+      only a masked hint. Changes take effect on the next request.
+    </div>
+
+    <div class="grid">
+      <section class="panel full" id="panel-set-keys">
+        <div class="panel-head"><h2>Provider API keys</h2>
+          <span class="meta">enrichment · reporting · sharing</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-keys-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+
+      <section class="panel full" id="panel-set-abuse">
+        <div class="panel-head"><h2>AbuseIPDB reporting</h2>
+          <span class="meta">outbound reporting of confirmed brute-forcers</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-abuse-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+
+      <section class="panel full" id="panel-set-geo">
+        <div class="panel-head"><h2>Globe &amp; geolocation</h2>
+          <span class="meta">home origin · geo HTTP</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-geo-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+
+      <section class="panel full" id="panel-set-token">
+        <div class="panel-head"><h2>Dashboard token</h2>
+          <span class="meta">auth for this dashboard</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-token-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+    </div>
+  </section><!-- /view-settings -->
 </div>
 
 <!-- Payload library inspector modal (slice G) -->
@@ -1370,24 +1467,37 @@
 // it once (and remember it for this tab) so the JS fetch() calls below — and
 // the download links — carry it too. Without this, the page loads but every
 // data fetch 401s. No token set => DASH_TOKEN stays '' and nothing changes.
-const DASH_TOKEN = (function () {
+// currentToken is a mutable holder (not a const) so the Settings panel can
+// rotate the dashboard token in-session: after POST /api/settings/token/rotate
+// returns the new value, setDashToken() swaps it here and every subsequent
+// fetch/withToken uses it — the live session never 401s on its own rotation.
+var currentToken = (function () {
   try {
     var t = new URLSearchParams(location.search).get('token');
     if (t) { sessionStorage.setItem('shardlure_token', t); return t; }
     return sessionStorage.getItem('shardlure_token') || '';
   } catch (_) { return ''; }
 })();
+// DASH_TOKEN kept as a truthiness snapshot for the "was auth on at load?" gate
+// below; the actual value used per request is always the live currentToken.
+const DASH_TOKEN = currentToken;
+function setDashToken(t) {
+  currentToken = t || '';
+  try { sessionStorage.setItem('shardlure_token', currentToken); } catch (_) {}
+}
 // Insert ?token=… into a same-origin URL (used for <a href> downloads and the
 // page-nav links), before any #fragment, without duplicating an existing token.
 function withToken(url) {
-  if (!DASH_TOKEN) return url;
+  if (!currentToken) return url;
   var hash = '', u = String(url);
   var hi = u.indexOf('#');
   if (hi >= 0) { hash = u.slice(hi); u = u.slice(0, hi); }
   if (/[?&]token=/.test(u)) return u + hash;
-  return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DASH_TOKEN) + hash;
+  return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(currentToken) + hash;
 }
-// Wrap fetch so every same-origin /api/ request sends the Bearer token.
+// Wrap fetch so every same-origin /api/ request sends the Bearer token. Install
+// the wrapper whenever auth was on at load (DASH_TOKEN non-empty); it reads the
+// live currentToken each call so a rotation takes effect immediately.
 (function () {
   if (!DASH_TOKEN) return;
   var _fetch = window.fetch.bind(window);
@@ -1395,10 +1505,10 @@ function withToken(url) {
     try {
       var url = (typeof input === 'string') ? input : (input && input.url) || '';
       // Same-origin API path: a relative URL beginning with "/api/".
-      if (url.indexOf('/api/') === 0) {
+      if (url.indexOf('/api/') === 0 && currentToken) {
         init = init || {};
         var h = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
-        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + DASH_TOKEN);
+        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + currentToken);
         init.headers = h;
       }
     } catch (_) {}
@@ -1798,15 +1908,197 @@ function setActiveView(name) {
 
 function readTabFromHash() {
   const m = /tab=([a-z]+)/.exec(location.hash || '');
-  return (m && ['overview','blue','red'].indexOf(m[1]) >= 0) ? m[1] : 'overview';
+  return (m && ['overview','blue','red','settings'].indexOf(m[1]) >= 0) ? m[1] : 'overview';
 }
 
 document.querySelectorAll('.tab').forEach(function(t) {
-  t.addEventListener('click', function(){ setActiveView(t.getAttribute('data-view')); });
+  t.addEventListener('click', function(){
+    var v = t.getAttribute('data-view');
+    setActiveView(v);
+    if (v === 'settings') loadSettings();
+  });
 });
 window.addEventListener('hashchange', function() {
-  setActiveView(readTabFromHash());
+  var v = readTabFromHash();
+  setActiveView(v);
+  if (v === 'settings') loadSettings();
 });
+
+// ── Settings panel ────────────────────────────────────────────────────────
+var _settingsLoaded = false;
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function srcLabel(src) {
+  if (src === 'db') return '<span class="sl-src db">saved</span>';
+  if (src === 'env') return '<span class="sl-src env">from env</span>';
+  return '<span class="sl-src">not set</span>';
+}
+// Render one secret row: masked hint + password input + Save/Clear/Test.
+function secretRowHTML(s) {
+  var test = s.testable
+    ? '<button class="set-btn" onclick="testProvider(\'' + esc(s.testable) + '\', this)">Test</button>'
+    : '';
+  return '<div class="set-row" data-key="' + esc(s.key) + '">'
+    + '<div class="set-label"><span class="sl-name">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-control">'
+    +   '<input type="password" placeholder="' + (s.set ? 'saved · ' + esc(s.hint) + ' — enter to replace' : 'not configured — paste key') + '" autocomplete="off" spellcheck="false">'
+    + '</div>'
+    + '<div class="set-actions">'
+    +   '<button class="set-btn primary" onclick="saveSecret(this)">Save</button>'
+    +   (s.set ? '<button class="set-btn danger" onclick="clearSetting(\'' + esc(s.key) + '\', this)">Clear</button>' : '')
+    +   test
+    +   '<span class="set-test"></span>'
+    + '</div></div>';
+}
+// Render one non-secret knob row by kind.
+function knobRowHTML(s) {
+  var ctrl;
+  if (s.kind === 'bool') {
+    var on = /^(1|true|yes|on)$/i.test(s.value || '');
+    ctrl = '<label class="set-toggle"><input type="checkbox" ' + (on ? 'checked' : '') + '> enabled</label>';
+  } else if (s.kind === 'int') {
+    ctrl = '<input type="number" value="' + esc(s.value) + '" placeholder="default">';
+  } else if (s.kind === 'float') {
+    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="default" inputmode="decimal">';
+  } else {
+    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="' + (s.kind === 'intcsv' ? 'e.g. 18,22' : 'default') + '">';
+  }
+  return '<div class="set-row" data-key="' + esc(s.key) + '" data-kind="' + esc(s.kind) + '">'
+    + '<div class="set-label"><span class="sl-name">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-control">' + ctrl + '</div>'
+    + '<div class="set-actions">'
+    +   '<button class="set-btn primary" onclick="saveKnob(this)">Save</button>'
+    +   '<span class="set-test"></span>'
+    + '</div></div>';
+}
+async function loadSettings() {
+  try {
+    var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var data = await r.json();
+    _settingsLoaded = true;
+    var buckets = { keys: [], abuse: [], geo: [], token: [] };
+    (data.settings || []).forEach(function (s) {
+      if (s.key === 'SHARDLURE_DASH_TOKEN') buckets.token.push(s);
+      else if (s.kind === 'secret') buckets.keys.push(s);
+      else if (s.key.indexOf('abuseipdb.') === 0) buckets.abuse.push(s);
+      else buckets.geo.push(s);
+    });
+    document.getElementById('set-keys-rows').innerHTML =
+      buckets.keys.map(secretRowHTML).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-abuse-rows').innerHTML =
+      buckets.abuse.map(knobRowHTML).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-geo-rows').innerHTML =
+      buckets.geo.map(knobRowHTML).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-token-rows').innerHTML = tokenRowHTML(buckets.token[0]);
+  } catch (e) {
+    document.getElementById('set-keys-rows').innerHTML =
+      '<div class="empty">failed to load settings: ' + esc(e.message) + '</div>';
+  }
+}
+function tokenRowHTML(s) {
+  s = s || { set: false, hint: '', source: 'unset' };
+  return '<div class="set-row">'
+    + '<div class="set-label"><span class="sl-name">Auth token</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-control"><span class="set-hint">' + (s.set ? esc(s.hint) : 'no token — dashboard is unauthenticated') + '</span></div>'
+    + '<div class="set-actions">'
+    +   '<button class="set-btn primary" onclick="rotateToken(this)">Rotate</button>'
+    +   '<span class="set-test"></span>'
+    + '</div></div>';
+}
+async function postSetting(body) {
+  var r = await fetch('/api/settings/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  var data = {};
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok || data.status === 'error') throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+function rowResult(btn, ok, msg) {
+  var span = btn.closest('.set-row').querySelector('.set-test');
+  if (!span) return;
+  span.className = 'set-test ' + (ok ? 'ok' : 'bad');
+  span.textContent = msg;
+  if (ok) setTimeout(function () { span.textContent = ''; span.className = 'set-test'; }, 2500);
+}
+async function saveSecret(btn) {
+  var row = btn.closest('.set-row');
+  var key = row.getAttribute('data-key');
+  var input = row.querySelector('input');
+  var val = (input.value || '').trim();
+  if (!val) { rowResult(btn, false, 'enter a value'); return; }
+  btn.disabled = true;
+  try {
+    await postSetting({ key: key, value: val });
+    input.value = '';
+    rowResult(btn, true, 'saved');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
+async function saveKnob(btn) {
+  var row = btn.closest('.set-row');
+  var key = row.getAttribute('data-key');
+  var kind = row.getAttribute('data-kind');
+  var val;
+  if (kind === 'bool') {
+    val = row.querySelector('input[type=checkbox]').checked ? '1' : '0';
+  } else {
+    val = (row.querySelector('input').value || '').trim();
+  }
+  btn.disabled = true;
+  try {
+    // Empty non-bool value clears the knob (reverts to default).
+    if (kind !== 'bool' && val === '') await postSetting({ key: key, action: 'clear' });
+    else await postSetting({ key: key, value: val });
+    rowResult(btn, true, 'saved');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
+async function clearSetting(key, btn) {
+  btn.disabled = true;
+  try {
+    await postSetting({ key: key, action: 'clear' });
+    rowResult(btn, true, 'cleared');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
+async function testProvider(provider, btn) {
+  var span = btn.closest('.set-row').querySelector('.set-test');
+  span.className = 'set-test pending'; span.textContent = 'testing…';
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/settings/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: provider })
+    });
+    var data = await r.json();
+    span.className = 'set-test ' + (data.ok ? 'ok' : 'bad');
+    span.textContent = (data.ok ? '✓ ' : '✗ ') + (data.message || '');
+  } catch (e) {
+    span.className = 'set-test bad'; span.textContent = '✗ ' + e.message;
+  } finally { btn.disabled = false; }
+}
+async function rotateToken(btn) {
+  if (!confirm('Rotate the dashboard token? Other open tabs/devices will need the new token. This session stays logged in.')) return;
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/settings/token/rotate', { method: 'POST' });
+    var data = await r.json();
+    if (!r.ok || !data.token) throw new Error(data.error || ('HTTP ' + r.status));
+    setDashToken(data.token); // keep THIS session working with the new token
+    rowResult(btn, true, 'rotated');
+    setTimeout(loadSettings, 400);
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
 
 function bindChipGroup(attr, key) {
   document.querySelectorAll('.chip[data-' + attr + ']').forEach(function(c) {
@@ -1878,6 +2170,7 @@ const __deepLinkSession = (function() {
   return m ? m[1] : '';
 })();
 setActiveView(readTabFromHash());
+if (readTabFromHash() === 'settings') loadSettings(); // deep-link straight to Settings
 if (__deepLinkSession) {
   // Defer one tick so openSession's modal markup is in the DOM.
   setTimeout(function() { openSession(__deepLinkSession); }, 0);

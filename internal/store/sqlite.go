@@ -174,6 +174,15 @@ CREATE TABLE IF NOT EXISTS ingest_state (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (source, path)
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  -- Operator-editable runtime key/value store backing the dashboard Settings
+  -- panel (API keys, AbuseIPDB reporting knobs, geo/home). Values are plaintext
+  -- in an already-0600 DB; see internal/store/app_settings.go for the rationale.
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -431,6 +440,24 @@ CREATE INDEX IF NOT EXISTS idx_abuseipdb_reports_ts ON abuseipdb_reports(reporte
 			return err
 		}
 		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (12, ?)`, now); err != nil {
+			return err
+		}
+	}
+
+	// v13: app_settings — operator-editable runtime key/value store backing the
+	// dashboard Settings panel (API keys, AbuseIPDB reporting knobs, geo/home).
+	// Plaintext values in an already-0600 DB; see internal/store/app_settings.go.
+	// Fresh DBs already have it from the base CREATE TABLE block above.
+	if current < 13 {
+		if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS app_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (13, ?)`, now); err != nil {
 			return err
 		}
 	}
