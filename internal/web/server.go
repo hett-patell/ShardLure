@@ -116,6 +116,17 @@ type summaryStats struct {
 	Countries    int
 	KindCounts   []store.LabelCount
 	SourceCounts []store.LabelCount
+	// Top-N whole-table GROUP BYs. These share the stats cache because they
+	// have the same cadence and cost profile (an O(all-rows) index scan) and
+	// were previously recomputed on every 5s dashboard poll, uncached.
+	TopIPs      []store.CountRow
+	TopUsers    []store.CountRow
+	TopCommands []store.CountRow
+	// Intel-tab aggregates, likewise recomputed every 5s poll before caching:
+	// the two actors GROUP BYs and the 72h hourly-by-kind heatmap scan.
+	IntentCounts   []store.LabelCount
+	PlaybookCounts []store.LabelCount
+	HourlyByKind   []store.HourlyKindCell
 }
 
 const statsTTL = 10 * time.Second
@@ -150,13 +161,43 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	if err != nil {
 		return s.statsCached, err
 	}
+	topIPs, err := s.st.TopSourceIPs(25)
+	if err != nil {
+		return s.statsCached, err
+	}
+	topUsers, err := s.st.TopUsernames(20)
+	if err != nil {
+		return s.statsCached, err
+	}
+	topCommands, err := s.st.TopCommands(20)
+	if err != nil {
+		return s.statsCached, err
+	}
+	intents, err := s.st.CountsByIntent()
+	if err != nil {
+		return s.statsCached, err
+	}
+	playbooks, err := s.st.CountsByPlaybook()
+	if err != nil {
+		return s.statsCached, err
+	}
+	hourlyByKind, err := s.st.HourlyEventCountsByKind(72)
+	if err != nil {
+		return s.statsCached, err
+	}
 	s.statsCached = &summaryStats{
-		Events:       ec,
-		Actors:       ac,
-		UniqueIPs:    ips,
-		Countries:    countries,
-		KindCounts:   kinds,
-		SourceCounts: sources,
+		Events:         ec,
+		Actors:         ac,
+		UniqueIPs:      ips,
+		Countries:      countries,
+		KindCounts:     kinds,
+		SourceCounts:   sources,
+		TopIPs:         topIPs,
+		TopUsers:       topUsers,
+		TopCommands:    topCommands,
+		IntentCounts:   intents,
+		PlaybookCounts: playbooks,
+		HourlyByKind:   hourlyByKind,
 	}
 	s.statsAt = time.Now()
 	return s.statsCached, nil
@@ -746,21 +787,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
-	topIPs, err := s.st.TopSourceIPs(25)
-	if err != nil {
-		httpError(w, "server", err, http.StatusInternalServerError)
-		return
-	}
-	topUsers, err := s.st.TopUsernames(20)
-	if err != nil {
-		httpError(w, "server", err, http.StatusInternalServerError)
-		return
-	}
-	topCommands, err := s.st.TopCommands(20)
-	if err != nil {
-		httpError(w, "server", err, http.StatusInternalServerError)
-		return
-	}
 	hourly, err := s.st.HourlyEventCounts(72)
 	if err != nil {
 		httpError(w, "server", err, http.StatusInternalServerError)
@@ -771,9 +797,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
-	var ec, ac, uniqueIPs int
+	var ec, ac, uniqueIPs, countries int
+	var topIPs, topUsers, topCommands []store.CountRow
 	if stats, err := s.summaryStatsCached(); err == nil {
-		ec, ac, uniqueIPs = stats.Events, stats.Actors, stats.UniqueIPs
+		ec, ac, uniqueIPs, countries = stats.Events, stats.Actors, stats.UniqueIPs, stats.Countries
+		topIPs, topUsers, topCommands = stats.TopIPs, stats.TopUsers, stats.TopCommands
 	}
 
 	resp := dashboardResponse{
@@ -909,12 +937,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp.Summary.UniqueIPs = uniqueIPs
-	// Countries: count distinct CCs across the WHOLE geo cache, not just the
-	// top-25 IPs that feed the topCountries chart — otherwise a 2600-IP dataset
-	// spanning 20+ countries reported ~7. Fall back to the top-25-derived count
-	// (minus the "??" Unknown bucket) if the geo-cache query fails.
-	if cc, err := s.st.DistinctGeoCountryCount(); err == nil && cc > 0 {
-		resp.Summary.Countries = cc
+	// Countries: distinct CCs across the WHOLE geo cache, not just the top-25
+	// IPs that feed the topCountries chart — otherwise a 2600-IP dataset
+	// spanning 20+ countries reported ~7. This value comes from the shared
+	// stats cache (summaryStatsCached already ran DistinctGeoCountryCount), so
+	// we don't re-run that whole-geo-cache JSON scan a second time per poll.
+	// Fall back to the top-25-derived count (minus the "??" bucket) if it was 0.
+	if countries > 0 {
+		resp.Summary.Countries = countries
 	} else {
 		resp.Summary.Countries = len(countryStats)
 		if _, hasUnknown := countryStats["??"]; hasUnknown {

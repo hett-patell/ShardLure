@@ -1436,6 +1436,10 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		seen[a.PrimaryIP] = true
 		// Resolve to the best reportable row for the IP so a low-signal cowrie
 		// row doesn't mask a confirmed journal row (see GetReportableActorByIP).
+		// This runs once per unique IP; each lookup is an index seek on
+		// idx_actors_primary_ip (migration v14), and every reported candidate is
+		// then gated behind a 2s network throttle downstream — so the per-IP
+		// query cost here is negligible and not worth batching.
 		best, berr := s.st.GetReportableActorByIP(a.PrimaryIP)
 		if berr != nil || best == nil {
 			best = &a
