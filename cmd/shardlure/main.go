@@ -536,8 +536,9 @@ func addrPort(addr string) int {
 	if addr == "" {
 		return 0
 	}
-	// Bare ":N" form - net.SplitHostPort accepts this with empty host.
-	host, port, err := net.SplitHostPort(addr)
+	// Bare ":N" form - net.SplitHostPort accepts this with empty host. Only the
+	// port matters here; the host is intentionally discarded.
+	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		// Fall back to a permissive parse: if the whole input is a
 		// number, treat it as a port. Keeps `--addr=8080` working
@@ -547,7 +548,6 @@ func addrPort(addr string) int {
 		}
 		return 0
 	}
-	_ = host
 	p, err := strconv.Atoi(port)
 	if err != nil || p <= 0 || p > 65535 {
 		return 0
