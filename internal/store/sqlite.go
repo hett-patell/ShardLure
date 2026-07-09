@@ -461,6 +461,25 @@ CREATE TABLE IF NOT EXISTS app_settings (
 			return err
 		}
 	}
+
+	// v14: actors indexes for the hot dashboard/intel orderings and the
+	// primary_ip lookups. Before this, actors had only idx_actors_last_seen, so
+	// TopActorsByEvents (ORDER BY event_count), TopActorsByRate (ORDER BY
+	// attempts_per_hour), and GetActorByPrimaryIP/GetReportableActorByIP
+	// (WHERE primary_ip=?) each did a full table scan + transient sort on every
+	// 5s poll — and report-all calls the primary_ip lookup in a loop over up to
+	// 1000 actors. On a busy honeypot the actors table can reach 10^5+ rows.
+	if current < 14 {
+		if _, err := s.db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_actors_primary_ip ON actors(primary_ip);
+CREATE INDEX IF NOT EXISTS idx_actors_event_count ON actors(event_count);
+CREATE INDEX IF NOT EXISTS idx_actors_rate ON actors(attempts_per_hour);`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (14, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

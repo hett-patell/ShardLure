@@ -20,8 +20,8 @@ func TestMigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("currentSchemaVersion: %v", err)
 	}
-	if v < 13 {
-		t.Fatalf("expected version >= 13 after fresh open, got %d", v)
+	if v < 14 {
+		t.Fatalf("expected version >= 14 after fresh open, got %d", v)
 	}
 	if err := s1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -224,6 +224,8 @@ func TestPerformanceIndexesPresent(t *testing.T) {
 	want := []string{
 		"idx_events_username", "idx_events_command", "idx_actors_last_seen",
 		"idx_artifacts_sha256", "idx_artifacts_session", "idx_artifacts_created",
+		// v14: actors ordering + primary_ip lookup indexes.
+		"idx_actors_primary_ip", "idx_actors_event_count", "idx_actors_rate",
 	}
 	for _, w := range want {
 		if !idx[w] {

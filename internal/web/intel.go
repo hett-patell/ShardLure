@@ -153,21 +153,11 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		resp.KindCounts = append(resp.KindCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
-	intents, err := s.st.CountsByIntent()
-	if err != nil {
-		httpError(w, "intel", err, http.StatusInternalServerError)
-		return
-	}
-	for _, k := range intents {
+	for _, k := range stats.IntentCounts {
 		resp.IntentCounts = append(resp.IntentCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
-	playbooks, err := s.st.CountsByPlaybook()
-	if err != nil {
-		httpError(w, "intel", err, http.StatusInternalServerError)
-		return
-	}
-	for _, k := range playbooks {
+	for _, k := range stats.PlaybookCounts {
 		resp.PlaybookCounts = append(resp.PlaybookCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
@@ -175,12 +165,7 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		resp.SourceCounts = append(resp.SourceCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 	}
 
-	cells, err := s.st.HourlyEventCountsByKind(72)
-	if err != nil {
-		httpError(w, "intel", err, http.StatusInternalServerError)
-		return
-	}
-	for _, c := range cells {
+	for _, c := range stats.HourlyByKind {
 		resp.Heatmap = append(resp.Heatmap, heatmapCell{
 			T:    c.Hour.Unix(),
 			Kind: c.Kind,
