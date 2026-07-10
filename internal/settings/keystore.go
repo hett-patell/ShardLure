@@ -57,6 +57,16 @@ const (
 	KeyHomeCity    = "home.city"
 	KeyHomeCountry = "home.country"
 	KeyHomeCC      = "home.cc"
+
+	// UI appearance (non-secret). Allowed: dragon | meridian | sprite.
+	// Empty / unset means dragon (default).
+	KeyUITheme = "ui.theme"
+
+	// MalwareBazaar sharing knobs (non-secret; yaml defaults when unset).
+	KeyBazaarEndpoint      = "bazaar.endpoint"
+	KeyBazaarTags          = "bazaar.tags" // comma-separated
+	KeyBazaarMaxBytes      = "bazaar.max_bytes"
+	KeyBazaarFreshnessDays = "bazaar.freshness_days"
 )
 
 // hasEnvFallback reports whether a key participates in the os.Getenv fallback.
@@ -155,6 +165,27 @@ func (k *Keystore) GetFloat(key string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+// GetStringCSV parses the effective value as a comma-separated list of
+// strings (e.g. MalwareBazaar tags "shardlure,honeypot"), returning def on
+// empty. Empty segments are skipped; an all-empty value yields def.
+func (k *Keystore) GetStringCSV(key string, def []string) []string {
+	v := strings.TrimSpace(k.Get(key))
+	if v == "" {
+		return def
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return def
+	}
+	return out
 }
 
 // GetIntCSV parses the effective value as a comma-separated list of ints

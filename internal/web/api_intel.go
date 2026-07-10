@@ -1069,10 +1069,10 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 			UploadedAt: u.UploadedAt.UTC().Format(time.RFC3339),
 			Status:     u.ResponseStatus,
 			MBURL:      u.MBURL,
+			SizeBytes:  u.SizeBytes,
+			SrcIP:      u.SrcIP,
 		}
 		if u.SizeBytes > 0 || u.SrcIP != "" || u.LocalPath != "" {
-			row.SizeBytes = u.SizeBytes
-			row.SrcIP = u.SrcIP
 			classifyMu.Lock()
 			cls, cached := classifyCache[u.SHA256]
 			classifyMu.Unlock()
@@ -1193,9 +1193,9 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	var skipReason string
 	opts := bazaar.Options{
 		APIKey:    bzKey,
-		Endpoint:  s.bazaarEndpoint,
-		ExtraTags: s.bazaarTags,
-		MaxBytes:  s.bazaarMaxBytes,
+		Endpoint:  s.bazaarEndpointLive(),
+		ExtraTags: s.bazaarTagsLive(),
+		MaxBytes:  s.bazaarMaxBytesLive(),
 		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, err error) {
 			result = r
 			// For a Vet/pre-flight skip, Share reports status="skipped" with

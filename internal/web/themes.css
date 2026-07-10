@@ -1,0 +1,797 @@
+/* ShardLure UI themes — applied via <html data-theme="…">.
+   Dragon tokens match the historical :root defaults. */
+
+html,
+html[data-theme="dragon"] {
+  --bg: #0a0608;
+  --glass: #141010;
+  --glass-2: #1e1618;
+  --sheet: #141010;
+  --paper: #0a0608;
+  --line: rgba(200, 120, 100, 0.10);
+  --line-strong: rgba(200, 120, 100, 0.22);
+  --line-soft: rgba(200, 120, 100, 0.08);
+  --text: #e8dcd8;
+  --ink: #e8dcd8;
+  --dim: #907068;
+  --muted: #907068;
+  --accent: #d02828;
+  --accent-2: #c89828;
+  --good: #48b878;
+  --warn: #c89828;
+  --danger: #d02828;
+  --ok: #48b878;
+  --blue-team: #5a8fd4;
+  --red-team: #d02828;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --sans: "Chakra Petch", system-ui, sans-serif;
+  --display: "Chakra Petch", system-ui, sans-serif;
+  --radius: 4px;
+  --chunk: 0px;
+  --shadow: none;
+  --panel-bg: var(--glass);
+  --body-bg: var(--bg);
+  --vignette: radial-gradient(ellipse at center, transparent 30%, rgba(0, 0, 0, 0.55) 90%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.55) 0%, transparent 22%, transparent 78%, rgba(0, 0, 0, 0.55) 100%);
+  --globe-atmosphere: #d02828;
+  --globe-point: #d02828;
+  --bg-pane: var(--glass);
+}
+
+html[data-theme="meridian"] {
+  --bg: #dfe3e8;
+  --glass: #f4f6f8;
+  --glass-2: #eef1f4;
+  --sheet: #f4f6f8;
+  --paper: #dfe3e8;
+  --line: #c5ccd6;
+  --line-strong: #aeb6c2;
+  --line-soft: #d5dbe3;
+  --text: #1a2332;
+  --ink: #1a2332;
+  --dim: #5c6775;
+  --muted: #5c6775;
+  --accent: #0d5c63;
+  --accent-2: #a67c2d;
+  --good: #2f6b4f;
+  --warn: #a67c2d;
+  --danger: #8b3a3a;
+  --ok: #2f6b4f;
+  --blue-team: #3a5a9a;
+  --red-team: #8b3a3a;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --sans: "Barlow", system-ui, sans-serif;
+  --display: "Barlow", system-ui, sans-serif;
+  --radius: 2px;
+  --chunk: 0px;
+  --shadow: none;
+  --panel-bg: var(--sheet);
+  --body-bg: var(--paper);
+  --vignette: radial-gradient(ellipse at 50% 42%, rgba(255, 255, 255, 0.55) 0%, transparent 70%);
+  --globe-atmosphere: #0d5c63;
+  --globe-point: #0d5c63;
+  --bg-pane: var(--glass-2);
+}
+
+html[data-theme="sprite"] {
+  --bg: #fff6e4;
+  --glass: #fffdf7;
+  --glass-2: #fff8e8;
+  --sheet: #fffdf7;
+  --paper: #fff6e4;
+  --line: #241910;
+  --line-strong: #241910;
+  --line-soft: #efe6d4;
+  --text: #241910;
+  --ink: #241910;
+  --dim: #5c4a3e;
+  --muted: #5c4a3e;
+  --accent: #e85d4c;
+  --accent-2: #f0b429;
+  --good: #2f9a62;
+  --warn: #f0b429;
+  --danger: #e85d4c;
+  --ok: #2f9a62;
+  --blue-team: #3a5a9a;
+  --red-team: #e85d4c;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --sans: "DM Sans", system-ui, sans-serif;
+  --display: "Pixelify Sans", ui-rounded, system-ui, sans-serif;
+  --radius: 0px;
+  --chunk: 3px;
+  --shadow: 3px 3px 0 #241910;
+  --panel-bg: var(--sheet);
+  --body-bg: var(--paper);
+  --vignette: none;
+  --globe-atmosphere: #6ec0e0;
+  --globe-point: #e85d4c;
+  --bg-pane: var(--glass-2);
+}
+
+/* Shared chrome that keys off theme tokens */
+html[data-theme="meridian"] body,
+html[data-theme="sprite"] body {
+  background: var(--body-bg);
+  color: var(--text);
+}
+
+html[data-theme="meridian"] .panel,
+html[data-theme="meridian"] .rail .panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+
+html[data-theme="sprite"] .panel,
+html[data-theme="sprite"] .rail .panel {
+  background: var(--panel-bg);
+  border: var(--chunk) solid var(--line);
+  border-radius: 0;
+  box-shadow: var(--shadow);
+}
+
+html[data-theme="sprite"] .brand .b1,
+html[data-theme="sprite"] .sb-brand,
+html[data-theme="sprite"] .title h1,
+html[data-theme="sprite"] .panel h2,
+html[data-theme="sprite"] .stat .num,
+html[data-theme="sprite"] .stat .n {
+  font-family: var(--display);
+}
+
+html[data-theme="meridian"] #vignette {
+  background: var(--vignette);
+  opacity: 0.85;
+}
+
+html[data-theme="sprite"] #vignette {
+  display: none;
+}
+
+html[data-theme="meridian"] .sidebar,
+html[data-theme="sprite"] .sidebar {
+  background: var(--ink);
+}
+
+html[data-theme="meridian"] .sidebar .sb-brand,
+html[data-theme="sprite"] .sidebar .sb-brand {
+  color: var(--sheet);
+  border-color: var(--accent);
+}
+
+html[data-theme="meridian"] .topbar,
+html[data-theme="sprite"] .topbar {
+  background: color-mix(in srgb, var(--sheet) 92%, transparent);
+  border-bottom: 1px solid var(--line);
+}
+
+html[data-theme="sprite"] .topbar {
+  border-bottom: var(--chunk) solid var(--line);
+  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="meridian"] .chip.on,
+html[data-theme="sprite"] .chip.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+html[data-theme="sprite"] .chip {
+  border: 2px solid var(--line);
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="sprite"] .tab.active,
+html[data-theme="meridian"] .tab.active {
+  border-bottom-color: var(--accent-2);
+  color: var(--text);
+}
+
+html[data-theme="sprite"] .sb-item.on,
+html[data-theme="meridian"] .sb-item.on {
+  color: var(--sheet);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* Theme picker (Settings → Appearance) */
+.theme-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.theme-card {
+  cursor: pointer;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--paper, var(--bg));
+  color: var(--text);
+  padding: 12px;
+  border-radius: var(--radius);
+  font: inherit;
+}
+html[data-theme="sprite"] .theme-card {
+  border: var(--chunk) solid var(--line);
+  box-shadow: 2px 2px 0 var(--line);
+  border-radius: 0;
+}
+.theme-card:hover {
+  border-color: var(--accent);
+}
+.theme-card.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+html[data-theme="sprite"] .theme-card.on {
+  box-shadow: 3px 3px 0 var(--accent);
+}
+.theme-card .swatch {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  height: 28px;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  border: 1px solid var(--line-soft, var(--line));
+}
+.theme-card .swatch span { display: block; }
+.theme-card .tname {
+  font: 600 13px var(--sans);
+  margin: 0 0 4px;
+}
+html[data-theme="sprite"] .theme-card .tname {
+  font-family: var(--display);
+}
+.theme-card .tblurb {
+  margin: 0;
+  font: 400 11px var(--sans);
+  color: var(--dim);
+  line-height: 1.4;
+}
+@media (max-width: 900px) {
+  .theme-picker { grid-template-columns: 1fr; }
+}
+
+/* —— Globe HTML overlays (Phase B) —— */
+.globe-overlay {
+  transform: translate(-50%, -100%);
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 200ms ease;
+}
+.globe-sticker {
+  width: 36px; height: 36px; padding: 0; margin: 0;
+  border: 3px solid #241910;
+  box-shadow: 3px 3px 0 #241910;
+  background: #fffdf7;
+  display: block;
+  image-rendering: pixelated;
+}
+.globe-sticker img {
+  width: 100%; height: 100%; display: block; image-rendering: pixelated;
+}
+.globe-sat {
+  position: relative;
+  width: 28px; height: 28px; display: block;
+  filter: drop-shadow(1px 1px 0 rgba(26, 35, 50, 0.25));
+}
+.globe-sat img { width: 100%; height: 100%; display: block; }
+.globe-sat::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: 50%;
+  animation: satRing 2.4s ease-out infinite;
+  animation-delay: var(--ring-delay, 0s);
+  pointer-events: none;
+}
+.globe-sat--hub {
+  width: 34px; height: 34px;
+}
+.globe-sat--hub::after {
+  inset: -9px;
+  border-width: 1.5px;
+  animation-duration: 2s;
+}
+@keyframes satRing {
+  0% { transform: scale(0.72); opacity: 0.75; }
+  100% { transform: scale(1.55); opacity: 0; }
+}
+.globe-live {
+  display: inline-flex; align-items: center; gap: 5px;
+  font: 600 9px var(--mono);
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ok); background: var(--sheet);
+  border: 1px solid var(--line); padding: 3px 7px 3px 6px;
+  white-space: nowrap;
+  box-shadow: 1px 1px 0 rgba(26, 35, 50, 0.08);
+  transform: translate(10px, -50%);
+}
+.globe-live i {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+  display: inline-block;
+  animation: satPulse 1.8s ease-in-out infinite;
+}
+@keyframes satPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+.globe-live b { color: var(--ink); font-weight: 600; }
+.globe-analytics {
+  font: 500 10px var(--mono); color: var(--ink);
+  background: color-mix(in srgb, var(--sheet) 96%, transparent);
+  border: 1px solid var(--line);
+  padding: 4px 7px; white-space: nowrap; text-align: left;
+  box-shadow: 1px 1px 0 rgba(26, 35, 50, 0.06);
+  transform: translate(12px, -50%);
+}
+.globe-analytics .lbl {
+  color: var(--dim); display: block; font-size: 8px;
+  letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 1px;
+}
+.globe-analytics .up { color: var(--ok); }
+.globe-analytics .dn { color: var(--danger); }
+
+.globe-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.globe-node .globe-sat { transform: none; }
+.globe-node .globe-analytics {
+  transform: none;
+  max-width: 140px;
+}
+.globe-node .globe-analytics b { color: var(--accent); font-weight: 600; }
+.globe-node .globe-analytics .ip {
+  display: block; margin-top: 2px; color: var(--dim);
+  font-size: 9px; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Light themes: soften Dragon-only glow assumptions */
+html[data-theme="meridian"] .title .dot,
+html[data-theme="sprite"] .title .dot {
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+}
+html[data-theme="meridian"] .sb-item.on,
+html[data-theme="sprite"] .sb-item.on {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+html[data-theme="meridian"] .nav a.active,
+html[data-theme="sprite"] .nav a.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+html[data-theme="meridian"] body,
+html[data-theme="sprite"] body {
+  color: var(--text);
+}
+html[data-theme="meridian"] #globe,
+html[data-theme="sprite"] #globe {
+  /* keep globe readable on light paper */
+  filter: none;
+}
+
+.globe-overlay--live,
+.globe-overlay--analytics {
+  transform: translate(8px, -50%);
+}
+.globe-overlay--live .globe-live,
+.globe-overlay--analytics .globe-analytics {
+  transform: none;
+}
+.globe-overlay--node {
+  transform: translate(-50%, calc(-100% - 6px));
+}
+.globe-overlay--sticker {
+  transform: translate(-50%, calc(-100% - 4px));
+}
+.globe-overlay--sat {
+  transform: translate(-50%, calc(-100% - 10px));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .globe-sat::after,
+  .globe-live i { animation: none; }
+}
+
+
+/* —— Light theme: kill Dragon-hardcoded dark chrome —— */
+html[data-theme="meridian"],
+html[data-theme="sprite"] {
+  --bg-pane: var(--glass-2);
+  color-scheme: light;
+}
+
+html[data-theme="meridian"] .stat,
+html[data-theme="meridian"] .cap-stat,
+html[data-theme="meridian"] .users .pill,
+html[data-theme="meridian"] .sparkline,
+html[data-theme="sprite"] .stat,
+html[data-theme="sprite"] .cap-stat,
+html[data-theme="sprite"] .users .pill,
+html[data-theme="sprite"] .sparkline {
+  background: var(--glass-2);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+html[data-theme="meridian"] .sidebar,
+html[data-theme="sprite"] .sidebar {
+  background: var(--ink);
+  border-right-color: color-mix(in srgb, var(--ink) 80%, #000);
+}
+html[data-theme="meridian"] .sb-item,
+html[data-theme="sprite"] .sb-item { color: color-mix(in srgb, var(--sheet) 55%, transparent); }
+html[data-theme="meridian"] .sb-item:hover,
+html[data-theme="sprite"] .sb-item:hover {
+  color: var(--sheet);
+  background: color-mix(in srgb, var(--sheet) 12%, transparent);
+  border-color: color-mix(in srgb, var(--sheet) 20%, transparent);
+}
+html[data-theme="meridian"] .sb-brand,
+html[data-theme="sprite"] .sb-brand { color: #fff; }
+
+html[data-theme="meridian"] .chip,
+html[data-theme="sprite"] .chip,
+html[data-theme="meridian"] .toolbar input.search,
+html[data-theme="sprite"] .toolbar input.search,
+html[data-theme="meridian"] input.search,
+html[data-theme="sprite"] input.search {
+  background: var(--sheet) !important;
+  border-color: var(--line) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .bar-row .track,
+html[data-theme="sprite"] .bar-row .track,
+html[data-theme="meridian"] .radar-track,
+html[data-theme="sprite"] .radar-track {
+  background: color-mix(in srgb, var(--ink) 8%, transparent) !important;
+}
+html[data-theme="meridian"] tr.actor-row:hover td,
+html[data-theme="sprite"] tr.actor-row:hover td {
+  background: color-mix(in srgb, var(--accent) 6%, transparent) !important;
+}
+html[data-theme="meridian"] tr.actor-row.selected td,
+html[data-theme="sprite"] tr.actor-row.selected td {
+  background: color-mix(in srgb, var(--accent) 12%, transparent) !important;
+}
+html[data-theme="meridian"] .detail,
+html[data-theme="sprite"] .detail,
+html[data-theme="meridian"] .gauge-breakdown,
+html[data-theme="sprite"] .gauge-breakdown,
+html[data-theme="meridian"] .empty,
+html[data-theme="sprite"] .empty {
+  background: var(--glass-2);
+  color: var(--dim);
+}
+html[data-theme="meridian"] .topbar,
+html[data-theme="sprite"] .topbar {
+  background: color-mix(in srgb, var(--sheet) 94%, transparent) !important;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+}
+html[data-theme="meridian"] .shell-main,
+html[data-theme="sprite"] .shell-main,
+html[data-theme="meridian"] .wrap,
+html[data-theme="sprite"] .wrap {
+  background: transparent;
+  color: var(--text);
+}
+html[data-theme="meridian"] table,
+html[data-theme="sprite"] table,
+html[data-theme="meridian"] th,
+html[data-theme="sprite"] th,
+html[data-theme="meridian"] td,
+html[data-theme="sprite"] td {
+  border-bottom-color: var(--line-soft, var(--line));
+}
+html[data-theme="meridian"] .tab,
+html[data-theme="sprite"] .tab { color: var(--dim); }
+html[data-theme="meridian"] .tab.active,
+html[data-theme="sprite"] .tab.active { color: var(--text); }
+html[data-theme="meridian"] .set-row,
+html[data-theme="sprite"] .set-row,
+html[data-theme="meridian"] .set-control input,
+html[data-theme="sprite"] .set-control input,
+html[data-theme="meridian"] .set-control textarea,
+html[data-theme="sprite"] .set-control textarea {
+  background: var(--sheet);
+  color: var(--text);
+  border-color: var(--line);
+}
+html[data-theme="meridian"] .team-banner,
+html[data-theme="sprite"] .team-banner,
+html[data-theme="meridian"] .set-note,
+html[data-theme="sprite"] .set-note {
+  background: var(--glass-2);
+  border-color: var(--line);
+  color: var(--dim);
+}
+html[data-theme="meridian"] .sess-modal .sm-card,
+html[data-theme="sprite"] .sess-modal .sm-card {
+  background: var(--sheet);
+  color: var(--text);
+  border-color: var(--line);
+}
+html[data-theme="meridian"] .feed-row,
+html[data-theme="sprite"] .feed-row,
+html[data-theme="meridian"] .cap-row,
+html[data-theme="sprite"] .cap-row,
+html[data-theme="meridian"] .row,
+html[data-theme="sprite"] .row {
+  border-bottom-color: var(--line-soft, var(--line));
+}
+
+/* Cobe stage (Meridian / Sprite) */
+#cobe-stage {
+  position: fixed; inset: 0; z-index: 0;
+  display: grid; place-items: center;
+  pointer-events: none;
+}
+#cobe-stage.on { pointer-events: auto; }
+#cobe-stage[hidden] { display: none !important; }
+#cobe-wrap {
+  position: relative;
+  width: min(72vh, 640px);
+  height: min(72vh, 640px);
+  max-width: calc(100vw - 720px);
+  max-height: calc(100vh - 80px);
+}
+#cobe {
+  width: 100%; height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+#cobe:active { cursor: grabbing; }
+#globe.globe-hidden { visibility: hidden; pointer-events: none; }
+html[data-theme="meridian"] #cobe-stage {
+  background:
+    radial-gradient(ellipse at 50% 42%, #eef1f4 0%, var(--paper) 70%);
+}
+html[data-theme="sprite"] #cobe-stage {
+  background:
+    radial-gradient(circle at 50% 48%, #fff 0%, var(--panel-bg) 55%);
+}
+html[data-theme="dragon"] #cobe-stage { display: none !important; }
+
+#cobe-overlays {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+#cobe-overlays .globe-overlay {
+  position: absolute;
+  left: 0; top: 0;
+  transform: none; /* projection sets transform */
+  pointer-events: none;
+}
+#cobe-overlays .globe-overlay .globe-sticker,
+#cobe-overlays .globe-overlay .globe-sat,
+#cobe-overlays .globe-overlay .globe-live,
+#cobe-overlays .globe-overlay .globe-analytics,
+#cobe-overlays .globe-overlay .globe-node {
+  pointer-events: auto;
+}
+
+/* Intel: replace Dragon-hardcoded rgba blacks / reds with tokens */
+html[data-theme="meridian"] .chip,
+html[data-theme="sprite"] .chip,
+html[data-theme="meridian"] .toolbar .chip,
+html[data-theme="sprite"] .toolbar .chip {
+  background: var(--sheet) !important;
+  border-color: var(--line) !important;
+  color: var(--dim) !important;
+}
+html[data-theme="meridian"] .chip.on,
+html[data-theme="sprite"] .chip.on {
+  color: var(--accent) !important;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent) !important;
+  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+html[data-theme="meridian"] input.search,
+html[data-theme="sprite"] input.search,
+html[data-theme="meridian"] .toolbar input.search,
+html[data-theme="sprite"] .toolbar input.search {
+  background: var(--sheet) !important;
+  border-color: var(--line) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .detail,
+html[data-theme="sprite"] .detail,
+html[data-theme="meridian"] .gauge-breakdown,
+html[data-theme="sprite"] .gauge-breakdown {
+  background: color-mix(in srgb, var(--ink) 6%, transparent) !important;
+}
+html[data-theme="meridian"] .sess-modal .sm-card,
+html[data-theme="sprite"] .sess-modal .sm-card,
+html[data-theme="meridian"] .sm-card,
+html[data-theme="sprite"] .sm-card {
+  background: var(--sheet) !important;
+  color: var(--text) !important;
+  border-color: var(--line-strong) !important;
+  box-shadow: 0 24px 80px color-mix(in srgb, var(--ink) 18%, transparent) !important;
+}
+html[data-theme="meridian"] .nav a.active,
+html[data-theme="sprite"] .nav a.active,
+html[data-theme="meridian"] .sb-item.on,
+html[data-theme="sprite"] .sb-item.on,
+html[data-theme="meridian"] .set-btn.primary,
+html[data-theme="sprite"] .set-btn.primary,
+html[data-theme="meridian"] .tag.hot,
+html[data-theme="sprite"] .tag.hot,
+html[data-theme="meridian"] .cap-badge.failed,
+html[data-theme="sprite"] .cap-badge.failed,
+html[data-theme="meridian"] .cap-badge.blocked,
+html[data-theme="sprite"] .cap-badge.blocked {
+  color: var(--accent) !important;
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent) !important;
+  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+html[data-theme="meridian"] .panel,
+html[data-theme="sprite"] .panel,
+html[data-theme="meridian"] .pane,
+html[data-theme="sprite"] .pane {
+  background: var(--panel-bg);
+}
+html[data-theme="meridian"] .shell,
+html[data-theme="sprite"] .shell,
+html[data-theme="meridian"] .shell-main,
+html[data-theme="sprite"] .shell-main {
+  background: var(--body-bg);
+  color: var(--text);
+}
+html[data-theme="meridian"] .live-dot,
+html[data-theme="sprite"] .live-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent);
+}
+/* MITRE ATT&CK coverage — light theme columns + heat cells */
+html[data-theme="meridian"] .mitre-col,
+html[data-theme="sprite"] .mitre-col {
+  background: var(--glass-2) !important;
+  border-color: var(--line) !important;
+}
+html[data-theme="meridian"] .mitre-cell,
+html[data-theme="sprite"] .mitre-cell {
+  background: var(--sheet) !important;
+  border-color: var(--line) !important;
+  color: var(--dim) !important;
+}
+html[data-theme="meridian"] .mitre-cell:hover,
+html[data-theme="sprite"] .mitre-cell:hover {
+  color: var(--text) !important;
+  border-color: var(--line-strong) !important;
+}
+html[data-theme="meridian"] .mitre-cell.lv1,
+html[data-theme="sprite"] .mitre-cell.lv1 {
+  background: color-mix(in srgb, var(--accent-2) 10%, var(--sheet)) !important;
+  border-color: color-mix(in srgb, var(--accent-2) 35%, transparent) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .mitre-cell.lv2,
+html[data-theme="sprite"] .mitre-cell.lv2 {
+  background: color-mix(in srgb, var(--accent-2) 18%, var(--sheet)) !important;
+  border-color: color-mix(in srgb, var(--accent-2) 45%, transparent) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .mitre-cell.lv3,
+html[data-theme="sprite"] .mitre-cell.lv3 {
+  background: color-mix(in srgb, var(--accent-2) 28%, var(--sheet)) !important;
+  border-color: color-mix(in srgb, var(--accent-2) 55%, transparent) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .mitre-cell.lv4,
+html[data-theme="sprite"] .mitre-cell.lv4 {
+  background: color-mix(in srgb, var(--warn) 32%, var(--sheet)) !important;
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .mitre-cell.lv5,
+html[data-theme="sprite"] .mitre-cell.lv5 {
+  background: color-mix(in srgb, var(--accent) 28%, var(--sheet)) !important;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .mitre-top .mt-pill,
+html[data-theme="sprite"] .mitre-top .mt-pill {
+  background: color-mix(in srgb, var(--accent-2) 12%, var(--sheet)) !important;
+  border-color: color-mix(in srgb, var(--accent-2) 40%, transparent) !important;
+  color: var(--blue-team) !important;
+}
+html[data-theme="sprite"] .mitre-col,
+html[data-theme="sprite"] .mitre-cell {
+  border-radius: 0;
+  border-width: 2px;
+  box-shadow: 1px 1px 0 rgba(36, 25, 16, 0.1);
+}
+html[data-theme="meridian"] .set-note,
+html[data-theme="sprite"] .set-note,
+html[data-theme="meridian"] .team-banner,
+html[data-theme="sprite"] .team-banner,
+html[data-theme="meridian"] .enrich-card,
+html[data-theme="sprite"] .enrich-card {
+  background: var(--glass-2) !important;
+  border-color: var(--line) !important;
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .users .pill,
+html[data-theme="sprite"] .users .pill {
+  background: var(--glass-2) !important;
+  border-color: var(--line) !important;
+  color: var(--text) !important;
+}
+
+
+/* Red team wells: force light surfaces under Meridian / Sprite */
+html[data-theme="meridian"] .wl-preview,
+html[data-theme="sprite"] .wl-preview,
+html[data-theme="meridian"] .graph-canvas,
+html[data-theme="sprite"] .graph-canvas,
+html[data-theme="meridian"] .replay-select,
+html[data-theme="sprite"] .replay-select,
+html[data-theme="meridian"] .replay-pre,
+html[data-theme="sprite"] .replay-pre,
+html[data-theme="meridian"] .deobf-input,
+html[data-theme="sprite"] .deobf-input,
+html[data-theme="meridian"] .deobf-row,
+html[data-theme="sprite"] .deobf-row,
+html[data-theme="meridian"] .pm-strings,
+html[data-theme="sprite"] .pm-strings,
+html[data-theme="meridian"] .pm-hex,
+html[data-theme="sprite"] .pm-hex,
+html[data-theme="meridian"] .sm-transcript,
+html[data-theme="sprite"] .sm-transcript {
+  background: var(--bg) !important;
+  color: var(--text);
+  border-color: var(--line);
+}
+html[data-theme="meridian"] .wl-kind.active,
+html[data-theme="sprite"] .wl-kind.active {
+  color: var(--accent) !important;
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent) !important;
+  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+html[data-theme="meridian"] .deobf-orig,
+html[data-theme="sprite"] .deobf-orig,
+html[data-theme="meridian"] .replay-pre,
+html[data-theme="sprite"] .replay-pre {
+  color: var(--text) !important;
+}
+html[data-theme="meridian"] .deobf-final,
+html[data-theme="sprite"] .deobf-final {
+  color: var(--good) !important;
+}
+html[data-theme="meridian"] .deobf-layer-pill,
+html[data-theme="sprite"] .deobf-layer-pill {
+  background: color-mix(in srgb, var(--accent) 15%, transparent) !important;
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent) !important;
+  color: var(--accent) !important;
+}
+html[data-theme="sprite"] .wl-preview,
+html[data-theme="sprite"] .graph-canvas,
+html[data-theme="sprite"] .replay-select,
+html[data-theme="sprite"] .replay-pre,
+html[data-theme="sprite"] .deobf-input,
+html[data-theme="sprite"] .deobf-row {
+  border: 2px solid var(--line);
+  border-radius: 0;
+  box-shadow: 2px 2px 0 rgba(36, 25, 16, 0.12);
+}
+
+
+/* Overview activity heatmap */
+html[data-theme="meridian"] #heatmap-wrap,
+html[data-theme="sprite"] #heatmap-wrap {
+  background: var(--glass-2) !important;
+  border-color: var(--line) !important;
+}
+html[data-theme="sprite"] #heatmap-wrap {
+  border: 2px solid var(--line);
+  border-radius: 0;
+  box-shadow: 2px 2px 0 rgba(36, 25, 16, 0.1);
+}

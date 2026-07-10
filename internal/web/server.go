@@ -44,10 +44,11 @@ type Server struct {
 	// fallbacks (config/Options/env) used when the keystore has no value.
 	keys             *settings.Keystore
 	homeDefault      homePoint
-	bazaarKeyDefault string // config intel.bazaar.api_key fallback (env/DB win)
-	bazaarEndpoint   string
-	bazaarTags       []string
-	bazaarMaxBytes   int64
+	bazaarKeyDefault       string // config intel.bazaar.api_key fallback (env/DB win)
+	bazaarEndpointDefault  string
+	bazaarTagsDefault      []string
+	bazaarMaxBytesDefault  int64
+	bazaarFreshnessDefault int
 
 	// AbuseIPDB reporting (opt-in, off unless report-enabled AND a key is
 	// present). abuseAdmin hard-rejects admin IPs in Vet. The report knobs
@@ -284,10 +285,11 @@ type Options struct {
 	HomeCC          string
 	GeoEnabled      bool
 	GeoInsecureHTTP bool
-	BazaarAPIKey    string
-	BazaarEndpoint  string
-	BazaarTags      []string
-	BazaarMaxBytes  int64
+	BazaarAPIKey           string
+	BazaarEndpoint         string
+	BazaarTags             []string
+	BazaarMaxBytes         int64
+	BazaarFreshnessDays    int
 
 	// AbuseIPDB opt-in reporting. AbuseReportEnabled + a key (from
 	// SHARDLURE_ABUSEIPDB_KEY, reused from enrichment) are both required to
@@ -342,6 +344,10 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	if bzMax <= 0 {
 		bzMax = 33 << 20
 	}
+	bzFresh := firstOpt.BazaarFreshnessDays
+	if bzFresh <= 0 {
+		bzFresh = 10
+	}
 
 	abuseEndpoint := firstOpt.AbuseEndpoint
 	if abuseEndpoint == "" {
@@ -362,9 +368,10 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		geo:                    newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st, keys),
 		homeDefault:            home,
 		bazaarKeyDefault:       firstOpt.BazaarAPIKey,
-		bazaarEndpoint:         bzEndpoint,
-		bazaarTags:             bzTags,
-		bazaarMaxBytes:         bzMax,
+		bazaarEndpointDefault:  bzEndpoint,
+		bazaarTagsDefault:      bzTags,
+		bazaarMaxBytesDefault:  bzMax,
+		bazaarFreshnessDefault: bzFresh,
 		abuseEndpoint:          abuseEndpoint,
 		abuseEnabledDefault:    firstOpt.AbuseReportEnabled,
 		abuseCategoriesDefault: abuseCats,
@@ -389,6 +396,28 @@ func (s *Server) bazaarKeyLive() string {
 		return k
 	}
 	return s.bazaarKeyDefault
+}
+
+func (s *Server) bazaarEndpointLive() string {
+	return s.keys.GetOr(settings.KeyBazaarEndpoint, s.bazaarEndpointDefault)
+}
+
+func (s *Server) bazaarTagsLive() []string {
+	return s.keys.GetStringCSV(settings.KeyBazaarTags, s.bazaarTagsDefault)
+}
+
+func (s *Server) bazaarMaxBytesLive() int64 {
+	if v := s.keys.GetInt(settings.KeyBazaarMaxBytes, 0); v > 0 {
+		return int64(v)
+	}
+	return s.bazaarMaxBytesDefault
+}
+
+func (s *Server) bazaarFreshnessDaysLive() int {
+	if v := s.keys.GetInt(settings.KeyBazaarFreshnessDays, 0); v > 0 {
+		return v
+	}
+	return s.bazaarFreshnessDefault
 }
 
 func (s *Server) abuseKeyLive() string { return s.keys.Get(settings.KeyAbuseIPDB) }
@@ -479,6 +508,22 @@ func (s *Server) RunContext(ctx context.Context) error {
 		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 		_, _ = w.Write(visNetworkJS)
 	})
+	mux.HandleFunc("/themes.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_, _ = w.Write(themesCSS)
+	})
+	mux.HandleFunc("/cobe-globe.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(cobeGlobeJS)
+	})
+	mux.HandleFunc("/cobe-boot.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(cobeBootJS)
+	})
+	mux.HandleFunc("/stickers/", s.handleSticker)
 	mux.HandleFunc("/api/ioc/list", s.guard(s.handleIOCList))
 	mux.HandleFunc("/api/ioc/csv", s.guard(s.handleIOCCSV))
 	mux.HandleFunc("/api/ioc/stix", s.guard(s.handleIOCSTIX))

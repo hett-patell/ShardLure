@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Meridian · Intel Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+:root {
+  --ink:#1a2332; --paper:#dfe3e8; --sheet:#f4f6f8; --panel:#f4f6f8;
+  --line:#c5ccd6; --line-soft:#d5dbe3; --muted:#5c6775;
+  --teal:#0d5c63; --teal-soft:#1a7a82; --amber:#a67c2d;
+  --ok:#2f6b4f; --danger:#8b3a3a; --blue:#3a5a9a; --red:#8b3a3a;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --sans:"Barlow",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--paper);color:var(--ink);font:13px/1.45 var(--sans)}
+body{overflow:auto}
+.shell{display:grid;grid-template-columns:52px 1fr;min-height:100vh}
+.nav{background:var(--ink);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:8px;position:sticky;top:0;height:100vh}
+.nav .mark{width:28px;height:28px;border:1.5px solid var(--teal-soft);display:grid;place-items:center;font:600 11px var(--mono);color:var(--teal-soft);margin-bottom:10px}
+.nav a{width:32px;height:32px;display:grid;place-items:center;color:#8a96a6;text-decoration:none}
+.nav a.on,.nav a:hover{color:var(--paper);background:rgba(255,255,255,.06)}
+.nav a svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.6}
+.main{min-width:0}
+.topbar{position:sticky;top:0;z-index:5;background:rgba(244,246,248,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:10px 18px}
+.topbar-inner{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.brand{font-weight:600;font-size:15px}
+.brand em{font-style:normal;color:var(--teal);font-weight:500;margin-left:8px;font:500 11px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.live{display:inline-flex;align-items:center;gap:6px;font:500 10px var(--mono);color:var(--ok);letter-spacing:.08em}
+.live i{width:6px;height:6px;border-radius:50%;background:var(--ok);animation:pulse 1.8s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(47,107,79,.45)}100%{box-shadow:0 0 0 8px transparent}}
+.toolbar{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}
+.chip-sep{font:500 10px var(--mono);color:var(--muted);margin:0 4px}
+.chip{font:500 10px var(--mono);border:1px solid var(--line);padding:4px 8px;color:var(--muted);cursor:pointer;background:var(--sheet)}
+.chip.on{color:var(--teal);border-color:var(--teal);background:rgba(13,92,99,.06)}
+.search{font:12px var(--mono);border:1px solid var(--line);background:var(--sheet);padding:5px 10px;min-width:200px;color:var(--ink)}
+.wrap{padding:16px 18px 48px;max-width:1400px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.tab{font:500 12px var(--sans);padding:8px 14px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent}
+.tab.on,.tab.active{color:var(--ink);border-bottom-color:var(--teal)}
+.tab.blue.on{border-bottom-color:var(--blue);color:var(--blue)}
+.tab.red.on{border-bottom-color:var(--red);color:var(--red)}
+.tdot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--teal);margin-right:6px;vertical-align:middle}
+.tab.blue .tdot{background:var(--blue)}
+.tab.red .tdot{background:var(--red)}
+.view{display:none}
+.view.on,.view.active{display:block}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px}
+.stat{background:var(--sheet);border:1px solid var(--line);padding:10px 12px}
+.stat .n,.stat .num{font:600 20px/1 var(--mono);font-variant-numeric:tabular-nums}
+.stat .n.teal,.stat .num.teal{color:var(--teal)}
+.stat .n.amber,.stat .num.amber{color:var(--amber)}
+.stat .n.ok,.stat .num.ok{color:var(--ok)}
+.stat .l,.stat .label{margin-top:4px;font:500 9px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.panel{background:var(--sheet);border:1px solid var(--line);padding:12px}
+.panel.full{grid-column:1/-1}
+.panel h2{margin:0 0 10px;font:600 10px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.panel h2 .meta,.panel-head .meta{font-weight:500;color:var(--teal);letter-spacing:0;text-transform:none}
+.panel-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.panel-head h2{margin:0}
+.bar{display:grid;grid-template-columns:110px 1fr 52px;gap:8px;align-items:center;font:11px var(--mono);margin:5px 0}
+.bar .lbl{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .lbl b{color:var(--ink)}
+.bar .track{height:4px;background:var(--line-soft);overflow:hidden}
+.bar .track i,.bar .fill{display:block;height:100%;background:var(--teal);width:0}
+.bar .n{text-align:right;color:var(--teal)}
+.gauge-outer{display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:center}
+.gauge-svg{width:100%;max-width:180px}
+#gauge-val{font:700 28px var(--mono);fill:var(--ink)}
+#gauge-lbl-svg, #gauge-lbl{font:600 10px var(--mono);fill:var(--muted);letter-spacing:.1em}
+.gauge-breakdown{display:grid;gap:6px}
+.gb{display:flex;justify-content:space-between;font:11px var(--mono);border-bottom:1px dotted var(--line);padding:3px 0}
+.gb span{color:var(--muted)} .gb b{color:var(--teal)}
+.cred-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.cred-col h3{margin:0 0 8px;font:600 10px var(--mono);color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
+.cred{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px dotted var(--line);font:11px var(--mono)}
+.cred code{color:var(--ink)} .cred span{color:var(--teal)}
+table{width:100%;border-collapse:collapse;font:11px var(--mono)}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+td.n{text-align:right;color:var(--teal);font-variant-numeric:tabular-nums}
+td.ip,.ip{color:var(--teal)} td.muted,.muted{color:var(--muted)}
+.cmd{color:var(--ok);word-break:break-all;font-family:var(--mono);font-size:11px}
+.tag{display:inline-block;border:1px solid var(--line);padding:1px 6px;font:500 10px var(--mono);background:var(--paper)}
+.kind{display:inline-block;border:1px solid var(--line);padding:1px 5px;font-size:10px}
+.kind.failed_password,.kind.invalid_user{background:#f3e0e0;color:var(--danger)}
+.kind.connect,.kind.client_version{background:#e4ebf7;color:var(--blue)}
+.kind.accepted,.kind.command{background:#e2efe8;color:var(--ok)}
+.scroll{max-height:280px;overflow:auto}
+.scroll.tall{max-height:340px}
+.detail{margin-top:12px;padding:10px;border:1px solid var(--line);background:var(--paper)}
+.detail h3{margin:0 0 8px;font:600 13px var(--sans)}
+.kv{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font:11px var(--mono)}
+.kv span{color:var(--muted);display:block;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+.kv b{font-weight:500;color:var(--ink);word-break:break-all}
+.tl-feed{max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:4px}
+.tl-row{display:grid;grid-template-columns:64px 120px 70px 1fr;gap:8px;padding:6px 4px;border-bottom:1px dotted var(--line);font:11px var(--mono);align-items:start}
+.tl-row .t{color:var(--muted)} .tl-row .u{color:var(--amber)}
+.tl-row .cmd{grid-column:2/-1;margin-top:-2px}
+.cap-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+.cap-stat{border:1px solid var(--line-soft);background:var(--paper);padding:8px}
+.cap-stat .n{font:600 16px var(--mono);color:var(--teal)} .cap-stat .l{font:500 9px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+.cap-live{font:500 10px var(--mono);color:var(--ok);letter-spacing:.08em;text-transform:uppercase}
+.mitre-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.mitre-card{border:1px solid var(--line);background:var(--paper);padding:10px}
+.mitre-card .mid{font:600 12px var(--mono);color:var(--teal)}
+.mitre-card .mname{font:600 12px var(--sans);margin:4px 0}
+.mitre-card .mtactic{font:500 10px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.mitre-card .mstats{margin-top:8px;font:11px var(--mono);color:var(--muted)}
+.mitre-card .mstats b{color:var(--ink)}
+.sess{border:1px solid var(--line-soft);background:var(--paper);padding:8px 10px;margin-bottom:6px}
+.sess-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sess-meta{font-size:10px;color:var(--muted);margin:4px 0}
+.deobf{border:1px solid var(--line);padding:8px;margin-bottom:8px;background:var(--paper)}
+.deobf .raw{color:var(--danger);margin:6px 0}
+.deobf .ok{color:var(--ok)}
+.mono{font-family:var(--mono)}
+.probe{color:var(--amber)}
+.back{font:500 11px var(--mono);color:var(--muted);text-decoration:none;border:1px solid var(--line);padding:4px 8px;background:var(--sheet)}
+.back:hover{color:var(--ink)}
+#heatmap{width:100%;height:96px;display:block;background:var(--paper);border:1px solid var(--line-soft)}
+.set-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.set-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft);font:12px var(--mono)}
+.set-badge{font:10px var(--mono);border:1px solid var(--line);padding:2px 6px;color:var(--muted)}
+.set-badge.set{color:var(--ok);border-color:rgba(47,107,79,.4)}
+@media(max-width:1000px){.grid,.stats,.set-grid,.cred-grid,.cap-stats,.gauge-outer{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.shell{grid-template-columns:1fr}.nav{flex-direction:row;height:auto;width:100%;position:sticky;padding:8px;gap:4px}.tl-row{grid-template-columns:56px 1fr}}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:var(--line)}
+</style>
+</head>
+<body>
+
+
+<div class="shell">
+  <nav class="nav">
+    <div class="mark">SL</div>
+    <a href="./meridian.html" title="Globe"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></a>
+    <a class="on" href="./meridian-intel.html" title="Intel"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
+  </nav>
+  <div class="main">
+    <div class="topbar"><div class="topbar-inner">
+      <div class="brand">Meridian <em>Intel Console</em></div>
+      <span class="live"><i></i>LIVE</span>
+      <div class="toolbar">
+        <span class="chip-sep">window:</span>
+        <span class="chip" data-window="1h">1h</span>
+        <span class="chip on" data-window="24h">24h</span>
+        <span class="chip" data-window="7d">7d</span>
+        <span class="chip" data-window="30d">30d</span>
+        <input class="search" placeholder="search IP / user / command…" />
+        <a class="back" href="./index.html">← studies</a>
+      </div>
+    </div></div>
+
+<div class="wrap">
+  <div class="tabs" id="tabs">
+    <span class="tab on active" data-view="overview"><span class="tdot"></span>Overview</span>
+    <span class="tab blue" data-view="blue"><span class="tdot"></span>Blue Team</span>
+    <span class="tab red" data-view="red"><span class="tdot"></span>Red Team</span>
+    <span class="tab" data-view="settings"><span class="tdot"></span>Settings</span>
+  </div>
+
+  <section class="view on active" id="view-overview">
+    <div class="stats">
+      <div class="stat"><div class="n teal" id="s-events">—</div><div class="l">events</div></div>
+      <div class="stat"><div class="n amber" id="s-actors">—</div><div class="l">actors</div></div>
+      <div class="stat"><div class="n ok" id="s-ips">—</div><div class="l">unique IPs</div></div>
+      <div class="stat"><div class="n" id="s-uptime">—</div><div class="l">uptime</div></div>
+      <div class="stat"><div class="n" id="s-upd">—</div><div class="l">updated</div></div>
+    </div>
+
+    <div class="grid">
+      <section class="panel">
+        <h2>Threat Level</h2>
+        
+        <div class="gauge-outer">
+          <svg class="gauge-svg" viewBox="0 0 200 110" aria-hidden="true">
+            <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#d5dbe3" stroke-width="12"/>
+            <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#0d5c63" stroke-width="12" stroke-dasharray="140 251"/>
+            <text id="gauge-val" x="100" y="88" text-anchor="middle">0</text>
+            <text id="gauge-lbl" x="100" y="104" text-anchor="middle" fill="#5c6775" font-size="10" font-family="IBM Plex Mono" letter-spacing="1.2">HIGH</text>
+          </svg>
+          <div></div>
+        </div>
+
+        <div class="gauge-breakdown" id="gauge-breakdown"></div>
+      </section>
+      <section class="panel">
+        <h2>Attack Geography</h2>
+        <div id="geo-bars"></div>
+      </section>
+    </div>
+
+    <div class="grid">
+      <section class="panel">
+        <h2>Top Credentials</h2>
+        <div class="cred-grid">
+          <div class="cred-col"><h3>Passwords</h3><div id="cred-pw"></div></div>
+          <div class="cred-col"><h3>Usernames</h3><div id="cred-us"></div></div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Brute-Force Radar</h2>
+        <div id="radar-bars"></div>
+      </section>
+    </div>
+
+    <div class="grid">
+      <section class="panel full">
+        <h2>Activity heatmap <span class="meta">24h · by kind</span></h2>
+        <canvas id="heatmap" width="960" height="120"></canvas>
+      </section>
+      <section class="panel"><h2>Event kinds</h2><div id="bars-kind"></div></section>
+      <section class="panel"><h2>Playbooks</h2><div id="bars-playbook"></div></section>
+      <section class="panel"><h2>Intent</h2><div id="bars-intent"></div></section>
+      <section class="panel"><h2>Sources</h2><div id="bars-source"></div></section>
+      <section class="panel full">
+        <h2>Threat actors</h2>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>IP</th><th>Location</th><th>Playbook</th><th>Intent</th><th class="n">Events</th><th class="n">Probe</th><th>Last cmd</th><th>Last seen</th></tr></thead>
+            <tbody id="actors-body"></tbody>
+          </table>
+        </div>
+        <div class="detail" id="actor-detail" hidden>
+          <h3 id="detail-title">Actor detail</h3>
+          <div class="kv" id="detail-kv"></div>
+        </div>
+      </section>
+      <section class="panel full">
+        <h2>Recent commands</h2>
+        <div class="scroll tall">
+          <table>
+            <thead><tr><th>Time</th><th>IP</th><th>User</th><th>Kind</th><th>Command</th></tr></thead>
+            <tbody id="cmds-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel full">
+        <div class="panel-head"><h2>Payload capture</h2><span class="cap-live" id="cap-live">idle</span></div>
+        <div class="cap-stats">
+          <div class="cap-stat"><div class="n" id="cap-total">0</div><div class="l">tracked</div></div>
+          <div class="cap-stat"><div class="n" id="cap-fetched">0</div><div class="l">saved</div></div>
+          <div class="cap-stat"><div class="n" id="cap-active">0</div><div class="l">fetching</div></div>
+          <div class="cap-stat"><div class="n" id="cap-bytes">—</div><div class="l">evidence</div></div>
+        </div>
+      </section>
+      <section class="panel full">
+        <div class="panel-head"><h2>Live Attack Timeline</h2><span class="meta" id="tl-meta"></span></div>
+        <div class="tl-feed" id="tl-feed"></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="view" id="view-blue" hidden>
+    <div class="grid">
+      <section class="panel full">
+        <div class="panel-head"><h2>MITRE ATT&CK coverage</h2><span class="meta" id="mitre-meta"></span></div>
+        <div class="mitre-grid" id="mitre-grid"></div>
+      </section>
+      <section class="panel full">
+        <div class="panel-head"><h2>Cowrie sessions</h2><span class="meta" id="sessions-meta"></span></div>
+        <div id="sessions-list"></div>
+      </section>
+      <section class="panel full">
+        <h2>IOC export</h2>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Type</th><th>Value</th><th>CC</th><th class="n">Count</th></tr></thead>
+            <tbody id="ioc-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel full">
+        <h2>Suggested AbuseIPDB reports</h2>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>IP</th><th>Playbook</th><th class="n">Priority</th><th class="n">Events</th><th>Reasons</th></tr></thead>
+            <tbody id="abuse-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Threat intel enrichment</h2>
+        <p class="muted" style="margin:0">Lookup stub — wire to /api/intel/enrich in production.</p>
+        <div class="toolbar" style="margin-top:10px">
+          <input class="search" placeholder="1.2.3.4" value="92.118.39.14" />
+          <span class="chip on">Enrich</span>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>MalwareBazaar</h2>
+        <div class="cap-stats">
+          <div class="cap-stat"><div class="n" id="bz-uploaded">0</div><div class="l">uploaded</div></div>
+          <div class="cap-stat"><div class="n" id="bz-pending">0</div><div class="l">pending</div></div>
+          <div class="cap-stat"><div class="n" id="bz-dupes">0</div><div class="l">dupes</div></div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <section class="view" id="view-red" hidden>
+    <div class="grid">
+      <section class="panel full">
+        <h2>TTP harvesting</h2>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Template</th><th class="n">Count</th><th class="n">Actors</th></tr></thead>
+            <tbody id="ttp-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel full">
+        <div class="panel-head"><h2>Payload library</h2><span class="meta" id="payloads-meta"></span></div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Time</th><th>Status</th><th>URL / origin</th><th class="n">Size</th><th>SHA256</th></tr></thead>
+            <tbody id="payloads-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Credential wordlists</h2>
+        <div id="wl-preview"></div>
+      </section>
+      <section class="panel">
+        <h2>Infrastructure graph</h2>
+        <div class="stats" id="graph-stats" style="grid-template-columns:1fr 1fr 1fr;margin:0"></div>
+      </section>
+      <section class="panel full">
+        <h2>Proxy / tunnel targets</h2>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Dst IP</th><th class="n">Port</th><th class="n">Hits</th><th class="n">Actors</th><th>Last seen</th></tr></thead>
+            <tbody id="tunnels-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel full">
+        <h2>Obfuscation analysis</h2>
+        <div id="deobf-list"></div>
+      </section>
+      <section class="panel full">
+        <h2>Attack replay</h2>
+        <p class="muted" style="margin:0 0 8px">Select a session to synthesize a replay script (demo stub).</p>
+        <div id="replay-list"></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="view" id="view-settings" hidden>
+    <div class="set-grid">
+      <section class="panel">
+        <h2>Provider API keys</h2>
+        <div class="set-row"><span>AbuseIPDB</span><span class="set-badge set">set</span></div>
+        <div class="set-row"><span>VirusTotal</span><span class="set-badge set">set</span></div>
+        <div class="set-row"><span>GreyNoise</span><span class="set-badge">empty</span></div>
+        <div class="set-row"><span>OTX</span><span class="set-badge">empty</span></div>
+        <div class="set-row"><span>Shodan</span><span class="set-badge">empty</span></div>
+      </section>
+      <section class="panel">
+        <h2>Live status</h2>
+        <div class="set-row"><span>Ingest</span><span class="set-badge set">live</span></div>
+        <div class="set-row"><span>Cowrie</span><span class="set-badge set">ok</span></div>
+        <div class="set-row"><span>Journal</span><span class="set-badge set">ok</span></div>
+        <div class="set-row"><span>Capture</span><span class="set-badge set">idle</span></div>
+      </section>
+      <section class="panel">
+        <h2>AbuseIPDB reporting</h2>
+        <div class="set-row"><span>Report enabled</span><span class="set-badge set">on</span></div>
+        <div class="set-row"><span>Min probe score</span><span class="set-badge">40</span></div>
+      </section>
+      <section class="panel">
+        <h2>Geolocation / token</h2>
+        <div class="set-row"><span>GeoIP</span><span class="set-badge set">ready</span></div>
+        <div class="set-row"><span>Dashboard token</span><span class="set-badge set">active</span></div>
+      </section>
+    </div>
+  </section>
+</div>
+</div></div>
+
+<script type="module">
+import { INTEL, paintIntel, wireTabs, wireWindowChips, sessionsList } from "./_intel.js";
+wireTabs();
+wireWindowChips();
+paintIntel(document, INTEL);
+const el = document.getElementById("replay-list");
+if (el) el.innerHTML = sessionsList((INTEL.replay || INTEL.sessions || []).slice(0,4));
+</script>
+
+</body>
+</html>

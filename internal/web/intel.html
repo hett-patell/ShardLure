@@ -1,11 +1,24 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dragon">
 <head>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('shardlure_theme') || 'dragon';
+    if (t !== 'dragon' && t !== 'meridian' && t !== 'sprite') t = 'dragon';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'dragon');
+  }
+})();
+</script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ShardLure Intel</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Pixelify+Sans:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+
 <style>
   :root {
     --bg: #0a0608;
@@ -78,6 +91,7 @@
      column beside it in the 2-col grid). Header stays put; body scrolls. */
   .table-scroll { max-height: 440px; overflow: auto; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid > .panel { min-width: 0; overflow: hidden; }
   @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
   .grid .full { grid-column: 1 / -1; }
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; table-layout: fixed; }
@@ -86,6 +100,12 @@
   td.n, th.n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
   td.ip { color: var(--accent-2); }
   td.cmd { color: var(--good); white-space: normal; word-break: break-all; line-height: 1.35; }
+  /* Recent commands: keep Time/IP/User/Kind compact so Command gets the rest. */
+  #cmds-table th:nth-child(1), #cmds-table td:nth-child(1) { width: 7%; }
+  #cmds-table th:nth-child(2), #cmds-table td:nth-child(2) { width: 11%; }
+  #cmds-table th:nth-child(3), #cmds-table td:nth-child(3) { width: 8%; }
+  #cmds-table th:nth-child(4), #cmds-table td:nth-child(4) { width: 9%; }
+  #cmds-table th:nth-child(5), #cmds-table td:nth-child(5) { width: auto; }
   td.loc { color: var(--dim); }
   .empty { color: var(--dim); font-family: var(--mono); font-size: 11px; padding: 8px 0; }
   tr.actor-row { cursor: pointer; }
@@ -99,19 +119,40 @@
   .bar-row .n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
   #heatmap-wrap {
     overflow-x: auto; overflow-y: hidden;
-    background: rgba(0,0,0,0.25); border-radius: 3px; padding: 8px;
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
+    border: 1px solid var(--line);
+    border-radius: 3px; padding: 8px;
     min-height: 140px;
   }
   #heatmap { display: block; min-width: 100%; height: auto; }
-  .detail { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--dim); display: none; }
+  .detail {
+    margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; color: var(--dim); display: none;
+    min-width: 0; max-width: 100%; overflow: hidden;
+  }
   .detail.open { display: block; }
-  .detail h3 { margin: 0 0 8px; font-size: 12px; color: var(--text); font-weight: 600; }
-  .detail .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; margin-bottom: 12px; }
-  .detail .kv strong { color: var(--text); font-weight: 500; }
-  .cmd-list { max-height: 280px; overflow: auto; }
-  .cmd-line { padding: 5px 0; border-bottom: 1px dotted var(--line); }
-  .cmd-line .meta { color: var(--dim); margin-right: 8px; font-size: 10px; }
-  .cmd-line .txt { color: var(--good); word-break: break-all; line-height: 1.35; }
+  .detail h3 {
+    margin: 0 0 8px; font-size: 12px; color: var(--text); font-weight: 600;
+    overflow-wrap: anywhere; word-break: break-word; line-height: 1.35;
+  }
+  .detail .kv {
+    display: grid; grid-template-columns: minmax(88px, 120px) minmax(0, 1fr);
+    gap: 4px 12px; margin-bottom: 12px; align-items: start;
+    min-width: 0; max-width: 100%;
+  }
+  .detail .kv > span {
+    color: var(--dim); padding-top: 1px;
+  }
+  .detail .kv strong {
+    color: var(--text); font-weight: 500;
+    min-width: 0; max-width: 100%;
+    overflow-wrap: anywhere; word-break: break-word; line-height: 1.4;
+  }
+  .detail .kv strong.cmd-val { color: var(--good); }
+  .cmd-list { max-height: 280px; overflow: auto; min-width: 0; }
+  .cmd-line { padding: 5px 0; border-bottom: 1px dotted var(--line); min-width: 0; }
+  .cmd-line .meta { color: var(--dim); margin-right: 8px; font-size: 10px; overflow-wrap: anywhere; }
+  .cmd-line .txt { color: var(--good); overflow-wrap: anywhere; word-break: break-word; line-height: 1.35; }
   .cmd-line.event .txt { color: var(--text); }
   .scroll { max-height: 420px; overflow: auto; }
   .scroll.tall { max-height: 520px; }
@@ -135,9 +176,17 @@
   .cap-stat .n.warn { color: var(--warn); }
   .cap-stat .n.dim { color: var(--accent-2); }
   .cap-stat .l { color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
-  td.url { color: var(--accent-2); white-space: normal; word-break: break-all; line-height: 1.35; max-width: 0; }
-  td.hash { color: var(--dim); font-size: 10.5px; }
+  td.url { color: var(--accent-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  td.hash { color: var(--dim); font-size: 10px; font-family: var(--mono); white-space: normal; word-break: break-all; line-height: 1.35; font-variant-numeric: tabular-nums; }
   td.size { color: var(--good); text-align: right; }
+  /* Payload capture: keep URL compact; SHA256 needs room for full 64-char hex. */
+  #capture-table th:nth-child(1), #capture-table td:nth-child(1) { width: 5%; }
+  #capture-table th:nth-child(2), #capture-table td:nth-child(2) { width: 7%; }
+  #capture-table th:nth-child(3), #capture-table td:nth-child(3) { width: 18%; max-width: 0; }
+  #capture-table th:nth-child(4), #capture-table td:nth-child(4) { width: 6%; }
+  #capture-table th:nth-child(5), #capture-table td:nth-child(5) { width: 34%; }
+  #capture-table th:nth-child(6), #capture-table td:nth-child(6) { width: 11%; }
+  #capture-table th:nth-child(7), #capture-table td:nth-child(7) { width: 9%; }
   .cap-badge {
     font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
     padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line);
@@ -327,7 +376,7 @@
   @media (max-width: 1200px) { .mitre-grid { grid-template-columns: repeat(5, 1fr); } }
   @media (max-width: 720px)  { .mitre-grid { grid-template-columns: repeat(2, 1fr); } }
   .mitre-col {
-    background: rgba(0,0,0,0.25);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
     border: 1px solid var(--line);
     border-radius: 3px;
     padding: 8px 6px;
@@ -346,17 +395,17 @@
   .mitre-cell {
     display: block; padding: 6px 7px; margin-bottom: 4px;
     border: 1px solid var(--line); border-radius: 3px;
-    background: rgba(255,255,255,0.015);
+    background: color-mix(in srgb, var(--sheet, var(--glass)) 40%, transparent);
     font-family: var(--mono); font-size: 10px; color: var(--dim);
     cursor: pointer; transition: border-color 0.15s, background 0.15s;
     text-decoration: none;
   }
   .mitre-cell:hover { border-color: var(--line-strong); color: var(--text); }
-  .mitre-cell.lv1 { background: rgba(200,152,40,0.06);  border-color: rgba(200,152,40,0.20); color: #a3d8ee; }
-  .mitre-cell.lv2 { background: rgba(200,152,40,0.12);  border-color: rgba(200,152,40,0.32); color: #c3e3f5; }
-  .mitre-cell.lv3 { background: rgba(200,152,40,0.16);  border-color: rgba(200,152,40,0.42); color: #f5e3a8; }
-  .mitre-cell.lv4 { background: rgba(216,112,48,0.22);  border-color: rgba(216,112,48,0.52); color: #ffd5b8; }
-  .mitre-cell.lv5 { background: rgba(208,40,40,0.32);  border-color: rgba(208,40,40,0.62); color: #ffd0d5; }
+  .mitre-cell.lv1 { background: color-mix(in srgb, var(--accent-2) 8%, transparent);  border-color: color-mix(in srgb, var(--accent-2) 22%, transparent); color: var(--text); }
+  .mitre-cell.lv2 { background: color-mix(in srgb, var(--accent-2) 14%, transparent); border-color: color-mix(in srgb, var(--accent-2) 34%, transparent); color: var(--text); }
+  .mitre-cell.lv3 { background: color-mix(in srgb, var(--accent-2) 20%, transparent); border-color: color-mix(in srgb, var(--accent-2) 44%, transparent); color: var(--text); }
+  .mitre-cell.lv4 { background: color-mix(in srgb, var(--warn) 26%, transparent);     border-color: color-mix(in srgb, var(--warn) 52%, transparent); color: var(--text); }
+  .mitre-cell.lv5 { background: color-mix(in srgb, var(--accent) 32%, transparent);   border-color: color-mix(in srgb, var(--accent) 62%, transparent); color: var(--text); }
   .mitre-cell .mt-id { font-weight: 600; letter-spacing: 0.04em; display: flex; justify-content: space-between; align-items: center; gap: 4px; }
   .mitre-cell .mt-name { color: inherit; opacity: 0.85; font-size: 9.5px; margin-top: 2px; line-height: 1.25; white-space: normal; }
   .mitre-cell .mt-n { font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -365,8 +414,8 @@
     margin-top: 12px; font-family: var(--mono); font-size: 10px; color: var(--dim);
   }
   .mitre-top .mt-pill {
-    border: 1px solid rgba(200,152,40,0.35);
-    background: rgba(200,152,40,0.08);
+    border: 1px solid color-mix(in srgb, var(--accent-2) 40%, transparent);
+    background: color-mix(in srgb, var(--accent-2) 10%, transparent);
     color: var(--blue-team);
     padding: 3px 8px; border-radius: 4px;
     display: inline-flex; gap: 6px; align-items: center;
@@ -374,20 +423,51 @@
   .mitre-top .mt-pill b { color: var(--text); font-weight: 600; }
 
   /* ==== Slice C: cowrie session timeline ==== */
-  .sess-list { max-height: 360px; overflow: auto; }
+  .sess-panel-body { display: flex; flex-direction: column; gap: 0; min-width: 0; }
+  .sess-scroll {
+    max-height: 440px; overflow: auto; overscroll-behavior: contain;
+    border: 1px solid var(--line); border-radius: 3px;
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+  }
+  .sess-foot {
+    display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px;
+  }
+  .sess-jump {
+    font: 600 9px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 3px 10px; border-radius: 3px; cursor: pointer;
+    color: var(--dim); background: var(--glass-2); border: 1px solid var(--line);
+  }
+  .sess-jump:hover { color: var(--text); border-color: var(--line-strong); }
+  .sess-head, .sess-row {
+    display: grid;
+    grid-template-columns: 22px 54px 108px 72px minmax(0, 1fr) 74px 58px 40px 40px 54px;
+    gap: 5px 7px; align-items: center;
+    padding: 6px 8px;
+    font-family: var(--mono); font-size: 10.5px;
+  }
+  .sess-head {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--glass); border-bottom: 1px solid var(--line-strong);
+    color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em;
+    font-weight: 600;
+  }
+  .sess-head .n, .sess-row .n { text-align: right; }
+  .sess-list { min-width: 0; }
   .sess-row {
-    display: grid; grid-template-columns: 28px 1fr 130px 90px 90px 70px 80px; gap: 8px;
-    align-items: center; padding: 8px 6px;
     border-bottom: 1px dotted var(--line);
-    font-family: var(--mono); font-size: 11px;
     cursor: pointer; transition: background 0.12s;
   }
+  .sess-row:last-child { border-bottom: 0; }
   .sess-row:hover { background: rgba(200,152,40,0.05); }
   .sess-row .sess-num { color: var(--dim-2); text-align: right; }
-  .sess-row .sess-ip { color: var(--accent-2); }
-  .sess-row .sess-user { color: var(--text); }
+  .sess-row .sess-when { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .sess-row .sess-ip { color: var(--accent-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-row .sess-user { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-row .sess-client { color: var(--dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-row .sess-hassh { color: var(--purple); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-row .sess-actor { color: var(--dim-2); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-row .sess-arch {
-    color: var(--dim-2); font-size: 9px; margin-left: 6px;
+    color: var(--dim-2); font-size: 8.5px; margin-left: 4px;
     padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
     vertical-align: middle;
   }
@@ -410,10 +490,9 @@
   }
   #abuse-suggest-table .sg-btn { padding: 2px 7px; font-size: 10px; }
   #abuse-suggest-table .sg-disabled { color: var(--dim-2); }
-  .sess-row .sess-dur, .sess-row .sess-when { color: var(--dim); text-align: right; }
+  .sess-row .sess-dur, .sess-row .sess-when { color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
   .sess-row .sess-n { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
   .sess-row .sess-c { color: var(--good); text-align: right; font-variant-numeric: tabular-nums; }
-  .sess-row .sess-id { color: var(--purple); font-size: 10px; }
 
   /* terminal-style modal */
   .sess-modal {
@@ -460,7 +539,7 @@
   }
   .sm-transcript {
     margin-top: 16px; border: 1px solid var(--line); border-radius: 3px;
-    background: #0a0608;
+    background: var(--bg);
   }
   .sm-transcript summary {
     cursor: pointer; padding: 8px 12px; font-family: var(--mono);
@@ -627,6 +706,23 @@
   #payloads-table .pl-blocked   { color: var(--accent); }
   #payloads-table .pl-capturing { color: var(--warn); }
 
+  /* MalwareBazaar sharing table */
+  #bazaar-table { table-layout: fixed; width: 100%; }
+  #bazaar-table-wrap.scroll { max-height: 440px; overflow: auto; }
+  #bazaar-table th:nth-child(1), #bazaar-table td:nth-child(1) { width: 38%; }
+  #bazaar-table th:nth-child(2), #bazaar-table td:nth-child(2) { width: 7%; }
+  #bazaar-table th:nth-child(3), #bazaar-table td:nth-child(3) { width: 10%; }
+  #bazaar-table th:nth-child(4), #bazaar-table td:nth-child(4) { width: 8%; }
+  #bazaar-table th:nth-child(5), #bazaar-table td:nth-child(5) { width: 12%; }
+  #bazaar-table th:nth-child(6), #bazaar-table td:nth-child(6) { width: 10%; }
+  #bazaar-table th:nth-child(7), #bazaar-table td:nth-child(7) { width: 8%; }
+  #bazaar-table td.bz-sha {
+    font-family: var(--mono); font-size: 10px; color: var(--purple);
+    white-space: normal; word-break: break-all; line-height: 1.35;
+  }
+  #bazaar-table td.bz-sha a { color: var(--purple); text-decoration: none; }
+  #bazaar-table td.bz-sha a:hover { color: var(--accent); text-decoration: underline; }
+
   /* payload modal */
   .pm-grid {
     display: grid; grid-template-columns: 110px 1fr; gap: 4px 14px;
@@ -644,13 +740,13 @@
   }
   .pm-strings {
     font-family: var(--mono); font-size: 11px; color: var(--good);
-    background: #0a0608; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 3px;
     padding: 8px 10px; max-height: 260px; overflow: auto;
     white-space: pre-wrap; word-break: break-all;
   }
   .pm-hex {
     font-family: var(--mono); font-size: 10.5px; color: var(--dim);
-    background: #0a0608; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 3px;
     padding: 8px 10px; max-height: 260px; overflow: auto;
     white-space: pre;
   }
@@ -669,13 +765,13 @@
   }
   .wl-kind:hover { color: var(--text); border-color: var(--line-strong); }
   .wl-kind.active {
-    color: var(--accent); border-color: rgba(208,40,40,0.5);
-    background: rgba(208,40,40,0.08);
+    color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .wl-preview {
     max-height: 320px; overflow: auto;
     font-family: var(--mono); font-size: 11px;
-    background: #0a0608; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 3px;
     padding: 8px 10px;
   }
   .wl-row {
@@ -689,10 +785,19 @@
   /* ==== Slice I: pivot graph ==== */
   .graph-canvas {
     height: 520px;
-    background: #0a0608;
+    background: var(--bg);
     border: 1px solid var(--line);
     border-radius: 3px;
     overflow: hidden;
+    position: relative;
+    box-sizing: border-box;
+  }
+  .graph-canvas .vis-network {
+    width: 100%;
+    height: 100%;
+  }
+  .graph-canvas .vis-network canvas {
+    outline: none;
   }
   .graph-legend {
     display: flex; align-items: center; gap: 14px;
@@ -716,7 +821,7 @@
     margin-bottom: 10px; flex-wrap: wrap;
   }
   .replay-select {
-    background: #0a0608; color: var(--text); border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
     font-family: var(--mono); font-size: 11px;
     padding: 5px 8px; border-radius: 3px; min-width: 260px;
   }
@@ -726,8 +831,8 @@
   }
   .replay-toggle input { accent-color: var(--accent); }
   .replay-pre {
-    background: #0a0608; border: 1px solid var(--line); border-radius: 3px;
-    font-family: var(--mono); font-size: 11px; color: #e8dcd8;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 3px;
+    font-family: var(--mono); font-size: 11px; color: var(--text);
     padding: 12px 14px; margin: 0;
     max-height: 480px; overflow: auto; white-space: pre;
     line-height: 1.55;
@@ -739,7 +844,7 @@
   }
   .deobf-input {
     flex: 1;
-    background: #0a0608; color: var(--text); border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
     font-family: var(--mono); font-size: 11px;
     padding: 7px 10px; border-radius: 3px;
   }
@@ -762,20 +867,20 @@
   }
   .deobf-row {
     border: 1px solid var(--line); border-radius: 3px;
-    background: #0a0608; padding: 8px 10px; margin-bottom: 8px;
+    background: var(--bg); padding: 8px 10px; margin-bottom: 8px;
   }
   .deobf-row-meta {
     color: var(--dim-2); font-size: 10px; margin-bottom: 4px;
     display: flex; gap: 12px; flex-wrap: wrap;
   }
   .deobf-row-meta strong { color: var(--text); font-weight: 600; }
-  .deobf-orig { color: #e8dcd8; word-break: break-all; }
+  .deobf-orig { color: var(--text); word-break: break-all; }
   .deobf-arrow { color: var(--accent); padding: 0 6px; }
-  .deobf-final { color: #48b878; word-break: break-all; }
+  .deobf-final { color: var(--good); word-break: break-all; }
   .deobf-layer-pill {
     display: inline-block;
-    background: rgba(208,40,40,0.15); color: var(--accent);
-    border: 1px solid rgba(208,40,40,0.35);
+    background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: 3px; padding: 0 5px; font-size: 9px; margin-right: 4px;
     letter-spacing: 0.04em; text-transform: uppercase;
   }
@@ -802,17 +907,91 @@
   .gauge-breakdown .gb-val { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 
   /* ── Widget: timeline ── */
-  .tl-feed { max-height: 260px; overflow: auto; }
-  /* kind column was 74px — too narrow for FAILED_PASSWORD / CLIENT_VERSION,
-     so the label overflowed into the IP column and rows read as collided.
-     Widen it and clamp every cell to its track so nothing bleeds across. */
-  .tl-row { display: grid; grid-template-columns: 42px 116px 116px minmax(0,1fr); gap: 5px 8px; padding: 3px 0; border-bottom: 1px dotted var(--line); align-items: baseline; font: 10.5px var(--mono); }
-  .tl-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .tl-time { color: var(--dim-2); }
-  .tl-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .tl-ip { color: var(--accent-2); }
-  .tl-body { color: var(--text); }
-  .tl-cmd { color: var(--good); }
+  .tl-live {
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 3px; border: 1px solid rgba(208,40,40,0.4);
+    color: var(--accent); background: rgba(208,40,40,0.1);
+    vertical-align: middle; margin-left: 8px; font-weight: 600;
+    animation: capPulse 1.4s infinite;
+  }
+  .tl-live.idle {
+    color: var(--dim); border-color: var(--line); background: transparent;
+    animation: none;
+  }
+  .tl-feed {
+    max-height: 360px; overflow: auto; position: relative;
+    padding: 4px 2px 4px 0;
+  }
+  .tl-feed::before {
+    content: '';
+    position: absolute; left: 17px; top: 10px; bottom: 10px; width: 2px;
+    background: linear-gradient(180deg, rgba(208,40,40,0.55) 0%, var(--line) 35%, transparent 100%);
+    pointer-events: none;
+  }
+  .tl-row {
+    display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 0 10px;
+    padding: 7px 8px 7px 0; margin-bottom: 1px; border-radius: 4px;
+    position: relative; transition: background 0.15s;
+    font: 10.5px var(--mono);
+  }
+  .tl-row:hover { background: rgba(255,255,255,0.035); }
+  .tl-row-fresh { animation: tlRowIn 0.5s ease; background: rgba(208,40,40,0.07); }
+  @keyframes tlRowIn {
+    from { opacity: 0; transform: translateX(-6px); background: rgba(208,40,40,0.14); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  .tl-spine { display: flex; justify-content: center; padding-top: 5px; position: relative; z-index: 1; }
+  .tl-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    border: 2px solid var(--line-strong); background: var(--bg);
+    box-shadow: 0 0 0 2px var(--bg);
+  }
+  .tl-row-fresh .tl-dot { animation: tlDotPulse 1.6s ease infinite; }
+  @keyframes tlDotPulse {
+    0%, 100% { box-shadow: 0 0 0 2px var(--bg), 0 0 0 0 rgba(208,40,40,0.45); }
+    50% { box-shadow: 0 0 0 2px var(--bg), 0 0 0 5px rgba(208,40,40,0); }
+  }
+  .tl-kind-auth .tl-dot { border-color: var(--accent); background: rgba(208,40,40,0.55); }
+  .tl-kind-ok .tl-dot { border-color: var(--warn); background: rgba(200,152,40,0.55); }
+  .tl-kind-cmd .tl-dot { border-color: var(--good); background: rgba(72,184,120,0.55); }
+  .tl-kind-net .tl-dot { border-color: var(--purple); background: rgba(168,120,192,0.45); }
+  .tl-kind-file .tl-dot { border-color: var(--accent-2); background: rgba(200,152,40,0.45); }
+  .tl-kind-tun .tl-dot { border-color: var(--purple); background: rgba(168,120,192,0.65); }
+  .tl-main { min-width: 0; }
+  .tl-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 3px; }
+  .tl-time {
+    color: var(--dim-2); font-size: 10px; font-variant-numeric: tabular-nums;
+    min-width: 28px;
+  }
+  .tl-row-fresh .tl-time { color: var(--accent); font-weight: 600; }
+  .tl-kind-badge {
+    font-size: 8.5px; letter-spacing: 0.07em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line);
+    background: rgba(255,255,255,0.03); white-space: nowrap;
+  }
+  .tl-kind-auth .tl-kind-badge { color: var(--accent); border-color: rgba(208,40,40,0.4); background: rgba(208,40,40,0.08); }
+  .tl-kind-ok .tl-kind-badge { color: var(--warn); border-color: rgba(200,152,40,0.4); background: rgba(200,152,40,0.08); }
+  .tl-kind-cmd .tl-kind-badge { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
+  .tl-kind-net .tl-kind-badge { color: var(--purple); border-color: rgba(168,120,192,0.4); background: rgba(168,120,192,0.08); }
+  .tl-kind-file .tl-kind-badge { color: var(--accent-2); border-color: rgba(200,152,40,0.35); background: rgba(200,152,40,0.06); }
+  .tl-kind-tun .tl-kind-badge { color: var(--purple); border-color: rgba(168,120,192,0.45); background: rgba(168,120,192,0.1); }
+  .tl-ip { color: var(--accent-2); font-weight: 500; }
+  .tl-user { color: var(--dim); font-size: 9.5px; }
+  .tl-user b { color: var(--text); font-weight: 600; }
+  .tl-body { color: var(--text); line-height: 1.4; min-width: 0; }
+  .tl-cmd {
+    display: block; color: var(--good);
+    background: rgba(72,184,120,0.06); border-left: 2px solid rgba(72,184,120,0.55);
+    padding: 3px 8px; border-radius: 0 3px 3px 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tl-cmd::before { content: '$ '; color: var(--dim); }
+  .tl-muted { color: var(--dim); font-size: 10px; }
+  .tl-auth b { color: var(--warn); }
+  @media (prefers-reduced-motion: reduce) {
+    .tl-live, .tl-row-fresh, .tl-row-fresh .tl-dot { animation: none; }
+    .tl-row-fresh { background: rgba(208,40,40,0.05); }
+  }
 
   /* ── Widget: credentials ── */
   .cred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -886,6 +1065,16 @@
   .set-test.ok  { color: var(--good); }
   .set-test.bad { color: var(--accent); }
   .set-test.pending { color: var(--dim); }
+  .set-token-reveal { margin-top: 10px; }
+  .set-token-copy {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-top: 8px; padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: 4px;
+  }
+  .set-token-value {
+    flex: 1; min-width: 0; font: 12px var(--mono); color: var(--good);
+    word-break: break-all; user-select: all;
+  }
   .set-toggle { display: inline-flex; align-items: center; gap: 6px; font: 12px var(--sans); color: var(--text); cursor: pointer; }
   .set-badge {
     font: 10px var(--mono); text-transform: uppercase; letter-spacing: .04em;
@@ -906,6 +1095,7 @@
   #sh-ingest.stale { color: var(--warn); }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
+<link rel="stylesheet" href="/themes.css" />
 </head>
 <body>
 <div class="shell">
@@ -1069,13 +1259,13 @@
         <table id="capture-table">
           <thead>
             <tr>
-              <th style="width:52px">Time</th>
-              <th style="width:72px">Status</th>
+              <th>Time</th>
+              <th>Status</th>
               <th>URL / target</th>
-              <th style="width:72px" class="n">Size</th>
-              <th style="width:100px">SHA256</th>
-              <th style="width:110px">Source IP</th>
-              <th style="width:88px">Origin</th>
+              <th class="n">Size</th>
+              <th>SHA256</th>
+              <th>Source IP</th>
+              <th>Origin</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -1083,7 +1273,10 @@
       </div>
     </section>
     <section class="panel full" style="margin-top:8px">
-      <div class="panel-head"><h2>Live Attack Timeline</h2><span class="meta" id="tl-meta"></span></div>
+      <div class="panel-head">
+        <h2>Live Attack Timeline <span class="tl-live idle" id="tl-live">live</span></h2>
+        <span class="meta" id="tl-meta"></span>
+      </div>
       <div class="tl-feed" id="tl-feed"><div class="empty">loading…</div></div>
     </section>
   </div>
@@ -1111,8 +1304,21 @@
           <h2>Cowrie sessions · play-by-play</h2>
           <span class="meta" id="sessions-meta">—</span>
         </div>
-        <div class="sess-list" id="sessions-list">
-          <div class="empty">loading…</div>
+        <div class="sess-panel-body">
+          <div class="sess-scroll" id="sessions-scroll">
+            <div class="sess-head">
+              <span>#</span><span>When</span><span>IP</span><span>User</span>
+              <span>Client</span><span>HASSH</span><span class="n">Dur</span>
+              <span class="n">Ev</span><span class="n">Cmd</span><span>Actor</span>
+            </div>
+            <div class="sess-list" id="sessions-list">
+              <div class="empty">loading…</div>
+            </div>
+          </div>
+          <div class="sess-foot">
+            <button type="button" class="sess-jump" data-sess-jump="top">↑ top</button>
+            <button type="button" class="sess-jump" data-sess-jump="bottom">↓ bottom</button>
+          </div>
         </div>
       </section>
 
@@ -1383,12 +1589,12 @@
           <table id="bazaar-table">
             <thead><tr>
               <th>SHA256</th>
-              <th style="width:60px">Size</th>
-              <th style="width:70px">Family</th>
-              <th style="width:60px">Kind</th>
-              <th style="width:90px">Source IP</th>
-              <th style="width:70px">Status</th>
-              <th style="width:64px">Time</th>
+              <th class="n">Size</th>
+              <th>Family</th>
+              <th>Kind</th>
+              <th>Source IP</th>
+              <th>Status</th>
+              <th>Time</th>
             </tr></thead>
             <tbody><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
           </table>
@@ -1411,6 +1617,44 @@
       variable; clearing it reverts to the env value. Secrets are never shown back —
       only a masked hint. Changes take effect on the next request.
     </div>
+
+
+    <section class="panel full" id="panel-set-appearance">
+      <div class="panel-head"><h2>Appearance</h2>
+        <span class="meta">UI theme · applies to globe and intel · saved live</span></div>
+      <div class="panel-body">
+        <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="UI theme">
+          <button type="button" class="theme-card" data-theme-id="dragon" role="radio" aria-checked="false">
+            <div class="swatch" aria-hidden="true">
+              <span style="background:#0a0608"></span><span style="background:#141010"></span>
+              <span style="background:#e8dcd8"></span><span style="background:#d02828"></span>
+              <span style="background:#c89828"></span>
+            </div>
+            <div class="tname">Dragon</div>
+            <p class="tblurb">Blood-red ops desk (default)</p>
+          </button>
+          <button type="button" class="theme-card" data-theme-id="meridian" role="radio" aria-checked="false">
+            <div class="swatch" aria-hidden="true">
+              <span style="background:#dfe3e8"></span><span style="background:#f4f6f8"></span>
+              <span style="background:#1a2332"></span><span style="background:#0d5c63"></span>
+              <span style="background:#a67c2d"></span>
+            </div>
+            <div class="tname">Meridian</div>
+            <p class="tblurb">Cool slate cartography</p>
+          </button>
+          <button type="button" class="theme-card" data-theme-id="sprite" role="radio" aria-checked="false">
+            <div class="swatch" aria-hidden="true">
+              <span style="background:#7ec8e3"></span><span style="background:#fff8e8"></span>
+              <span style="background:#241910"></span><span style="background:#e85d4c"></span>
+              <span style="background:#f0b429"></span>
+            </div>
+            <div class="tname">Sprite</div>
+            <p class="tblurb">Chunky pixel console</p>
+          </button>
+        </div>
+        <div class="set-note" id="theme-picker-status" style="margin-top:10px;margin-bottom:0"></div>
+      </div>
+    </section>
 
     <!-- Live health strip -->
     <section class="panel full" id="panel-set-health">
@@ -1446,6 +1690,14 @@
         </div></div>
       </section>
 
+      <section class="panel full" id="panel-set-bazaar">
+        <div class="panel-head"><h2>MalwareBazaar sharing</h2>
+          <span class="meta">payload uploads · tags · size limits</span></div>
+        <div class="panel-body"><div class="set-rows" id="set-bazaar-rows">
+          <div class="empty">loading…</div>
+        </div></div>
+      </section>
+
       <section class="panel full" id="panel-set-reports">
         <div class="panel-head"><h2>AbuseIPDB report history</h2>
           <span class="meta" id="set-reports-meta">recent submissions · read-only</span></div>
@@ -1470,7 +1722,7 @@
 
       <section class="panel full" id="panel-set-token">
         <div class="panel-head"><h2>Dashboard token</h2>
-          <span class="meta">auth for this dashboard</span></div>
+          <span class="meta">auth for this dashboard · remove to leave it open</span></div>
         <div class="panel-body"><div class="set-rows" id="set-token-rows">
           <div class="empty">loading…</div>
         </div></div>
@@ -1523,6 +1775,63 @@ var currentToken = (function () {
 })();
 // DASH_TOKEN kept as a truthiness snapshot for the "was auth on at load?" gate
 // below; the actual value used per request is always the live currentToken.
+
+/* ==== UI theme (Dragon / Meridian / Sprite) ==== */
+window.__shardlureTheme = 'dragon';
+function applyTheme(id, opts) {
+  if (id !== 'dragon' && id !== 'meridian' && id !== 'sprite') id = 'dragon';
+  var force = opts && opts.force;
+  var prev = window.__shardlureTheme;
+  // Same-tab BroadcastChannel echoes postMessage back to our own listener.
+  // Bail before re-broadcast / onTheme when nothing changed — otherwise the
+  // pivot graph destroy/create loops forever and never paints.
+  if (!force && prev === id && document.documentElement.getAttribute('data-theme') === id) {
+    return id;
+  }
+  window.__shardlureTheme = id;
+  document.documentElement.setAttribute('data-theme', id);
+  try { localStorage.setItem('shardlure_theme', id); } catch (e) {}
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      window.__shardlureThemeEcho = id;
+      var bc = new BroadcastChannel('shardlure-theme');
+      bc.postMessage({ theme: id });
+      bc.close();
+    }
+  } catch (e) {}
+  if (typeof window.__shardlureOnTheme === 'function') {
+    try { window.__shardlureOnTheme(id); } catch (e) {}
+  }
+  return id;
+}
+async function syncThemeFromServer() {
+  try {
+    var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+    var data = await r.json();
+    var row = (data.settings || []).find(function (s) { return s.key === 'ui.theme'; });
+    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'dragon';
+    return applyTheme(id);
+  } catch (e) {
+    return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+  }
+}
+try {
+  window.addEventListener('storage', function (e) {
+    if (e.key === 'shardlure_theme' && e.newValue) applyTheme(e.newValue);
+  });
+  if (typeof BroadcastChannel !== 'undefined') {
+    var __themeBC = new BroadcastChannel('shardlure-theme');
+    __themeBC.onmessage = function (ev) {
+      if (!ev.data || !ev.data.theme) return;
+      // Ignore the echo of our own postMessage (Chrome delivers to same tab).
+      if (ev.data.theme === window.__shardlureThemeEcho ||
+          ev.data.theme === window.__shardlureTheme) return;
+      applyTheme(ev.data.theme);
+    };
+  }
+} catch (e) {}
+
 const DASH_TOKEN = currentToken;
 function setDashToken(t) {
   currentToken = t || '';
@@ -1595,6 +1904,7 @@ function patchNavLinks() {
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', patchNavLinks);
 } else { patchNavLinks(); }
+syncThemeFromServer();
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
 const fmt = function(n) { return Number(n || 0).toLocaleString(); };
@@ -1607,13 +1917,26 @@ const fmtBytes = function(n) {
 };
 const shortURL = function(u) {
   u = String(u || '');
-  if (u.length <= 72) return u;
-  return u.slice(0, 36) + '…' + u.slice(-30);
+  if (u.length <= 44) return u;
+  return u.slice(0, 20) + '…' + u.slice(-18);
 };
 const shortHash = function(h) {
   h = String(h || '');
-  if (h.length <= 16) return h || '—';
-  return h.slice(0, 12) + '…';
+  if (!h) return '—';
+  if (h.length <= 22) return h;
+  return h.slice(0, 10) + '…' + h.slice(-8);
+};
+const shortClient = function(c) {
+  c = String(c || '').trim();
+  if (!c) return '—';
+  if (c.length <= 28) return c;
+  return c.slice(0, 24) + '…';
+};
+const shortActor = function(a) {
+  a = String(a || '').trim();
+  if (!a) return '—';
+  if (a.length <= 10) return a;
+  return a.slice(0, 8) + '…';
 };
 let lastCaptureKey = '';
 const rel = function(ts) {
@@ -1625,6 +1948,31 @@ const rel = function(ts) {
   return Math.floor(s / 3600) + 'h';
 };
 
+function heatmapPalette() {
+  var cs = getComputedStyle(document.documentElement);
+  var g = function (k, fb) { return (cs.getPropertyValue(k) || fb).trim(); };
+  var accent = g('--accent', '#d02828');
+  var accent2 = g('--accent-2', '#c89828');
+  var good = g('--good', '#48b878');
+  var warn = g('--warn', '#c89828');
+  var dim = g('--dim', '#907068');
+  var text = g('--text', '#e8dcd8');
+  var bg = g('--bg', '#0a0608');
+  var glass2 = g('--glass-2', '#1e1618');
+  var theme = document.documentElement.getAttribute('data-theme') || 'dragon';
+  // Purple isn't a core token on all themes — keep a readable fallback.
+  var purple = theme === 'sprite' ? '#7a5ea8' : (theme === 'meridian' ? '#5a4a8a' : '#a878c0');
+  var empty = theme === 'dragon' ? '#402828' : glass2;
+  return {
+    bg: bg, label: dim, axis: dim, empty: empty, text: text,
+    kinds: {
+      invalid_user: accent, failed_password: accent, failed_publickey: warn,
+      accepted: accent2, connect: purple, command: good,
+      file_upload: accent2, file_download: accent2, tunnel: purple,
+      auth_fail: accent, input: good, default: dim
+    }
+  };
+}
 const kindColors = {
       invalid_user:'#d02828', failed_password:'#d02828', failed_publickey:'#d87030',
       accepted:'#c89828', connect:'#a878c0', command:'#48b878',
@@ -1652,13 +2000,18 @@ function drawHeatmap(cells) {
   const wrap = document.getElementById('heatmap-wrap');
   const dpr = window.devicePixelRatio || 1;
   const ctx = canvas.getContext('2d');
+  const pal = heatmapPalette();
+  // Keep legacy kindColors in sync for timeline chips that read it.
+  Object.keys(pal.kinds).forEach(function (k) { kindColors[k] = pal.kinds[k]; });
   if (!cells || !cells.length) {
     const w = Math.max(400, wrap.clientWidth || 400);
     canvas.style.width = w + 'px';
     canvas.style.height = '48px';
     canvas.width = w * dpr; canvas.height = 48 * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#7a8aa3';
+    ctx.fillStyle = pal.bg;
+    ctx.fillRect(0, 0, w, 48);
+    ctx.fillStyle = pal.axis;
     ctx.font = '12px monospace';
     ctx.fillText('No hourly data yet', 12, 28);
     return;
@@ -1679,25 +2032,25 @@ function drawHeatmap(cells) {
   canvas.width = Math.floor(cssW * dpr);
   canvas.height = Math.floor(cssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#0a0608';
+  ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, cssW, cssH);
   let maxN = 1;
   cells.forEach(function(c){ if (c.n > maxN) maxN = c.n; });
   kindList.forEach(function(kind, yi) {
-    ctx.fillStyle = '#c0a898';
+    ctx.fillStyle = pal.label;
     ctx.font = '10px ui-monospace, monospace';
     ctx.textAlign = 'right';
     ctx.fillText(kind.slice(0, 16), padL - 10, padT + yi * cellH + 12);
     hours.forEach(function(h, xi) {
       const n = map[h + '|' + kind] || 0;
-      const col = kindColors[kind] || kindColors.default;
-      ctx.globalAlpha = n ? Math.max(0.35, n / maxN) : 0.08;
-      ctx.fillStyle = n ? col : '#402828';
+      const col = pal.kinds[kind] || pal.kinds.default;
+      ctx.globalAlpha = n ? Math.max(0.35, n / maxN) : 0.22;
+      ctx.fillStyle = n ? col : pal.empty;
       ctx.fillRect(padL + xi * cellW, padT + yi * cellH, cellW - 3, cellH - 3);
       ctx.globalAlpha = 1;
     });
   });
-  ctx.fillStyle = '#7a8aa3';
+  ctx.fillStyle = pal.axis;
   ctx.font = '9px ui-monospace, monospace';
   ctx.textAlign = 'center';
   const step = Math.max(1, Math.floor(hours.length / 10));
@@ -1718,7 +2071,10 @@ async function loadActorDetail(id) {
   const el = document.getElementById('actor-detail');
   el.classList.add('open');
   document.getElementById('detail-title').textContent = (a.ip || a.id) + ' · ' + (a.playbook || 'unknown');
-  const users = (a.topUsers || []).map(function(u){ return u.user + ' (' + u.hits + ')'; }).join(', ') || '—';
+  const topUsers = a.topUsers || [];
+  const usersShown = topUsers.slice(0, 8).map(function(u){ return u.user + ' (' + u.hits + ')'; }).join(', ');
+  const usersMore = topUsers.length > 8 ? ' · +' + (topUsers.length - 8) + ' more' : '';
+  const users = usersShown ? (usersShown + usersMore) : '—';
   const loc = [a.city, a.country].filter(Boolean).join(', ') || '—';
   document.getElementById('detail-kv').innerHTML =
     '<span>Actor ID</span><strong>' + esc(a.id) + '</strong>' +
@@ -1731,7 +2087,7 @@ async function loadActorDetail(id) {
     '<span>Top users</span><strong>' + esc(users) + '</strong>' +
     (a.hassh ? '<span>HASSH</span><strong>' + esc(a.hassh) + '</strong>' : '') +
     (a.sshClient ? '<span>SSH client</span><strong>' + esc(a.sshClient) + '</strong>' : '') +
-    (a.lastCommand ? '<span>Last command</span><strong style="color:var(--good)">' + esc(a.lastCommand) + '</strong>' : '');
+    (a.lastCommand ? '<span>Last command</span><strong class="cmd-val">' + esc(a.lastCommand) + '</strong>' : '');
   // AbuseIPDB report button: shown only when the backend says this actor is
   // eligible (reporting armed + passes the Vet gate + not already reported).
   const actions = document.getElementById('detail-actions');
@@ -1875,7 +2231,7 @@ function renderCapture(d) {
       '<td>' + badge + '</td>' +
       '<td class="url" title="' + esc(a.url + (a.detail ? '\n' + a.detail : '')) + '">' + esc(shortURL(a.url)) + '</td>' +
       '<td class="size n">' + (a.sizeBytes > 0 ? esc(fmtBytes(a.sizeBytes)) : '—') + '</td>' +
-      '<td class="hash" title="' + esc(a.sha256 || '') + '">' + esc(shortHash(a.sha256)) + '</td>' +
+      '<td class="hash" title="' + esc(a.sha256 || '') + '">' + esc(a.sha256 || '—') + '</td>' +
       '<td class="ip">' + esc(a.srcIp || '—') + '</td>' +
       '<td>' + esc(origin || '—') + '</td></tr>';
   }).join('');
@@ -2003,7 +2359,10 @@ function knobRowHTML(s) {
   } else if (s.kind === 'float') {
     ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="default" inputmode="decimal">';
   } else {
-    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="' + (s.kind === 'intcsv' ? 'e.g. 18,22' : 'default') + '">';
+    var ph = 'default';
+    if (s.key === 'bazaar.tags') ph = 'e.g. shardlure, honeypot';
+    else if (s.key === 'bazaar.endpoint') ph = 'https://mb-api.abuse.ch/api/v1/';
+    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="' + (s.kind === 'intcsv' ? 'e.g. 18,22' : ph) + '">';
   }
   return '<div class="set-row" data-key="' + esc(s.key) + '" data-kind="' + esc(s.kind) + '">'
     + '<div class="set-label"><span class="sl-name">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
@@ -2013,26 +2372,76 @@ function knobRowHTML(s) {
     +   '<span class="set-test"></span>'
     + '</div></div>';
 }
+
+function markThemePicker(id) {
+  var root = document.getElementById('theme-picker');
+  if (!root) return;
+  root.querySelectorAll('.theme-card').forEach(function (card) {
+    var on = card.getAttribute('data-theme-id') === id;
+    card.classList.toggle('on', on);
+    card.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+}
+async function selectTheme(id) {
+  var prev = window.__shardlureTheme || 'dragon';
+  applyTheme(id);
+  markThemePicker(id);
+  var status = document.getElementById('theme-picker-status');
+  try {
+    await postSetting({ key: 'ui.theme', value: id });
+    if (status) status.textContent = 'Theme saved · ' + id;
+  } catch (e) {
+    applyTheme(prev);
+    markThemePicker(prev);
+    if (status) status.textContent = 'Save failed: ' + e.message;
+  }
+}
+function wireThemePicker() {
+  var root = document.getElementById('theme-picker');
+  if (!root || root.dataset.wired) return;
+  root.dataset.wired = '1';
+  root.addEventListener('click', function (e) {
+    var card = e.target.closest('.theme-card');
+    if (!card) return;
+    selectTheme(card.getAttribute('data-theme-id'));
+  });
+}
+
 async function loadSettings() {
   try {
     var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     var data = await r.json();
     _settingsLoaded = true;
-    var buckets = { keys: [], abuse: [], geo: [], token: [] };
+    var buckets = { keys: [], abuse: [], bazaar: [], geo: [], token: [] };
+    var themeVal = 'dragon';
     (data.settings || []).forEach(function (s) {
+      if (s.key === 'ui.theme') {
+        if (s.value) themeVal = s.value;
+        return;
+      }
       if (s.key === 'SHARDLURE_DASH_TOKEN') buckets.token.push(s);
+      else if (s.key === 'SHARDLURE_BAZAAR_KEY') buckets.bazaar.push(s);
+      else if (s.key.indexOf('bazaar.') === 0) buckets.bazaar.push(s);
       else if (s.kind === 'secret') buckets.keys.push(s);
       else if (s.key.indexOf('abuseipdb.') === 0) buckets.abuse.push(s);
       else buckets.geo.push(s);
     });
+    applyTheme(themeVal);
+    markThemePicker(themeVal);
+    wireThemePicker();
     document.getElementById('set-keys-rows').innerHTML =
       buckets.keys.map(secretRowHTML).join('') || '<div class="empty">none</div>';
     document.getElementById('set-abuse-rows').innerHTML =
       buckets.abuse.map(knobRowHTML).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-bazaar-rows').innerHTML =
+      buckets.bazaar.map(function (s) {
+        return s.kind === 'secret' ? secretRowHTML(s) : knobRowHTML(s);
+      }).join('') || '<div class="empty">none</div>';
     document.getElementById('set-geo-rows').innerHTML =
       buckets.geo.map(knobRowHTML).join('') || '<div class="empty">none</div>';
-    document.getElementById('set-token-rows').innerHTML = tokenRowHTML(buckets.token[0]);
+    document.getElementById('set-token-rows').innerHTML = tokenPanelHTML(buckets.token[0]);
+    if (_revealedDashToken) showRevealedToken(_revealedDashToken);
   } catch (e) {
     document.getElementById('set-keys-rows').innerHTML =
       '<div class="empty">failed to load settings: ' + esc(e.message) + '</div>';
@@ -2112,8 +2521,43 @@ function tokenRowHTML(s) {
     + '<div class="set-control"><span class="set-hint">' + (s.set ? esc(s.hint) : 'no token — dashboard is unauthenticated') + '</span></div>'
     + '<div class="set-actions">'
     +   '<button class="set-btn primary" onclick="rotateToken(this)">Rotate</button>'
+    +   (s.set ? '<button class="set-btn danger" onclick="clearDashToken(this)">Remove</button>' : '')
     +   '<span class="set-test"></span>'
     + '</div></div>';
+}
+function tokenPanelHTML(s) {
+  return tokenRowHTML(s)
+    + '<div id="set-token-reveal" class="set-token-reveal" style="display:none">'
+    + '<div class="set-note">New token — copy it now. It is only shown here once after rotate (other tabs need the new value).</div>'
+    + '<div class="set-token-copy">'
+    + '<code id="set-token-value" class="set-token-value"></code>'
+    + '<button type="button" class="set-btn primary" onclick="copyDashToken(this)">Copy</button>'
+    + '</div></div>';
+}
+var _revealedDashToken = '';
+function showRevealedToken(tok) {
+  _revealedDashToken = tok || '';
+  var box = document.getElementById('set-token-reveal');
+  var val = document.getElementById('set-token-value');
+  if (!box || !val || !_revealedDashToken) return;
+  val.textContent = _revealedDashToken;
+  box.style.display = 'block';
+}
+async function copyDashToken(btn) {
+  var val = document.getElementById('set-token-value');
+  if (!val || !val.textContent) return;
+  try {
+    await navigator.clipboard.writeText(val.textContent);
+    btn.textContent = 'Copied!';
+    setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+  } catch (_) {
+    var range = document.createRange();
+    range.selectNodeContents(val);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    btn.textContent = 'Selected';
+  }
 }
 async function postSetting(body) {
   var r = await fetch('/api/settings/save', {
@@ -2199,9 +2643,33 @@ async function rotateToken(btn) {
     var r = await fetch('/api/settings/token/rotate', { method: 'POST' });
     var data = await r.json();
     if (!r.ok || !data.token) throw new Error(data.error || ('HTTP ' + r.status));
-    setDashToken(data.token); // keep THIS session working with the new token
-    rowResult(btn, true, 'rotated');
-    setTimeout(loadSettings, 400);
+    setDashToken(data.token);
+    showRevealedToken(data.token);
+    var hint = btn.closest('.set-row').querySelector('.set-hint');
+    if (hint) hint.textContent = '••••' + data.token.slice(-4);
+    rowResult(btn, true, 'rotated — copy below');
+    loadStatus();
+  } catch (e) { rowResult(btn, false, e.message); }
+  finally { btn.disabled = false; }
+}
+async function clearDashToken(btn) {
+  if (!confirm('Remove dashboard authentication? Anyone who can reach this port gets full access (credential exports, pprof, etc.). Only use on Tailscale or loopback.')) return;
+  btn.disabled = true;
+  try {
+    await postSetting({ key: 'SHARDLURE_DASH_TOKEN', action: 'clear' });
+    setDashToken('');
+    _revealedDashToken = '';
+    var box = document.getElementById('set-token-reveal');
+    if (box) box.style.display = 'none';
+    await loadSettings();
+    var sr = await fetch('/api/settings/status?_=' + Date.now(), { cache: 'no-store' });
+    var st = sr.ok ? await sr.json() : {};
+    if (st.tokenSet) {
+      rowResult(btn, false, 'still armed via env var');
+    } else {
+      rowResult(btn, true, 'auth disabled');
+    }
+    loadStatus();
   } catch (e) { rowResult(btn, false, e.message); }
   finally { btn.disabled = false; }
 }
@@ -2400,16 +2868,15 @@ function fmtOffset(ms) {
 function renderSessions(data) {
   const list = document.getElementById('sessions-list');
   const meta = document.getElementById('sessions-meta');
+  const scrollEl = document.getElementById('sessions-scroll');
+  const prevScroll = scrollEl ? scrollEl.scrollTop : 0;
+  const atBottom = scrollEl && (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 24);
   var win = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
   if (!data.sessions || data.sessions.length === 0) {
     list.innerHTML = '<div class="empty">no cowrie sessions in window</div>';
     meta.textContent = '0 sessions · ' + win + ' window';
     return;
   }
-  // data.total is the true distinct-session count in the window; the list is
-  // capped to the newest `returned`. Show "newest N of M" when capped so the
-  // count isn't read as the window total (and so widening the window — which
-  // grows M but not the newest-N rows — visibly changes the number).
   var shown = (data.returned != null) ? data.returned : data.sessions.length;
   var totalSess = (data.total != null) ? data.total : shown;
   var label = totalSess > shown
@@ -2418,29 +2885,51 @@ function renderSessions(data) {
   meta.textContent = label + ' · ' + win + ' window';
   let html = '';
   data.sessions.forEach(function(s, i) {
-    // s.id / s.ip / s.user are attacker-influenced (cowrie session id, source
-    // IP, attempted SSH username) — escape before they touch innerHTML.
     const user = s.user ? esc(s.user) : '<span style="color:var(--dim-2)">—</span>';
-    // durExact marks a duration sourced from cowrie's session.closed duration_ms
-    // (counts the idle tail); the ~ prefix flags the MAX(ts)-MIN(ts) estimate.
     const durTitle = s.durExact ? 'cowrie session.closed duration' : 'estimated from event span';
     const durTxt = (s.durExact ? '' : '~') + fmtDur(s.durMs);
     const arch = s.arch ? '<span class="sess-arch" title="client arch">' + esc(s.arch) + '</span>' : '';
-    html += '<div class="sess-row" data-sid="' + esc(s.id) + '">' +
+    const when = rel(s.start);
+    const client = shortClient(s.client);
+    const hassh = shortHash(s.hassh);
+    const actor = shortActor(s.actor);
+    const rowTitle = 'session ' + s.id + (s.start ? ' · started ' + s.start : '');
+    html += '<div class="sess-row" data-sid="' + esc(s.id) + '" title="' + esc(rowTitle) + '">' +
       '<span class="sess-num">' + (i + 1) + '</span>' +
-      '<span class="sess-id">' + esc(s.id) + '</span>' +
+      '<span class="sess-when" title="' + esc(s.start || '') + '">' + esc(when) + '</span>' +
       '<span class="sess-ip">' + esc(s.ip) + '</span>' +
       '<span class="sess-user">' + user + arch + '</span>' +
-      '<span class="sess-dur" title="' + durTitle + '">' + durTxt + '</span>' +
-      '<span class="sess-n" title="events">' + s.events + 'e</span>' +
-      '<span class="sess-c" title="commands">' + s.commands + 'c</span>' +
+      '<span class="sess-client" title="' + esc(s.client || '') + '">' + esc(client) + '</span>' +
+      '<span class="sess-hassh" title="' + esc(s.hassh || '') + '">' + esc(hassh) + '</span>' +
+      '<span class="sess-dur n" title="' + durTitle + '">' + durTxt + '</span>' +
+      '<span class="sess-n n" title="events">' + s.events + '</span>' +
+      '<span class="sess-c n" title="commands">' + s.commands + '</span>' +
+      '<span class="sess-actor" title="' + esc(s.actor || '') + '">' + esc(actor) + '</span>' +
       '</div>';
   });
   list.innerHTML = html;
   list.querySelectorAll('.sess-row').forEach(function(row) {
     row.addEventListener('click', function() { openSession(row.dataset.sid); });
   });
+  if (scrollEl) {
+    if (atBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
+    else scrollEl.scrollTop = prevScroll;
+  }
 }
+
+(function bindSessionScroll() {
+  var panel = document.getElementById('panel-sessions');
+  if (!panel || panel.dataset.scrollBound) return;
+  panel.dataset.scrollBound = '1';
+  panel.addEventListener('click', function(ev) {
+    var btn = ev.target.closest('[data-sess-jump]');
+    if (!btn) return;
+    var scrollEl = document.getElementById('sessions-scroll');
+    if (!scrollEl) return;
+    if (btn.dataset.sessJump === 'bottom') scrollEl.scrollTop = scrollEl.scrollHeight;
+    else scrollEl.scrollTop = 0;
+  });
+})();
 
 async function refreshSessions() {
   try {
@@ -3339,6 +3828,28 @@ if (readTabFromHash() === 'red') refreshWordlist();
 // ==== Slice I: infrastructure pivot graph =========================
 const GRAPH = { network: null, container: null };
 
+window.__shardlureOnTheme = (function (prev) {
+  var graphTimer = 0;
+  return function (id) {
+    if (typeof prev === 'function') try { prev(id); } catch (e) {}
+    try {
+      if (window._lastHeatmap) drawHeatmap(window._lastHeatmap);
+    } catch (e) {}
+    // Debounce graph rebuild — theme broadcasts / rapid switches must not
+    // destroy the network mid-init (leaves a blank canvas).
+    try {
+      if (GRAPH.lastData && document.getElementById('view-red') &&
+          document.getElementById('view-red').classList.contains('active')) {
+        clearTimeout(graphTimer);
+        graphTimer = setTimeout(function () {
+          try { renderGraph(GRAPH.lastData); } catch (e) {}
+        }, 120);
+      }
+    } catch (e) {}
+  };
+})(window.__shardlureOnTheme);
+
+
 const NODE_STYLE = {
   actor: { color: '#d02828', shape: 'dot' },
   ip:    { color: '#c89828', shape: 'square' },
@@ -3372,27 +3883,89 @@ async function refreshGraph() {
   }
 }
 
+function isLightGraphTheme() {
+  var t = document.documentElement.getAttribute('data-theme');
+  return t === 'sprite' || t === 'meridian';
+}
+
+function graphThemeColors() {
+  var cs = getComputedStyle(document.documentElement);
+  var text = (cs.getPropertyValue('--text') || '#e8dcd8').trim();
+  var accent = (cs.getPropertyValue('--accent') || '#d02828').trim();
+  var bg = (cs.getPropertyValue('--bg') || '#0a0608').trim();
+  var line = (cs.getPropertyValue('--line') || 'rgba(200,120,100,0.15)').trim();
+  var light = isLightGraphTheme();
+  return {
+    text: text,
+    accent: accent,
+    bg: bg,
+    // Sprite/Meridian: use full ink line colour — faint rgba edges vanished on cream.
+    line: line,
+    edge: light ? line : line,
+    edgeHover: accent,
+    nodeBorder: light ? '#fffdf7' : null,
+    mono: 'monospace',
+    light: light,
+  };
+}
+
+function graphNodeLabel(n) {
+  var lbl = String(n.label || '');
+  if (lbl.length <= 18) return lbl;
+  if (n.kind === 'actor') {
+    var p = lbl.lastIndexOf(':');
+    return p >= 0 ? lbl.slice(p + 1, p + 13) : lbl.slice(0, 12);
+  }
+  return lbl.slice(0, 14) + '…';
+}
+
+function graphResizeFit() {
+  if (!GRAPH.network) return;
+  try { GRAPH.network.redraw(); } catch (e) {}
+}
+
 function renderGraph(data) {
   if (typeof vis === 'undefined') {
     document.getElementById('graph-canvas').innerHTML =
       '<div class="empty" style="padding:24px">vis-network failed to load</div>';
     return;
   }
+  GRAPH.lastData = data;
+  var tc = graphThemeColors();
   const nodes = data.nodes.map(function(n) {
     const style = NODE_STYLE[n.kind] || NODE_STYLE.user;
+    var border = tc.nodeBorder || style.color;
     return {
-      id: n.id, label: n.label, shape: style.shape,
-      color: { background: style.color, border: style.color },
-      font: { color: '#e8dcd8', face: 'JetBrains Mono, ui-monospace, monospace', size: 11 },
+      id: n.id,
+      label: graphNodeLabel(n),
+      shape: style.shape,
+      color: {
+        background: style.color,
+        border: border,
+        highlight: { background: style.color, border: tc.accent },
+        hover: { background: style.color, border: tc.accent },
+      },
+      font: {
+        color: tc.text,
+        face: tc.mono,
+        size: 11,
+        strokeWidth: tc.light ? 3 : 0,
+        strokeColor: tc.bg,
+      },
       size: 8 + Math.min(22, Math.sqrt(n.weight) * 3),
-      title: n.kind + ' · weight ' + n.weight,
+      title: n.kind + ' · ' + n.label + ' · weight ' + n.weight,
     };
   });
-  const edges = data.edges.map(function(e) {
+  const edges = (data.edges || []).map(function(e) {
     return {
       from: e.from, to: e.to,
       width: Math.min(4, Math.log2(1 + e.weight)),
-      color: { color: 'rgba(200,120,100,0.15)', highlight: '#d02828' },
+      color: {
+        color: tc.edge,
+        opacity: tc.light ? 0.5 : 0.85,
+        highlight: tc.edgeHover,
+        hover: tc.edgeHover,
+      },
       smooth: false,
       title: 'co-occur × ' + e.weight,
     };
@@ -3405,15 +3978,27 @@ function renderGraph(data) {
     { nodes: nodes, edges: edges },
     {
       physics: {
+        enabled: true,
         solver: 'forceAtlas2Based',
         forceAtlas2Based: { gravitationalConstant: -50, springLength: 110, damping: 0.4 },
-        stabilization: { iterations: 200 },
+        stabilization: { enabled: true, iterations: 160, fit: true },
       },
-      interaction: { hover: true, tooltipDelay: 150, dragNodes: true, zoomView: true },
-      nodes: { borderWidth: 1 },
+      layout: { improvedLayout: false, randomSeed: 42 },
+      interaction: {
+        hover: true,
+        tooltipDelay: 150,
+        dragNodes: true,
+        dragView: true,
+        zoomView: true,
+        multiselect: false,
+      },
+      nodes: { borderWidth: tc.light ? 2 : 1 },
       edges: { selectionWidth: 2 },
     }
   );
+  GRAPH.network.once('stabilizationIterationsDone', function () {
+    try { GRAPH.network.fit({ animation: false }); } catch (e) {}
+  });
 }
 
 const _setActiveForGraph = setActiveView;
@@ -3439,9 +4024,10 @@ async function loadReplaySessions() {
                          '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
     const data = await r.json();
-    const items = data.sessions || [];
+    const items = (data.sessions || []).filter(function(s) { return (s.commands || 0) > 0; });
     if (items.length === 0) {
-      sel.innerHTML = '<option value="">no sessions in window</option>';
+      sel.innerHTML = '<option value="">no sessions with commands in window</option>';
+      document.getElementById('replay-pre').innerHTML = '<div class="empty">no sessions with commands in window</div>';
       return;
     }
     sel.innerHTML = items.map(function(s) {
@@ -3616,8 +4202,9 @@ function renderBazaar(d) {
   }
   tb.innerHTML = rows.map(function(u) {
     var sha = esc(u.sha256 || '');
-    var shortSha = sha.slice(0,10) + '…';
-    var link = u.mbUrl ? '<a href="' + esc(u.mbUrl) + '" target="_blank" rel="noopener" style="color:var(--purple);text-decoration:none" title="' + sha + '">' + shortSha + '</a>' : '<span style="color:var(--purple)" title="' + sha + '">' + shortSha + '</span>';
+    var link = u.mbUrl
+      ? '<a href="' + esc(u.mbUrl) + '" target="_blank" rel="noopener" title="View on MalwareBazaar">' + sha + '</a>'
+      : sha;
     var size = u.sizeBytes ? fmtBytes(u.sizeBytes) : '—';
     var family = u.family ? '<span class="tag ok" style="font-size:9px;padding:1px 5px">' + esc(u.family) + '</span>' : '<span style="color:var(--dim)">—</span>';
     var kind = u.fileKind ? esc(u.fileKind) : '—';
@@ -3626,7 +4213,7 @@ function renderBazaar(d) {
     var stLabel = u.status === 'file_already_known' ? 'known' : esc(u.status || '?');
     var badge = '<span class="tag ' + stClass + '" style="font-size:9px;padding:1px 5px">' + stLabel + '</span>';
     var ts = u.uploadedAt ? rel(u.uploadedAt) : '—';
-    return '<tr><td>' + link + '</td><td style="color:var(--dim)">' + size + '</td><td>' + family + '</td><td style="color:var(--dim)">' + kind + '</td><td>' + ip + '</td><td>' + badge + '</td><td style="color:var(--dim)">' + ts + '</td></tr>';
+    return '<tr><td class="bz-sha">' + link + '</td><td class="n" style="color:var(--dim)">' + size + '</td><td>' + family + '</td><td style="color:var(--dim)">' + kind + '</td><td>' + ip + '</td><td>' + badge + '</td><td style="color:var(--dim)">' + ts + '</td></tr>';
   }).join('');
 }
 
@@ -3766,18 +4353,69 @@ async function refreshTimeline() {
     renderTimeline(d.events||[]);
   }catch(_){}
 }
+function tlKindClass(kind) {
+  if (kind === 'command' || kind === 'input') return 'tl-kind-cmd';
+  if (kind === 'failed_password' || kind === 'invalid_user' || kind === 'failed_publickey' || kind === 'auth_fail') return 'tl-kind-auth';
+  if (kind === 'accepted') return 'tl-kind-ok';
+  if (kind === 'connect' || kind === 'client_version') return 'tl-kind-net';
+  if (kind === 'file_upload' || kind === 'file_download') return 'tl-kind-file';
+  if (kind === 'tunnel') return 'tl-kind-tun';
+  return 'tl-kind-net';
+}
+function tlKindLabel(kind) {
+  var m = {
+    failed_password: 'auth fail', failed_publickey: 'key fail', invalid_user: 'bad user',
+    client_version: 'client', file_upload: 'upload', file_download: 'download',
+    accepted: 'login ok', connect: 'connect', command: 'command', tunnel: 'tunnel'
+  };
+  return m[kind] || String(kind || 'event').replace(/_/g, ' ');
+}
+function tlBody(e) {
+  if (e.command) return '<div class="tl-body"><span class="tl-cmd" title="' + esc(e.command) + '">' + esc(e.command.slice(0, 120)) + '</span></div>';
+  if (e.username) return '<div class="tl-body"><span class="tl-auth">attempted login as <b>' + esc(e.username) + '</b></span></div>';
+  if (e.kind === 'connect') return '<div class="tl-body"><span class="tl-muted">new SSH session opened</span></div>';
+  if (e.kind === 'client_version') return '<div class="tl-body"><span class="tl-muted">client banner announced</span></div>';
+  if (e.kind === 'tunnel') return '<div class="tl-body"><span class="tl-muted">direct-tcpip pivot tunnel</span></div>';
+  if (e.kind === 'file_upload' || e.kind === 'file_download') return '<div class="tl-body"><span class="tl-muted">' + esc(tlKindLabel(e.kind)) + ' event</span></div>';
+  return '<div class="tl-body"><span class="tl-muted">' + esc(tlKindLabel(e.kind)) + '</span></div>';
+}
 function renderTimeline(events) {
   var el=document.getElementById('tl-feed');
   var meta=document.getElementById('tl-meta');
+  var live=document.getElementById('tl-live');
   if(!el)return;
-  // Fetch caps at limit=40; when full, say "latest 40" so it doesn't read as
-  // the true last-hour total.
-  if(meta)meta.textContent=(events.length>=40?'latest '+events.length:events.length+' events');
-  if(!events.length){el.innerHTML='<div class="empty">No events in the last hour</div>';return}
+  var now=Date.now();
+  var freshCutoff=now-20000;
+  var hasFresh=events.some(function(e){ var d=new Date(e.ts).getTime(); return Number.isFinite(d)&&d>=freshCutoff; });
+  if(live){
+    live.classList.toggle('idle', !hasFresh);
+    live.textContent=hasFresh?'live':'idle';
+  }
+  if(meta){
+    var label=(events.length>=40?'latest '+events.length:events.length+' events');
+    meta.textContent='last hour · '+label+(hasFresh?' · activity now':'');
+  }
+  if(!events.length){
+    el.innerHTML='<div class="empty">No events in the last hour — waiting for the next probe…</div>';
+    return;
+  }
   el.innerHTML=events.map(function(e){
-    var kc=(typeof kindColors!=='undefined'&&kindColors[e.kind])?kindColors[e.kind]:'var(--dim)';
-    var body=e.command?'<span class="tl-cmd">'+esc(e.command.slice(0,80))+'</span>':esc(e.username||'—');
-    return '<div class="tl-row"><span class="tl-time">'+rel(e.ts)+'</span><span class="tl-kind" style="color:'+kc+'">'+esc(e.kind)+'</span><span class="tl-ip">'+esc(e.srcIp)+'</span><span class="tl-body">'+body+'</span></div>';
+    var kc=tlKindClass(e.kind);
+    var fresh=false;
+    var d=new Date(e.ts).getTime();
+    if(Number.isFinite(d)&&d>=freshCutoff) fresh=true;
+    var user=e.username?'<span class="tl-user">as <b>'+esc(e.username)+'</b></span>':'';
+    return '<div class="tl-row '+kc+(fresh?' tl-row-fresh':'')+'">' +
+      '<div class="tl-spine"><span class="tl-dot"></span></div>' +
+      '<div class="tl-main">' +
+        '<div class="tl-head">' +
+          '<span class="tl-time">'+rel(e.ts)+'</span>' +
+          '<span class="tl-kind-badge">'+esc(tlKindLabel(e.kind))+'</span>' +
+          '<span class="tl-ip">'+esc(e.srcIp)+'</span>' +
+          user +
+        '</div>' +
+        tlBody(e) +
+      '</div></div>';
   }).join('');
 }
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
 	"time"
 
@@ -121,7 +122,16 @@ FROM events WHERE command IS NOT NULL AND command != '' ORDER BY ts DESC LIMIT ?
 		e.Source = models.Source(source)
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Cowrie stamps username on login/auth events, not on command.input —
+	// fill empty usernames from the session's login row so the intel
+	// "Recent commands" User column isn't permanently "—".
+	if err := s.fillSessionUsernames(out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *Store) EventsByActor(actorID string, limit int) ([]CommandEvent, error) {
@@ -152,7 +162,70 @@ FROM events WHERE actor_id=? ORDER BY ts DESC`
 		e.Source = models.Source(source)
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.fillSessionUsernames(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// fillSessionUsernames backfills empty Username fields from the session's
+// login/auth events. Cowrie only writes username on accepted/failed_password
+// rows; command/file_* events leave it blank. Batched in one IN-query over
+// the distinct session_ids that still need a user.
+func (s *Store) fillSessionUsernames(events []CommandEvent) error {
+	need := make(map[string]struct{})
+	for _, e := range events {
+		if e.Username == "" && e.SessionID != "" {
+			need[e.SessionID] = struct{}{}
+		}
+	}
+	if len(need) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(need))
+	for id := range need {
+		ids = append(ids, id)
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `SELECT session_id, MAX(CASE WHEN username != '' THEN username END)
+FROM events
+WHERE session_id IN (` + strings.Join(placeholders, ",") + `)
+GROUP BY session_id`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	bySess := make(map[string]string, len(ids))
+	for rows.Next() {
+		var sid string
+		var user sql.NullString
+		if err := rows.Scan(&sid, &user); err != nil {
+			return err
+		}
+		if user.Valid && user.String != "" {
+			bySess[sid] = user.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range events {
+		if events[i].Username == "" && events[i].SessionID != "" {
+			if u, ok := bySess[events[i].SessionID]; ok {
+				events[i].Username = u
+			}
+		}
+	}
+	return nil
 }
 
 // LastCommandByActor returns the most recent non-empty command for an actor.

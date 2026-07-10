@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ShardLure · Theme Studies</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #14171c; --card: #1c2129; --line: #2a313c;
+    --text: #e6e8ec; --muted: #8b93a1;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --sans: "Barlow", system-ui, sans-serif;
+    --serif: "Newsreader", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font: 16px/1.5 var(--sans); padding: 48px 24px 80px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 {
+    font-family: var(--serif); font-weight: 400;
+    font-size: clamp(2rem, 4vw, 2.75rem); letter-spacing: -.02em; margin: 0 0 8px;
+  }
+  .lede { color: var(--muted); max-width: 44rem; margin: 0 0 12px; }
+  .lede a { color: #c8cdd5; }
+  .meta {
+    font: 400 12px var(--mono); color: var(--muted); margin: 0 0 36px;
+  }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;
+  }
+  a.card {
+    display: block; text-decoration: none; color: inherit;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px; transition: border-color .15s, transform .15s;
+  }
+  a.card:hover { border-color: #4a5568; transform: translateY(-2px); }
+  .swatch {
+    height: 64px; border-radius: 6px; margin-bottom: 14px; overflow: hidden;
+    display: grid; grid-template-columns: repeat(5, 1fr);
+  }
+  .swatch span { display: block; }
+  .kicker {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 6px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 1.25rem; font-weight: 600; }
+  .card p { margin: 0; color: var(--muted); font-size: .92rem; }
+  .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }
+  .tags span {
+    font: 500 10px var(--mono); color: var(--muted);
+    border: 1px solid var(--line); padding: 2px 7px; border-radius: 4px;
+  }
+  .note {
+    margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 12px; color: var(--muted); line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>ShardLure theme studies</h1>
+    <p class="lede">
+      Meridian + Sprite theme studies — globe and intel console mocks with a live
+      <a href="https://cobe.vercel.app/">Cobe</a> globe. Dummy data. Dragon theme untouched.
+    </p>
+    <p class="meta">http://localhost:8765/demos/themes/</p>
+
+    <div class="grid">
+      <a class="card" href="./meridian.html">
+        <div class="swatch" aria-hidden="true">
+          <span style="background:#dfe3e8"></span><span style="background:#f4f6f8"></span>
+          <span style="background:#1a2332"></span><span style="background:#0d5c63"></span>
+          <span style="background:#a67c2d"></span>
+        </div>
+        <p class="kicker">01 · Cartography</p>
+        <h3>Meridian</h3>
+        <p>Cool slate paper, atlas restraint, instrument chrome. Map-green ink.</p>
+        <div class="tags"><span>globe</span><span>satellites</span><span>analytics</span></div>
+      </a>
+      <a class="card" href="./meridian-intel.html">
+        <div class="swatch" aria-hidden="true">
+          <span style="background:#dfe3e8"></span><span style="background:#f4f6f8"></span>
+          <span style="background:#1a2332"></span><span style="background:#0d5c63"></span>
+          <span style="background:#a67c2d"></span>
+        </div>
+        <p class="kicker">01b · Intel console</p>
+        <h3>Meridian Intel</h3>
+        <p>Overview / Blue / Red / Settings — same surfaces as arm:8080/intel.</p>
+        <div class="tags"><span>MITRE</span><span>sessions</span><span>TTP</span><span>payloads</span></div>
+      </a>
+      <a class="card" href="./sprite.html">
+        <div class="swatch" aria-hidden="true">
+          <span style="background:#7ec8e3"></span><span style="background:#fff8e8"></span>
+          <span style="background:#2a1f18"></span><span style="background:#e85d4c"></span>
+          <span style="background:#f0b429"></span>
+        </div>
+        <p class="kicker">02 · Pixel / cartoon</p>
+        <h3>Sprite</h3>
+        <p>Chunky borders, hard shadows, sky wash — playful map console.</p>
+        <div class="tags"><span>stickers</span><span>pixel type</span><span>warp</span></div>
+      </a>
+      <a class="card" href="./sprite-intel.html">
+        <div class="swatch" aria-hidden="true">
+          <span style="background:#7ec8e3"></span><span style="background:#fff8e8"></span>
+          <span style="background:#2a1f18"></span><span style="background:#e85d4c"></span>
+          <span style="background:#f0b429"></span>
+        </div>
+        <p class="kicker">02b · Intel console</p>
+        <h3>Sprite Intel</h3>
+        <p>Full intel console in Sprite chrome — gaming stickers energy, readable type.</p>
+        <div class="tags"><span>MITRE</span><span>radar</span><span>timeline</span><span>wordlists</span></div>
+      </a>
+    </div>
+
+    <p class="note">
+      Shared mock data: <code>_shared.js</code><br/>
+      Serve: <code>python3 -m http.server 8765</code> from repo root<br/>
+      Cobe: drag · momentum · scroll zoom · click pins · dbl-click home · focus buttons
+    </p>
+  </div>
+</body>
+</html>

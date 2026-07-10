@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Meridian · ShardLure theme study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --ink: #1a2332; --paper: #dfe3e8; --sheet: #f4f6f8;
+    --line: #c5ccd6; --line-soft: #d5dbe3; --muted: #5c6775;
+    --teal: #0d5c63; --teal-soft: #1a7a82; --amber: #a67c2d;
+    --ok: #2f6b4f; --danger: #8b3a3a;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --sans: "Barlow", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 13px/1.45 var(--sans); background: var(--paper); color: var(--ink); overflow: hidden; }
+
+  .shell { display: grid; grid-template-columns: 52px 300px 1fr 300px; height: 100vh; }
+  .nav {
+    background: var(--ink); display: flex; flex-direction: column; align-items: center;
+    padding: 14px 0; gap: 8px;
+  }
+  .nav .mark {
+    width: 28px; height: 28px; border: 1.5px solid var(--teal-soft);
+    display: grid; place-items: center; font: 600 11px var(--mono); color: var(--teal-soft); margin-bottom: 10px;
+  }
+  .nav a {
+    width: 32px; height: 32px; display: grid; place-items: center; color: #8a96a6; text-decoration: none;
+  }
+  .nav a.on, .nav a:hover { color: var(--paper); background: rgba(255,255,255,.06); }
+  .nav a svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+
+  .rail {
+    background: var(--sheet); border-right: 1px solid var(--line);
+    padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  }
+  .rail.right { border-right: 0; border-left: 1px solid var(--line); }
+
+  .stage {
+    position: relative; display: grid; place-items: center; overflow: hidden;
+    background:
+      radial-gradient(ellipse at 50% 42%, #eef1f4 0%, var(--paper) 70%),
+      repeating-linear-gradient(0deg, transparent, transparent 23px, rgba(26,35,50,.03) 24px),
+      repeating-linear-gradient(90deg, transparent, transparent 23px, rgba(26,35,50,.03) 24px);
+  }
+  #globe-wrap { position: relative; max-width: none; max-height: none; width: min(72vh, 560px); height: min(72vh, 560px); }
+  #cobe { width: 100%; height: 100%; display: block; cursor: grab; }
+  #cobe:active { cursor: grabbing; }
+
+  .pin, .arc-tag {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform: translate(-50%, calc(-100% - 8px));
+    opacity: 0; pointer-events: none;
+    font: 500 10px var(--mono); color: var(--ink);
+    background: var(--sheet); border: 1px solid var(--line); padding: 3px 7px;
+    white-space: nowrap; transition: opacity .25s;
+  }
+  .pin strong { color: var(--teal); }
+  .arc-tag { transform: translate(-50%, calc(-100% - 8px)); color: var(--teal); font-size: 9px; background: rgba(244,246,248,.92); }
+
+  .compass {
+    position: absolute; bottom: 20px; left: 20px;
+    font: 500 10px var(--mono); color: var(--muted); letter-spacing: .1em; text-transform: uppercase;
+  }
+  .compass span { color: var(--teal); }
+
+  .panel {
+    background: var(--sheet); border: 1px solid var(--line); padding: 11px 12px 10px;
+    animation: rise .45s ease both;
+  }
+  .panel:nth-child(1) { animation-delay: .02s; }
+  .panel:nth-child(2) { animation-delay: .06s; }
+  .panel:nth-child(3) { animation-delay: .1s; }
+  .panel:nth-child(4) { animation-delay: .14s; }
+  .panel:nth-child(5) { animation-delay: .18s; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  .panel h2 {
+    margin: 0 0 9px; font: 600 10px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+    display: flex; justify-content: space-between;
+  }
+  .panel h2 em { font-style: normal; color: var(--teal); font-weight: 500; }
+
+  .brand h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .brand .meta { font: 400 11px var(--mono); color: var(--muted); line-height: 1.55; }
+  .brand .meta b { color: var(--ink); font-weight: 500; }
+  .chips { display: flex; gap: 6px; margin-top: 10px; }
+  .chip {
+    font: 500 10px var(--mono); text-decoration: none; padding: 4px 8px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .chip.on { color: var(--teal); border-color: var(--teal); background: rgba(13,92,99,.06); }
+
+  .threat {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border: 1px solid var(--line); background: var(--paper);
+  }
+  .threat .gauge {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: conic-gradient(var(--amber) 0 52%, var(--line-soft) 0);
+    display: grid; place-items: center;
+  }
+  .threat .gauge i {
+    width: 26px; height: 26px; border-radius: 50%; background: var(--sheet);
+    display: grid; place-items: center; font: 600 10px var(--mono); color: var(--amber);
+  }
+  .threat .copy { font: 500 11px var(--mono); }
+  .threat .copy small { display: block; color: var(--muted); font-weight: 400; margin-top: 2px; }
+
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { border: 1px solid var(--line-soft); background: var(--paper); padding: 9px 10px 8px; }
+  .stat .n { font: 600 19px/1 var(--mono); font-variant-numeric: tabular-nums; }
+  .stat .n.teal { color: var(--teal); } .stat .n.amber { color: var(--amber); } .stat .n.ok { color: var(--ok); }
+  .stat .l { margin-top: 4px; font: 500 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+
+  .focus { display: flex; flex-wrap: wrap; gap: 5px; }
+  .focus button {
+    font: 500 10px var(--mono); color: var(--muted); background: var(--paper);
+    border: 1px solid var(--line); padding: 4px 8px; cursor: pointer;
+  }
+  .focus button.on, .focus button:hover { color: var(--teal); border-color: var(--teal); }
+
+  table { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+  th, td { text-align: left; padding: 5px 2px; border-bottom: 1px solid var(--line-soft); }
+  th { color: var(--muted); font-weight: 500; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+  td.n { text-align: right; color: var(--teal); font-variant-numeric: tabular-nums; }
+  td.ip { color: var(--ink); } td.loc { color: var(--muted); }
+
+  .bar {
+    display: grid; grid-template-columns: 72px 1fr 40px; gap: 8px; align-items: center;
+    font: 11px var(--mono); margin: 5px 0;
+  }
+  .bar .lbl { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar .track { height: 4px; background: var(--line-soft); overflow: hidden; }
+  .bar .fill { height: 100%; background: var(--teal); transform-origin: left; animation: grow .6s ease both; }
+  .bar .n { text-align: right; color: var(--teal); }
+  @keyframes grow { from { transform: scaleX(0); } }
+
+  .rows { max-height: 150px; overflow: auto; }
+  .row {
+    display: grid; grid-template-columns: 48px 1fr auto; gap: 8px; padding: 5px 0;
+    border-bottom: 1px dotted var(--line); font: 11px var(--mono);
+  }
+  .row .t { color: var(--muted); } .row .ip { color: var(--teal); }
+  .row .u { color: var(--amber); } .row .k { color: var(--ink); }
+  .row .cmd { color: var(--ok); display: block; margin-top: 2px; word-break: break-all; }
+
+  .live {
+    display: inline-flex; align-items: center; gap: 6px;
+    font: 500 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ok);
+  }
+  .live i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); animation: pulse 1.8s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(47,107,79,.45); } 100% { box-shadow: 0 0 0 8px transparent; } }
+
+  .spark {
+    position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+    width: min(420px, 70%); background: var(--sheet); border: 1px solid var(--line); padding: 10px 14px 8px;
+  }
+  .spark .lab {
+    display: flex; justify-content: space-between; font: 500 9px var(--mono);
+    letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px;
+  }
+  .spark canvas { display: block; width: 100%; height: 36px; }
+
+  .back {
+    position: fixed; top: 12px; right: 16px; z-index: 10;
+    font: 500 11px var(--mono); color: var(--muted); text-decoration: none;
+    background: var(--sheet); border: 1px solid var(--line); padding: 5px 10px;
+  }
+  .back:hover { color: var(--ink); }
+
+
+  /* satellites + live / analytics overlays */
+  .sat {
+    position: absolute; left: 0; top: 0;
+    width: 28px; height: 28px;
+    opacity: 0; pointer-events: none; cursor: pointer;
+    border: 0; padding: 0; margin: 0; background: transparent;
+    appearance: none; -webkit-appearance: none;
+    filter: drop-shadow(1px 1px 0 rgba(26,35,50,.25));
+    transition: opacity .2s;
+  }
+  .sat img { width: 100%; height: 100%; display: block; }
+  .sat::after {
+    content: ""; position: absolute; inset: -6px;
+    border: 1px solid rgba(13,92,99,.35); border-radius: 50%;
+    animation: satRing 2.4s ease-out infinite;
+  }
+  @keyframes satRing {
+    0% { transform: scale(.7); opacity: .7; }
+    100% { transform: scale(1.5); opacity: 0; }
+  }
+
+  .live-badge {
+    position: absolute; left: 0; top: 0;
+    display: inline-flex; align-items: center; gap: 5px;
+    font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ok); background: var(--sheet);
+    border: 1px solid var(--line); padding: 3px 7px 3px 6px; margin: 0;
+    opacity: 0; pointer-events: none; cursor: pointer; white-space: nowrap;
+    appearance: none; -webkit-appearance: none;
+    box-shadow: 1px 1px 0 rgba(26,35,50,.08);
+  }
+  .live-badge i {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+    animation: pulse 1.8s infinite;
+  }
+  .live-badge b { color: var(--ink); font-weight: 600; }
+
+  .analytics {
+    position: absolute; left: 0; top: 0;
+    font: 500 10px var(--mono); color: var(--ink);
+    background: rgba(244,246,248,.96); border: 1px solid var(--line);
+    padding: 4px 7px; margin: 0; opacity: 0; pointer-events: none; cursor: pointer; white-space: nowrap;
+    appearance: none; -webkit-appearance: none; text-align: left;
+    box-shadow: 1px 1px 0 rgba(26,35,50,.06);
+  }
+  .analytics .up { color: var(--ok); }
+  .analytics .dn { color: var(--danger); }
+  .analytics .lbl { color: var(--muted); display: block; font-size: 8px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 1px; }
+
+  @media (max-width: 1100px) { .shell { grid-template-columns: 52px 260px 1fr; } .rail.right { display: none; } }
+  @media (max-width: 760px) { .shell { grid-template-columns: 1fr; } .nav, .rail.left { display: none; } }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: var(--line); }
+</style>
+</head>
+<body>
+<a class="back" href="./index.html">← studies</a>
+<div class="shell">
+  <nav class="nav">
+    <div class="mark">SL</div>
+    <a class="on" href="#" title="Globe"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></a>
+    <a href="./meridian-intel.html" title="Intel"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
+  </nav>
+
+  <aside class="rail left">
+    <section class="panel brand">
+      <h1>Meridian telemetry</h1>
+      <div class="meta">source <b>cowrie + journal</b><br/>origin <b>Mumbai · IN</b><br/>updated <b id="clock">—</b></div>
+      <div class="chips"><a class="chip on" href="./meridian.html">Globe</a><a class="chip" href="./meridian-intel.html">Intel</a></div>
+    </section>
+    <section class="panel">
+      <div class="threat">
+        <div class="gauge"><i>52</i></div>
+        <div class="copy">Threat · HIGH<small>volume heavy · weaponization low</small></div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Summary</h2>
+      <div class="stats" id="stats"></div>
+    </section>
+    <section class="panel">
+      <h2>Focus</h2>
+      <div class="focus" id="focuses"></div>
+    </section>
+    <section class="panel">
+      <h2>By country <em>72h</em></h2>
+      <div id="countries"></div>
+    </section>
+    <section class="panel">
+      <h2>Top usernames</h2>
+      <table><thead><tr><th>User</th><th class="n">Hits</th></tr></thead><tbody id="users"></tbody></table>
+    </section>
+  </aside>
+
+  <main class="stage">
+    <div id="globe-wrap">
+      <canvas id="cobe" width="1000" height="1000"></canvas>
+      <div data-place="home" class="pin"><strong>HOME</strong> Mumbai</div>
+      <div data-place="nl" class="pin">NL · 28.9k</div>
+      <div data-place="bg" class="pin">BG · 11.0k</div>
+      <div data-place="us" class="pin">US · Dallas</div>
+      <div data-place="cn" class="pin">CN · Nanjing</div>
+      <button type="button" data-place="nl" class="sat" data-offset="float" title="NL node"><img src="./stickers/sat.svg" alt="satellite" /></button>
+      <button type="button" data-place="us" class="sat" data-offset="float" title="US node"><img src="./stickers/sat.svg" alt="satellite" /></button>
+      <button type="button" data-place="cn" class="sat" data-offset="float" title="CN node"><img src="./stickers/sat.svg" alt="satellite" /></button>
+      <button type="button" data-place="home" class="live-badge" data-offset="side" title="origin live">
+        <i></i>LIVE <b>1.1k/h</b>
+      </button>
+      <button type="button" data-place="nl" class="analytics" data-offset="side" title="NL analytics">
+        <span class="lbl">NL volume</span>
+        28.9k <span class="up">↑ 12%</span>
+      </button>
+      <button type="button" data-place="bg" class="analytics" data-offset="side" title="BG analytics">
+        <span class="lbl">BG volume</span>
+        11.0k <span class="up">↑ 4%</span>
+      </button>
+      <button type="button" data-place="us" class="analytics" data-offset="side" title="US analytics">
+        <span class="lbl">US volume</span>
+        8.4k <span class="dn">↓ 2%</span>
+      </button>
+      <div class="arc-tag">NL → home</div>
+      <div class="arc-tag">US → home</div>
+    </div>
+    <div class="compass">φ <span id="phi">0.00</span> · θ <span id="theta">0.20</span> · drag · zoom · sats · badges · click pin · dbl-click home</div>
+    <div class="spark">
+      <div class="lab"><span>Events / hour</span><span>peak 1,114</span></div>
+      <canvas id="spark" width="400" height="36"></canvas>
+    </div>
+  </main>
+
+  <aside class="rail right">
+    <section class="panel">
+      <h2>Top source IPs</h2>
+      <table><thead><tr><th>IP</th><th>Loc</th><th class="n">Hits</th></tr></thead><tbody id="ips"></tbody></table>
+    </section>
+    <section class="panel">
+      <h2>Top actors</h2>
+      <div class="rows" id="actors"></div>
+    </section>
+    <section class="panel">
+      <h2>Top commands</h2>
+      <div class="rows" id="cmds"></div>
+    </section>
+    <section class="panel">
+      <h2>Payload capture <span class="live"><i></i>idle</span></h2>
+      <div class="stats" id="cap"></div>
+    </section>
+    <section class="panel" style="flex:1;min-height:140px">
+      <h2>Live feed</h2>
+      <div class="rows" id="feed" style="max-height:220px"></div>
+    </section>
+  </aside>
+</div>
+
+<script type="module">
+import createGlobe from "https://esm.sh/cobe@2.0.1";
+import {
+  SUMMARY, COUNTRIES, ACTORS, IPS, USERS, CMDS, FEED, CAPTURE, HOME,
+  fmt, tickClock, drawSpark, globeEntities, bindGlobeInteraction, wireFocusButtons, PLACES, startGlobeLoop,
+} from "./_shared.js";
+
+tickClock(document.getElementById("clock"));
+drawSpark(document.getElementById("spark"), "#0d5c63");
+
+document.getElementById("stats").innerHTML = `
+  <div class="stat"><div class="n teal">${fmt(SUMMARY.events)}</div><div class="l">events</div></div>
+  <div class="stat"><div class="n amber">${fmt(SUMMARY.actors)}</div><div class="l">actors</div></div>
+  <div class="stat"><div class="n ok">${fmt(SUMMARY.ips)}</div><div class="l">unique ips</div></div>
+  <div class="stat"><div class="n">${SUMMARY.countries}</div><div class="l">countries</div></div>`;
+
+const maxC = COUNTRIES[0].hits;
+document.getElementById("countries").innerHTML = COUNTRIES.slice(0,6).map((c,i) => `
+  <div class="bar"><span class="lbl">${c.name}</span>
+  <div class="track"><div class="fill" style="width:${(c.hits/maxC*100).toFixed(1)}%;animation-delay:${i*.05}s"></div></div>
+  <span class="n">${(c.hits/1000).toFixed(1)}k</span></div>`).join("");
+
+document.getElementById("users").innerHTML = USERS.map(([u,h]) =>
+  `<tr><td>${u}</td><td class="n">${fmt(h)}</td></tr>`).join("");
+document.getElementById("ips").innerHTML = IPS.map(r =>
+  `<tr><td class="ip">${r.ip}</td><td class="loc">${r.loc}</td><td class="n">${fmt(r.hits)}</td></tr>`).join("");
+document.getElementById("actors").innerHTML = ACTORS.map(a =>
+  `<div class="row"><span class="t">${a.cc}</span><span><span class="ip">${a.ip}</span><br/><span class="k">${a.playbook}</span></span></div>`).join("");
+document.getElementById("cmds").innerHTML = CMDS.map(([c,h]) =>
+  `<div class="row" style="grid-template-columns:1fr 40px"><span class="cmd">${c}</span><span class="n" style="color:var(--teal);font:11px var(--mono);text-align:right">${h}</span></div>`).join("");
+document.getElementById("cap").innerHTML = `
+  <div class="stat"><div class="n ok">${CAPTURE.saved}</div><div class="l">saved</div></div>
+  <div class="stat"><div class="n amber">${CAPTURE.fetching}</div><div class="l">fetching</div></div>
+  <div class="stat"><div class="n teal">${CAPTURE.bytes}</div><div class="l">evidence</div></div>
+  <div class="stat"><div class="n">${CAPTURE.failed}</div><div class="l">failed</div></div>`;
+document.getElementById("feed").innerHTML = FEED.map(([t,ip,u,k,cmd]) =>
+  `<div class="row" style="grid-template-columns:52px 1fr"><span class="t">${t}</span>
+   <span><span class="ip">${ip}</span> ${u?`<span class="u">${u}</span>`:""} <span class="k">${k}</span>
+   ${cmd?`<span class="cmd">${cmd}</span>`:""}</span></div>`).join("");
+
+const canvas = document.getElementById("cobe");
+const wrap = document.getElementById("globe-wrap");
+const state = { phi: 2.4, theta: 0.22, targetPhi: 2.4, targetTheta: 0.22, scale: 1, targetScale: 1, autoRotate: true };
+const { markers, arcs } = globeEntities();
+const size = () => Math.min(wrap.clientWidth, wrap.clientHeight) * 2;
+const ix = bindGlobeInteraction(canvas, state, { wrap, places: PLACES });
+wireFocusButtons(document.getElementById("focuses"), ix);
+
+const globe = createGlobe(canvas, {
+  devicePixelRatio: 2, width: size(), height: size(),
+  phi: state.phi, theta: state.theta, dark: 0, diffuse: 1.35,
+  mapSamples: 22000, mapBrightness: 5.5, mapBaseBrightness: 0.04,
+  baseColor: [0.92, 0.94, 0.96], markerColor: [0.13, 0.36, 0.39],
+  glowColor: [0.88, 0.90, 0.93], markerElevation: 0.015,
+  arcColor: [0.13, 0.36, 0.39], arcWidth: 0.45, arcHeight: 0.28,
+  markers, arcs
+});
+
+startGlobeLoop(globe, ix, (view) => {
+  document.getElementById("phi").textContent = view.phi.toFixed(2);
+  document.getElementById("theta").textContent = view.theta.toFixed(2);
+});
+
+window.addEventListener("resize", () => { const s = size(); globe.update({ width: s, height: s }); });
+</script>
+</body>
+</html>

@@ -1,13 +1,24 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dragon">
 <head>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('shardlure_theme') || 'dragon';
+    if (t !== 'dragon' && t !== 'meridian' && t !== 'sprite') t = 'dragon';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'dragon');
+  }
+})();
+</script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ShardLure Live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="https://unpkg.com/globe.gl@2.32.0/dist/globe.gl.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Pixelify+Sans:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+
 <style>
   :root {
     --bg: #0a0608;
@@ -80,8 +91,8 @@
     animation: pulse 1.8s infinite;
   }
   @keyframes pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(208,40,40,0.55), 0 0 10px rgba(208,40,40,0.8); }
-    100% { box-shadow: 0 0 0 14px rgba(208,40,40,0), 0 0 10px rgba(208,40,40,0.8); }
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent), 0 0 10px color-mix(in srgb, var(--accent) 80%, transparent); }
+    100% { box-shadow: 0 0 0 14px transparent, 0 0 10px color-mix(in srgb, var(--accent) 80%, transparent); }
   }
   .title .meta {
     color: var(--dim); font-family: var(--mono); font-size: 11px;
@@ -95,7 +106,7 @@
     color: var(--dim);
   }
   .nav a:hover { color: var(--text); border-color: var(--line-strong); }
-  .nav a.active { color: var(--accent); border-color: rgba(208,40,40,0.45); background: rgba(208,40,40,0.08); }
+  .nav a.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px; }
@@ -200,7 +211,7 @@
   }
   .cap-badge.capturing { color: var(--warn); border-color: rgba(200,152,40,0.45); background: rgba(200,152,40,0.1); }
   .cap-badge.fetched { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
-  .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: rgba(208,40,40,0.4); background: rgba(208,40,40,0.08); }
+  .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
   .users { display: flex; flex-wrap: wrap; gap: 6px; }
   .users .pill {
@@ -265,8 +276,8 @@
   }
   .sb-item:hover { color: var(--text); background: var(--glass-2); border-color: var(--line); }
   .sb-item.on {
-    color: var(--accent); background: rgba(208,40,40,0.08);
-    border-color: rgba(208,40,40,0.20);
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .sb-item.on::before {
     content: ''; position: absolute; left: -1px; top: 8px; bottom: 8px;
@@ -284,7 +295,7 @@
   }
   @keyframes sbPulse {
     0%,100% { box-shadow: 0 0 4px var(--accent); }
-    50% { box-shadow: 0 0 14px var(--accent), 0 0 24px rgba(208,40,40,0.15); }
+    50% { box-shadow: 0 0 14px var(--accent), 0 0 24px color-mix(in srgb, var(--accent) 15%, transparent); }
   }
   .rail.left { left: 52px; }
   @media (max-width: 760px) {
@@ -292,6 +303,7 @@
     .rail.left { left: 0; }
   }
 </style>
+<link rel="stylesheet" href="/themes.css" />
 </head>
 <body>
 
@@ -304,6 +316,12 @@
 </nav>
 
 <div id="globe"></div>
+<div id="cobe-stage" hidden>
+  <div id="cobe-wrap">
+    <canvas id="cobe" width="1000" height="1000"></canvas>
+    <div id="cobe-overlays"></div>
+  </div>
+</div>
 <div id="vignette"></div>
 
 <aside class="rail left">
@@ -398,6 +416,66 @@
 // Forward the dashboard auth token (?token=… in the page URL) on every /api/
 // fetch when SHARDLURE_DASH_TOKEN is set server-side. Without this the globe
 // loads but /api/dashboard and /api/capture 401. No token => no-op.
+
+/* ==== UI theme (Dragon / Meridian / Sprite) ==== */
+window.__shardlureTheme = 'dragon';
+function currentThemeId() {
+  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'dragon';
+}
+function applyTheme(id, opts) {
+  if (id !== 'dragon' && id !== 'meridian' && id !== 'sprite') id = 'dragon';
+  var force = opts && opts.force;
+  var prev = window.__shardlureTheme;
+  // Same-tab BroadcastChannel echoes postMessage back to our own listener.
+  // Bail before re-broadcast / onTheme when nothing changed — otherwise the
+  // pivot graph destroy/create loops forever and never paints.
+  if (!force && prev === id && document.documentElement.getAttribute('data-theme') === id) {
+    return id;
+  }
+  window.__shardlureTheme = id;
+  document.documentElement.setAttribute('data-theme', id);
+  try { localStorage.setItem('shardlure_theme', id); } catch (e) {}
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      window.__shardlureThemeEcho = id;
+      var bc = new BroadcastChannel('shardlure-theme');
+      bc.postMessage({ theme: id });
+      bc.close();
+    }
+  } catch (e) {}
+  if (typeof window.__shardlureOnTheme === 'function') {
+    try { window.__shardlureOnTheme(id); } catch (e) {}
+  }
+  return id;
+}
+async function syncThemeFromServer() {
+  try {
+    var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+    var data = await r.json();
+    var row = (data.settings || []).find(function (s) { return s.key === 'ui.theme'; });
+    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'dragon';
+    return applyTheme(id);
+  } catch (e) {
+    return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+  }
+}
+try {
+  window.addEventListener('storage', function (e) {
+    if (e.key === 'shardlure_theme' && e.newValue) applyTheme(e.newValue);
+  });
+  if (typeof BroadcastChannel !== 'undefined') {
+    var __themeBC = new BroadcastChannel('shardlure-theme');
+    __themeBC.onmessage = function (ev) {
+      if (!ev.data || !ev.data.theme) return;
+      // Ignore the echo of our own postMessage (Chrome delivers to same tab).
+      if (ev.data.theme === window.__shardlureThemeEcho ||
+          ev.data.theme === window.__shardlureTheme) return;
+      applyTheme(ev.data.theme);
+    };
+  }
+} catch (e) {}
+
 const DASH_TOKEN = (function () {
   try {
     var t = new URLSearchParams(location.search).get('token');
@@ -447,6 +525,7 @@ function patchNavLinks() {
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', patchNavLinks);
 } else { patchNavLinks(); }
+
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = function(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ESC_MAP[c]; }); };
 const fmt = function(n) { return Number(n || 0).toLocaleString(); };
@@ -482,27 +561,129 @@ const flag = function(cc) {
   return String.fromCodePoint.apply(String, cc.toUpperCase().split('').map(function(c){ return 0x1F1A5 + c.charCodeAt(0); }));
 };
 
-const globe = Globe()(document.getElementById('globe'))
-  .globeImageUrl('https://networkshard.com/ssh-attacks/img/earth-night.jpg')
-  .bumpImageUrl('https://networkshard.com/ssh-attacks/img/earth-topology.png')
-  .backgroundImageUrl('https://networkshard.com/ssh-attacks/img/night-sky.png')
-  .backgroundColor('rgba(0,0,0,0)')
-  .showGraticules(true)
-  .atmosphereColor('#d02828')
-  .atmosphereAltitude(0.22)
-  .pointColor(function(){ return '#d02828'; })
-  .pointAltitude(0.02)
-  .pointRadius(0.22);
+var globe = null;
+var _dragonGlobePromise = null;
+var _cobeBootPromise = null;
 
-globe.controls().autoRotate = true;
-globe.controls().autoRotateSpeed = 0.35;
-globe.controls().enableZoom = true;
-globe.controls().minDistance = 180;
-globe.controls().maxDistance = 600;
+function ensureDragonGlobe() {
+  if (globe) return Promise.resolve(globe);
+  if (_dragonGlobePromise) return _dragonGlobePromise;
+  _dragonGlobePromise = import('https://esm.sh/globe.gl@2.32.0').then(function (mod) {
+    var Globe = mod.default || mod;
+    var el = document.getElementById('globe');
+    if (!el) throw new Error('globe container missing');
+    globe = Globe()(el)
+      .globeImageUrl('https://networkshard.com/ssh-attacks/img/earth-night.jpg')
+      .bumpImageUrl('https://networkshard.com/ssh-attacks/img/earth-topology.png')
+      .backgroundImageUrl('https://networkshard.com/ssh-attacks/img/night-sky.png')
+      .backgroundColor('rgba(0,0,0,0)')
+      .showGraticules(true)
+      .atmosphereColor('#d02828')
+      .atmosphereAltitude(0.22)
+      .pointColor(function(){ return '#d02828'; })
+      .pointAltitude(0.02)
+      .pointRadius(0.22);
+    globe.controls().autoRotate = true;
+    globe.controls().autoRotateSpeed = 0.35;
+    globe.controls().enableZoom = true;
+    globe.controls().minDistance = 180;
+    globe.controls().maxDistance = 600;
+    return globe;
+  }).catch(function (err) {
+    _dragonGlobePromise = null;
+    throw err;
+  });
+  return _dragonGlobePromise;
+}
+
+function ensureCobeBoot() {
+  if (window.ShardCobe) return Promise.resolve(window.ShardCobe);
+  if (_cobeBootPromise) return _cobeBootPromise;
+  _cobeBootPromise = import('/cobe-boot.js?v=1').then(function () {
+    return window.ShardCobe;
+  }).catch(function (err) {
+    _cobeBootPromise = null;
+    throw err;
+  });
+  return _cobeBootPromise;
+}
+
+function usesCobeTheme(id) {
+  return id === 'meridian' || id === 'sprite';
+}
+
+function setDragonGlobeVisible(on) {
+  var el = document.getElementById('globe');
+  if (!el) return;
+  if (on) {
+    el.classList.remove('globe-hidden');
+    try {
+      if (globe) {
+        if (globe.controls) globe.controls().autoRotate = true;
+        // Resume three.js loop only when Dragon is shown.
+        if (typeof globe.resumeAnimation === 'function') globe.resumeAnimation();
+      }
+    } catch (e) {}
+  } else {
+    el.classList.add('globe-hidden');
+    try {
+      if (globe) {
+        if (globe.controls) globe.controls().autoRotate = false;
+        // Critical: stop globe.gl rAF while Cobe owns the GPU.
+        if (typeof globe.pauseAnimation === 'function') globe.pauseAnimation();
+      }
+    } catch (e) {}
+  }
+}
+
+function syncGlobeEngine(theme) {
+  theme = theme || currentThemeId();
+  if (usesCobeTheme(theme)) {
+    setDragonGlobeVisible(false);
+    return ensureCobeBoot().then(function (boot) {
+      return boot.ensure(theme);
+    }).then(function () {
+      if (typeof applyGlobeOverlays === 'function') applyGlobeOverlays();
+      if (typeof _lastHome !== 'undefined' && _lastHome && window.ShardCobe) {
+        window.ShardCobe.updateData(_lastHome, typeof _lastActors !== 'undefined' ? _lastActors : []);
+      }
+    }).catch(function () {});
+  }
+  if (window.ShardCobe && typeof window.ShardCobe.destroy === 'function') {
+    window.ShardCobe.destroy();
+  }
+  return ensureDragonGlobe().then(function () {
+    setDragonGlobeVisible(true);
+    try {
+      var cs = getComputedStyle(document.documentElement);
+      var atm = (cs.getPropertyValue('--globe-atmosphere') || '#d02828').trim();
+      var pt = (cs.getPropertyValue('--globe-point') || '#d02828').trim();
+      globe.atmosphereColor(atm);
+      globe.pointColor(function () { return pt; });
+    } catch (e) {}
+    if (typeof applyGlobeOverlays === 'function') applyGlobeOverlays();
+    if (typeof applyArcThemeColors === 'function') applyArcThemeColors();
+    if (typeof _lastHome !== 'undefined' && _lastHome && typeof refresh === 'function') {
+      return refresh();
+    }
+  }).catch(function () {});
+}
+
+window.__shardlureOnTheme = function () {
+  try { syncGlobeEngine(currentThemeId()); } catch (e) {}
+};
+// Defer engine load until theme is known (localStorage head script + server sync).
+syncThemeFromServer().finally(function () {
+  window.__shardlureOnTheme();
+});
 
 const spark = document.getElementById('spark');
 let sparkData = [];
 let lastArcKey = '';
+var _lastHome = { lat: 19.076, lon: 72.8777, city: 'Mumbai', country: 'India', cc: 'IN' };
+var _lastActors = [];
+var _lastMaxN = 1;
+
 
 function drawSpark(series) {
   const ctx = spark.getContext('2d');
@@ -520,9 +701,10 @@ function drawSpark(series) {
   const maxV = Math.max.apply(null, series.map(function(p){ return p.n || 0; }));
   document.getElementById('spark-max').textContent = 'peak ' + fmt(maxV) + '/h';
 
+  const ac = themeAccentRGB();
   const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, 'rgba(208,40,40,0.55)');
-  grad.addColorStop(1, 'rgba(208,40,40,0.02)');
+  grad.addColorStop(0, rgba(ac, 0.55));
+  grad.addColorStop(1, rgba(ac, 0.02));
   const pad = 1;
   const xy = function(p) {
     return [
@@ -539,7 +721,7 @@ function drawSpark(series) {
 
   ctx.beginPath();
   series.forEach(function(p, i){ const q = xy(p); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); });
-  ctx.strokeStyle = '#d02828';
+  ctx.strokeStyle = ac.hex;
   ctx.lineWidth = 1.2;
   ctx.stroke();
 }
@@ -724,6 +906,194 @@ async function refreshCapture() {
   } catch (_) {}
 }
 
+
+/* ==== Theme globe overlays (Sprite stickers / Meridian sats) ==== */
+var STICKER_CYCLE = ['skull.svg', 'bolt.svg', 'bug.svg', 'controller.svg', 'shield.svg'];
+
+function themeAccentRGB() {
+  var theme = currentThemeId();
+  if (theme === 'meridian') return { r: 13, g: 92, b: 99, hex: '#0d5c63', hex2: '#a67c2d', text: '#1a2332', bg: 'rgba(244,246,248,0.96)', line: '#c5ccd6' };
+  if (theme === 'sprite') return { r: 232, g: 93, b: 76, hex: '#e85d4c', hex2: '#f0b429', text: '#241910', bg: 'rgba(255,253,247,0.96)', line: '#241910' };
+  return { r: 208, g: 40, b: 40, hex: '#d02828', hex2: '#c89828', text: '#e8dcd8', bg: 'rgba(20,16,16,0.92)', line: 'rgba(200,120,100,0.22)' };
+}
+function rgba(c, a) { return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')'; }
+
+/** Merge recent + volume-ordered actors; dedupe by IP keeping highest event count. */
+function mergeActorsForGlobe(actors, topActors) {
+  var byIp = {};
+  function add(a) {
+    if (!a || !a.ip) return;
+    var cur = byIp[a.ip];
+    if (!cur || (a.events || 0) > (cur.events || 0)) byIp[a.ip] = a;
+  }
+  (actors || []).forEach(add);
+  (topActors || []).forEach(add);
+  return Object.keys(byIp).map(function (k) { return byIp[k]; });
+}
+
+function buildThemeOverlays(theme, home, actors) {
+  if (theme !== 'sprite' && theme !== 'meridian') return [];
+  var ranked = (actors || [])
+    .filter(function (a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); })
+    .sort(function (a, b) { return (b.events || 0) - (a.events || 0); })
+    .slice(0, 6);
+  var out = [];
+  if (theme === 'sprite') {
+    out.push({
+      lat: home.lat, lng: home.lon, kind: 'sticker', alt: 0.04,
+      sticker: 'shield.svg', label: 'HOME', tilt: -4
+    });
+    ranked.forEach(function (a, i) {
+      out.push({
+        lat: a.lat, lng: a.lon, kind: 'sticker', alt: 0.03 + (i % 3) * 0.01,
+        sticker: STICKER_CYCLE[i % STICKER_CYCLE.length],
+        label: (a.cc || '') + ' · ' + (a.ip || ''),
+        tilt: (i % 2 === 0 ? -8 : 7) + (i % 3)
+      });
+    });
+  } else {
+    // Meridian: hub sat + live badge at home; separate floating sats + side analytics per actor.
+    var pkHome = 'home';
+    out.push({
+      lat: home.lat, lng: home.lon, kind: 'live', alt: 0.05,
+      rate: 'LIVE', sub: (home.city || 'home'),
+      placeKey: pkHome,
+    });
+    out.push({
+      lat: home.lat, lng: home.lon, kind: 'sat', alt: 0.075,
+      label: 'HUB', placeKey: pkHome, hub: true, ringDelay: 0,
+    });
+    ranked.slice(0, 6).forEach(function (a, i) {
+      var pk = 'actor' + i;
+      var n = a.events || 0;
+      var rate = Number(a.rateHour);
+      var rateLbl = Number.isFinite(rate) && rate > 0 ? rate.toFixed(1) + '/h' : '';
+      out.push({
+        lat: a.lat, lng: a.lon, kind: 'sat', alt: 0.055 + (i % 3) * 0.01,
+        label: a.cc || a.ip || 'node', placeKey: pk, ringDelay: i * 0.4,
+      });
+      out.push({
+        lat: a.lat, lng: a.lon, kind: 'analytics', alt: 0.04,
+        placeKey: pk,
+        title: (a.cc || '??') + (a.city ? ' · ' + a.city : ''),
+        value: n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n),
+        rateLabel: rateLbl,
+        ip: a.ip || '',
+      });
+    });
+  }
+  return out;
+}
+
+function makeOverlayEl(d) {
+  var wrap = document.createElement('div');
+  wrap.className = 'globe-overlay globe-overlay--' + (d.kind || 'x');
+  wrap.title = d.label || d.title || d.ip || '';
+  if (d.kind === 'sticker') {
+    var box = document.createElement('div');
+    box.className = 'globe-sticker';
+    box.style.transform = 'rotate(' + (d.tilt || 0) + 'deg)';
+    var img = document.createElement('img');
+    img.src = '/stickers/' + d.sticker;
+    img.alt = d.label || 'sticker';
+    box.appendChild(img);
+    wrap.appendChild(box);
+  } else if (d.kind === 'sat') {
+    var satBox = document.createElement('div');
+    satBox.className = 'globe-sat' + (d.hub ? ' globe-sat--hub' : '');
+    if (d.ringDelay != null) satBox.style.setProperty('--ring-delay', d.ringDelay + 's');
+    var satImg = document.createElement('img');
+    satImg.src = '/stickers/sat.svg';
+    satImg.alt = d.label || 'satellite';
+    satBox.appendChild(satImg);
+    wrap.appendChild(satBox);
+  } else if (d.kind === 'live') {
+    var live = document.createElement('div');
+    live.className = 'globe-live';
+    live.innerHTML = '<i></i>LIVE <b>' + esc(d.sub || '') + '</b>';
+    wrap.appendChild(live);
+  } else if (d.kind === 'analytics') {
+    var chip = document.createElement('div');
+    chip.className = 'globe-analytics';
+    chip.innerHTML = '<span class="lbl">' + esc(d.title || '') + '</span>' +
+      esc(d.value || '') + ' <span class="' + (d.trend === 'dn' ? 'dn' : 'up') + '">' +
+      esc(d.trendLabel || '') + '</span>';
+    wrap.appendChild(chip);
+  } else if (d.kind === 'node') {
+    var node = document.createElement('div');
+    node.className = 'globe-node';
+    var satBox = document.createElement('div');
+    satBox.className = 'globe-sat';
+    var satImg = document.createElement('img');
+    satImg.src = '/stickers/sat.svg';
+    satImg.alt = d.label || 'satellite';
+    satBox.appendChild(satImg);
+    var chip = document.createElement('div');
+    chip.className = 'globe-analytics';
+    chip.innerHTML = '<span class="lbl">' + esc(d.title || '') + '</span>' +
+      '<b>' + esc(d.value || '') + '</b>' +
+      (d.rateLabel ? ' <span class="up">' + esc(d.rateLabel) + '</span>' : '') +
+      (d.ip ? '<span class="ip">' + esc(d.ip) + '</span>' : '');
+    node.appendChild(satBox);
+    node.appendChild(chip);
+    wrap.appendChild(node);
+  }
+  return wrap;
+}
+
+function applyGlobeOverlays() {
+  var theme = currentThemeId();
+  var data = buildThemeOverlays(theme, _lastHome, _lastActors);
+  if (usesCobeTheme(theme)) {
+    // Clear globe.gl HTML overlays while Cobe is active.
+    try {
+      if (typeof globe !== 'undefined' && globe) {
+        globe.htmlElementsData([]).htmlTransitionDuration(0);
+      }
+    } catch (e) {}
+    if (!window.ShardCobe || !window.ShardCobe.isActive()) return;
+    var places = [];
+    var nodes = [];
+    var seenPlaces = {};
+    data.forEach(function (d, i) {
+      var id = d.placeKey || ('ov' + i);
+      if (!seenPlaces[id]) {
+        places.push({ id: id, lat: d.lat, lon: d.lng, label: d.label || d.title || '' });
+        seenPlaces[id] = true;
+      }
+      var el = makeOverlayEl(d);
+      el.setAttribute('data-place', id);
+      if (d.tilt != null) el.style.setProperty('--tilt', d.tilt + 'deg');
+      if (d.kind === 'sticker' || d.kind === 'sat') el.setAttribute('data-offset', 'float');
+      else if (d.kind === 'live' || d.kind === 'analytics') el.setAttribute('data-offset', 'side');
+      nodes.push(el);
+    });
+    if (!seenPlaces.home) {
+      places.push({ id: 'home', lat: _lastHome.lat, lon: _lastHome.lon, label: 'Home' });
+    }
+    window.ShardCobe.setOverlayPlaces(places, nodes);
+    return;
+  }
+  if (typeof globe === 'undefined' || !globe) return;
+  globe
+    .htmlElementsData(data)
+    .htmlLat('lat')
+    .htmlLng('lng')
+    .htmlAltitude(function (d) { return d.alt || 0.03; })
+    .htmlElement(makeOverlayEl)
+    .htmlElementVisibilityModifier(function (el, visible) {
+      el.style.opacity = visible ? '1' : '0';
+    })
+    .htmlTransitionDuration(0);
+}
+
+function applyArcThemeColors() {
+  if (usesCobeTheme(currentThemeId())) return;
+  if (typeof globe === 'undefined' || !globe) return;
+  var ac = themeAccentRGB();
+  globe.arcColor(function () { return [rgba(ac, 0.14), rgba(ac, 0.95)]; });
+}
+
 async function refresh() {
   const r = await fetch('/api/dashboard?_=' + Date.now(), { cache: 'no-store' });
   if (!r.ok) return;
@@ -732,6 +1102,8 @@ async function refresh() {
   const actors = d.actors || [];
   const recent = d.recent || [];
   const home = d.home || { lat: 19.076, lon: 72.8777, city: 'Mumbai', country: 'India', cc: 'IN' };
+  _lastHome = home;
+  _lastActors = actors;
 
   document.getElementById('s-events').textContent = fmt(summary.eventCount);
   document.getElementById('s-actors').textContent = fmt(summary.actorCount);
@@ -760,13 +1132,25 @@ async function refresh() {
     document.getElementById('s-countries').textContent = '…';
   }
   const maxN = Math.max.apply(null, [1].concat(points.map(function(p){ return p.n; })));
-  globe.pointsData(points)
+  _lastMaxN = maxN;
+
+  if (usesCobeTheme(currentThemeId())) {
+    if (window.ShardCobe) {
+      window.ShardCobe.updateData(home, mergeActorsForGlobe(actors, d.topActors || []));
+    }
+    applyGlobeOverlays();
+    return;
+  }
+
+  var g = await ensureDragonGlobe();
+  g.pointsData(points)
     .pointAltitude(function(p){ return 0.005 + 0.18 * Math.sqrt((p.n || 0) / maxN); })
     .pointRadius(function(p){ return 0.18 + 0.55 * Math.sqrt((p.n || 0) / maxN); })
     .pointLabel(function(p){
-      return '<div style="font-family:ui-monospace,monospace;font-size:11px;background:rgba(20,16,16,0.92);border:1px solid rgba(200,120,100,0.22);padding:6px 9px;border-radius:4px;">' +
-        '<span style="color:#c89828">' + esc(p.ip) + '</span> <span style="color:#d02828;font-weight:600">' + fmt(p.n) + 'x</span><br/>' +
-        '<span style="color:#e8dcd8">' + esc(p.playbook) + '</span></div>';
+      var ac = themeAccentRGB();
+      return '<div style="font-family:ui-monospace,monospace;font-size:11px;background:' + ac.bg + ';border:1px solid ' + ac.line + ';color:' + ac.text + ';padding:6px 9px;border-radius:4px;">' +
+        '<span style="color:' + ac.hex2 + '">' + esc(p.ip) + '</span> <span style="color:' + ac.hex + ';font-weight:600">' + fmt(p.n) + 'x</span><br/>' +
+        '<span style="color:' + ac.text + '">' + esc(p.playbook) + '</span></div>';
     });
 
   const arcs = points.slice(0, 80).map(function(p, idx) {
@@ -775,16 +1159,20 @@ async function refresh() {
   // Skip the arcsData reset when the arc set hasn't changed: re-setting it
   // every 5s poll restarted the dash animations visibly.
   const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2) + ':' + a.n; }).join('|');
-  if (arcKey === lastArcKey) return;
-  globe.arcsData(arcs)
-    .arcColor(function(){ return ['rgba(208,40,40,0.12)', 'rgba(208,40,40,0.95)']; })
+  if (arcKey === lastArcKey) {
+    applyGlobeOverlays();
+    return;
+  }
+  g.arcsData(arcs)
     .arcStroke(function(a){ return Math.max(0.55, 0.55 + 1.1 * Math.sqrt((a.n || 0) / maxN)); })
     .arcDashLength(0.42)
     .arcDashGap(0.18)
     .arcDashInitialGap(1)
     .arcDashAnimateTime(function(a){ return 1400 + (a.idx % 9) * 180; })
     .arcAltitude(function(a){ return 0.18 + 0.22 * Math.sqrt((a.n || 0) / maxN); });
+  applyArcThemeColors();
   lastArcKey = arcKey;
+  applyGlobeOverlays();
 }
 
 refresh();
@@ -795,5 +1183,6 @@ setInterval(refresh, 5000);
 setInterval(refreshCapture, 5000);
 window.addEventListener('resize', function() { drawSpark(sparkData); });
 </script>
+
 </body>
 </html>

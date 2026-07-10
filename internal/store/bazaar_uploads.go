@@ -180,14 +180,37 @@ func (s *Store) ListBazaarUploadsWithArtifacts(limit int) ([]BazaarUploadWithArt
 	// at multiple URLs), so a plain LEFT JOIN fanned each upload into N rows —
 	// double-counting the sharing history and throwing off the row limit.
 	// MAX() picks a stable representative for the display-only size/ip/path.
+	// Src IP is often blank on cowrie_download rows (synced from disk without
+	// session context); backfill from events matched by sha256 or session_id.
 	q := `
 SELECT u.sha256, u.uploaded_at, u.response_status, COALESCE(u.mb_url, ''),
-       COALESCE(a.size_bytes, 0), COALESCE(a.src_ip, ''), COALESCE(a.local_path, '')
+       COALESCE(a.size_bytes, 0),
+       COALESCE(NULLIF(a.src_ip, ''), NULLIF(ev.sha_ip, ''), NULLIF(es.sess_ip, ''), ''),
+       COALESCE(a.local_path, '')
 FROM bazaar_uploads u
 LEFT JOIN (
-  SELECT sha256, MAX(size_bytes) AS size_bytes, MAX(src_ip) AS src_ip, MAX(local_path) AS local_path
+  SELECT sha256,
+         MAX(size_bytes) AS size_bytes,
+         MAX(CASE WHEN src_ip != '' THEN src_ip END) AS src_ip,
+         MAX(local_path) AS local_path,
+         MAX(CASE WHEN session_id != '' THEN session_id END) AS session_id
   FROM artifacts WHERE sha256 != '' GROUP BY sha256
 ) a ON a.sha256 = u.sha256
+LEFT JOIN (
+  SELECT sha256,
+         MAX(CASE WHEN src_ip != '' THEN src_ip END) AS sha_ip
+  FROM events
+  WHERE sha256 != '' AND src_ip != ''
+  GROUP BY sha256
+) ev ON ev.sha256 = u.sha256
+LEFT JOIN (
+  SELECT session_id,
+         MAX(CASE WHEN src_ip != '' THEN src_ip END) AS sess_ip
+  FROM events
+  WHERE session_id != '' AND src_ip != ''
+  GROUP BY session_id
+) es ON es.session_id = a.session_id
+     AND a.session_id IS NOT NULL AND a.session_id != ''
 ORDER BY u.uploaded_at DESC`
 	args := []interface{}{}
 	if limit > 0 {

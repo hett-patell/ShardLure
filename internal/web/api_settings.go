@@ -67,6 +67,12 @@ var settingsRegistry = []settingMeta{
 	{Key: settings.KeyAbuseCategories, Kind: kindIntCSV, Label: "Categories"},
 	{Key: settings.KeyAbuseComment, Kind: kindText, Label: "Report comment"},
 
+	// --- MalwareBazaar sharing knobs (non-secret) ---
+	{Key: settings.KeyBazaarEndpoint, Kind: kindText, Label: "API endpoint"},
+	{Key: settings.KeyBazaarTags, Kind: kindText, Label: "Sample tags"},
+	{Key: settings.KeyBazaarMaxBytes, Kind: kindInt, Label: "Max upload size (bytes)", MinInt: 1, MaxInt: 1073741824, HasIntRange: true},
+	{Key: settings.KeyBazaarFreshnessDays, Kind: kindInt, Label: "Freshness window (days)", MinInt: 1, MaxInt: 30, HasIntRange: true},
+
 	// --- geolocation (non-secret) ---
 	// Only the geo-HTTP toggles are exposed here: they meaningfully enable /
 	// disable outbound attacker-IP geolocation. The globe's home origin
@@ -74,6 +80,12 @@ var settingsRegistry = []settingMeta{
 	// and editing it here duplicated config while barely affecting the globe.
 	{Key: settings.KeyGeoHTTP, Kind: kindBool, Label: "Geo lookups enabled"},
 	{Key: settings.KeyGeoInsecure, Kind: kindBool, Label: "Allow insecure geo HTTP"},
+
+	// --- appearance (non-secret) ---
+	{Key: settings.KeyUITheme, Kind: kindText, Label: "UI theme"},
+
+	// --- dashboard auth (secret; rendered in its own panel, not with provider keys) ---
+	{Key: settings.KeyDashToken, Kind: kindSecret, Label: "Dashboard auth token"},
 }
 
 // metaFor looks up a setting's metadata; ok=false means the key is not on the
@@ -243,6 +255,19 @@ func validateSetting(m settingMeta, val string) string {
 				return "categories must be comma-separated integers"
 			}
 		}
+	case kindText:
+		if m.Key == settings.KeyUITheme {
+			switch val {
+			case "dragon", "meridian", "sprite":
+			default:
+				return "theme must be dragon, meridian, or sprite"
+			}
+		}
+		if m.Key == settings.KeyBazaarEndpoint {
+			if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
+				return "endpoint must be an http(s) URL"
+			}
+		}
 	}
 	return ""
 }
@@ -291,7 +316,7 @@ func (s *Server) testBazaar(ctx context.Context) (bool, string) {
 	if key == "" {
 		return false, "no API key configured"
 	}
-	endpoint := s.bazaarEndpoint
+	endpoint := s.bazaarEndpointLive()
 	if endpoint == "" {
 		endpoint = "https://mb-api.abuse.ch/api/v1/"
 	}
