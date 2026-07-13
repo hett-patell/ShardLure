@@ -195,7 +195,11 @@ func (s *Store) fillSessionUsernames(events []CommandEvent) error {
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	q := `SELECT session_id, MAX(CASE WHEN username != '' THEN username END)
+	q := `SELECT session_id,
+  COALESCE(
+    MAX(CASE WHEN kind = 'accepted' AND username != '' THEN username END),
+    MAX(CASE WHEN username != '' THEN username END)
+  )
 FROM events
 WHERE session_id IN (` + strings.Join(placeholders, ",") + `)
 GROUP BY session_id`

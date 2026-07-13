@@ -178,32 +178,31 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
     { passive: false }
   );
 
-  window.addEventListener("pointermove", (e) => {
+  const onPointerMove = (e) => {
     if (!dragging) return;
     onMove(e.clientX, e.clientY);
-  });
+  };
+  window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", endDrag);
   window.addEventListener("pointercancel", endDrag);
 
-  canvas.addEventListener(
-    "wheel",
-    (e) => {
-      e.preventDefault();
-      const delta = e.deltaY > 0 ? -0.05 : 0.05;
-      state.targetScale = clamp((state.targetScale || 1) + delta, 0.7, 1.55);
-      pauseAuto(2000);
-    },
-    { passive: false }
-  );
+  const onWheel = (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.05 : 0.05;
+    state.targetScale = clamp((state.targetScale || 1) + delta, 0.7, 1.55);
+    pauseAuto(2000);
+  };
+  canvas.addEventListener("wheel", onWheel, { passive: false });
 
-  canvas.addEventListener("dblclick", (e) => {
+  const onDblClick = (e) => {
     e.preventDefault();
     const home = places.find((p) => p.id === "home") || places[0];
     if (home) {
       focus(home.lat, home.lon, home);
       state.targetScale = 1;
     }
-  });
+  };
+  canvas.addEventListener("dblclick", onDblClick);
 
   let labelEls = [];
   let placeById = {};
@@ -324,6 +323,14 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
     focus,
     wrap,
     baseSize,
+    destroy() {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+      canvas.removeEventListener("wheel", onWheel);
+      canvas.removeEventListener("dblclick", onDblClick);
+      clearTimeout(resumeTimer);
+    },
     setPlaces(next) {
       rebindLabels(next);
     },

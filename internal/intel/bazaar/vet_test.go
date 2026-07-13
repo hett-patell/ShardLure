@@ -92,6 +92,43 @@ func TestVet(t *testing.T) {
 	}
 }
 
+func TestVetFreshnessDaysOverride(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	fourDaysAgo := now.Add(-4 * 24 * time.Hour)
+	twelveDaysAgo := now.Add(-12 * 24 * time.Hour)
+
+	freshELF := Candidate{SizeBytes: 100_000, Origin: "cowrie_download", ObservedAt: fourDaysAgo}
+	cls := Classification{FileKind: "ELF", Tags: []string{"elf"}}
+
+	// 4-day-old sample with FreshnessDays=3 should be rejected as stale
+	ok, reason := Vet(freshELF, cls, now, VetOptions{FreshnessDays: 3})
+	if ok {
+		t.Fatalf("expected rejection with FreshnessDays=3 for 4-day-old sample")
+	}
+	if !contains(reason, "3-day") {
+		t.Errorf("reason %q should mention 3-day policy", reason)
+	}
+
+	// Same sample without override (default 10) should accept
+	ok, _ = Vet(freshELF, cls, now)
+	if !ok {
+		t.Fatal("4-day-old sample should pass with default 10-day window")
+	}
+
+	// 12-day-old sample with FreshnessDays=15 should accept
+	oldELF := Candidate{SizeBytes: 100_000, Origin: "cowrie_download", ObservedAt: twelveDaysAgo}
+	ok, _ = Vet(oldELF, cls, now, VetOptions{FreshnessDays: 15})
+	if !ok {
+		t.Fatal("12-day-old sample should pass with FreshnessDays=15")
+	}
+
+	// Same 12-day-old with default (10) should be rejected
+	ok, _ = Vet(oldELF, cls, now)
+	if ok {
+		t.Fatal("12-day-old sample should be rejected with default 10-day window")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

@@ -100,9 +100,6 @@ func (s *Set) Has(ip string) bool {
 	if _, ok := s.exact[ip]; ok {
 		return true
 	}
-	if len(s.cidrs) == 0 {
-		return false
-	}
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return false

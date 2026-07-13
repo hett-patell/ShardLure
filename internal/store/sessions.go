@@ -145,12 +145,13 @@ func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionS
 	if limit <= 0 {
 		limit = 30
 	}
+	sinceStr := since.UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.Query(`
 WITH first_cmds AS (
   SELECT session_id, command,
     ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts ASC) AS rn
   FROM events
-  WHERE source = 'cowrie' AND kind = 'command' AND command != ''
+  WHERE source = 'cowrie' AND kind = 'command' AND command != '' AND ts >= ?
 )
 SELECT
   s.session_id,
@@ -170,7 +171,7 @@ WHERE s.source='cowrie' AND s.session_id != '' AND s.ts >= ?
 GROUP BY s.session_id
 HAVING n_cmd > 0
 ORDER BY end_ts DESC
-LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+LIMIT ?`, sinceStr, sinceStr, limit)
 	if err != nil {
 		return nil, err
 	}

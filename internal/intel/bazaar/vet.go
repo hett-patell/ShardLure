@@ -1,6 +1,9 @@
 package bazaar
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // MalwareBazaar submission policy (https://bazaar.abuse.ch/, "Submission
 // Policy") is enforced HERE, in one place, so both the CLI `share` command
@@ -23,8 +26,8 @@ const (
 	// (empty markers, 1-byte scp probes, truncated fetches), never a real
 	// sample. The archive holds literal 1- and 2-byte "downloads".
 	minSampleBytes = 64
-	// maxFreshness is MB's hard 10-day rule, measured from first observation.
-	maxFreshness = 10 * 24 * time.Hour
+	// defaultFreshnessDays is MB's hard 10-day rule, measured from first observation.
+	defaultFreshnessDays = 10
 )
 
 // malwareTags are tags Classify attaches that, on their own, confirm the file
@@ -52,12 +55,22 @@ var benignKinds = map[string]bool{
 	"SSH key": true,
 }
 
+// VetOptions holds optional policy overrides for Vet.
+type VetOptions struct {
+	FreshnessDays int // 0 = use defaultFreshnessDays (10)
+}
+
 // Vet decides whether a single candidate may be submitted to MalwareBazaar.
 // Returns (false, reason) to skip. now is injected for testability.
 //
 // Order matters: hard rejects (policy violations / benign / junk) come first
 // and win over any malware signal, then the accept signals are evaluated.
-func Vet(c Candidate, cls Classification, now time.Time) (bool, string) {
+func Vet(c Candidate, cls Classification, now time.Time, opts ...VetOptions) (bool, string) {
+	freshDays := defaultFreshnessDays
+	if len(opts) > 0 && opts[0].FreshnessDays > 0 {
+		freshDays = opts[0].FreshnessDays
+	}
+	maxFreshness := time.Duration(freshDays) * 24 * time.Hour
 	// --- hard rejects -------------------------------------------------
 	if c.Origin == "cowrie_tty" {
 		return false, "tty transcript, not a malware sample"
@@ -73,7 +86,7 @@ func Vet(c Candidate, cls Classification, now time.Time) (bool, string) {
 	// ObservedAt (unknown) is treated as stale — better to skip than risk a
 	// policy strike on a sample we can't date.
 	if c.ObservedAt.IsZero() || now.Sub(c.ObservedAt) > maxFreshness {
-		return false, "stale: older than MB's 10-day freshness policy"
+		return false, fmt.Sprintf("stale: older than %d-day freshness policy", freshDays)
 	}
 
 	// --- confirmed-malware signals (accept if ANY) --------------------

@@ -32,6 +32,9 @@ func Classify(events []*models.Event) []Hit {
 		}
 	}
 	for _, e := range events {
+		if e == nil {
+			continue
+		}
 		cmd := strings.ToLower(e.Command)
 		for i := range cat {
 			if cat[i].match(e, cmd) {
@@ -63,6 +66,9 @@ func Classify(events []*models.Event) []Hit {
 // by future per-event tagging (e.g. in the session timeline) so the UI
 // can show TTP tags inline.
 func ClassifyOne(e *models.Event) []string {
+	if e == nil {
+		return nil
+	}
 	cat := techniques()
 	cmd := strings.ToLower(e.Command)
 	var out []string

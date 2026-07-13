@@ -98,10 +98,33 @@ type Resolver struct {
 // provider.
 func NewResolver(st *store.Store) *Resolver {
 	return &Resolver{
-		St:   st,
-		HTTP: &http.Client{Timeout: 6 * time.Second},
-		Now:  time.Now,
+		St: st,
+		HTTP: &http.Client{
+			Timeout: 6 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 5 {
+					return errors.New("too many redirects")
+				}
+				if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+					for k := range req.Header {
+						if isAuthHeader(k) {
+							req.Header.Del(k)
+						}
+					}
+				}
+				return nil
+			},
+		},
+		Now: time.Now,
 	}
+}
+
+func isAuthHeader(k string) bool {
+	switch strings.ToLower(k) {
+	case "authorization", "key", "x-apikey", "x-otx-api-key":
+		return true
+	}
+	return false
 }
 
 // LookupAll fans out to every provider and returns one Result per

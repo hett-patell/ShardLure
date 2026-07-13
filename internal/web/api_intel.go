@@ -11,10 +11,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
+	"github.com/networkshard/shardlure/internal/intel/bazaar"
 	"github.com/networkshard/shardlure/internal/intel/deobf"
 	"github.com/networkshard/shardlure/internal/intel/enrich"
 	"github.com/networkshard/shardlure/internal/intel/graph"
@@ -23,9 +25,6 @@ import (
 	"github.com/networkshard/shardlure/internal/intel/payload"
 	"github.com/networkshard/shardlure/internal/intel/replay"
 	"github.com/networkshard/shardlure/internal/intel/ttp"
-	"sync"
-
-	"github.com/networkshard/shardlure/internal/intel/bazaar"
 	"github.com/networkshard/shardlure/internal/intel/wordlist"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
@@ -1192,10 +1191,11 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	var result *bazaar.Result
 	var skipReason string
 	opts := bazaar.Options{
-		APIKey:    bzKey,
-		Endpoint:  s.bazaarEndpointLive(),
-		ExtraTags: s.bazaarTagsLive(),
-		MaxBytes:  s.bazaarMaxBytesLive(),
+		APIKey:        bzKey,
+		Endpoint:      s.bazaarEndpointLive(),
+		ExtraTags:     s.bazaarTagsLive(),
+		MaxBytes:      s.bazaarMaxBytesLive(),
+		FreshnessDays: s.bazaarFreshnessDaysLive(),
 		OnProgress: func(_ bazaar.Candidate, _ bazaar.Classification, r *bazaar.Result, err error) {
 			result = r
 			// For a Vet/pre-flight skip, Share reports status="skipped" with
@@ -1454,10 +1454,15 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		})
 	}
 
-	// Serialize batch reporting process-wide with the single-report throttle so
-	// a click here can't race a click on a per-row button into an API flood.
-	s.abuseReportMu.Lock()
-	defer s.abuseReportMu.Unlock()
+	// Guard against concurrent batch runs (a second click, a script loop).
+	// TryLock returns false if another batch is already in flight — return
+	// immediately instead of queueing behind a ~2000s network call.
+	if !s.abuseReportBatchMu.TryLock() {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "batch report already in progress"})
+		return
+	}
+	defer s.abuseReportBatchMu.Unlock()
 
 	opts := abuseipdb.Options{
 		APIKey:     abuseKey,
@@ -1470,7 +1475,10 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 	}
 	rec := &abuseReportRecorderAdapter{st: s.st}
 	reported, skipped, ferr := abuseipdb.Report(r.Context(), rec, cands, opts)
+
+	s.abuseReportMu.Lock()
 	s.lastAbuseReportAt = time.Now()
+	s.abuseReportMu.Unlock()
 
 	resp := reportAllResponse{Status: "ok", Reported: reported, Skipped: skipped}
 	if ferr != nil {
