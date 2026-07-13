@@ -56,6 +56,11 @@ function destroy() {
     } catch (_) {}
     _stop = null;
   }
+  if (_ix) {
+    try {
+      if (typeof _ix.destroy === "function") _ix.destroy();
+    } catch (_) {}
+  }
   if (_globe) {
     try {
       if (typeof _globe.destroy === "function") _globe.destroy();

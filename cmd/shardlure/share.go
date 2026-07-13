@@ -86,13 +86,14 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
 	}
 
 	opts := bazaar.Options{
-		APIKey:    apiKey,
-		Endpoint:  ep,
-		ExtraTags: cfg.Intel.Bazaar.Tags,
-		MaxBytes:  maxBytes,
-		DryRun:    *dryRun,
-		Anonymous: *anonymous,
-		Comment:   *comment,
+		APIKey:        apiKey,
+		Endpoint:      ep,
+		ExtraTags:     cfg.Intel.Bazaar.Tags,
+		MaxBytes:      maxBytes,
+		FreshnessDays: freshDays,
+		DryRun:        *dryRun,
+		Anonymous:     *anonymous,
+		Comment:       *comment,
 		// 2 s rate limit lives inside Share's default. Hardcoded
 		// here only to make it obvious in --dry-run output.
 		RateLimit: 2 * time.Second,

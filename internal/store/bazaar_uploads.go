@@ -182,6 +182,12 @@ func (s *Store) ListBazaarUploadsWithArtifacts(limit int) ([]BazaarUploadWithArt
 	// MAX() picks a stable representative for the display-only size/ip/path.
 	// Src IP is often blank on cowrie_download rows (synced from disk without
 	// session context); backfill from events matched by sha256 or session_id.
+	// The ev/es subqueries scope their events scan to ONLY the sha256s/sessions
+	// tied to bazaar_uploads (not the whole events table). Before this, both
+	// GROUP BY'd all of events on every 30s poll at limit=1000 — reintroducing
+	// the per-poll full-table cost v14 removed elsewhere. `ev` now rides the
+	// partial idx_events_sha256 (v15); `es` is restricted to the artifact
+	// sessions of uploaded samples.
 	q := `
 SELECT u.sha256, u.uploaded_at, u.response_status, COALESCE(u.mb_url, ''),
        COALESCE(a.size_bytes, 0),
@@ -194,13 +200,16 @@ LEFT JOIN (
          MAX(CASE WHEN src_ip != '' THEN src_ip END) AS src_ip,
          MAX(local_path) AS local_path,
          MAX(CASE WHEN session_id != '' THEN session_id END) AS session_id
-  FROM artifacts WHERE sha256 != '' GROUP BY sha256
+  FROM artifacts
+  WHERE sha256 != '' AND sha256 IN (SELECT sha256 FROM bazaar_uploads)
+  GROUP BY sha256
 ) a ON a.sha256 = u.sha256
 LEFT JOIN (
   SELECT sha256,
          MAX(CASE WHEN src_ip != '' THEN src_ip END) AS sha_ip
   FROM events
   WHERE sha256 != '' AND src_ip != ''
+    AND sha256 IN (SELECT sha256 FROM bazaar_uploads)
   GROUP BY sha256
 ) ev ON ev.sha256 = u.sha256
 LEFT JOIN (
@@ -208,9 +217,13 @@ LEFT JOIN (
          MAX(CASE WHEN src_ip != '' THEN src_ip END) AS sess_ip
   FROM events
   WHERE session_id != '' AND src_ip != ''
+    AND session_id IN (
+      SELECT session_id FROM artifacts
+      WHERE sha256 != '' AND session_id != ''
+        AND sha256 IN (SELECT sha256 FROM bazaar_uploads)
+    )
   GROUP BY session_id
 ) es ON es.session_id = a.session_id
-     AND a.session_id IS NOT NULL AND a.session_id != ''
 ORDER BY u.uploaded_at DESC`
 	args := []interface{}{}
 	if limit > 0 {

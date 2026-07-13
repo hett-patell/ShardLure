@@ -480,6 +480,22 @@ CREATE INDEX IF NOT EXISTS idx_actors_rate ON actors(attempts_per_hour);`); err 
 			return err
 		}
 	}
+
+	// v15: index events(sha256) for the bazaar sharing panel. Its upload list
+	// (polled at limit=1000 every 30s) backfills each sample's source IP from
+	// events matched by sha256; without this index that subquery full-scanned
+	// the whole events table on every poll (the same per-poll-GROUP-BY cost the
+	// v14/0ccb048 work removed elsewhere). Partial index keeps it small: only
+	// rows that actually carry a sha256 are relevant to that lookup.
+	if current < 15 {
+		if _, err := s.db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_events_sha256 ON events(sha256) WHERE sha256 != '';`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (15, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -51,15 +51,16 @@ type UploadRecorder interface {
 // values rather than silently defaulting, because uploading to the
 // wrong endpoint or with an empty key would be an embarrassing bug.
 type Options struct {
-	APIKey     string
-	Endpoint   string
-	ExtraTags  []string
-	MaxBytes   int64
-	DryRun     bool
-	Anonymous  bool
-	Comment    string // operator-supplied comment appended to per-sample context
-	RateLimit  time.Duration
-	OnProgress func(c Candidate, classification Classification, result *Result, err error)
+	APIKey        string
+	Endpoint      string
+	ExtraTags     []string
+	MaxBytes      int64
+	FreshnessDays int // 0 = default (10 days); configurable via settings panel
+	DryRun        bool
+	Anonymous     bool
+	Comment       string // operator-supplied comment appended to per-sample context
+	RateLimit     time.Duration
+	OnProgress    func(c Candidate, classification Classification, result *Result, err error)
 }
 
 // Errors surfaced to callers. Kept as sentinels so the CLI can map
@@ -154,7 +155,7 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		// junk, or stale sample is skipped locally and never touches the MB
 		// API. This is the single enforcement point for both the CLI and the
 		// dashboard upload button.
-		if ok, reason := Vet(cand, cls, time.Now()); !ok {
+		if ok, reason := Vet(cand, cls, time.Now(), VetOptions{FreshnessDays: opts.FreshnessDays}); !ok {
 			skipped++
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, cls, &Result{Status: "skipped"}, errors.New(reason))
