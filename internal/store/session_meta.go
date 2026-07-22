@@ -1,7 +1,9 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
+	"time"
 )
 
 // cowrie carries a session's real end-of-life facts on eventids that make poor
@@ -70,6 +72,113 @@ INSERT INTO cowrie_session_meta (session_id, arch) VALUES (?, ?)
 ON CONFLICT(session_id) DO UPDATE SET arch=excluded.arch`,
 		sessionID, arch)
 	return err
+}
+
+// SessionBinding is one session's side-channel facts from a single parse pass,
+// as produced by the cowrie ingester. Empty/zero fields are skipped. Passed to
+// RecordSessionBindings so a tick's worth of bindings commit in ONE transaction
+// instead of one writeMu acquisition per (binding × table).
+type SessionBinding struct {
+	SessionID  string
+	HASSH      string
+	Arch       string
+	DurationMs int64
+	// TTYSHA/TTYTS bind a ttylog sha to this session (cowrie_tty_index). Empty
+	// TTYSHA skips the tty write.
+	TTYSHA string
+	TTYTS  time.Time
+}
+
+// RecordSessionBindings persists a batch of per-session side-channel bindings
+// (hassh, duration, arch, ttylog-sha) in a single write transaction. It is the
+// batched form of calling RecordSessionHASSH / RecordSessionDuration /
+// RecordSessionArch / RecordCowrieTTYBinding per item: on a tick with many new
+// sessions that was N separate writeMu acquisitions ahead of the main event
+// insert; this collapses them to one. Semantics per column are identical to the
+// singular methods (same ON CONFLICT clauses, same skip-empty rules).
+//
+// Tables are ensured BEFORE opening the transaction: the ensure* helpers take
+// writeMu via execWrite, and writeMu is not reentrant, so calling them inside
+// WithTx (which holds writeMu) would deadlock.
+func (s *Store) RecordSessionBindings(bindings []SessionBinding) error {
+	if len(bindings) == 0 {
+		return nil
+	}
+	needMeta, needHASSH, needTTY := false, false, false
+	for _, b := range bindings {
+		if strings.TrimSpace(b.SessionID) == "" {
+			continue
+		}
+		if strings.TrimSpace(b.HASSH) != "" {
+			needHASSH = true
+		}
+		if strings.TrimSpace(b.Arch) != "" || b.DurationMs > 0 {
+			needMeta = true
+		}
+		if strings.TrimSpace(b.TTYSHA) != "" {
+			needTTY = true
+		}
+	}
+	if needHASSH {
+		if err := s.ensureSessionHASSHIndex(); err != nil {
+			return err
+		}
+	}
+	if needMeta {
+		if err := s.ensureSessionMetaTable(); err != nil {
+			return err
+		}
+	}
+	if needTTY {
+		if err := s.ensureCowrieTTYIndex(); err != nil {
+			return err
+		}
+	}
+	if !needHASSH && !needMeta && !needTTY {
+		return nil
+	}
+	return s.WithTx(func(tx *sql.Tx) error {
+		for _, b := range bindings {
+			sid := strings.TrimSpace(b.SessionID)
+			if sid == "" {
+				continue
+			}
+			if h := strings.TrimSpace(b.HASSH); h != "" {
+				if _, err := tx.Exec(`
+INSERT INTO cowrie_session_hassh (session_id, hassh) VALUES (?, ?)
+ON CONFLICT(session_id) DO UPDATE SET hassh=excluded.hassh`, sid, h); err != nil {
+					return err
+				}
+			}
+			if b.DurationMs > 0 {
+				if _, err := tx.Exec(`
+INSERT INTO cowrie_session_meta (session_id, duration_ms) VALUES (?, ?)
+ON CONFLICT(session_id) DO UPDATE SET duration_ms=excluded.duration_ms`, sid, b.DurationMs); err != nil {
+					return err
+				}
+			}
+			if a := strings.TrimSpace(b.Arch); a != "" {
+				if _, err := tx.Exec(`
+INSERT INTO cowrie_session_meta (session_id, arch) VALUES (?, ?)
+ON CONFLICT(session_id) DO UPDATE SET arch=excluded.arch`, sid, a); err != nil {
+					return err
+				}
+			}
+			if sha := strings.TrimSpace(strings.ToLower(b.TTYSHA)); sha != "" {
+				ts := b.TTYTS
+				if ts.IsZero() {
+					ts = time.Now().UTC()
+				}
+				if _, err := tx.Exec(`
+INSERT INTO cowrie_tty_index (sha256, session_id, ts) VALUES (?, ?, ?)
+ON CONFLICT(sha256) DO UPDATE SET session_id=excluded.session_id, ts=excluded.ts`,
+					sha, sid, ts.UTC().Format(time.RFC3339Nano)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // SessionMetaForSessions returns the session_id->SessionMeta map for the given

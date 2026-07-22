@@ -22,6 +22,25 @@ else
   echo 'Ubuntu 22.04.4 LTS' | sudo tee "$COWRIE_HOME/honeyfs/etc/issue.net" >/dev/null
 fi
 
+# --- txtcmds: realistic command output stubs (anti-fingerprinting) ---
+if [[ -d "$PERSONA/txtcmds" ]]; then
+  echo "[stealth] syncing txtcmds persona (anti-fingerprint stubs)"
+  TXTCMDS_DST="$COWRIE_HOME/share/cowrie/txtcmds"
+  sudo mkdir -p "$TXTCMDS_DST"
+  sudo rsync -a "$PERSONA/txtcmds/" "$TXTCMDS_DST/"
+else
+  echo "[stealth] no txtcmds dir in persona — skipping"
+fi
+
+# --- time persona: regenerate time-sensitive files against the live clock ---
+# Frozen uptime/last/who + /proc/uptime are a honeypot tell vs Cowrie's live
+# `date`. Runs AFTER the txtcmds rsync so it overwrites the just-synced stubs.
+if [[ -f "$PERSONA/gen-time-persona.py" ]]; then
+  echo "[stealth] refreshing time-sensitive persona against live clock"
+  sudo python3 "$PERSONA/gen-time-persona.py" "$COWRIE_HOME" \
+    || echo "[stealth] WARN: time-persona generator failed; time files may be stale (fingerprintable)"
+fi
+
 # --- userdb: realistic weak creds, no *:* honeypot catch-alls ---
 if [[ -f "$PERSONA/userdb.txt" ]]; then
   sudo cp "$PERSONA/userdb.txt" "$COWRIE_HOME/etc/userdb.txt"
@@ -84,19 +103,19 @@ def merge(base_text, overlay_text):
     over = parse_ini(overlay_text)
     for sec, kv in over.items():
         base.setdefault(sec, {}).update(kv)
-    base.setdefault("ssh", {})["listen_endpoints"] = "tcp:22:interface=0.0.0.0"
-    base.setdefault("honeypot", {})
+    base.setdefault("[ssh]", {})["listen_endpoints"] = "tcp:22:interface=0.0.0.0"
+    base.setdefault("[honeypot]", {})
     for k in ("log_path", "data_path", "download_path"):
-        if k not in base["honeypot"]:
+        if k not in base["[honeypot]"]:
             default = {
                 "log_path": str(cowrie_home / "var/log/cowrie"),
                 "data_path": str(cowrie_home / "var/lib/cowrie"),
                 "download_path": str(cowrie_home / "var/lib/cowrie/downloads"),
             }[k]
-            base["honeypot"][k] = default
-    base.setdefault("output_jsonlog", {})
-    base["output_jsonlog"].setdefault("enabled", "true")
-    base["output_jsonlog"].setdefault("logfile", str(cowrie_home / "var/log/cowrie/cowrie.json"))
+            base["[honeypot]"][k] = default
+    base.setdefault("[output_jsonlog]", {})
+    base["[output_jsonlog]"].setdefault("enabled", "true")
+    base["[output_jsonlog]"].setdefault("logfile", str(cowrie_home / "var/log/cowrie/cowrie.json"))
     lines = []
     for sec, kv in base.items():
         lines.append(sec)
@@ -122,6 +141,27 @@ sudo chown cowrie:cowrie "$KEYDIR"/ssh_host_*key "$KEYDIR"/ssh_host_*key.pub 2>/
 sudo chmod 600 "$KEYDIR"/ssh_host_*key
 
 sudo chown -R cowrie:cowrie "$COWRIE_HOME/honeyfs" "$COWRIE_HOME/etc" "$COWRIE_HOME/var"
+
+# --- Cowrie source patches (anti-fingerprint shell fixes) ---
+# We do NOT swallow patch failures: a silent no-op (e.g. upstream Cowrie
+# reformatted a target block) reverts the shell to fingerprintable behaviour
+# while claiming success. Track failures and report them loudly at the end;
+# non-fatal so the rest of the deploy still completes.
+if [[ -d "$PERSONA/patches" ]]; then
+  echo "[stealth] applying Cowrie source patches"
+  patch_failures=()
+  for patch in "$PERSONA/patches"/*.py; do
+    [[ -f "$patch" ]] || continue
+    echo "  patch: $(basename "$patch")"
+    if ! sudo python3 "$patch" "$COWRIE_HOME"; then
+      patch_failures+=("$(basename "$patch")")
+    fi
+  done
+  if (( ${#patch_failures[@]} > 0 )); then
+    echo "[stealth] WARN: Cowrie patches FAILED: ${patch_failures[*]}" >&2
+    echo "[stealth] WARN: honeypot may be fingerprintable — check for upstream Cowrie drift" >&2
+  fi
+fi
 
 echo "[stealth] restart cowrie"
 sudo systemctl restart cowrie

@@ -73,19 +73,22 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	// Full window (was capped at the most-recent 20000 events, so any window
-	// wider than ~30h silently classified only the last 30h).
-	events, err := s.eventsForWindowCached(windowHours)
+	// Bounded to the most-recent defaultWindowEventCap events; total is the true
+	// window population so TotalEvents stays honest and the header discloses any
+	// truncation (see discloseWindowTruncation) rather than silently classifying
+	// a fraction — the failure mode of the old fixed 20000-event cap.
+	events, total, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), total)
 
 	hits := mitre.Classify(events)
 	resp := mitreResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
-		TotalEvents: len(events), // now the true window total (full window read)
+		TotalEvents: total, // true window total, even when the analysis was capped
 		Grid:        mitre.CoverageGrid(hits),
 	}
 	for _, h := range hits {
@@ -398,11 +401,12 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // default 7d for TTP
-	events, err := s.eventsForWindowCached(windowHours)
+	events, evTotal, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), evTotal)
 	limit := 100
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 1000 {
 		limit = n
@@ -491,11 +495,12 @@ func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
 	}
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 168) // 7d default
-	events, err := s.eventsForWindowCached(windowHours)
+	events, total, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), total)
 
 	resp := deobfResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -592,11 +597,12 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("top")); err == nil && n > 0 && n <= 500 {
 		topN = n
 	}
-	events, err := s.eventsForWindowCached(windowHours)
+	events, total, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), total)
 	g := graph.Build(events, topN)
 	// Sum the per-kind distinct totals so the UI can show "rendered of total".
 	totalNodes := 0
@@ -647,11 +653,12 @@ func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 720) // 30d default
-	events, err := s.eventsForWindowCached(windowHours)
+	events, total, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), total)
 
 	var entries []wordlist.Entry
 	switch kind {
@@ -930,11 +937,12 @@ func (s *Server) handleIOCList(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	events, err := s.eventsForWindowCached(windowHours)
+	events, evTotal, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), evTotal)
 	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
 	var kinds []ioc.Kind
 	if kind != "" && kind != "all" {
@@ -966,11 +974,12 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	events, err := s.eventsForWindowCached(windowHours)
+	events, total, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), total)
 	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
 	var kinds []ioc.Kind
 	if kind != "" && kind != "all" {
@@ -1002,11 +1011,12 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 24)
-	events, err := s.eventsForWindowCached(windowHours)
+	events, total, err := s.eventsForWindowCached(windowHours)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	discloseWindowTruncation(w, len(events), total)
 	indicators := ioc.Collect(events, nil)
 
 	fname := "shardlure-stix-" + time.Now().UTC().Format("20060102T150405Z") + ".json"

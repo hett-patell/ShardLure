@@ -1,22 +1,22 @@
 <!doctype html>
-<html lang="en" data-theme="dragon">
+<html lang="en" data-theme="signal" data-mode="dark">
 <head>
 <script>
-(function () {
   try {
-    var t = localStorage.getItem('shardlure_theme') || 'dragon';
-    if (t !== 'dragon' && t !== 'meridian' && t !== 'sprite') t = 'dragon';
+    var t = localStorage.getItem('shardlure_theme') || 'signal';
+    var m = localStorage.getItem('shardlure_mode') || 'dark';
     document.documentElement.setAttribute('data-theme', t);
+    if (t === 'signal') document.documentElement.setAttribute('data-mode', m);
   } catch (e) {
-    document.documentElement.setAttribute('data-theme', 'dragon');
+    document.documentElement.setAttribute('data-theme', 'signal');
+    document.documentElement.setAttribute('data-mode', 'dark');
   }
-})();
 </script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ShardLure Live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Pixelify+Sans:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
 
 <style>
@@ -43,10 +43,6 @@
     color: var(--text);
   }
 
-  #globe {
-    position: fixed; inset: 0;
-    z-index: 0;
-  }
   #vignette {
     position: fixed; inset: 0; z-index: 1; pointer-events: none;
     background:
@@ -315,7 +311,6 @@
   <div class="sb-dot"></div>
 </nav>
 
-<div id="globe"></div>
 <div id="cobe-stage" hidden>
   <div id="cobe-wrap">
     <canvas id="cobe" width="1000" height="1000"></canvas>
@@ -417,13 +412,23 @@
 // fetch when SHARDLURE_DASH_TOKEN is set server-side. Without this the globe
 // loads but /api/dashboard and /api/capture 401. No token => no-op.
 
-/* ==== UI theme (Dragon / Meridian / Sprite) ==== */
-window.__shardlureTheme = 'dragon';
+/* ==== UI theme (Signal / Meridian / Sprite) ==== */
+window.__shardlureTheme = 'signal';
 function currentThemeId() {
-  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'dragon';
+  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'signal';
+}
+function applyMode(mode) {
+  mode = (mode === 'light') ? 'light' : 'dark';
+  try { localStorage.setItem('shardlure_mode', mode); } catch (e) {}
+  if (currentThemeId() === 'signal') {
+    document.documentElement.setAttribute('data-mode', mode);
+  } else {
+    document.documentElement.removeAttribute('data-mode');
+  }
+  try { syncGlobeEngine(currentThemeId()); } catch (e) {}
 }
 function applyTheme(id, opts) {
-  if (id !== 'dragon' && id !== 'meridian' && id !== 'sprite') id = 'dragon';
+  if (id !== 'signal' && id !== 'meridian' && id !== 'sprite') id = 'signal';
   var force = opts && opts.force;
   var prev = window.__shardlureTheme;
   // Same-tab BroadcastChannel echoes postMessage back to our own listener.
@@ -434,12 +439,17 @@ function applyTheme(id, opts) {
   }
   window.__shardlureTheme = id;
   document.documentElement.setAttribute('data-theme', id);
+  if (id === 'signal') {
+    document.documentElement.setAttribute('data-mode', localStorage.getItem('shardlure_mode') || 'dark');
+  } else {
+    document.documentElement.removeAttribute('data-mode');
+  }
   try { localStorage.setItem('shardlure_theme', id); } catch (e) {}
   try {
     if (typeof BroadcastChannel !== 'undefined') {
       window.__shardlureThemeEcho = id;
       var bc = new BroadcastChannel('shardlure-theme');
-      bc.postMessage({ theme: id });
+      bc.postMessage({ theme: id, mode: localStorage.getItem('shardlure_mode') || 'dark' });
       bc.close();
     }
   } catch (e) {}
@@ -451,18 +461,19 @@ function applyTheme(id, opts) {
 async function syncThemeFromServer() {
   try {
     var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
     var data = await r.json();
     var row = (data.settings || []).find(function (s) { return s.key === 'ui.theme'; });
-    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'dragon';
+    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'signal';
     return applyTheme(id);
   } catch (e) {
-    return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+    return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
   }
 }
 try {
   window.addEventListener('storage', function (e) {
     if (e.key === 'shardlure_theme' && e.newValue) applyTheme(e.newValue);
+    if (e.key === 'shardlure_mode' && e.newValue) applyMode(e.newValue);
   });
   if (typeof BroadcastChannel !== 'undefined') {
     var __themeBC = new BroadcastChannel('shardlure-theme');
@@ -472,6 +483,7 @@ try {
       if (ev.data.theme === window.__shardlureThemeEcho ||
           ev.data.theme === window.__shardlureTheme) return;
       applyTheme(ev.data.theme);
+      if (ev.data.mode) applyMode(ev.data.mode);
     };
   }
 } catch (e) {}
@@ -561,40 +573,7 @@ const flag = function(cc) {
   return String.fromCodePoint.apply(String, cc.toUpperCase().split('').map(function(c){ return 0x1F1A5 + c.charCodeAt(0); }));
 };
 
-var globe = null;
-var _dragonGlobePromise = null;
 var _cobeBootPromise = null;
-
-function ensureDragonGlobe() {
-  if (globe) return Promise.resolve(globe);
-  if (_dragonGlobePromise) return _dragonGlobePromise;
-  _dragonGlobePromise = import('https://esm.sh/globe.gl@2.32.0').then(function (mod) {
-    var Globe = mod.default || mod;
-    var el = document.getElementById('globe');
-    if (!el) throw new Error('globe container missing');
-    globe = Globe()(el)
-      .globeImageUrl('https://networkshard.com/ssh-attacks/img/earth-night.jpg')
-      .bumpImageUrl('https://networkshard.com/ssh-attacks/img/earth-topology.png')
-      .backgroundImageUrl('https://networkshard.com/ssh-attacks/img/night-sky.png')
-      .backgroundColor('rgba(0,0,0,0)')
-      .showGraticules(true)
-      .atmosphereColor('#d02828')
-      .atmosphereAltitude(0.22)
-      .pointColor(function(){ return '#d02828'; })
-      .pointAltitude(0.02)
-      .pointRadius(0.22);
-    globe.controls().autoRotate = true;
-    globe.controls().autoRotateSpeed = 0.35;
-    globe.controls().enableZoom = true;
-    globe.controls().minDistance = 180;
-    globe.controls().maxDistance = 600;
-    return globe;
-  }).catch(function (err) {
-    _dragonGlobePromise = null;
-    throw err;
-  });
-  return _dragonGlobePromise;
-}
 
 function ensureCobeBoot() {
   if (window.ShardCobe) return Promise.resolve(window.ShardCobe);
@@ -608,63 +587,19 @@ function ensureCobeBoot() {
   return _cobeBootPromise;
 }
 
-function usesCobeTheme(id) {
-  return id === 'meridian' || id === 'sprite';
-}
-
-function setDragonGlobeVisible(on) {
-  var el = document.getElementById('globe');
-  if (!el) return;
-  if (on) {
-    el.classList.remove('globe-hidden');
-    try {
-      if (globe) {
-        if (globe.controls) globe.controls().autoRotate = true;
-        // Resume three.js loop only when Dragon is shown.
-        if (typeof globe.resumeAnimation === 'function') globe.resumeAnimation();
-      }
-    } catch (e) {}
-  } else {
-    el.classList.add('globe-hidden');
-    try {
-      if (globe) {
-        if (globe.controls) globe.controls().autoRotate = false;
-        // Critical: stop globe.gl rAF while Cobe owns the GPU.
-        if (typeof globe.pauseAnimation === 'function') globe.pauseAnimation();
-      }
-    } catch (e) {}
-  }
+function currentMode() {
+  if (currentThemeId() !== 'signal') return 'dark';
+  return document.documentElement.getAttribute('data-mode') || 'dark';
 }
 
 function syncGlobeEngine(theme) {
   theme = theme || currentThemeId();
-  if (usesCobeTheme(theme)) {
-    setDragonGlobeVisible(false);
-    return ensureCobeBoot().then(function (boot) {
-      return boot.ensure(theme);
-    }).then(function () {
-      if (typeof applyGlobeOverlays === 'function') applyGlobeOverlays();
-      if (typeof _lastHome !== 'undefined' && _lastHome && window.ShardCobe) {
-        window.ShardCobe.updateData(_lastHome, typeof _lastActors !== 'undefined' ? _lastActors : []);
-      }
-    }).catch(function () {});
-  }
-  if (window.ShardCobe && typeof window.ShardCobe.destroy === 'function') {
-    window.ShardCobe.destroy();
-  }
-  return ensureDragonGlobe().then(function () {
-    setDragonGlobeVisible(true);
-    try {
-      var cs = getComputedStyle(document.documentElement);
-      var atm = (cs.getPropertyValue('--globe-atmosphere') || '#d02828').trim();
-      var pt = (cs.getPropertyValue('--globe-point') || '#d02828').trim();
-      globe.atmosphereColor(atm);
-      globe.pointColor(function () { return pt; });
-    } catch (e) {}
+  return ensureCobeBoot().then(function (boot) {
+    return boot.ensure(theme, currentMode());
+  }).then(function () {
     if (typeof applyGlobeOverlays === 'function') applyGlobeOverlays();
-    if (typeof applyArcThemeColors === 'function') applyArcThemeColors();
-    if (typeof _lastHome !== 'undefined' && _lastHome && typeof refresh === 'function') {
-      return refresh();
+    if (typeof _lastHome !== 'undefined' && _lastHome && window.ShardCobe) {
+      window.ShardCobe.updateData(_lastHome, typeof _lastActors !== 'undefined' ? _lastActors : []);
     }
   }).catch(function () {});
 }
@@ -679,10 +614,8 @@ syncThemeFromServer().finally(function () {
 
 const spark = document.getElementById('spark');
 let sparkData = [];
-let lastArcKey = '';
 var _lastHome = { lat: 19.076, lon: 72.8777, city: 'Mumbai', country: 'India', cc: 'IN' };
 var _lastActors = [];
-var _lastMaxN = 1;
 
 
 function drawSpark(series) {
@@ -914,7 +847,11 @@ function themeAccentRGB() {
   var theme = currentThemeId();
   if (theme === 'meridian') return { r: 13, g: 92, b: 99, hex: '#0d5c63', hex2: '#a67c2d', text: '#1a2332', bg: 'rgba(244,246,248,0.96)', line: '#c5ccd6' };
   if (theme === 'sprite') return { r: 232, g: 93, b: 76, hex: '#e85d4c', hex2: '#f0b429', text: '#241910', bg: 'rgba(255,253,247,0.96)', line: '#241910' };
-  return { r: 208, g: 40, b: 40, hex: '#d02828', hex2: '#c89828', text: '#e8dcd8', bg: 'rgba(20,16,16,0.92)', line: 'rgba(200,120,100,0.22)' };
+  if (theme === 'signal') {
+    if (currentMode() === 'light') return { r: 182, g: 217, b: 0, hex: '#b6d900', hex2: '#1f8a4c', text: '#14151a', bg: 'rgba(239,239,233,0.96)', line: '#d6d6cc' };
+    return { r: 209, g: 254, b: 23, hex: '#d1fe17', hex2: '#40d986', text: '#f7f7f8', bg: 'rgba(15,17,19,0.92)', line: 'rgba(150,160,60,0.22)' };
+  }
+  return { r: 209, g: 254, b: 23, hex: '#d1fe17', hex2: '#40d986', text: '#f7f7f8', bg: 'rgba(15,17,19,0.92)', line: 'rgba(150,160,60,0.22)' };
 }
 function rgba(c, a) { return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')'; }
 
@@ -1044,54 +981,27 @@ function makeOverlayEl(d) {
 function applyGlobeOverlays() {
   var theme = currentThemeId();
   var data = buildThemeOverlays(theme, _lastHome, _lastActors);
-  if (usesCobeTheme(theme)) {
-    // Clear globe.gl HTML overlays while Cobe is active.
-    try {
-      if (typeof globe !== 'undefined' && globe) {
-        globe.htmlElementsData([]).htmlTransitionDuration(0);
-      }
-    } catch (e) {}
-    if (!window.ShardCobe || !window.ShardCobe.isActive()) return;
-    var places = [];
-    var nodes = [];
-    var seenPlaces = {};
-    data.forEach(function (d, i) {
-      var id = d.placeKey || ('ov' + i);
-      if (!seenPlaces[id]) {
-        places.push({ id: id, lat: d.lat, lon: d.lng, label: d.label || d.title || '' });
-        seenPlaces[id] = true;
-      }
-      var el = makeOverlayEl(d);
-      el.setAttribute('data-place', id);
-      if (d.tilt != null) el.style.setProperty('--tilt', d.tilt + 'deg');
-      if (d.kind === 'sticker' || d.kind === 'sat') el.setAttribute('data-offset', 'float');
-      else if (d.kind === 'live' || d.kind === 'analytics') el.setAttribute('data-offset', 'side');
-      nodes.push(el);
-    });
-    if (!seenPlaces.home) {
-      places.push({ id: 'home', lat: _lastHome.lat, lon: _lastHome.lon, label: 'Home' });
+  if (!window.ShardCobe || !window.ShardCobe.isActive()) return;
+  var places = [];
+  var nodes = [];
+  var seenPlaces = {};
+  data.forEach(function (d, i) {
+    var id = d.placeKey || ('ov' + i);
+    if (!seenPlaces[id]) {
+      places.push({ id: id, lat: d.lat, lon: d.lng, label: d.label || d.title || '' });
+      seenPlaces[id] = true;
     }
-    window.ShardCobe.setOverlayPlaces(places, nodes);
-    return;
+    var el = makeOverlayEl(d);
+    el.setAttribute('data-place', id);
+    if (d.tilt != null) el.style.setProperty('--tilt', d.tilt + 'deg');
+    if (d.kind === 'sticker' || d.kind === 'sat') el.setAttribute('data-offset', 'float');
+    else if (d.kind === 'live' || d.kind === 'analytics') el.setAttribute('data-offset', 'side');
+    nodes.push(el);
+  });
+  if (!seenPlaces.home) {
+    places.push({ id: 'home', lat: _lastHome.lat, lon: _lastHome.lon, label: 'Home' });
   }
-  if (typeof globe === 'undefined' || !globe) return;
-  globe
-    .htmlElementsData(data)
-    .htmlLat('lat')
-    .htmlLng('lng')
-    .htmlAltitude(function (d) { return d.alt || 0.03; })
-    .htmlElement(makeOverlayEl)
-    .htmlElementVisibilityModifier(function (el, visible) {
-      el.style.opacity = visible ? '1' : '0';
-    })
-    .htmlTransitionDuration(0);
-}
-
-function applyArcThemeColors() {
-  if (usesCobeTheme(currentThemeId())) return;
-  if (typeof globe === 'undefined' || !globe) return;
-  var ac = themeAccentRGB();
-  globe.arcColor(function () { return [rgba(ac, 0.14), rgba(ac, 0.95)]; });
+  window.ShardCobe.setOverlayPlaces(places, nodes);
 }
 
 async function refresh() {
@@ -1125,53 +1035,14 @@ async function refresh() {
   sparkData = (d.hourly || []).slice(-72);
   drawSpark(sparkData);
 
-  const points = actors.filter(function(a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); })
-    .sort(function(a, b) { return (b.events || 0) - (a.events || 0); })
-    .map(function(a) { return { lat: a.lat, lng: a.lon, n: a.events || 0, ip: a.ip, playbook: a.playbook || '' }; });
+  const points = actors.filter(function(a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); });
   if (!points.length && actors.length) {
     document.getElementById('s-countries').textContent = '…';
   }
-  const maxN = Math.max.apply(null, [1].concat(points.map(function(p){ return p.n; })));
-  _lastMaxN = maxN;
 
-  if (usesCobeTheme(currentThemeId())) {
-    if (window.ShardCobe) {
-      window.ShardCobe.updateData(home, mergeActorsForGlobe(actors, d.topActors || []));
-    }
-    applyGlobeOverlays();
-    return;
+  if (window.ShardCobe) {
+    window.ShardCobe.updateData(home, mergeActorsForGlobe(actors, d.topActors || []));
   }
-
-  var g = await ensureDragonGlobe();
-  g.pointsData(points)
-    .pointAltitude(function(p){ return 0.005 + 0.18 * Math.sqrt((p.n || 0) / maxN); })
-    .pointRadius(function(p){ return 0.18 + 0.55 * Math.sqrt((p.n || 0) / maxN); })
-    .pointLabel(function(p){
-      var ac = themeAccentRGB();
-      return '<div style="font-family:ui-monospace,monospace;font-size:11px;background:' + ac.bg + ';border:1px solid ' + ac.line + ';color:' + ac.text + ';padding:6px 9px;border-radius:4px;">' +
-        '<span style="color:' + ac.hex2 + '">' + esc(p.ip) + '</span> <span style="color:' + ac.hex + ';font-weight:600">' + fmt(p.n) + 'x</span><br/>' +
-        '<span style="color:' + ac.text + '">' + esc(p.playbook) + '</span></div>';
-    });
-
-  const arcs = points.slice(0, 80).map(function(p, idx) {
-    return { startLat: p.lat, startLng: p.lng, endLat: home.lat, endLng: home.lon, idx: idx, n: p.n };
-  });
-  // Skip the arcsData reset when the arc set hasn't changed: re-setting it
-  // every 5s poll restarted the dash animations visibly.
-  const arcKey = arcs.map(function(a){ return a.startLat.toFixed(2) + ',' + a.startLng.toFixed(2) + ':' + a.n; }).join('|');
-  if (arcKey === lastArcKey) {
-    applyGlobeOverlays();
-    return;
-  }
-  g.arcsData(arcs)
-    .arcStroke(function(a){ return Math.max(0.55, 0.55 + 1.1 * Math.sqrt((a.n || 0) / maxN)); })
-    .arcDashLength(0.42)
-    .arcDashGap(0.18)
-    .arcDashInitialGap(1)
-    .arcDashAnimateTime(function(a){ return 1400 + (a.idx % 9) * 180; })
-    .arcAltitude(function(a){ return 0.18 + 0.22 * Math.sqrt((a.n || 0) / maxN); });
-  applyArcThemeColors();
-  lastArcKey = arcKey;
   applyGlobeOverlays();
 }
 

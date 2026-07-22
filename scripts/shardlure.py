@@ -421,6 +421,9 @@ def apply_stealth_persona(honeypot_port: int) -> None:
         (COWRIE_HOME / "etc/userdb.txt").write_bytes(clean)
     ensure_cowrie_filesystem()
     plant_bait_files()
+    deploy_txtcmds()
+    deploy_time_persona()
+    deploy_patches()
     keydir = COWRIE_HOME / "var/lib/cowrie"
     keydir.mkdir(parents=True, exist_ok=True)
     for pattern in ("ssh_host_*key", "ssh_host_*key.pub"):
@@ -489,6 +492,70 @@ def plant_bait_files() -> None:
     dst_pickle = COWRIE_HOME / "var/lib/cowrie/fs.pickle"
     if pickle_path.exists():
         shutil.copy2(pickle_path, dst_pickle)
+
+
+def deploy_txtcmds() -> None:
+    """Copy persona txtcmds into Cowrie's share dir (anti-fingerprint stubs)."""
+    txtcmds_src = ROOT / "install" / "persona" / "txtcmds"
+    if not txtcmds_src.is_dir():
+        return
+    txtcmds_dst = COWRIE_HOME / "share" / "cowrie" / "txtcmds"
+    txtcmds_dst.mkdir(parents=True, exist_ok=True)
+    log("deploying txtcmds anti-fingerprint stubs")
+    for src_file in txtcmds_src.rglob("*"):
+        if not src_file.is_file():
+            continue
+        rel = src_file.relative_to(txtcmds_src)
+        dst = txtcmds_dst / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst)
+
+
+def deploy_time_persona() -> None:
+    """Regenerate time-sensitive persona files against the live clock.
+
+    The txtcmds/honeyfs files are otherwise frozen at a fixed date, which is a
+    honeypot tell: Cowrie's `date` renders from the real clock, so a visitor
+    comparing `date` to `uptime`/`last`/`who` would see the box stuck months in
+    the past. The generator rewrites uptime/w/who/last and /proc/uptime so they
+    track "now" and agree with each other. Must run AFTER deploy_txtcmds() (it
+    overwrites files that step just planted).
+    """
+    gen = ROOT / "install" / "persona" / "gen-time-persona.py"
+    if not gen.is_file():
+        return
+    log("refreshing time-sensitive persona against live clock")
+    proc = run([sys.executable, str(gen), str(COWRIE_HOME)])
+    if proc.returncode != 0:
+        # Non-fatal: a stale-but-planted persona still works, just fingerprintable.
+        log(f"warning: time-persona generator exited {proc.returncode}; "
+            "persona time files may be stale (fingerprintable)")
+
+
+def deploy_patches() -> None:
+    """Apply Cowrie source patches (anti-fingerprint shell fixes).
+
+    Mirrors the patches step in scripts/apply-stealth.sh so a plain
+    `shardlure.py run` produces the same hardened honeypot as the standalone
+    re-apply script. Each patch is idempotent (skips if already applied) and
+    fails loudly if its target block is missing — we do NOT swallow errors,
+    because a silent patch failure reverts Cowrie to fingerprintable behaviour.
+    """
+    patches_dir = ROOT / "install" / "persona" / "patches"
+    if not patches_dir.is_dir():
+        return
+    log("applying Cowrie source patches (anti-fingerprint)")
+    failed: list[str] = []
+    for patch in sorted(patches_dir.glob("*.py")):
+        proc = run([sys.executable, str(patch), str(COWRIE_HOME)])
+        if proc.returncode != 0:
+            failed.append(patch.name)
+    if failed:
+        # Loud, but non-fatal: the operator should know stealth is degraded
+        # (e.g. upstream Cowrie reformatted a target block) without the whole
+        # deploy aborting.
+        log("warning: Cowrie patches FAILED to apply: " + ", ".join(failed)
+            + " — honeypot may be fingerprintable; check for upstream drift")
 
 
 def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:

@@ -58,9 +58,12 @@ const (
 	KeyHomeCountry = "home.country"
 	KeyHomeCC      = "home.cc"
 
-	// UI appearance (non-secret). Allowed: dragon | meridian | sprite.
-	// Empty / unset means dragon (default).
+	// UI appearance (non-secret). Allowed: signal | meridian | sprite.
+	// Empty / unset means signal (default).
 	KeyUITheme = "ui.theme"
+	// KeyUIMode is the light/dark mode for themes that support it (Signal).
+	// Allowed: dark | light. Empty / unset means dark (default).
+	KeyUIMode = "ui.mode"
 
 	// MalwareBazaar sharing knobs (non-secret; yaml defaults when unset).
 	KeyBazaarEndpoint      = "bazaar.endpoint"

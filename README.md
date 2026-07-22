@@ -28,6 +28,7 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - [Persona And Bait](#persona-and-bait)
 - [IP Reputation Enrichment](#ip-reputation-enrichment)
 - [Threat Intel Sharing (MalwareBazaar)](#threat-intel-sharing-malwarebazaar)
+- [AbuseIPDB Reporting](#abuseipdb-reporting)
 - [Architecture](#architecture)
 - [Security Notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
@@ -46,11 +47,16 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Deploy-safe sync:** tar-over-SSH because `scp` of Go/Python sources mysteriously turns them into UTF-16. We do not gaslight you about this — see Troubleshooting.
 - **Incremental Cowrie ingest:** tracks file offset + inode, so a 100MB cowrie.json doesn't get re-scanned every 5 seconds. Your I/O thanks us.
 - **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
-- **Dragon theme:** purpose-built SOC dashboard with sidebar navigation, Chakra Petch typography, blood-red/molten-gold palette, flat panels, sharp geometry. No glass-morphism — this is a wartime console.
-- **Dashboard widgets:** threat-level gauge, attack geography, brute-force radar, top credentials, live attack timeline. All fed by real-time API polling.
+- **Themes:** ships **Signal** (default — a near-black signal field with a light/dark toggle), plus **Meridian** and **Sprite**. Switchable live from the settings panel; the selected theme and Signal's mode persist in SQLite. One WebGL globe engine (Cobe) across all themes.
+- **3D Cobe globe:** WebGL globe with live arcs from attacker IPs to your home point. Pointer-drag rotation, scroll zoom, double-click reset. Proper listener lifecycle (no leaks on theme switch).
+- **Dashboard widgets:** threat-level gauge, attack geography, brute-force radar, top credentials, live attack timeline, tunnel/proxy targets, session metadata. All fed by real-time API polling.
+- **Dashboard settings panel:** configure API keys, theme, home location, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
+- **AbuseIPDB reporting:** report confirmed brute-forcers back to AbuseIPDB from the dashboard (Report All) or CLI (`report abuseipdb`). Vetting gate enforces probe-score floor, private/admin IP exclusion, and 24h re-report dedup.
 - **Seven-provider IP enrichment:** look up any attacker IP against AbuseIPDB, VirusTotal, GreyNoise, Shodan, AlienVault OTX, IPQualityScore, and IPinfo in parallel — normalized verdict + score + tags, cached 24h. Two work with no API key.
-- **Persistent geo cache:** IP geolocation results are stored in SQLite and survive restarts. No more "resolving…" on every page load.
+- **Runtime keystore:** API keys and settings live in SQLite, editable from the settings panel. DB wins over env vars; env vars win over config file. No restart needed.
+- **Tunnel tracking:** captures and aggregates `direct-tcpip` forwarding attempts (attacker proxy pivots) — powers the "Proxy Targets" widget and tunnel IOC export.
+- **Persistent geo cache:** IP geolocation results are stored in SQLite and survive restarts. No more "resolving..." on every page load.
 
 ## Setup Guide
 
@@ -240,6 +246,7 @@ sudo ./shardlure run
 | `status` | Print event and actor counts |
 | `ioc` | Export a small IOC slice |
 | `share bazaar [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]` | Upload captured payloads to MalwareBazaar (abuse.ch) |
+| `report abuseipdb [--dry-run] [--limit N] [--min-probe N] [--rewindow N] [--status]` | Report confirmed brute-forcers to AbuseIPDB |
 | `version` | Print version |
 
 ### Installer
@@ -290,9 +297,28 @@ journal:
 cowrie:
   home: /var/lib/shardlure/cowrie
   json_log: /var/lib/shardlure/cowrie/var/log/cowrie/cowrie.json
+
+capture:
+  enabled: true
+  evidence_dir: /var/lib/shardlure/evidence
+  quarantine_fetch: true
+  max_bytes: 52428800
+  timeout_sec: 45
+
+intel:
+  bazaar:
+    api_key: ""
+    tags: ["shardlure", "honeypot"]
+    max_bytes: 33554432
+    freshness_days: 10
+  abuseipdb:
+    report_enabled: false
+    categories: [18, 22]
+    min_probe_score: 60
+    rewindow_hours: 24
 ```
 
-Use `-config /path/shardlure.yaml` or `SHARDLURE_CONFIG` to override the path.
+Use `-config /path/shardlure.yaml` or `SHARDLURE_CONFIG` to override the path. API keys can also be set from the dashboard settings panel (stored in SQLite, takes precedence over env/config).
 
 Do not commit your real config. `admin_ips` may reveal private network details such as Tailscale IPs.
 
@@ -413,6 +439,55 @@ You can also share payloads from the web dashboard: open the payload inspector m
 | `--status` | – | list past uploads from `bazaar_uploads` instead of uploading |
 
 **Why MalwareBazaar?** It's the de-facto sharing hub for honeypot-captured Linux malware. Their submission policy (confirmed malware only, no PUPs/adware, no file infectors, samples must be <10 days old) is enforced by the vetting gate described above before any upload, and again server-side by abuse.ch. Repeated violations get accounts banned — see `internal/intel/bazaar/vet.go` for the policy gate and `internal/intel/bazaar/client.go` for the fatal-status handling that halts the run on `user_blacklisted`. `--since` defaults from `intel.bazaar.freshness_days`.
+
+## AbuseIPDB Reporting
+
+`shardlure report abuseipdb` reports confirmed brute-force actors back to the AbuseIPDB community feed. This is the give-back half of enrichment — you consume the threat-intel feed via `/check`, and contribute back via `/report`.
+
+Every candidate passes a **vetting gate** (`internal/intel/abuseipdb/vet.go`) before anything is sent:
+
+- Actor must have a ProbeScore above the configured floor (default 60).
+- Private, reserved, and admin IPs are never reported.
+- A 24h re-report window prevents spamming the API (AbuseIPDB permits 15min, but 24h keeps us well within fair use).
+- The generated comment carries session stats (event count, username count, MITRE TTPs) but NOTHING identifying the honeypot host.
+
+The same gate runs for both the CLI and the dashboard's "Report All" button. The dashboard also prevents concurrent batch reports — a second click returns "batch already in progress" instead of deadlocking.
+
+**Setup**
+
+1. Ensure `SHARDLURE_ABUSEIPDB_KEY` is set (same key as enrichment).
+2. Opt in via `shardlure.yaml`:
+
+    ```yaml
+    intel:
+      abuseipdb:
+        report_enabled: true
+        categories: [18, 22]       # 18=Brute-Force, 22=SSH
+        min_probe_score: 60
+        rewindow_hours: 24
+    ```
+
+3. Dry-run first:
+
+    ```bash
+    shardlure report abuseipdb --dry-run --limit 10
+    ```
+
+4. When the output looks right, drop `--dry-run`:
+
+    ```bash
+    shardlure report abuseipdb --limit 25
+    ```
+
+**Flags**
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--dry-run` | false | print what would be reported without contacting AbuseIPDB |
+| `--limit N` | 25 | cap per-run reports (0 = unbounded) |
+| `--min-probe N` | 60 | minimum actor ProbeScore to report (0-100) |
+| `--rewindow N` | 24 | hours before a reported IP may be reported again |
+| `--status` | – | list past reports from `abuseipdb_reports` instead of reporting |
 
 ## Architecture
 
@@ -597,7 +672,7 @@ sudo userdel -r cowrie
 - [x] Graceful shutdown on SIGINT/SIGTERM (so Ctrl-C is no longer a war crime)
 - [x] DB chmod 0600 + sshd-config auto-rollback on failed reload
 - [x] MalwareBazaar payload sharing (CLI + one-click dashboard upload)
-- [x] Dragon theme — full SOC dashboard redesign with sidebar nav
+- [x] Signal theme — full SOC dashboard redesign with sidebar nav and light/dark toggle
 - [x] Dashboard widgets: threat gauge, geography, credentials, brute-force radar, live timeline
 - [x] Persistent geo cache (SQLite-backed, survives restarts)
 - [x] MalwareBazaar dashboard widget (stats + upload history + family classification)
@@ -606,6 +681,12 @@ sudo userdel -r cowrie
 - [x] Dashboard auth token forwarded on every request + cross-page navigation
 - [x] One-command uninstall (`uninstall [--purge]`) with SSH-restore-first safety
 - [x] Full-window analytics — MITRE/TTP/IOC/graph/deobf cover the whole selected window (not a recent sample), with capped widgets disclosing "N of M"
+- [x] Multi-theme support (Signal, Meridian, Sprite) with live switching
+- [x] 3D Cobe globe with WebGL arcs, drag rotation, and proper listener lifecycle
+- [x] Dashboard settings panel (API keys, theme, home location — masked + connection-tested)
+- [x] Runtime keystore (DB > env > config precedence, no restart needed)
+- [x] AbuseIPDB outbound reporting (CLI + dashboard Report All, vetting gate, 24h dedup)
+- [x] Tunnel/proxy target tracking (`direct-tcpip` aggregation + red-team widget)
 - [ ] GeoLite2 MMDB enrichment (escape the ip-api.com rate limits arc)
 - [ ] Real-time WebSocket feed (current dashboard polls every 5s, which is fine but mid)
 
@@ -615,7 +696,7 @@ sudo userdel -r cowrie
 A: Marginally. It moves real SSH to a private port (good) and runs a fake one (interesting). The main value is *intel*: you learn what botnets are doing to boxes that look like yours.
 
 **Q: Will I get cool maps?**
-A: Yes. There is a globe. It rotates. Blood-red arcs converge on your home point like you're in a 2007 hacker movie. The intel console has a threat gauge, brute-force radar, and attack geography panel.
+A: Yes. There is a globe. It rotates. Chartreuse arcs converge on your home point like you're in a 2007 hacker movie. The intel console has a threat gauge, brute-force radar, and attack geography panel.
 
 **Q: Is this production-ready?**
 A: It's "single-VPS, one-operator, runs-on-my-laptop" ready. If you want a fleet, you'll want to front the SQLite with something less single-writer. PRs welcome.

@@ -1,0 +1,9 @@
+ Static hostname: prod-app-server-01
+       Icon name: computer-vm
+         Chassis: vm
+      Machine ID: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+         Boot ID: f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3
+  Virtualization: xen
+Operating System: Ubuntu 22.04.4 LTS
+          Kernel: Linux 5.15.0-94-generic
+    Architecture: x86-64

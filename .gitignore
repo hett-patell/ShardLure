@@ -13,3 +13,19 @@ coverage.out
 agents
 __pycache__/
 *.pyc
+
+# Agent / tool runtime artifacts
+/.pi/
+/test-results/
+/.superpowers/
+
+# Crew agent state — ignore contents but keep placeholder dirs tracked.
+# Exclude *contents* (not the dir itself) so git still descends and the
+# negated .gitkeep re-includes below actually take effect.
+/.crew/*
+!/.crew/artifacts/
+!/.crew/graphs/
+/.crew/artifacts/*
+/.crew/graphs/*
+!/.crew/artifacts/.gitkeep
+!/.crew/graphs/.gitkeep
