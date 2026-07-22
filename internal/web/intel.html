@@ -1,16 +1,16 @@
 <!doctype html>
-<html lang="en" data-theme="dragon">
+<html lang="en" data-theme="signal" data-mode="dark">
 <head>
 <script>
-(function () {
   try {
-    var t = localStorage.getItem('shardlure_theme') || 'dragon';
-    if (t !== 'dragon' && t !== 'meridian' && t !== 'sprite') t = 'dragon';
+    var t = localStorage.getItem('shardlure_theme') || 'signal';
+    var m = localStorage.getItem('shardlure_mode') || 'dark';
     document.documentElement.setAttribute('data-theme', t);
+    if (t === 'signal') document.documentElement.setAttribute('data-mode', m);
   } catch (e) {
-    document.documentElement.setAttribute('data-theme', 'dragon');
+    document.documentElement.setAttribute('data-theme', 'signal');
+    document.documentElement.setAttribute('data-mode', 'dark');
   }
-})();
 </script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -1624,14 +1624,13 @@
         <span class="meta">UI theme · applies to globe and intel · saved live</span></div>
       <div class="panel-body">
         <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="UI theme">
-          <button type="button" class="theme-card" data-theme-id="dragon" role="radio" aria-checked="false">
+          <button type="button" class="theme-card" data-theme-id="signal" role="radio" aria-checked="true">
             <div class="swatch" aria-hidden="true">
-              <span style="background:#0a0608"></span><span style="background:#141010"></span>
-              <span style="background:#e8dcd8"></span><span style="background:#d02828"></span>
-              <span style="background:#c89828"></span>
+              <span style="background:#0f1113"></span><span style="background:#1c1e20"></span>
+              <span style="background:#f7f7f8"></span><span style="background:#d1fe17"></span>
             </div>
-            <div class="tname">Dragon</div>
-            <p class="tblurb">Blood-red ops desk (default)</p>
+            <div class="tname">Signal</div>
+            <p class="tblurb">High-contrast dark ops (default)</p>
           </button>
           <button type="button" class="theme-card" data-theme-id="meridian" role="radio" aria-checked="false">
             <div class="swatch" aria-hidden="true">
@@ -1651,6 +1650,11 @@
             <div class="tname">Sprite</div>
             <p class="tblurb">Chunky pixel console</p>
           </button>
+        </div>
+        <div class="mode-toggle" id="mode-toggle" style="margin-top:12px;display:none">
+          <span class="set-label">Mode</span>
+          <button type="button" class="chip" data-mode="dark">Dark</button>
+          <button type="button" class="chip" data-mode="light">Light</button>
         </div>
         <div class="set-note" id="theme-picker-status" style="margin-top:10px;margin-bottom:0"></div>
       </div>
@@ -1776,10 +1780,22 @@ var currentToken = (function () {
 // DASH_TOKEN kept as a truthiness snapshot for the "was auth on at load?" gate
 // below; the actual value used per request is always the live currentToken.
 
-/* ==== UI theme (Dragon / Meridian / Sprite) ==== */
-window.__shardlureTheme = 'dragon';
+/* ==== UI theme (Signal / Meridian / Sprite) ==== */
+window.__shardlureTheme = 'signal';
+function currentThemeId() {
+  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'signal';
+}
+function applyMode(mode) {
+  mode = (mode === 'light') ? 'light' : 'dark';
+  try { localStorage.setItem('shardlure_mode', mode); } catch (e) {}
+  if (currentThemeId() === 'signal') {
+    document.documentElement.setAttribute('data-mode', mode);
+  } else {
+    document.documentElement.removeAttribute('data-mode');
+  }
+}
 function applyTheme(id, opts) {
-  if (id !== 'dragon' && id !== 'meridian' && id !== 'sprite') id = 'dragon';
+  if (id !== 'signal' && id !== 'meridian' && id !== 'sprite') id = 'signal';
   var force = opts && opts.force;
   var prev = window.__shardlureTheme;
   // Same-tab BroadcastChannel echoes postMessage back to our own listener.
@@ -1790,12 +1806,17 @@ function applyTheme(id, opts) {
   }
   window.__shardlureTheme = id;
   document.documentElement.setAttribute('data-theme', id);
+  if (id === 'signal') {
+    document.documentElement.setAttribute('data-mode', localStorage.getItem('shardlure_mode') || 'dark');
+  } else {
+    document.documentElement.removeAttribute('data-mode');
+  }
   try { localStorage.setItem('shardlure_theme', id); } catch (e) {}
   try {
     if (typeof BroadcastChannel !== 'undefined') {
       window.__shardlureThemeEcho = id;
       var bc = new BroadcastChannel('shardlure-theme');
-      bc.postMessage({ theme: id });
+      bc.postMessage({ theme: id, mode: localStorage.getItem('shardlure_mode') || 'dark' });
       bc.close();
     }
   } catch (e) {}
@@ -1807,18 +1828,19 @@ function applyTheme(id, opts) {
 async function syncThemeFromServer() {
   try {
     var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
     var data = await r.json();
     var row = (data.settings || []).find(function (s) { return s.key === 'ui.theme'; });
-    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'dragon';
+    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'signal';
     return applyTheme(id);
   } catch (e) {
-    return applyTheme(localStorage.getItem('shardlure_theme') || 'dragon');
+    return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
   }
 }
 try {
   window.addEventListener('storage', function (e) {
     if (e.key === 'shardlure_theme' && e.newValue) applyTheme(e.newValue);
+    if (e.key === 'shardlure_mode' && e.newValue) applyMode(e.newValue);
   });
   if (typeof BroadcastChannel !== 'undefined') {
     var __themeBC = new BroadcastChannel('shardlure-theme');
@@ -1828,6 +1850,7 @@ try {
       if (ev.data.theme === window.__shardlureThemeEcho ||
           ev.data.theme === window.__shardlureTheme) return;
       applyTheme(ev.data.theme);
+      if (ev.data.mode) applyMode(ev.data.mode);
     };
   }
 } catch (e) {}
@@ -1959,10 +1982,10 @@ function heatmapPalette() {
   var text = g('--text', '#e8dcd8');
   var bg = g('--bg', '#0a0608');
   var glass2 = g('--glass-2', '#1e1618');
-  var theme = document.documentElement.getAttribute('data-theme') || 'dragon';
+  var theme = document.documentElement.getAttribute('data-theme') || 'signal';
   // Purple isn't a core token on all themes — keep a readable fallback.
   var purple = theme === 'sprite' ? '#7a5ea8' : (theme === 'meridian' ? '#5a4a8a' : '#a878c0');
-  var empty = theme === 'dragon' ? '#402828' : glass2;
+  var empty = glass2;
   return {
     bg: bg, label: dim, axis: dim, empty: empty, text: text,
     kinds: {
@@ -2382,10 +2405,20 @@ function markThemePicker(id) {
     card.setAttribute('aria-checked', on ? 'true' : 'false');
   });
 }
+function syncModeToggle(id) {
+  var mt = document.getElementById('mode-toggle');
+  if (!mt) return;
+  mt.style.display = (id === 'signal') ? '' : 'none';
+  var mode = localStorage.getItem('shardlure_mode') || 'dark';
+  mt.querySelectorAll('.chip').forEach(function (c) {
+    c.classList.toggle('on', c.getAttribute('data-mode') === mode);
+  });
+}
 async function selectTheme(id) {
-  var prev = window.__shardlureTheme || 'dragon';
+  var prev = window.__shardlureTheme || 'signal';
   applyTheme(id);
   markThemePicker(id);
+  syncModeToggle(id);
   var status = document.getElementById('theme-picker-status');
   try {
     await postSetting({ key: 'ui.theme', value: id });
@@ -2393,6 +2426,7 @@ async function selectTheme(id) {
   } catch (e) {
     applyTheme(prev);
     markThemePicker(prev);
+    syncModeToggle(prev);
     if (status) status.textContent = 'Save failed: ' + e.message;
   }
 }
@@ -2405,6 +2439,20 @@ function wireThemePicker() {
     if (!card) return;
     selectTheme(card.getAttribute('data-theme-id'));
   });
+  var mt = document.getElementById('mode-toggle');
+  if (mt && !mt.dataset.wired) {
+    mt.dataset.wired = '1';
+    mt.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-mode]');
+      if (!b) return;
+      var mode = b.getAttribute('data-mode');
+      applyMode(mode);
+      postSetting({ key: 'ui.mode', value: mode });
+      document.querySelectorAll('#mode-toggle .chip').forEach(function (c) {
+        c.classList.toggle('on', c.getAttribute('data-mode') === mode);
+      });
+    });
+  }
 }
 
 async function loadSettings() {
@@ -2414,10 +2462,15 @@ async function loadSettings() {
     var data = await r.json();
     _settingsLoaded = true;
     var buckets = { keys: [], abuse: [], bazaar: [], geo: [], token: [] };
-    var themeVal = 'dragon';
+    var themeVal = 'signal';
+    var modeVal = localStorage.getItem('shardlure_mode') || 'dark';
     (data.settings || []).forEach(function (s) {
       if (s.key === 'ui.theme') {
         if (s.value) themeVal = s.value;
+        return;
+      }
+      if (s.key === 'ui.mode') {
+        if (s.value) modeVal = s.value;
         return;
       }
       if (s.key === 'SHARDLURE_DASH_TOKEN') buckets.token.push(s);
@@ -2428,7 +2481,9 @@ async function loadSettings() {
       else buckets.geo.push(s);
     });
     applyTheme(themeVal);
+    applyMode(modeVal);
     markThemePicker(themeVal);
+    syncModeToggle(themeVal);
     wireThemePicker();
     document.getElementById('set-keys-rows').innerHTML =
       buckets.keys.map(secretRowHTML).join('') || '<div class="empty">none</div>';
