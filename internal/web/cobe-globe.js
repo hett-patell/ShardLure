@@ -455,7 +455,51 @@ export function startGlobeLoop(globe, ix, onFrame) {
 }
 
 /** Theme palettes for Cobe createGlobe options + marker/arc RGB triples. */
-export function cobeThemeConfig(theme) {
+export function cobeThemeConfig(theme, mode) {
+  if (theme === "signal") {
+    if (mode === "light") {
+      return {
+        dark: 0,
+        diffuse: 1.15,
+        mapSamples: 8000,
+        mapBrightness: 1.35,
+        mapBaseBrightness: 0.08,
+        baseColor: [0.92, 0.92, 0.88],
+        markerColor: [0.55, 0.68, 0.0],
+        glowColor: [0.85, 0.86, 0.80],
+        markerElevation: 0.022,
+        arcColor: [0.55, 0.68, 0.0],
+        arcWidth: 0.5,
+        arcHeight: 0.3,
+        colors: {
+          home: [0.55, 0.68, 0.0],
+          hot: [0.77, 0.12, 0.15],
+          cool: [0.12, 0.54, 0.30],
+          arc: [0.55, 0.68, 0.0],
+        },
+      };
+    }
+    return {
+      dark: 1,
+      diffuse: 1.05,
+      mapSamples: 8000,
+      mapBrightness: 2.8,
+      mapBaseBrightness: 0.015,
+      baseColor: [0.07, 0.08, 0.09],
+      markerColor: [0.82, 0.99, 0.09],
+      glowColor: [0.12, 0.14, 0.10],
+      markerElevation: 0.03,
+      arcColor: [0.82, 0.99, 0.09],
+      arcWidth: 0.5,
+      arcHeight: 0.32,
+      colors: {
+        home: [0.82, 0.99, 0.09],
+        hot: [0.90, 0.16, 0.19],
+        cool: [0.25, 0.85, 0.52],
+        arc: [0.82, 0.99, 0.09],
+      },
+    };
+  }
   if (theme === "sprite") {
     return {
       dark: 0,
