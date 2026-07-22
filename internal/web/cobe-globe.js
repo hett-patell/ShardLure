@@ -1,6 +1,6 @@
 /**
  * Interactive Cobe helpers for Meridian / Sprite themes.
- * Ported from demos/themes/_shared.js (Cobe 2.x: no onRender — rAF + update).
+ * Cobe 2.x: no onRender — rAF + update.
  */
 
 export function locationToAngles(lat, lon) {

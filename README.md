@@ -47,7 +47,7 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Deploy-safe sync:** tar-over-SSH because `scp` of Go/Python sources mysteriously turns them into UTF-16. We do not gaslight you about this — see Troubleshooting.
 - **Incremental Cowrie ingest:** tracks file offset + inode, so a 100MB cowrie.json doesn't get re-scanned every 5 seconds. Your I/O thanks us.
 - **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
-- **Multi-theme dashboard:** ships with Dragon (blood-red SOC console), Meridian, Sprite, and Noctiluca — switchable live from the settings panel. Each theme gets its own palette, typography, and personality.
+- **Themes:** ships **Signal** (default — a near-black signal field with a light/dark toggle), plus **Meridian** and **Sprite**. Switchable live from the settings panel; the selected theme and Signal's mode persist in SQLite. One WebGL globe engine (Cobe) across all themes.
 - **3D Cobe globe:** WebGL globe with live arcs from attacker IPs to your home point. Pointer-drag rotation, scroll zoom, double-click reset. Proper listener lifecycle (no leaks on theme switch).
 - **Dashboard widgets:** threat-level gauge, attack geography, brute-force radar, top credentials, live attack timeline, tunnel/proxy targets, session metadata. All fed by real-time API polling.
 - **Dashboard settings panel:** configure API keys, theme, home location, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save.
@@ -672,7 +672,7 @@ sudo userdel -r cowrie
 - [x] Graceful shutdown on SIGINT/SIGTERM (so Ctrl-C is no longer a war crime)
 - [x] DB chmod 0600 + sshd-config auto-rollback on failed reload
 - [x] MalwareBazaar payload sharing (CLI + one-click dashboard upload)
-- [x] Dragon theme — full SOC dashboard redesign with sidebar nav
+- [x] Signal theme — full SOC dashboard redesign with sidebar nav and light/dark toggle
 - [x] Dashboard widgets: threat gauge, geography, credentials, brute-force radar, live timeline
 - [x] Persistent geo cache (SQLite-backed, survives restarts)
 - [x] MalwareBazaar dashboard widget (stats + upload history + family classification)
@@ -681,7 +681,7 @@ sudo userdel -r cowrie
 - [x] Dashboard auth token forwarded on every request + cross-page navigation
 - [x] One-command uninstall (`uninstall [--purge]`) with SSH-restore-first safety
 - [x] Full-window analytics — MITRE/TTP/IOC/graph/deobf cover the whole selected window (not a recent sample), with capped widgets disclosing "N of M"
-- [x] Multi-theme support (Dragon, Meridian, Sprite, Noctiluca) with live switching
+- [x] Multi-theme support (Signal, Meridian, Sprite) with live switching
 - [x] 3D Cobe globe with WebGL arcs, drag rotation, and proper listener lifecycle
 - [x] Dashboard settings panel (API keys, theme, home location — masked + connection-tested)
 - [x] Runtime keystore (DB > env > config precedence, no restart needed)

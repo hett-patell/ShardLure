@@ -382,7 +382,7 @@ html[data-theme="sprite"] .theme-card .tname {
   font-size: 9px; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* Light themes: soften Dragon-only glow assumptions */
+/* Light themes: soften dark-theme glow assumptions */
 html[data-theme="meridian"] .title .dot,
 html[data-theme="sprite"] .title .dot,
 html[data-theme="signal"][data-mode="light"] .title .dot {
@@ -404,13 +404,6 @@ html[data-theme="sprite"] body,
 html[data-theme="signal"][data-mode="light"] body {
   color: var(--text);
 }
-html[data-theme="meridian"] #globe,
-html[data-theme="sprite"] #globe,
-html[data-theme="signal"][data-mode="light"] #globe {
-  /* keep globe readable on light paper */
-  filter: none;
-}
-
 .globe-overlay--live,
 .globe-overlay--analytics {
   transform: translate(8px, -50%);
@@ -435,7 +428,7 @@ html[data-theme="signal"][data-mode="light"] #globe {
 }
 
 
-/* —— Light theme: kill Dragon-hardcoded dark chrome —— */
+/* —— Light theme: light-theme chrome overrides —— */
 html[data-theme="meridian"],
 html[data-theme="sprite"],
 html[data-theme="signal"][data-mode="light"] {
@@ -620,7 +613,6 @@ html[data-theme="signal"][data-mode="light"] .row {
   touch-action: none;
 }
 #cobe:active { cursor: grabbing; }
-#globe.globe-hidden { visibility: hidden; pointer-events: none; }
 html[data-theme="meridian"] #cobe-stage {
   background:
     radial-gradient(ellipse at 50% 42%, #eef1f4 0%, var(--paper) 70%);
@@ -649,7 +641,7 @@ html[data-theme="sprite"] #cobe-stage {
   pointer-events: auto;
 }
 
-/* Intel: replace Dragon-hardcoded rgba blacks / reds with tokens */
+/* Intel: replace hardcoded rgba blacks / reds with tokens */
 html[data-theme="meridian"] .chip,
 html[data-theme="sprite"] .chip,
 html[data-theme="signal"][data-mode="light"] .chip,
