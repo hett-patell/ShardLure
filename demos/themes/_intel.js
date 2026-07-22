@@ -1,4 +1,4 @@
-// Shared intel-console helpers for Meridian / Sprite demos.
+// Shared intel-console helpers for the theme-study intel demos.
 import { INTEL } from "./_intel_data.js";
 
 export { INTEL };
