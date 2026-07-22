@@ -1,6 +1,6 @@
 /**
- * Lazy-loaded Cobe engine for Meridian / Sprite themes.
- * Imported only when a light theme is selected — not on Dragon (globe.gl).
+ * Lazy-loaded Cobe engine — the only globe engine, shared by all themes
+ * (Signal / Meridian / Sprite).
  */
 import createGlobe from "https://esm.sh/cobe@2.0.1";
 import {
@@ -33,6 +33,7 @@ let _stop = null;
 let _ix = null;
 let _state = null;
 let _theme = null;
+let _mode = "dark";
 let _home = { lat: 19.076, lon: 72.8777 };
 let _actors = [];
 
@@ -79,8 +80,9 @@ function destroy() {
   }
 }
 
-async function ensure(theme) {
-  if (theme !== "meridian" && theme !== "sprite") {
+async function ensure(theme, mode) {
+  _mode = mode || "dark";
+  if (theme !== "meridian" && theme !== "sprite" && theme !== "signal") {
     destroy();
     return null;
   }
@@ -102,7 +104,7 @@ async function ensure(theme) {
   w.style.width = "";
   w.style.height = "";
 
-  const cfg = cobeThemeConfig(theme);
+  const cfg = cobeThemeConfig(theme, _mode);
   _state = {
     phi: 2.4,
     theta: 0.22,
@@ -157,7 +159,7 @@ function updateData(home, actors) {
   clearTimeout(_dataTimer);
   _dataTimer = setTimeout(() => {
     if (!_globe || !_theme) return;
-    const cfg = cobeThemeConfig(_theme);
+    const cfg = cobeThemeConfig(_theme, _mode);
     const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors);
     const key = cobeEntitiesKey(_home, markers, arcs);
     if (key === _dataKey) return;
