@@ -91,9 +91,10 @@ func Render(sessionID string, events []*models.Event, opts Options) string {
 			fmt.Fprintf(&b, "# T+%s\n", formatOffset(off))
 		}
 		if opts.DryRun {
-			b.WriteString("# ")
+			b.WriteString("# " + strings.ReplaceAll(cmd, "\n", "\n# "))
+		} else {
+			b.WriteString(cmd)
 		}
-		b.WriteString(cmd)
 		b.WriteByte('\n')
 		prev = e.TS
 		first = false

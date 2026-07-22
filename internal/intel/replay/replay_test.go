@@ -48,6 +48,23 @@ func TestRenderDryRun(t *testing.T) {
 	}
 }
 
+func TestRenderDryRunCommentsEveryPhysicalLine(t *testing.T) {
+	events := []*models.Event{{
+		TS: time.Now(), Kind: models.KindCommand,
+		Command: "printf safe\nid\nuname -a",
+	}}
+	s := Render("s", events, Options{DryRun: true})
+	want := "# printf safe\n# id\n# uname -a\n"
+	if !strings.Contains(s, want) {
+		t.Fatalf("multiline command not fully commented:\n%s", s)
+	}
+	for _, raw := range []string{"\nid\n", "\nuname -a\n"} {
+		if strings.Contains(s, raw) {
+			t.Fatalf("live attacker line %q", raw)
+		}
+	}
+}
+
 func TestRenderEmpty(t *testing.T) {
 	s := Render("empty", []*models.Event{}, Options{})
 	if !strings.Contains(s, "no command events captured") {
