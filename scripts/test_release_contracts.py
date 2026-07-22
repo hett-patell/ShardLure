@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 RELEASING_PATH = ROOT / "docs" / "RELEASING.md"
 RELEASE_SCRIPT_PATH = ROOT / "scripts" / "publish-release.sh"
+README_PATH = ROOT / "README.md"
 
 
 class ReleaseContractTests(unittest.TestCase):
@@ -319,6 +320,26 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("git tag -a v2.0.0", guide)
         self.assertIn("git push origin refs/tags/v2.0.0", guide)
         self.assertNotIn("gh release create", guide)
+
+    def test_readme_never_uses_fixed_tmp_binary(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("sudo cp /tmp/shardlure", readme)
+        self.assertNotIn("BUILD_BIN", readme)
+
+        deployment = readme[
+            readme.index("## Deployment\n") : readme.index(
+                "### Manual Journal Export\n"
+            )
+        ]
+        self.assertNotIn("/tmp/shardlure", deployment)
+        tokens = (
+            "bash scripts/fix-go-sources.sh",
+            "Run the exact `sudo install ...` command printed by "
+            "`scripts/fix-go-sources.sh`",
+            "sudo python3 scripts/shardlure.py finish",
+        )
+        offsets = [deployment.index(token) for token in tokens]
+        self.assertEqual(offsets, sorted(offsets))
 
     def test_missing_release_creates_then_uploads_and_publishes(self) -> None:
         result, calls = self._run_release("missing")

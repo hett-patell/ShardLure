@@ -339,7 +339,12 @@ On the VPS:
 ```bash
 cd ~/ShardLure/shardlure
 bash scripts/fix-go-sources.sh
-sudo cp /tmp/shardlure /usr/local/bin/shardlure
+```
+
+Run the exact `sudo install ...` command printed by `scripts/fix-go-sources.sh`;
+it includes the randomized build path created for that run. Then finish setup:
+
+```bash
 sudo python3 scripts/shardlure.py finish
 ```
 
