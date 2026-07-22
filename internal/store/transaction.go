@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -126,6 +127,79 @@ func clearSourceTx(tx *sql.Tx, source models.Source) error {
 	}
 	_, err := tx.Exec("DELETE FROM events WHERE source=?", source)
 	return err
+}
+
+// JournalActorUpdate contains the actor roll-up written alongside a newly
+// inserted journal event. The event's source IP identifies the actor_ips row.
+type JournalActorUpdate struct {
+	Actor     *models.Actor
+	IPFirst   time.Time
+	IPLast    time.Time
+	IPCount   int
+	Username  string
+	UserCount int
+}
+
+// AppendJournalEventAtomic deduplicates an exact normalized journal event and
+// writes the event plus its optional actor roll-up in one transaction. Event
+// IDs are published to the caller only after the transaction commits.
+func (s *Store) AppendJournalEventAtomic(e *models.Event, update *JournalActorUpdate) (inserted bool, err error) {
+	if e == nil {
+		return false, errors.New("store: nil journal event")
+	}
+	if update != nil && update.Actor == nil {
+		return false, errors.New("store: journal actor update has nil actor")
+	}
+
+	stored := *e
+	normalizedTS := stored.TS.UTC().Format(time.RFC3339Nano)
+	err = s.WithTx(func(tx *sql.Tx) error {
+		var exists int
+		err := tx.QueryRow(`
+SELECT 1
+FROM events INDEXED BY idx_events_ts
+WHERE ts = ?
+  AND source = ?
+  AND kind = ?
+  AND COALESCE(src_ip, '') = ?
+  AND COALESCE(src_port, 0) = ?
+  AND COALESCE(username, '') = ?
+  AND COALESCE(raw, '') = ?
+LIMIT 1`, normalizedTS, stored.Source, stored.Kind, stored.SrcIP, stored.SrcPort, stored.Username, stored.Raw).Scan(&exists)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		if err := insertEvent(tx, &stored); err != nil {
+			return err
+		}
+		if update != nil {
+			if err := upsertActor(tx, update.Actor); err != nil {
+				return err
+			}
+			if err := upsertActorIP(tx, update.Actor.ID, stored.SrcIP, update.IPFirst, update.IPLast, update.IPCount); err != nil {
+				return err
+			}
+			if update.Username != "" && update.Username != "?" {
+				if err := upsertActorUser(tx, update.Actor.ID, update.Username, update.UserCount); err != nil {
+					return err
+				}
+			}
+		}
+		inserted = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !inserted {
+		return false, nil
+	}
+	e.ID = stored.ID
+	return true, nil
 }
 
 // UpsertJournalActorAtomic applies the three actor-related writes
