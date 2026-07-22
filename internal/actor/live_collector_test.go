@@ -158,6 +158,84 @@ func TestLiveCollectorHydratesEvictedIP(t *testing.T) {
 	}
 }
 
+func TestLiveCollectorHydratesJournalRowWhenCowrieIsNewer(t *testing.T) {
+	resetLiveCollectorForTest()
+	defer resetLiveCollectorForTest()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "source-qualified-hydration.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	ip := "198.51.100.44"
+	journalID := JournalActorID(ip)
+	journalFirst := time.Date(2026, 7, 20, 8, 0, 0, 0, time.UTC)
+	journalLast := journalFirst.Add(5 * time.Minute)
+	cowrieFirst := journalLast.Add(time.Hour)
+	cowrieLast := cowrieFirst.Add(10 * time.Minute)
+
+	seed := []*models.AggregatedActor{
+		{
+			Actor: &models.Actor{
+				ID: journalID, Source: models.SourceJournal, PrimaryIP: ip,
+				FirstSeen: journalFirst, LastSeen: journalLast, EventCount: 5, UniqueUsers: 1,
+			},
+			IPs:   map[string]models.IPStat{ip: {Count: 5, First: journalFirst, Last: journalLast}},
+			Users: map[string]int{"root": 5},
+		},
+		{
+			Actor: &models.Actor{
+				ID: "cowrie:newer-shared-ip", Source: models.SourceCowrie, PrimaryIP: ip,
+				FirstSeen: cowrieFirst, LastSeen: cowrieLast, EventCount: 40, UniqueUsers: 1,
+			},
+			IPs:   map[string]models.IPStat{ip: {Count: 40, First: cowrieFirst, Last: cowrieLast}},
+			Users: map[string]int{"cowrie-user": 40},
+		},
+	}
+	if err := st.AppendEventsAndUpsertActorsAgg(nil, seed); err != nil {
+		t.Fatalf("seed actors: %v", err)
+	}
+
+	e := &models.Event{
+		TS:       cowrieLast.Add(time.Hour),
+		Source:   models.SourceJournal,
+		Kind:     models.KindFailedPass,
+		SrcIP:    ip,
+		Username: "root",
+		ActorID:  journalID,
+		Raw:      "{}",
+	}
+	if err := st.InsertEvent(e); err != nil {
+		t.Fatalf("insert journal event: %v", err)
+	}
+	if err := SyncJournalEvent(st, e, AdminSet(nil)); err != nil {
+		t.Fatalf("sync journal event: %v", err)
+	}
+
+	got, err := st.GetActor(journalID)
+	if err != nil {
+		t.Fatalf("GetActor(%q): %v", journalID, err)
+	}
+	if got.EventCount != 6 {
+		t.Errorf("EventCount = %d, want journal count 5 + new event = 6", got.EventCount)
+	}
+	if !got.FirstSeen.Equal(journalFirst) {
+		t.Errorf("FirstSeen = %s, want journal first %s", got.FirstSeen, journalFirst)
+	}
+	if got.UniqueUsers != 1 {
+		t.Errorf("UniqueUsers = %d, want journal user set only", got.UniqueUsers)
+	}
+
+	users, err := st.ActorUsers(journalID)
+	if err != nil {
+		t.Fatalf("ActorUsers(%q): %v", journalID, err)
+	}
+	if len(users) != 1 || users[0].Username != "root" || users[0].Count != 6 {
+		t.Errorf("journal actor users = %#v, want root count 6", users)
+	}
+}
+
 // TestLiveCollectorPerIPUserCap caps the per-IP username sub-map to
 // keep a single noisy scanner from probing a million distinct names
 // from one IP and using all of process memory.

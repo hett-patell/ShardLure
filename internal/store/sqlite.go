@@ -283,7 +283,7 @@ WHERE source = 'cowrie'
 	// revisions — session_id-leading index for SessionEvents /
 	// shell-session lookups and a standalone ip index for the
 	// actor_ips table (the compound PK starts with actor_id, which
-	// is useless for ip-only scans such as LoadJournalIPStats).
+	// cannot serve reverse lookups keyed only by IP).
 	if current < 4 {
 		const v4Idx = `
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(source, session_id, ts);

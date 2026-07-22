@@ -136,9 +136,9 @@ func adminSetsEqual(a, b *netmatch.Set) bool {
 // InsertEvent).
 //
 // Steady-state cost: O(U log U) where U is the unique-username count
-// for this IP. On an evicted-then-returning IP, plus a single
-// indexed SELECT to re-hydrate counters from the DB. Bounded RSS in
-// either case.
+// for this IP. On an evicted-then-returning IP, plus two indexed
+// SELECTs to re-hydrate the composite actor/IP counters and the
+// actor's users. Bounded RSS in either case.
 func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) error {
 	if e == nil || e.SrcIP == "" || admin.Has(e.SrcIP) {
 		return nil
@@ -156,9 +156,9 @@ func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) err
 
 	// Hydrate the IP from the DB on first sight after process start
 	// or after eviction. Done outside c.mu to avoid holding the
-	// collector lock across the SELECT.
+	// collector lock across the SELECTs.
 	if !c.has(e.SrcIP) {
-		stored, err := st.LoadJournalIPStats(e.SrcIP)
+		stored, err := st.LoadJournalIPStats(JournalActorID(e.SrcIP), e.SrcIP)
 		if err != nil {
 			return fmt.Errorf("hydrate journal ip stats: %w", err)
 		}
