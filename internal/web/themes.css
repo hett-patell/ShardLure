@@ -1,41 +1,65 @@
 /* ShardLure UI themes — applied via <html data-theme="…">.
-   Dragon tokens match the historical :root defaults. */
+   Signal is the default; it supports data-mode="dark|light". */
 
 html,
-html[data-theme="dragon"] {
-  --bg: #0a0608;
-  --glass: #141010;
-  --glass-2: #1e1618;
-  --sheet: #141010;
-  --paper: #0a0608;
-  --line: rgba(200, 120, 100, 0.10);
-  --line-strong: rgba(200, 120, 100, 0.22);
-  --line-soft: rgba(200, 120, 100, 0.08);
-  --text: #e8dcd8;
-  --ink: #e8dcd8;
-  --dim: #907068;
-  --muted: #907068;
-  --accent: #d02828;
-  --accent-2: #c89828;
-  --good: #48b878;
-  --warn: #c89828;
-  --danger: #d02828;
-  --ok: #48b878;
+html[data-theme="signal"] {
+  --bg: #0f1113;
+  --glass: #131517;
+  --glass-2: #1c1e20;
+  --sheet: #131517;
+  --paper: #0f1113;
+  --line: #2a2d31;
+  --line-strong: #3a3d41;
+  --line-soft: #1e2024;
+  --text: #f7f7f8;
+  --ink: #f7f7f8;
+  --dim: #898a8b;
+  --muted: #565a5e;
+  --accent: #d1fe17;
+  --accent-2: #40d986;
+  --good: #40d986;
+  --warn: #f3c977;
+  --danger: #e72930;
+  --ok: #40d986;
   --blue-team: #5a8fd4;
-  --red-team: #d02828;
+  --red-team: #e72930;
   --mono: "JetBrains Mono", ui-monospace, monospace;
-  --sans: "Chakra Petch", system-ui, sans-serif;
-  --display: "Chakra Petch", system-ui, sans-serif;
-  --radius: 4px;
+  --sans: "Inter", system-ui, -apple-system, sans-serif;
+  --display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --radius: 12px;
   --chunk: 0px;
   --shadow: none;
   --panel-bg: var(--glass);
   --body-bg: var(--bg);
-  --vignette: radial-gradient(ellipse at center, transparent 30%, rgba(0, 0, 0, 0.55) 90%),
-    linear-gradient(90deg, rgba(0, 0, 0, 0.55) 0%, transparent 22%, transparent 78%, rgba(0, 0, 0, 0.55) 100%);
-  --globe-atmosphere: #d02828;
-  --globe-point: #d02828;
+  --vignette: radial-gradient(ellipse at center, transparent 40%, rgba(0, 0, 0, 0.5) 95%);
+  --globe-atmosphere: #d1fe17;
+  --globe-point: #d1fe17;
   --bg-pane: var(--glass);
+}
+
+html[data-theme="signal"][data-mode="light"] {
+  --bg: #efefe9;
+  --glass: #f7f7f2;
+  --glass-2: #ffffff;
+  --sheet: #f7f7f2;
+  --paper: #efefe9;
+  --line: #d6d6cc;
+  --line-strong: #c4c4b8;
+  --line-soft: #e0e0d6;
+  --text: #14151a;
+  --ink: #14151a;
+  --dim: #5c5e63;
+  --muted: #8b8d92;
+  --accent: #b6d900;
+  --accent-2: #1f8a4c;
+  --good: #1f8a4c;
+  --warn: #9a6b00;
+  --danger: #c41e25;
+  --ok: #1f8a4c;
+  --red-team: #c41e25;
+  --globe-atmosphere: #b6d900;
+  --globe-point: #b6d900;
+  --vignette: radial-gradient(ellipse at 50% 42%, rgba(255, 255, 255, 0.5) 0%, transparent 70%);
 }
 
 html[data-theme="meridian"] {
@@ -110,7 +134,8 @@ html[data-theme="sprite"] {
 
 /* Shared chrome that keys off theme tokens */
 html[data-theme="meridian"] body,
-html[data-theme="sprite"] body {
+html[data-theme="sprite"] body,
+html[data-theme="signal"][data-mode="light"] body {
   background: var(--body-bg);
   color: var(--text);
 }
@@ -150,18 +175,21 @@ html[data-theme="sprite"] #vignette {
 }
 
 html[data-theme="meridian"] .sidebar,
-html[data-theme="sprite"] .sidebar {
+html[data-theme="sprite"] .sidebar,
+html[data-theme="signal"][data-mode="light"] .sidebar {
   background: var(--ink);
 }
 
 html[data-theme="meridian"] .sidebar .sb-brand,
-html[data-theme="sprite"] .sidebar .sb-brand {
+html[data-theme="sprite"] .sidebar .sb-brand,
+html[data-theme="signal"][data-mode="light"] .sidebar .sb-brand {
   color: var(--sheet);
   border-color: var(--accent);
 }
 
 html[data-theme="meridian"] .topbar,
-html[data-theme="sprite"] .topbar {
+html[data-theme="sprite"] .topbar,
+html[data-theme="signal"][data-mode="light"] .topbar {
   background: color-mix(in srgb, var(--sheet) 92%, transparent);
   border-bottom: 1px solid var(--line);
 }
@@ -172,7 +200,8 @@ html[data-theme="sprite"] .topbar {
 }
 
 html[data-theme="meridian"] .chip.on,
-html[data-theme="sprite"] .chip.on {
+html[data-theme="sprite"] .chip.on,
+html[data-theme="signal"][data-mode="light"] .chip.on {
   color: var(--accent);
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -184,13 +213,15 @@ html[data-theme="sprite"] .chip {
 }
 
 html[data-theme="sprite"] .tab.active,
-html[data-theme="meridian"] .tab.active {
+html[data-theme="meridian"] .tab.active,
+html[data-theme="signal"][data-mode="light"] .tab.active {
   border-bottom-color: var(--accent-2);
   color: var(--text);
 }
 
 html[data-theme="sprite"] .sb-item.on,
-html[data-theme="meridian"] .sb-item.on {
+html[data-theme="meridian"] .sb-item.on,
+html[data-theme="signal"][data-mode="light"] .sb-item.on {
   color: var(--sheet);
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
@@ -353,24 +384,29 @@ html[data-theme="sprite"] .theme-card .tname {
 
 /* Light themes: soften Dragon-only glow assumptions */
 html[data-theme="meridian"] .title .dot,
-html[data-theme="sprite"] .title .dot {
+html[data-theme="sprite"] .title .dot,
+html[data-theme="signal"][data-mode="light"] .title .dot {
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
 }
 html[data-theme="meridian"] .sb-item.on,
-html[data-theme="sprite"] .sb-item.on {
+html[data-theme="sprite"] .sb-item.on,
+html[data-theme="signal"][data-mode="light"] .sb-item.on {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 html[data-theme="meridian"] .nav a.active,
-html[data-theme="sprite"] .nav a.active {
+html[data-theme="sprite"] .nav a.active,
+html[data-theme="signal"][data-mode="light"] .nav a.active {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 html[data-theme="meridian"] body,
-html[data-theme="sprite"] body {
+html[data-theme="sprite"] body,
+html[data-theme="signal"][data-mode="light"] body {
   color: var(--text);
 }
 html[data-theme="meridian"] #globe,
-html[data-theme="sprite"] #globe {
+html[data-theme="sprite"] #globe,
+html[data-theme="signal"][data-mode="light"] #globe {
   /* keep globe readable on light paper */
   filter: none;
 }
@@ -401,7 +437,8 @@ html[data-theme="sprite"] #globe {
 
 /* —— Light theme: kill Dragon-hardcoded dark chrome —— */
 html[data-theme="meridian"],
-html[data-theme="sprite"] {
+html[data-theme="sprite"],
+html[data-theme="signal"][data-mode="light"] {
   --bg-pane: var(--glass-2);
   color-scheme: light;
 }
@@ -413,116 +450,151 @@ html[data-theme="meridian"] .sparkline,
 html[data-theme="sprite"] .stat,
 html[data-theme="sprite"] .cap-stat,
 html[data-theme="sprite"] .users .pill,
-html[data-theme="sprite"] .sparkline {
+html[data-theme="sprite"] .sparkline,
+html[data-theme="signal"][data-mode="light"] .stat,
+html[data-theme="signal"][data-mode="light"] .cap-stat,
+html[data-theme="signal"][data-mode="light"] .users .pill,
+html[data-theme="signal"][data-mode="light"] .sparkline {
   background: var(--glass-2);
   border-color: var(--line);
   color: var(--text);
 }
 
 html[data-theme="meridian"] .sidebar,
-html[data-theme="sprite"] .sidebar {
+html[data-theme="sprite"] .sidebar,
+html[data-theme="signal"][data-mode="light"] .sidebar {
   background: var(--ink);
   border-right-color: color-mix(in srgb, var(--ink) 80%, #000);
 }
 html[data-theme="meridian"] .sb-item,
-html[data-theme="sprite"] .sb-item { color: color-mix(in srgb, var(--sheet) 55%, transparent); }
+html[data-theme="sprite"] .sb-item,
+html[data-theme="signal"][data-mode="light"] .sb-item { color: color-mix(in srgb, var(--sheet) 55%, transparent); }
 html[data-theme="meridian"] .sb-item:hover,
-html[data-theme="sprite"] .sb-item:hover {
+html[data-theme="sprite"] .sb-item:hover,
+html[data-theme="signal"][data-mode="light"] .sb-item:hover {
   color: var(--sheet);
   background: color-mix(in srgb, var(--sheet) 12%, transparent);
   border-color: color-mix(in srgb, var(--sheet) 20%, transparent);
 }
 html[data-theme="meridian"] .sb-brand,
-html[data-theme="sprite"] .sb-brand { color: #fff; }
+html[data-theme="sprite"] .sb-brand,
+html[data-theme="signal"][data-mode="light"] .sb-brand { color: #fff; }
 
 html[data-theme="meridian"] .chip,
 html[data-theme="sprite"] .chip,
+html[data-theme="signal"][data-mode="light"] .chip,
 html[data-theme="meridian"] .toolbar input.search,
 html[data-theme="sprite"] .toolbar input.search,
+html[data-theme="signal"][data-mode="light"] .toolbar input.search,
 html[data-theme="meridian"] input.search,
-html[data-theme="sprite"] input.search {
+html[data-theme="sprite"] input.search,
+html[data-theme="signal"][data-mode="light"] input.search {
   background: var(--sheet) !important;
   border-color: var(--line) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .bar-row .track,
 html[data-theme="sprite"] .bar-row .track,
+html[data-theme="signal"][data-mode="light"] .bar-row .track,
 html[data-theme="meridian"] .radar-track,
-html[data-theme="sprite"] .radar-track {
+html[data-theme="sprite"] .radar-track,
+html[data-theme="signal"][data-mode="light"] .radar-track {
   background: color-mix(in srgb, var(--ink) 8%, transparent) !important;
 }
 html[data-theme="meridian"] tr.actor-row:hover td,
-html[data-theme="sprite"] tr.actor-row:hover td {
+html[data-theme="sprite"] tr.actor-row:hover td,
+html[data-theme="signal"][data-mode="light"] tr.actor-row:hover td {
   background: color-mix(in srgb, var(--accent) 6%, transparent) !important;
 }
 html[data-theme="meridian"] tr.actor-row.selected td,
-html[data-theme="sprite"] tr.actor-row.selected td {
+html[data-theme="sprite"] tr.actor-row.selected td,
+html[data-theme="signal"][data-mode="light"] tr.actor-row.selected td {
   background: color-mix(in srgb, var(--accent) 12%, transparent) !important;
 }
 html[data-theme="meridian"] .detail,
 html[data-theme="sprite"] .detail,
+html[data-theme="signal"][data-mode="light"] .detail,
 html[data-theme="meridian"] .gauge-breakdown,
 html[data-theme="sprite"] .gauge-breakdown,
+html[data-theme="signal"][data-mode="light"] .gauge-breakdown,
 html[data-theme="meridian"] .empty,
-html[data-theme="sprite"] .empty {
+html[data-theme="sprite"] .empty,
+html[data-theme="signal"][data-mode="light"] .empty {
   background: var(--glass-2);
   color: var(--dim);
 }
 html[data-theme="meridian"] .topbar,
-html[data-theme="sprite"] .topbar {
+html[data-theme="sprite"] .topbar,
+html[data-theme="signal"][data-mode="light"] .topbar {
   background: color-mix(in srgb, var(--sheet) 94%, transparent) !important;
   border-bottom: 1px solid var(--line);
   color: var(--text);
 }
 html[data-theme="meridian"] .shell-main,
 html[data-theme="sprite"] .shell-main,
+html[data-theme="signal"][data-mode="light"] .shell-main,
 html[data-theme="meridian"] .wrap,
-html[data-theme="sprite"] .wrap {
+html[data-theme="sprite"] .wrap,
+html[data-theme="signal"][data-mode="light"] .wrap {
   background: transparent;
   color: var(--text);
 }
 html[data-theme="meridian"] table,
 html[data-theme="sprite"] table,
+html[data-theme="signal"][data-mode="light"] table,
 html[data-theme="meridian"] th,
 html[data-theme="sprite"] th,
+html[data-theme="signal"][data-mode="light"] th,
 html[data-theme="meridian"] td,
-html[data-theme="sprite"] td {
+html[data-theme="sprite"] td,
+html[data-theme="signal"][data-mode="light"] td {
   border-bottom-color: var(--line-soft, var(--line));
 }
 html[data-theme="meridian"] .tab,
-html[data-theme="sprite"] .tab { color: var(--dim); }
+html[data-theme="sprite"] .tab,
+html[data-theme="signal"][data-mode="light"] .tab { color: var(--dim); }
 html[data-theme="meridian"] .tab.active,
-html[data-theme="sprite"] .tab.active { color: var(--text); }
+html[data-theme="sprite"] .tab.active,
+html[data-theme="signal"][data-mode="light"] .tab.active { color: var(--text); }
 html[data-theme="meridian"] .set-row,
 html[data-theme="sprite"] .set-row,
+html[data-theme="signal"][data-mode="light"] .set-row,
 html[data-theme="meridian"] .set-control input,
 html[data-theme="sprite"] .set-control input,
+html[data-theme="signal"][data-mode="light"] .set-control input,
 html[data-theme="meridian"] .set-control textarea,
-html[data-theme="sprite"] .set-control textarea {
+html[data-theme="sprite"] .set-control textarea,
+html[data-theme="signal"][data-mode="light"] .set-control textarea {
   background: var(--sheet);
   color: var(--text);
   border-color: var(--line);
 }
 html[data-theme="meridian"] .team-banner,
 html[data-theme="sprite"] .team-banner,
+html[data-theme="signal"][data-mode="light"] .team-banner,
 html[data-theme="meridian"] .set-note,
-html[data-theme="sprite"] .set-note {
+html[data-theme="sprite"] .set-note,
+html[data-theme="signal"][data-mode="light"] .set-note {
   background: var(--glass-2);
   border-color: var(--line);
   color: var(--dim);
 }
 html[data-theme="meridian"] .sess-modal .sm-card,
-html[data-theme="sprite"] .sess-modal .sm-card {
+html[data-theme="sprite"] .sess-modal .sm-card,
+html[data-theme="signal"][data-mode="light"] .sess-modal .sm-card {
   background: var(--sheet);
   color: var(--text);
   border-color: var(--line);
 }
 html[data-theme="meridian"] .feed-row,
 html[data-theme="sprite"] .feed-row,
+html[data-theme="signal"][data-mode="light"] .feed-row,
 html[data-theme="meridian"] .cap-row,
 html[data-theme="sprite"] .cap-row,
+html[data-theme="signal"][data-mode="light"] .cap-row,
 html[data-theme="meridian"] .row,
-html[data-theme="sprite"] .row {
+html[data-theme="sprite"] .row,
+html[data-theme="signal"][data-mode="light"] .row {
   border-bottom-color: var(--line-soft, var(--line));
 }
 
@@ -557,7 +629,6 @@ html[data-theme="sprite"] #cobe-stage {
   background:
     radial-gradient(circle at 50% 48%, #fff 0%, var(--panel-bg) 55%);
 }
-html[data-theme="dragon"] #cobe-stage { display: none !important; }
 
 #cobe-overlays {
   position: absolute; inset: 0;
@@ -581,36 +652,45 @@ html[data-theme="dragon"] #cobe-stage { display: none !important; }
 /* Intel: replace Dragon-hardcoded rgba blacks / reds with tokens */
 html[data-theme="meridian"] .chip,
 html[data-theme="sprite"] .chip,
+html[data-theme="signal"][data-mode="light"] .chip,
 html[data-theme="meridian"] .toolbar .chip,
-html[data-theme="sprite"] .toolbar .chip {
+html[data-theme="sprite"] .toolbar .chip,
+html[data-theme="signal"][data-mode="light"] .toolbar .chip {
   background: var(--sheet) !important;
   border-color: var(--line) !important;
   color: var(--dim) !important;
 }
 html[data-theme="meridian"] .chip.on,
-html[data-theme="sprite"] .chip.on {
+html[data-theme="sprite"] .chip.on,
+html[data-theme="signal"][data-mode="light"] .chip.on {
   color: var(--accent) !important;
   border-color: color-mix(in srgb, var(--accent) 45%, transparent) !important;
   background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
 }
 html[data-theme="meridian"] input.search,
 html[data-theme="sprite"] input.search,
+html[data-theme="signal"][data-mode="light"] input.search,
 html[data-theme="meridian"] .toolbar input.search,
-html[data-theme="sprite"] .toolbar input.search {
+html[data-theme="sprite"] .toolbar input.search,
+html[data-theme="signal"][data-mode="light"] .toolbar input.search {
   background: var(--sheet) !important;
   border-color: var(--line) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .detail,
 html[data-theme="sprite"] .detail,
+html[data-theme="signal"][data-mode="light"] .detail,
 html[data-theme="meridian"] .gauge-breakdown,
-html[data-theme="sprite"] .gauge-breakdown {
+html[data-theme="sprite"] .gauge-breakdown,
+html[data-theme="signal"][data-mode="light"] .gauge-breakdown {
   background: color-mix(in srgb, var(--ink) 6%, transparent) !important;
 }
 html[data-theme="meridian"] .sess-modal .sm-card,
 html[data-theme="sprite"] .sess-modal .sm-card,
+html[data-theme="signal"][data-mode="light"] .sess-modal .sm-card,
 html[data-theme="meridian"] .sm-card,
-html[data-theme="sprite"] .sm-card {
+html[data-theme="sprite"] .sm-card,
+html[data-theme="signal"][data-mode="light"] .sm-card {
   background: var(--sheet) !important;
   color: var(--text) !important;
   border-color: var(--line-strong) !important;
@@ -618,87 +698,107 @@ html[data-theme="sprite"] .sm-card {
 }
 html[data-theme="meridian"] .nav a.active,
 html[data-theme="sprite"] .nav a.active,
+html[data-theme="signal"][data-mode="light"] .nav a.active,
 html[data-theme="meridian"] .sb-item.on,
 html[data-theme="sprite"] .sb-item.on,
+html[data-theme="signal"][data-mode="light"] .sb-item.on,
 html[data-theme="meridian"] .set-btn.primary,
 html[data-theme="sprite"] .set-btn.primary,
+html[data-theme="signal"][data-mode="light"] .set-btn.primary,
 html[data-theme="meridian"] .tag.hot,
 html[data-theme="sprite"] .tag.hot,
+html[data-theme="signal"][data-mode="light"] .tag.hot,
 html[data-theme="meridian"] .cap-badge.failed,
 html[data-theme="sprite"] .cap-badge.failed,
+html[data-theme="signal"][data-mode="light"] .cap-badge.failed,
 html[data-theme="meridian"] .cap-badge.blocked,
-html[data-theme="sprite"] .cap-badge.blocked {
+html[data-theme="sprite"] .cap-badge.blocked,
+html[data-theme="signal"][data-mode="light"] .cap-badge.blocked {
   color: var(--accent) !important;
   border-color: color-mix(in srgb, var(--accent) 40%, transparent) !important;
   background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
 }
 html[data-theme="meridian"] .panel,
 html[data-theme="sprite"] .panel,
+html[data-theme="signal"][data-mode="light"] .panel,
 html[data-theme="meridian"] .pane,
-html[data-theme="sprite"] .pane {
+html[data-theme="sprite"] .pane,
+html[data-theme="signal"][data-mode="light"] .pane {
   background: var(--panel-bg);
 }
 html[data-theme="meridian"] .shell,
 html[data-theme="sprite"] .shell,
+html[data-theme="signal"][data-mode="light"] .shell,
 html[data-theme="meridian"] .shell-main,
-html[data-theme="sprite"] .shell-main {
+html[data-theme="sprite"] .shell-main,
+html[data-theme="signal"][data-mode="light"] .shell-main {
   background: var(--body-bg);
   color: var(--text);
 }
 html[data-theme="meridian"] .live-dot,
-html[data-theme="sprite"] .live-dot {
+html[data-theme="sprite"] .live-dot,
+html[data-theme="signal"][data-mode="light"] .live-dot {
   background: var(--accent);
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent);
 }
 /* MITRE ATT&CK coverage — light theme columns + heat cells */
 html[data-theme="meridian"] .mitre-col,
-html[data-theme="sprite"] .mitre-col {
+html[data-theme="sprite"] .mitre-col,
+html[data-theme="signal"][data-mode="light"] .mitre-col {
   background: var(--glass-2) !important;
   border-color: var(--line) !important;
 }
 html[data-theme="meridian"] .mitre-cell,
-html[data-theme="sprite"] .mitre-cell {
+html[data-theme="sprite"] .mitre-cell,
+html[data-theme="signal"][data-mode="light"] .mitre-cell {
   background: var(--sheet) !important;
   border-color: var(--line) !important;
   color: var(--dim) !important;
 }
 html[data-theme="meridian"] .mitre-cell:hover,
-html[data-theme="sprite"] .mitre-cell:hover {
+html[data-theme="sprite"] .mitre-cell:hover,
+html[data-theme="signal"][data-mode="light"] .mitre-cell:hover {
   color: var(--text) !important;
   border-color: var(--line-strong) !important;
 }
 html[data-theme="meridian"] .mitre-cell.lv1,
-html[data-theme="sprite"] .mitre-cell.lv1 {
+html[data-theme="sprite"] .mitre-cell.lv1,
+html[data-theme="signal"][data-mode="light"] .mitre-cell.lv1 {
   background: color-mix(in srgb, var(--accent-2) 10%, var(--sheet)) !important;
   border-color: color-mix(in srgb, var(--accent-2) 35%, transparent) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .mitre-cell.lv2,
-html[data-theme="sprite"] .mitre-cell.lv2 {
+html[data-theme="sprite"] .mitre-cell.lv2,
+html[data-theme="signal"][data-mode="light"] .mitre-cell.lv2 {
   background: color-mix(in srgb, var(--accent-2) 18%, var(--sheet)) !important;
   border-color: color-mix(in srgb, var(--accent-2) 45%, transparent) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .mitre-cell.lv3,
-html[data-theme="sprite"] .mitre-cell.lv3 {
+html[data-theme="sprite"] .mitre-cell.lv3,
+html[data-theme="signal"][data-mode="light"] .mitre-cell.lv3 {
   background: color-mix(in srgb, var(--accent-2) 28%, var(--sheet)) !important;
   border-color: color-mix(in srgb, var(--accent-2) 55%, transparent) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .mitre-cell.lv4,
-html[data-theme="sprite"] .mitre-cell.lv4 {
+html[data-theme="sprite"] .mitre-cell.lv4,
+html[data-theme="signal"][data-mode="light"] .mitre-cell.lv4 {
   background: color-mix(in srgb, var(--warn) 32%, var(--sheet)) !important;
   border-color: color-mix(in srgb, var(--warn) 55%, transparent) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .mitre-cell.lv5,
-html[data-theme="sprite"] .mitre-cell.lv5 {
+html[data-theme="sprite"] .mitre-cell.lv5,
+html[data-theme="signal"][data-mode="light"] .mitre-cell.lv5 {
   background: color-mix(in srgb, var(--accent) 28%, var(--sheet)) !important;
   border-color: color-mix(in srgb, var(--accent) 55%, transparent) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .mitre-top .mt-pill,
-html[data-theme="sprite"] .mitre-top .mt-pill {
+html[data-theme="sprite"] .mitre-top .mt-pill,
+html[data-theme="signal"][data-mode="light"] .mitre-top .mt-pill {
   background: color-mix(in srgb, var(--accent-2) 12%, var(--sheet)) !important;
   border-color: color-mix(in srgb, var(--accent-2) 40%, transparent) !important;
   color: var(--blue-team) !important;
@@ -711,16 +811,20 @@ html[data-theme="sprite"] .mitre-cell {
 }
 html[data-theme="meridian"] .set-note,
 html[data-theme="sprite"] .set-note,
+html[data-theme="signal"][data-mode="light"] .set-note,
 html[data-theme="meridian"] .team-banner,
 html[data-theme="sprite"] .team-banner,
+html[data-theme="signal"][data-mode="light"] .team-banner,
 html[data-theme="meridian"] .enrich-card,
-html[data-theme="sprite"] .enrich-card {
+html[data-theme="sprite"] .enrich-card,
+html[data-theme="signal"][data-mode="light"] .enrich-card {
   background: var(--glass-2) !important;
   border-color: var(--line) !important;
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .users .pill,
-html[data-theme="sprite"] .users .pill {
+html[data-theme="sprite"] .users .pill,
+html[data-theme="signal"][data-mode="light"] .users .pill {
   background: var(--glass-2) !important;
   border-color: var(--line) !important;
   color: var(--text) !important;
@@ -730,44 +834,58 @@ html[data-theme="sprite"] .users .pill {
 /* Red team wells: force light surfaces under Meridian / Sprite */
 html[data-theme="meridian"] .wl-preview,
 html[data-theme="sprite"] .wl-preview,
+html[data-theme="signal"][data-mode="light"] .wl-preview,
 html[data-theme="meridian"] .graph-canvas,
 html[data-theme="sprite"] .graph-canvas,
+html[data-theme="signal"][data-mode="light"] .graph-canvas,
 html[data-theme="meridian"] .replay-select,
 html[data-theme="sprite"] .replay-select,
+html[data-theme="signal"][data-mode="light"] .replay-select,
 html[data-theme="meridian"] .replay-pre,
 html[data-theme="sprite"] .replay-pre,
+html[data-theme="signal"][data-mode="light"] .replay-pre,
 html[data-theme="meridian"] .deobf-input,
 html[data-theme="sprite"] .deobf-input,
+html[data-theme="signal"][data-mode="light"] .deobf-input,
 html[data-theme="meridian"] .deobf-row,
 html[data-theme="sprite"] .deobf-row,
+html[data-theme="signal"][data-mode="light"] .deobf-row,
 html[data-theme="meridian"] .pm-strings,
 html[data-theme="sprite"] .pm-strings,
+html[data-theme="signal"][data-mode="light"] .pm-strings,
 html[data-theme="meridian"] .pm-hex,
 html[data-theme="sprite"] .pm-hex,
+html[data-theme="signal"][data-mode="light"] .pm-hex,
 html[data-theme="meridian"] .sm-transcript,
-html[data-theme="sprite"] .sm-transcript {
+html[data-theme="sprite"] .sm-transcript,
+html[data-theme="signal"][data-mode="light"] .sm-transcript {
   background: var(--bg) !important;
   color: var(--text);
   border-color: var(--line);
 }
 html[data-theme="meridian"] .wl-kind.active,
-html[data-theme="sprite"] .wl-kind.active {
+html[data-theme="sprite"] .wl-kind.active,
+html[data-theme="signal"][data-mode="light"] .wl-kind.active {
   color: var(--accent) !important;
   border-color: color-mix(in srgb, var(--accent) 50%, transparent) !important;
   background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
 }
 html[data-theme="meridian"] .deobf-orig,
 html[data-theme="sprite"] .deobf-orig,
+html[data-theme="signal"][data-mode="light"] .deobf-orig,
 html[data-theme="meridian"] .replay-pre,
-html[data-theme="sprite"] .replay-pre {
+html[data-theme="sprite"] .replay-pre,
+html[data-theme="signal"][data-mode="light"] .replay-pre {
   color: var(--text) !important;
 }
 html[data-theme="meridian"] .deobf-final,
-html[data-theme="sprite"] .deobf-final {
+html[data-theme="sprite"] .deobf-final,
+html[data-theme="signal"][data-mode="light"] .deobf-final {
   color: var(--good) !important;
 }
 html[data-theme="meridian"] .deobf-layer-pill,
-html[data-theme="sprite"] .deobf-layer-pill {
+html[data-theme="sprite"] .deobf-layer-pill,
+html[data-theme="signal"][data-mode="light"] .deobf-layer-pill {
   background: color-mix(in srgb, var(--accent) 15%, transparent) !important;
   border-color: color-mix(in srgb, var(--accent) 35%, transparent) !important;
   color: var(--accent) !important;
@@ -786,7 +904,8 @@ html[data-theme="sprite"] .deobf-row {
 
 /* Overview activity heatmap */
 html[data-theme="meridian"] #heatmap-wrap,
-html[data-theme="sprite"] #heatmap-wrap {
+html[data-theme="sprite"] #heatmap-wrap,
+html[data-theme="signal"][data-mode="light"] #heatmap-wrap {
   background: var(--glass-2) !important;
   border-color: var(--line) !important;
 }
