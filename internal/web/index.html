@@ -16,7 +16,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ShardLure Live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Pixelify+Sans:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
 
 <style>
@@ -449,7 +449,7 @@ function applyTheme(id, opts) {
     if (typeof BroadcastChannel !== 'undefined') {
       window.__shardlureThemeEcho = id;
       var bc = new BroadcastChannel('shardlure-theme');
-      bc.postMessage({ theme: id });
+      bc.postMessage({ theme: id, mode: localStorage.getItem('shardlure_mode') || 'dark' });
       bc.close();
     }
   } catch (e) {}
@@ -473,6 +473,7 @@ async function syncThemeFromServer() {
 try {
   window.addEventListener('storage', function (e) {
     if (e.key === 'shardlure_theme' && e.newValue) applyTheme(e.newValue);
+    if (e.key === 'shardlure_mode' && e.newValue) applyMode(e.newValue);
   });
   if (typeof BroadcastChannel !== 'undefined') {
     var __themeBC = new BroadcastChannel('shardlure-theme');
@@ -482,6 +483,7 @@ try {
       if (ev.data.theme === window.__shardlureThemeEcho ||
           ev.data.theme === window.__shardlureTheme) return;
       applyTheme(ev.data.theme);
+      if (ev.data.mode) applyMode(ev.data.mode);
     };
   }
 } catch (e) {}
@@ -845,7 +847,11 @@ function themeAccentRGB() {
   var theme = currentThemeId();
   if (theme === 'meridian') return { r: 13, g: 92, b: 99, hex: '#0d5c63', hex2: '#a67c2d', text: '#1a2332', bg: 'rgba(244,246,248,0.96)', line: '#c5ccd6' };
   if (theme === 'sprite') return { r: 232, g: 93, b: 76, hex: '#e85d4c', hex2: '#f0b429', text: '#241910', bg: 'rgba(255,253,247,0.96)', line: '#241910' };
-  return { r: 208, g: 40, b: 40, hex: '#d02828', hex2: '#c89828', text: '#e8dcd8', bg: 'rgba(20,16,16,0.92)', line: 'rgba(200,120,100,0.22)' };
+  if (theme === 'signal') {
+    if (currentMode() === 'light') return { r: 182, g: 217, b: 0, hex: '#b6d900', hex2: '#1f8a4c', text: '#14151a', bg: 'rgba(239,239,233,0.96)', line: '#d6d6cc' };
+    return { r: 209, g: 254, b: 23, hex: '#d1fe17', hex2: '#40d986', text: '#f7f7f8', bg: 'rgba(15,17,19,0.92)', line: 'rgba(150,160,60,0.22)' };
+  }
+  return { r: 209, g: 254, b: 23, hex: '#d1fe17', hex2: '#40d986', text: '#f7f7f8', bg: 'rgba(15,17,19,0.92)', line: 'rgba(150,160,60,0.22)' };
 }
 function rgba(c, a) { return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')'; }
 

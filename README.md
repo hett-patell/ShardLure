@@ -696,7 +696,7 @@ sudo userdel -r cowrie
 A: Marginally. It moves real SSH to a private port (good) and runs a fake one (interesting). The main value is *intel*: you learn what botnets are doing to boxes that look like yours.
 
 **Q: Will I get cool maps?**
-A: Yes. There is a globe. It rotates. Blood-red arcs converge on your home point like you're in a 2007 hacker movie. The intel console has a threat gauge, brute-force radar, and attack geography panel.
+A: Yes. There is a globe. It rotates. Chartreuse arcs converge on your home point like you're in a 2007 hacker movie. The intel console has a threat gauge, brute-force radar, and attack geography panel.
 
 **Q: Is this production-ready?**
 A: It's "single-VPS, one-operator, runs-on-my-laptop" ready. If you want a fleet, you'll want to front the SQLite with something less single-writer. PRs welcome.
