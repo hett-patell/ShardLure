@@ -28,8 +28,8 @@ func cmdShare(st *store.Store, cfg config.Config, args []string) {
 }
 
 func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
-	// intel.bazaar.freshness_days is the documented knob for the default
-	// freshness window; --since overrides it per-run.
+	// intel.bazaar.freshness_days tightens both the default candidate-selection
+	// window and Vet. --since may widen local selection, but never Vet policy.
 	freshDays := cfg.Intel.Bazaar.FreshnessDays
 	if freshDays <= 0 {
 		freshDays = 10
@@ -37,8 +37,8 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
 	fs := flag.NewFlagSet("share bazaar", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would upload without contacting MalwareBazaar")
 	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded)")
-	sha := fs.String("sha", "", "upload only the sample with this sha256 (overrides limit/since)")
-	since := fs.Duration("since", time.Duration(freshDays)*24*time.Hour, "only consider artifacts captured within this duration (default from intel.bazaar.freshness_days)")
+	sha := fs.String("sha", "", "select only the sample with this sha256 (still subject to dedup and Vet)")
+	since := fs.Duration("since", time.Duration(freshDays)*24*time.Hour, "local candidate-selection window; does not change the 10-day upload ceiling")
 	anonymous := fs.Bool("anonymous", false, "submit without attribution to your account")
 	statusOnly := fs.Bool("status", false, "list past uploads from bazaar_uploads instead of uploading")
 	comment := fs.String("comment", "", "extra comment appended to every sample's context.comment")
@@ -60,7 +60,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
 		fatal(fmt.Errorf("collect candidates: %w", err))
 	}
 	if len(cands) == 0 {
-		fmt.Println("no candidates: nothing in artifacts table within the freshness window (try --since 720h)")
+		fmt.Println("no candidates: nothing in artifacts table within the candidate-selection window")
 		return
 	}
 
@@ -140,12 +140,11 @@ func (a *bazaarRecorderAdapter) RecordBazaarUpload(sha, status, mbURL string, at
 //   - sha256 IS NOT NULL    — needed for dedup
 //   - origin LIKE '%download%'  — exclude TTY transcripts (those
 //     are operator artifacts, not malware samples)
-//   - created_at >= now - since  — honour abuse.ch freshness policy
+//   - created_at >= now - since  — local candidate selection only
 //
-// If singleSHA is non-empty, it overrides the WHERE clause completely
-// so an operator can force-retry a specific sample regardless of
-// freshness/dedup. The bazaar package still consults its own
-// BazaarUploadRecorded gate.
+// If singleSHA is non-empty, it overrides the WHERE clause completely. Both
+// paths still enter bazaar.Share, which applies dedup and the non-bypassable
+// Vet freshness policy before any network call.
 func collectShareCandidates(st *store.Store, singleSHA string, since time.Duration) ([]bazaar.Candidate, error) {
 	if singleSHA != "" {
 		row, err := st.GetArtifactBySHA(singleSHA)

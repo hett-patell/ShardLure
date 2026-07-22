@@ -81,8 +81,8 @@ type Config struct {
 			// side; this is a client-side safety rail).
 			MaxBytes int64 `yaml:"max_bytes"`
 			// FreshnessDays bounds how recently the artifact must
-			// have been captured. Defaults to 10 (matches abuse.ch
-			// submission policy).
+			// have been captured. Values 1..10 may only tighten the
+			// hard 10-day policy; 0 uses the default of 10.
 			FreshnessDays int `yaml:"freshness_days"`
 		} `yaml:"bazaar"`
 		AbuseIPDB struct {
@@ -222,6 +222,9 @@ func (c Config) Validate() error {
 	}
 	if c.Intel.Bazaar.MaxBytes < 0 {
 		return fmt.Errorf("config: intel.bazaar.max_bytes must be >= 0, got %d", c.Intel.Bazaar.MaxBytes)
+	}
+	if c.Intel.Bazaar.FreshnessDays < 0 || c.Intel.Bazaar.FreshnessDays > 10 {
+		return fmt.Errorf("config: intel.bazaar.freshness_days must be in 0-10, got %d", c.Intel.Bazaar.FreshnessDays)
 	}
 	if c.Intel.AbuseIPDB.MinProbeScore < 0 || c.Intel.AbuseIPDB.MinProbeScore > 100 {
 		return fmt.Errorf("config: intel.abuseipdb.min_probe_score must be in 0-100, got %d", c.Intel.AbuseIPDB.MinProbeScore)

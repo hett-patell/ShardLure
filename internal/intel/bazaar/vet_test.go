@@ -95,6 +95,7 @@ func TestVet(t *testing.T) {
 func TestVetFreshnessDaysOverride(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	fourDaysAgo := now.Add(-4 * 24 * time.Hour)
+	nineDaysAgo := now.Add(-9 * 24 * time.Hour)
 	twelveDaysAgo := now.Add(-12 * 24 * time.Hour)
 
 	freshELF := Candidate{SizeBytes: 100_000, Origin: "cowrie_download", ObservedAt: fourDaysAgo}
@@ -115,17 +116,22 @@ func TestVetFreshnessDaysOverride(t *testing.T) {
 		t.Fatal("4-day-old sample should pass with default 10-day window")
 	}
 
-	// 12-day-old sample with FreshnessDays=15 should accept
-	oldELF := Candidate{SizeBytes: 100_000, Origin: "cowrie_download", ObservedAt: twelveDaysAgo}
-	ok, _ = Vet(oldELF, cls, now, VetOptions{FreshnessDays: 15})
+	// A value above the hard ceiling cannot loosen policy: it still uses the
+	// default 10-day window, under which a 9-day-old sample remains eligible.
+	nineDayELF := Candidate{SizeBytes: 100_000, Origin: "cowrie_download", ObservedAt: nineDaysAgo}
+	ok, reason = Vet(nineDayELF, cls, now, VetOptions{FreshnessDays: 15})
 	if !ok {
-		t.Fatal("12-day-old sample should pass with FreshnessDays=15")
+		t.Fatalf("9-day-old sample should pass under hard 10-day ceiling (reason=%q)", reason)
 	}
 
-	// Same 12-day-old with default (10) should be rejected
-	ok, _ = Vet(oldELF, cls, now)
+	// The same attempted override must not admit a sample older than 10 days.
+	oldELF := Candidate{SizeBytes: 100_000, Origin: "cowrie_download", ObservedAt: twelveDaysAgo}
+	ok, reason = Vet(oldELF, cls, now, VetOptions{FreshnessDays: 15})
 	if ok {
-		t.Fatal("12-day-old sample should be rejected with default 10-day window")
+		t.Fatal("12-day-old sample should be rejected despite FreshnessDays=15")
+	}
+	if !contains(reason, "10-day") {
+		t.Errorf("reason %q should mention hard 10-day policy", reason)
 	}
 }
 

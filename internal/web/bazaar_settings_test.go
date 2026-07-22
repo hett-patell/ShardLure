@@ -71,3 +71,54 @@ func TestBazaarSettingsLive(t *testing.T) {
 		t.Fatalf("freshness live = %d", got)
 	}
 }
+
+func TestBazaarFreshnessSettingRejectsLooserPolicyAndPreservesSavedValue(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "bazaar-freshness-settings.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	keys, err := settings.Load(st)
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	s := New(st, keys, "127.0.0.1:0", Options{BazaarFreshnessDays: 10})
+
+	meta, ok := metaFor(settings.KeyBazaarFreshnessDays)
+	if !ok {
+		t.Fatal("bazaar.freshness_days missing from settingsRegistry")
+	}
+	if !meta.HasIntRange || meta.MinInt != 1 || meta.MaxInt != 10 {
+		t.Errorf("freshness range = enabled:%v %d..%d, want 1..10", meta.HasIntRange, meta.MinInt, meta.MaxInt)
+	}
+
+	post := func(value string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"key": settings.KeyBazaarFreshnessDays, "value": value})
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/settings/save", bytes.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		s.handleSettingsSave(rec, r)
+		return rec
+	}
+
+	if rec := post("10"); rec.Code != http.StatusOK {
+		t.Fatalf("save freshness=10: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post("7"); rec.Code != http.StatusOK {
+		t.Fatalf("save freshness=7: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post("11"); rec.Code != http.StatusBadRequest {
+		t.Errorf("save freshness=11: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored, exists, err := st.GetAppSetting(settings.KeyBazaarFreshnessDays)
+	if err != nil {
+		t.Fatalf("GetAppSetting: %v", err)
+	}
+	if !exists || stored != "7" {
+		t.Errorf("stored freshness = (%q, exists=%v), want (7, true)", stored, exists)
+	}
+	if got := s.bazaarFreshnessDaysLive(); got != 7 {
+		t.Errorf("live freshness = %d, want preserved value 7", got)
+	}
+}

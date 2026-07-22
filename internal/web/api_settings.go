@@ -71,7 +71,7 @@ var settingsRegistry = []settingMeta{
 	{Key: settings.KeyBazaarEndpoint, Kind: kindText, Label: "API endpoint"},
 	{Key: settings.KeyBazaarTags, Kind: kindText, Label: "Sample tags"},
 	{Key: settings.KeyBazaarMaxBytes, Kind: kindInt, Label: "Max upload size (bytes)", MinInt: 1, MaxInt: 1073741824, HasIntRange: true},
-	{Key: settings.KeyBazaarFreshnessDays, Kind: kindInt, Label: "Freshness window (days)", MinInt: 1, MaxInt: 30, HasIntRange: true},
+	{Key: settings.KeyBazaarFreshnessDays, Kind: kindInt, Label: "Freshness window (days)", MinInt: 1, MaxInt: 10, HasIntRange: true},
 
 	// --- geolocation (non-secret) ---
 	// Only the geo-HTTP toggles are exposed here: they meaningfully enable /

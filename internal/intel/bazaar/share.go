@@ -55,7 +55,7 @@ type Options struct {
 	Endpoint      string
 	ExtraTags     []string
 	MaxBytes      int64
-	FreshnessDays int // 0 = default (10 days); configurable via settings panel
+	FreshnessDays int // 1..9 tightens policy; all other values use the hard 10-day default
 	DryRun        bool
 	Anonymous     bool
 	Comment       string // operator-supplied comment appended to per-sample context
@@ -76,8 +76,9 @@ var (
 //  1. Skip if size > MaxBytes (server-side cap) or size == 0.
 //  2. Skip if BazaarUploadRecorded returns true (already shipped).
 //  3. Classify on disk → tag set + optional family.
-//  4. POST to MalwareBazaar with combined (ExtraTags + classification).
-//  5. On accepted response, RecordBazaarUpload so the next run skips it.
+//  4. Apply the local MalwareBazaar submission-policy gate.
+//  5. POST to MalwareBazaar with combined (ExtraTags + classification).
+//  6. On accepted response, RecordBazaarUpload so the next run skips it.
 //
 // Returns (uploaded, skipped, error). uploaded counts both inserted
 // and file_already_known responses (both mean "MB has it"); skipped

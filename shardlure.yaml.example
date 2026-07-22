@@ -54,8 +54,8 @@ intel:
     # cowrie SFTP capture that turns out to be a 4 GiB dump.
     max_bytes: 33554432   # 32 MiB
     # Abuse.ch fair-use: do not upload samples older than 10 days.
-    # The share subcommand filters artifacts by this window unless
-    # --since or --sha overrides it.
+    # Valid values are 0..10 (0 uses the 10-day default). --since and
+    # --sha only select local candidates; neither bypasses the Vet gate.
     freshness_days: 10
   abuseipdb:
     # Outbound REPORTING of confirmed brute-forcers to AbuseIPDB (the

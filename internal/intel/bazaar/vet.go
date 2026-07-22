@@ -57,7 +57,7 @@ var benignKinds = map[string]bool{
 
 // VetOptions holds optional policy overrides for Vet.
 type VetOptions struct {
-	FreshnessDays int // 0 = use defaultFreshnessDays (10)
+	FreshnessDays int // 1..9 tightens policy; 0, 10, or invalid = hard default (10)
 }
 
 // Vet decides whether a single candidate may be submitted to MalwareBazaar.
@@ -67,7 +67,7 @@ type VetOptions struct {
 // and win over any malware signal, then the accept signals are evaluated.
 func Vet(c Candidate, cls Classification, now time.Time, opts ...VetOptions) (bool, string) {
 	freshDays := defaultFreshnessDays
-	if len(opts) > 0 && opts[0].FreshnessDays > 0 {
+	if len(opts) > 0 && opts[0].FreshnessDays > 0 && opts[0].FreshnessDays < defaultFreshnessDays {
 		freshDays = opts[0].FreshnessDays
 	}
 	maxFreshness := time.Duration(freshDays) * 24 * time.Hour
