@@ -36,18 +36,27 @@ NEW = """\
                         self.protocol.pp = temp_pp
                     for real_path, virtual_path in temp_pp.redirect_real_files:"""
 
-if "self.protocol.pp = temp_pp" in content:
+old_count = content.count(OLD)
+new_count = content.count(NEW)
+pristine = old_count == 1 and new_count == 0
+fully_patched = old_count == 0 and new_count == 1
+
+if fully_patched:
     print(f"  [skip] {path}: already patched")
     sys.exit(0)
-if OLD not in content:
-    print(f"  [FAIL] {path}: target block not found", file=sys.stderr)
+
+if not pristine:
+    print(
+        f"  [FAIL] {path}: target is neither pristine nor fully patched",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 if check_only:
     print(f"  [check] {path}: compatible")
     sys.exit(0)
 
-content = content.replace(OLD, NEW)
+content = content.replace(OLD, NEW, 1)
 with open(path, 'w') as f:
     f.write(content)
 print(f"  [ok] {path}: patched")

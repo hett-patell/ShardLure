@@ -116,6 +116,39 @@ class CowrieCheckoutTests(unittest.TestCase):
             self.assertEqual((target / "tracked.txt").read_text(encoding="utf-8"), "locally patched\n")
             self.assertEqual(self._git(target, "rev-parse", "HEAD").stdout.strip(), pin)
 
+    def test_existing_checkout_validation_scopes_safe_directory_to_resolved_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "nested").mkdir()
+            resolved_target = base / "cowrie"
+            (resolved_target / ".git").mkdir(parents=True)
+            target = base / "nested" / ".." / "cowrie"
+            fake_run = mock.Mock(
+                return_value=subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=EXPECTED_PIN + "\n"
+                )
+            )
+
+            with mock.patch.object(shardlure, "run", fake_run):
+                ensure_cowrie_checkout(target, EXPECTED_PIN, "https://example.invalid/cowrie.git")
+
+            fake_run.assert_called_once_with(
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={resolved_target.resolve()}",
+                    "-C",
+                    str(target),
+                    "rev-parse",
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            command = fake_run.call_args.args[0]
+            self.assertNotIn("--global", command)
+            self.assertNotIn("safe.directory=*", command)
+
     def test_mismatched_existing_checkout_fails_without_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

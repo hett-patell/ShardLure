@@ -120,25 +120,32 @@ NEW2 = """\
                             continue
                 return SyntaxError_(token=self._error_token(line, node))"""
 
-MARKER = "If a pipe follows (e.g. `( cmd1 ) | cmd2`)"
-if MARKER in content:
+old_counts = (content.count(OLD1), content.count(OLD2))
+new_counts = (content.count(NEW1), content.count(NEW2))
+pristine = all(count == 1 for count in old_counts) and all(
+    count == 0 for count in new_counts
+)
+fully_patched = all(count == 0 for count in old_counts) and all(
+    count == 1 for count in new_counts
+)
+
+if fully_patched:
     print(f"  [skip] {path}: already patched")
     sys.exit(0)
 
-if OLD1 not in content:
-    print(f"  [FAIL] {path}: _parse_statement target block not found", file=sys.stderr)
-    sys.exit(1)
-
-if OLD2 not in content:
-    print(f"  [FAIL] {path}: _parse_simple target block not found", file=sys.stderr)
+if not pristine:
+    print(
+        f"  [FAIL] {path}: target is neither pristine nor fully patched",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 if check_only:
     print(f"  [check] {path}: compatible")
     sys.exit(0)
 
-content = content.replace(OLD1, NEW1)
-content = content.replace(OLD2, NEW2)
+content = content.replace(OLD1, NEW1, 1)
+content = content.replace(OLD2, NEW2, 1)
 
 with open(path, 'w') as f:
     f.write(content)

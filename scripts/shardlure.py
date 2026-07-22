@@ -53,7 +53,15 @@ def ensure_cowrie_checkout(
     """Create the exact detached Cowrie checkout or validate an existing one."""
     if (target / ".git").exists():
         current = run(
-            ["git", "-C", str(target), "rev-parse", "HEAD"],
+            [
+                "git",
+                "-c",
+                f"safe.directory={target.resolve()}",
+                "-C",
+                str(target),
+                "rev-parse",
+                "HEAD",
+            ],
             capture_output=True,
             text=True,
         )
