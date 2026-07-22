@@ -17,13 +17,31 @@ func TestValidateUITheme(t *testing.T) {
 	if !ok {
 		t.Fatal("ui.theme missing from settingsRegistry")
 	}
-	for _, good := range []string{"dragon", "meridian", "sprite"} {
+	for _, good := range []string{"signal", "meridian", "sprite"} {
 		if msg := validateSetting(meta, good); msg != "" {
 			t.Fatalf("%q rejected: %s", good, msg)
 		}
 	}
+	if msg := validateSetting(meta, "dragon"); msg == "" {
+		t.Fatal("expected dragon to be rejected (removed in v2.0)")
+	}
 	if msg := validateSetting(meta, "neon"); msg == "" {
 		t.Fatal("expected neon to be rejected")
+	}
+}
+
+func TestValidateUIMode(t *testing.T) {
+	meta, ok := metaFor(settings.KeyUIMode)
+	if !ok {
+		t.Fatal("ui.mode missing from settingsRegistry")
+	}
+	for _, good := range []string{"dark", "light"} {
+		if msg := validateSetting(meta, good); msg != "" {
+			t.Fatalf("%q rejected: %s", good, msg)
+		}
+	}
+	if msg := validateSetting(meta, "sepia"); msg == "" {
+		t.Fatal("expected sepia to be rejected")
 	}
 }
 

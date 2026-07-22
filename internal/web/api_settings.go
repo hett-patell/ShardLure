@@ -83,6 +83,7 @@ var settingsRegistry = []settingMeta{
 
 	// --- appearance (non-secret) ---
 	{Key: settings.KeyUITheme, Kind: kindText, Label: "UI theme"},
+	{Key: settings.KeyUIMode, Kind: kindText, Label: "Light/dark mode"},
 
 	// --- dashboard auth (secret; rendered in its own panel, not with provider keys) ---
 	{Key: settings.KeyDashToken, Kind: kindSecret, Label: "Dashboard auth token"},
@@ -258,9 +259,16 @@ func validateSetting(m settingMeta, val string) string {
 	case kindText:
 		if m.Key == settings.KeyUITheme {
 			switch val {
-			case "dragon", "meridian", "sprite":
+			case "signal", "meridian", "sprite":
 			default:
-				return "theme must be dragon, meridian, or sprite"
+				return "theme must be signal, meridian, or sprite"
+			}
+		}
+		if m.Key == settings.KeyUIMode {
+			switch val {
+			case "dark", "light":
+			default:
+				return "mode must be dark or light"
 			}
 		}
 		if m.Key == settings.KeyBazaarEndpoint {
