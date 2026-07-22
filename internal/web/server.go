@@ -113,6 +113,21 @@ type Server struct {
 	statsMu     sync.Mutex
 	statsCached *summaryStats
 	statsAt     time.Time
+
+	// dashExtraCache memoizes the two remaining full-window scans that
+	// /api/dashboard ran UNCACHED on every 5s poll: the 72h hourly-by-kind
+	// GROUP BY (substr(ts) grouping, whole-window sort) and RecentShellSessions
+	// (GROUP BY session_id + a ROW_NUMBER() CTE over the 24h cowrie window).
+	// Same cadence and staleness profile as statsCache — data only moves on
+	// the 5s ingest tick — so they share its TTL.
+	dashExtraMu     sync.Mutex
+	dashExtraCached *dashExtra
+	dashExtraAt     time.Time
+}
+
+type dashExtra struct {
+	Hourly        []store.HourCount
+	ShellSessions []store.ShellSessionSummary
 }
 
 type summaryStats struct {
@@ -209,8 +224,39 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	return s.statsCached, nil
 }
 
+// dashExtraCachedValues returns the memoized 72h hourly counts and recent shell
+// sessions, recomputing at most once per statsTTL. These two ran uncached on
+// every 5s /api/dashboard poll; they share statsTTL because they change on the
+// same 5s ingest tick. On a recompute error the last-good value is served (nil
+// on first call), keeping the landing dashboard alive through a transient error.
+func (s *Server) dashExtraCachedValues() ([]store.HourCount, []store.ShellSessionSummary) {
+	s.dashExtraMu.Lock()
+	defer s.dashExtraMu.Unlock()
+	if s.dashExtraCached != nil && time.Since(s.dashExtraAt) < statsTTL {
+		return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
+	}
+	hourly, err := s.st.HourlyEventCounts(72)
+	if err != nil {
+		if s.dashExtraCached != nil {
+			return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
+		}
+		return nil, nil
+	}
+	shell, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
+	if err != nil {
+		if s.dashExtraCached != nil {
+			return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
+		}
+		return hourly, nil
+	}
+	s.dashExtraCached = &dashExtra{Hourly: hourly, ShellSessions: shell}
+	s.dashExtraAt = time.Now()
+	return hourly, shell
+}
+
 type windowedEvents struct {
 	events []*models.Event
+	total  int // true window size; > len(events) when the cap truncated
 	at     time.Time
 }
 
@@ -222,10 +268,17 @@ const eventsWindowTTL = 15 * time.Second
 // an enormous slice in cache. Retention caps the data well below this anyway.
 const maxWindowHours = 24 * 366
 
-// eventsForWindowCached returns the events with TS within the last windowHours,
-// memoized per window for eventsWindowTTL. The returned slice is shared and
+// eventsForWindowCached returns up to defaultWindowEventCap events (newest
+// first) with TS within the last windowHours, plus the TRUE total number of
+// events in that window (which may exceed len(events) when the cap truncated).
+// Memoized per window for eventsWindowTTL. The returned slice is shared and
 // MUST be treated read-only by callers (the intel collectors only read).
-func (s *Server) eventsForWindowCached(windowHours int) ([]*models.Event, error) {
+//
+// The cap is what keeps this bounded: a 30d window over a multi-million-row DB
+// no longer materializes the whole thing into a cached slice. Callers disclose
+// total vs len(events) so the truncation is honest, not silent (the old
+// uncapped EventsSinceAll here was the process's largest single allocation).
+func (s *Server) eventsForWindowCached(windowHours int) ([]*models.Event, int, error) {
 	if windowHours <= 0 {
 		windowHours = 24
 	}
@@ -235,15 +288,15 @@ func (s *Server) eventsForWindowCached(windowHours int) ([]*models.Event, error)
 	s.eventsMu.Lock()
 	defer s.eventsMu.Unlock()
 	if e, ok := s.eventsCache[windowHours]; ok && time.Since(e.at) < eventsWindowTTL {
-		return e.events, nil
+		return e.events, e.total, nil
 	}
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	ev, err := s.st.EventsSinceAll(since)
+	ev, total, err := s.st.EventsSinceCapped(since, 0)
 	if err != nil {
 		if e, ok := s.eventsCache[windowHours]; ok {
-			return e.events, nil // serve last-good on transient error
+			return e.events, e.total, nil // serve last-good on transient error
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	if s.eventsCache == nil {
 		s.eventsCache = make(map[int]windowedEvents, 4)
@@ -255,8 +308,19 @@ func (s *Server) eventsForWindowCached(windowHours int) ([]*models.Event, error)
 			delete(s.eventsCache, k)
 		}
 	}
-	s.eventsCache[windowHours] = windowedEvents{events: ev, at: time.Now()}
-	return ev, nil
+	s.eventsCache[windowHours] = windowedEvents{events: ev, total: total, at: time.Now()}
+	return ev, total, nil
+}
+
+// discloseWindowTruncation sets an advisory response header when the windowed
+// event cap truncated the analysis, so every intel endpoint discloses it
+// uniformly (returned/total) regardless of its own JSON shape. No-op when the
+// full window fit under the cap. Header, not body, so it can't break any
+// existing endpoint's JSON contract.
+func discloseWindowTruncation(w http.ResponseWriter, returned, total int) {
+	if total > returned {
+		w.Header().Set("X-ShardLure-Window-Truncated", fmt.Sprintf("%d/%d", returned, total))
+	}
 }
 
 // topCountriesCached returns the hits-by-country aggregation, recomputing at
@@ -837,16 +901,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "server", err, http.StatusInternalServerError)
 		return
 	}
-	hourly, err := s.st.HourlyEventCounts(72)
-	if err != nil {
-		httpError(w, "server", err, http.StatusInternalServerError)
-		return
-	}
-	shellSessions, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
-	if err != nil {
-		httpError(w, "server", err, http.StatusInternalServerError)
-		return
-	}
+	// Both the 72h hourly scan and the 24h shell-session GROUP BY were full-window
+	// queries on the 5s poll path; served from a statsTTL cache now (see
+	// dashExtraCachedValues). They no longer fail the request — a transient DB
+	// error serves last-good rather than 500ing the whole dashboard.
+	hourly, shellSessions := s.dashExtraCachedValues()
 	var ec, ac, uniqueIPs, countries int
 	var topIPs, topUsers, topCommands []store.CountRow
 	if stats, err := s.summaryStatsCached(); err == nil {

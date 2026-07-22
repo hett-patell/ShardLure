@@ -230,18 +230,41 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 // write failure is surfaced via the store's normal error path but does not
 // block event ingest.
 func persistBindings(st *store.Store, bindings sideBindings) {
-	for _, b := range bindings.tty {
-		_ = st.RecordCowrieTTYBinding(b.SHA, b.SessionID, b.TS)
+	// Coalesce every side-channel fact this pass produced into one batch so the
+	// whole set commits in a single write transaction, instead of one writeMu
+	// acquisition per (binding × table) ahead of the event insert. The hassh/
+	// duration/arch maps are keyed by session id (merge into one row per
+	// session); ttylog bindings are keyed by sha (a session can close several),
+	// so each becomes its own entry carrying just the tty fields.
+	batch := make([]store.SessionBinding, 0, len(bindings.hassh)+len(bindings.tty))
+	byID := make(map[string]int, len(bindings.hassh))
+	upsert := func(sid string) *store.SessionBinding {
+		if i, ok := byID[sid]; ok {
+			return &batch[i]
+		}
+		batch = append(batch, store.SessionBinding{SessionID: sid})
+		byID[sid] = len(batch) - 1
+		return &batch[len(batch)-1]
 	}
 	for sid, h := range bindings.hassh {
-		_ = st.RecordSessionHASSH(sid, h)
+		upsert(sid).HASSH = h
 	}
 	for sid, ms := range bindings.duration {
-		_ = st.RecordSessionDuration(sid, ms)
+		upsert(sid).DurationMs = ms
 	}
 	for sid, arch := range bindings.arch {
-		_ = st.RecordSessionArch(sid, arch)
+		upsert(sid).Arch = arch
 	}
+	for _, b := range bindings.tty {
+		batch = append(batch, store.SessionBinding{
+			SessionID: b.SessionID,
+			TTYSHA:    b.SHA,
+			TTYTS:     b.TS,
+		})
+	}
+	// Best effort: a binding write failure does not block event ingest (same
+	// contract as before). The store logs its own errors.
+	_ = st.RecordSessionBindings(batch)
 }
 
 // stampHASSH fills in e.HASSH for events whose own line didn't carry it.

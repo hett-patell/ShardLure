@@ -66,10 +66,27 @@ func Open(path string) (*Store, error) {
 	// pool would throw away WAL's reader/writer concurrency and let one slow
 	// dashboard query stall live ingest.
 	db.SetMaxOpenConns(8)
+	// Keep idle connections warm. The default MaxIdleConns of 2 let the pool
+	// churn open/close under the mixed read/write load (journal tail + cowrie
+	// ticker + several dashboard readers), so keep enough idle to cover the
+	// concurrent readers. ConnMaxLifetime bounds a single long-lived conn's
+	// staleness without forcing constant reconnects.
+	db.SetMaxIdleConns(8)
+	db.SetConnMaxLifetime(time.Hour)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// This schema is heavily index-plan-dependent (see the migration ladder and
+	// the ts-IN-not-source workaround in events_dedup.go). Without stats the
+	// planner works off defaults and can pick a full scan over an index; run
+	// optimize once after migrate so those documented plans hold on an existing
+	// DB. Cheap on a fresh DB (nothing to analyze), best-effort — a planner-hint
+	// failure must never block startup.
+	if _, err := db.Exec(`PRAGMA optimize`); err != nil {
+		// non-fatal: stale stats degrade plans, they don't break correctness
+		_ = err
 	}
 	// Honeypot DBs can contain attacker-supplied passwords; restrict to owner.
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
@@ -1034,11 +1051,15 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		}
 	}
 
-	// Reclaim WAL space the chunked deletes accumulated.
+	// Reclaim WAL space the chunked deletes accumulated, then refresh the query
+	// planner's stats. A large purge changes table/index cardinality enough to
+	// flip a plan; running optimize here (on the same 24h maintenance cadence)
+	// keeps the documented index plans valid as the DB grows and shrinks.
 	func() {
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
 		_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+		_, _ = s.db.Exec(`PRAGMA optimize`)
 	}()
 
 	// Unlink the evidence files now that their rows are gone. Best-effort: an

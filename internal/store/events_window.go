@@ -86,6 +86,10 @@ FROM events WHERE ts >= ? ORDER BY ts ASC`,
 // endpoints whose collectors take a []*Event slice. The result is the true
 // window population — a "30d" request returns 30 days of events, not the last
 // 5000.
+//
+// Prefer EventsSinceCapped for anything reachable from a UI poll: this method
+// materializes the ENTIRE window into a slice, which on a multi-million-row DB
+// is a full scan plus a multi-hundred-MB allocation held in cache.
 func (s *Store) EventsSinceAll(since time.Time) ([]*models.Event, error) {
 	var out []*models.Event
 	err := s.IterateEventsSince(since, func(e *models.Event) error {
@@ -94,3 +98,35 @@ func (s *Store) EventsSinceAll(since time.Time) ([]*models.Event, error) {
 	})
 	return out, err
 }
+
+// EventsSinceCapped returns at most limit events from the window (the most
+// recent, newest-first) along with total — the true count of events in the
+// window regardless of the cap. This is the bounded counterpart to
+// EventsSinceAll: it never materializes more than limit rows in memory, but
+// unlike the old silently-truncating EventsSince it also reports the full
+// window size so callers can disclose "analyzed N of M" instead of quietly
+// classifying a fraction. limit<=0 uses defaultWindowEventCap.
+//
+// The events are returned newest-first (ts DESC LIMIT), matching what a capped
+// view should show — the most recent activity — while total comes from a cheap
+// COUNT that rides idx_events_ts.
+func (s *Store) EventsSinceCapped(since time.Time, limit int) (events []*models.Event, total int, err error) {
+	if limit <= 0 {
+		limit = defaultWindowEventCap
+	}
+	sinceStr := since.UTC().Format(time.RFC3339Nano)
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE ts >= ?`, sinceStr).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	events, err = s.EventsSince(since, limit)
+	return events, total, err
+}
+
+// defaultWindowEventCap bounds the events any single windowed-analytics fetch
+// pulls into memory. 200k rows of the Event struct is on the order of tens of
+// MB — enough that the MITRE/TTP/IOC/wordlist collectors see a representative
+// window on any real honeypot, but a hard ceiling so a wide window over a huge
+// DB can't OOM the process or pin a giant slice in the window cache. When the
+// window holds more than this, the handlers report total > returned so the UI
+// can disclose the truncation.
+const defaultWindowEventCap = 200_000
