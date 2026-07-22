@@ -17,6 +17,7 @@ __pycache__/
 # Agent / tool runtime artifacts
 /.pi/
 /test-results/
+/.superpowers/
 
 # Crew agent state — ignore contents but keep placeholder dirs tracked.
 # Exclude *contents* (not the dir itself) so git still descends and the
