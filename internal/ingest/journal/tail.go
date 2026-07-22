@@ -52,12 +52,7 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 			}
 			continue
 		}
-		e.ActorID = actor.JournalActorID(e.SrcIP)
-		if err := st.InsertEvent(e); err != nil {
-			fmt.Fprintf(os.Stderr, "journal tail insert failed: %v\n", err)
-			continue
-		}
-		if err := actor.SyncJournalEvent(st, e, admin); err != nil {
+		if _, err := actor.SyncJournalEvent(st, e, admin); err != nil {
 			fmt.Fprintf(os.Stderr, "journal actor sync failed for %s: %v\n", e.SrcIP, err)
 		}
 	}

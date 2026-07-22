@@ -17,9 +17,9 @@ import (
 //
 //   - liveMaxIPs caps the number of distinct source IPs the live tail
 //     keeps fully resident. Each entry is a small IPStats with a
-//     username sub-map; the DB upsert is what makes a row durable, so
-//     evicting only loses the in-memory cache (it's reloaded on the
-//     next event for that IP).
+//     username sub-map; the atomic event+actor append is what makes a
+//     row durable, so evicting only loses the in-memory cache (it's
+//     reloaded on the next event for that IP).
 //   - liveMaxUsersPerIP caps the cardinality of the per-IP username
 //     map. Overflow names are collapsed into liveUserOverflowKey so
 //     the IP's distinct-user count keeps incrementing while we stop
@@ -45,17 +45,19 @@ var (
 // source IP and one map entry forever per probed username, which on
 // a busy honeypot was the dominant lifetime allocation.
 //
-// The DB is the source of truth: every Add() ends in an
-// UpsertJournalActorAtomic. When an entry is evicted, the row stays
-// authoritative; on the IP's next event we re-hydrate from
-// store.LoadJournalIPStats so the upsert continues to write the true
-// running totals instead of clobbering them with a small post-evict
-// count.
+// The DB is the source of truth: every collector mutation is followed
+// by AppendJournalEventAtomic, and a rejected append invalidates the
+// mutated entry. When an entry is evicted, the row stays authoritative;
+// on the IP's next event we re-hydrate from store.LoadJournalIPStats so
+// the next atomic append writes the true running totals instead of
+// clobbering them with a small post-evict count.
 //
-// The collector is locked by a single mutex. The live journal tail is
-// single-goroutine so contention is nil; the mutex exists for the
-// pprof/test-introspection paths.
+// opMu serializes a full non-admin sync through its durable append outcome so
+// a rejected mutation cannot leak into another caller's snapshot. mu guards
+// only the resident maps and LRU; it is never held across DB I/O. The live
+// journal tail is single-goroutine, so production contention is normally nil.
 type liveJournalCollector struct {
+	opMu     sync.Mutex // serializes hydrate/mutate with its durable append outcome
 	mu       sync.Mutex
 	admin    *netmatch.Set
 	byIP     map[string]*liveIPEntry
@@ -130,50 +132,65 @@ func adminSetsEqual(a, b *netmatch.Set) bool {
 	return a.Key() == b.Key()
 }
 
-// SyncJournalEvent updates the actor row for a single freshly-
-// inserted journal event. The event's ActorID must already be set to
-// JournalActorID(e.SrcIP) (the live tail does this before
-// InsertEvent).
+// SyncJournalEvent deduplicates and inserts one journal event while updating
+// its actor roll-up in the same transaction. It owns canonical ActorID
+// stamping for attack events; callers must not insert the event first.
 //
 // Steady-state cost: O(U log U) where U is the unique-username count
 // for this IP. On an evicted-then-returning IP, plus two indexed
 // SELECTs to re-hydrate the composite actor/IP counters and the
 // actor's users. Bounded RSS in either case.
-func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) error {
-	if e == nil || e.SrcIP == "" || admin.Has(e.SrcIP) {
-		return nil
+func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) (inserted bool, err error) {
+	if e == nil {
+		return false, nil
 	}
 	liveCollectorMu.Lock()
+	if liveCollector != nil && !adminSetsEqual(liveCollectorAdmin, admin) {
+		liveCollectorMu.Unlock()
+		return false, fmt.Errorf("actor: SyncJournalEvent admin set changed between calls; restart process to pick up new admin IPs")
+	}
+	if e.SrcIP == "" || admin.Has(e.SrcIP) {
+		liveCollectorMu.Unlock()
+		e.ActorID = ""
+		return st.AppendJournalEventAtomic(e, nil)
+	}
 	if liveCollector == nil {
 		liveCollector = newLiveJournalCollector(admin)
 		liveCollectorAdmin = admin
-	} else if !adminSetsEqual(liveCollectorAdmin, admin) {
-		liveCollectorMu.Unlock()
-		return fmt.Errorf("actor: SyncJournalEvent admin set changed between calls; restart process to pick up new admin IPs")
 	}
 	c := liveCollector
 	liveCollectorMu.Unlock()
 
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+	e.ActorID = JournalActorID(e.SrcIP)
 	// Hydrate the IP from the DB on first sight after process start
 	// or after eviction. Done outside c.mu to avoid holding the
 	// collector lock across the SELECTs.
 	if !c.has(e.SrcIP) {
 		stored, err := st.LoadJournalIPStats(JournalActorID(e.SrcIP), e.SrcIP)
 		if err != nil {
-			return fmt.Errorf("hydrate journal ip stats: %w", err)
+			return false, fmt.Errorf("hydrate journal ip stats: %w", err)
 		}
 		c.hydrate(e.SrcIP, stored)
 	}
 
 	a, ipStat, userCount := c.addAndFinalize(e)
 	if a == nil {
-		return nil
+		return false, nil
 	}
-	return st.UpsertJournalActorAtomic(
-		a,
-		e.SrcIP, ipStat.First, ipStat.Last, ipStat.Count,
-		e.Username, userCount,
-	)
+	inserted, err = st.AppendJournalEventAtomic(e, &store.JournalActorUpdate{
+		Actor:     a,
+		IPFirst:   ipStat.First,
+		IPLast:    ipStat.Last,
+		IPCount:   ipStat.Count,
+		Username:  e.Username,
+		UserCount: userCount,
+	})
+	if err != nil || !inserted {
+		c.invalidate(e.SrcIP)
+	}
+	return inserted, err
 }
 
 // has reports whether the collector currently holds an entry for ip.
@@ -185,6 +202,19 @@ func (c *liveJournalCollector) has(ip string) bool {
 	defer c.mu.Unlock()
 	_, ok := c.byIP[ip]
 	return ok
+}
+
+// invalidate discards one mutated cache entry after its corresponding atomic
+// write is rejected. The next event for the IP rehydrates durable counters.
+func (c *liveJournalCollector) invalidate(ip string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ent, ok := c.byIP[ip]
+	if !ok {
+		return
+	}
+	c.lru.Remove(ent.elem)
+	delete(c.byIP, ip)
 }
 
 // hydrate installs counters loaded from the DB. Idempotent: if the

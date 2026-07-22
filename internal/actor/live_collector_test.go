@@ -43,10 +43,7 @@ func TestLiveCollectorEvictsByLRU(t *testing.T) {
 			ActorID:  JournalActorID(ip),
 			Raw:      "{}",
 		}
-		if err := st.InsertEvent(e); err != nil {
-			t.Fatalf("insert %d: %v", i, err)
-		}
-		if err := SyncJournalEvent(st, e, admin); err != nil {
+		if _, err := SyncJournalEvent(st, e, admin); err != nil {
 			t.Fatalf("sync %d: %v", i, err)
 		}
 	}
@@ -68,8 +65,45 @@ func TestLiveCollectorEvictsByLRU(t *testing.T) {
 	}
 }
 
+func TestLiveCollectorInvalidateRemovesExactEntry(t *testing.T) {
+	c := newLiveJournalCollector(AdminSet(nil))
+	base := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	event := func(ip string, ts time.Time) *models.Event {
+		return &models.Event{
+			TS: ts, Source: models.SourceJournal, Kind: models.KindFailedPass,
+			SrcIP: ip, Username: "root", ActorID: JournalActorID(ip), Raw: "{}",
+		}
+	}
+
+	const keepIP = "203.0.113.10"
+	const invalidateIP = "203.0.113.11"
+	c.hydrate(invalidateIP, store.JournalIPStats{})
+	c.addAndFinalize(event(invalidateIP, base))
+	c.hydrate(keepIP, store.JournalIPStats{})
+	c.addAndFinalize(event(keepIP, base.Add(time.Second)))
+	c.addAndFinalize(event(invalidateIP, base.Add(2*time.Second)))
+
+	if tail := c.lru.Back(); tail == nil || tail.Value != keepIP {
+		t.Fatalf("LRU tail = %v, want untouched IP %q", tail, keepIP)
+	}
+	c.invalidate(invalidateIP)
+
+	if c.has(invalidateIP) {
+		t.Fatalf("invalidated IP %q remains in collector", invalidateIP)
+	}
+	if !c.has(keepIP) {
+		t.Fatalf("invalidate removed LRU tail %q instead of target", keepIP)
+	}
+	if got := c.lru.Len(); got != 1 {
+		t.Fatalf("LRU length = %d, want 1", got)
+	}
+	if front := c.lru.Front(); front == nil || front.Value != keepIP {
+		t.Fatalf("remaining LRU entry = %v, want %q", front, keepIP)
+	}
+}
+
 // TestLiveCollectorHydratesEvictedIP confirms that when an evicted
-// IP returns, its persisted counters are loaded so the next upsert
+// IP returns, its persisted counters are loaded so the next atomic append
 // writes the running total rather than a smaller post-evict count.
 func TestLiveCollectorHydratesEvictedIP(t *testing.T) {
 	resetLiveCollectorForTest()
@@ -99,10 +133,7 @@ func TestLiveCollectorHydratesEvictedIP(t *testing.T) {
 			ActorID:  JournalActorID(target),
 			Raw:      "{}",
 		}
-		if err := st.InsertEvent(e); err != nil {
-			t.Fatalf("insert: %v", err)
-		}
-		if err := SyncJournalEvent(st, e, admin); err != nil {
+		if _, err := SyncJournalEvent(st, e, admin); err != nil {
 			t.Fatalf("sync target #%d: %v", i, err)
 		}
 	}
@@ -117,10 +148,7 @@ func TestLiveCollectorHydratesEvictedIP(t *testing.T) {
 			ActorID:  JournalActorID(ip),
 			Raw:      "{}",
 		}
-		if err := st.InsertEvent(e); err != nil {
-			t.Fatalf("insert: %v", err)
-		}
-		if err := SyncJournalEvent(st, e, admin); err != nil {
+		if _, err := SyncJournalEvent(st, e, admin); err != nil {
 			t.Fatalf("sync filler #%d: %v", i, err)
 		}
 	}
@@ -142,10 +170,7 @@ func TestLiveCollectorHydratesEvictedIP(t *testing.T) {
 		ActorID:  JournalActorID(target),
 		Raw:      "{}",
 	}
-	if err := st.InsertEvent(e); err != nil {
-		t.Fatalf("insert post-evict: %v", err)
-	}
-	if err := SyncJournalEvent(st, e, admin); err != nil {
+	if _, err := SyncJournalEvent(st, e, admin); err != nil {
 		t.Fatalf("sync post-evict: %v", err)
 	}
 
@@ -206,10 +231,7 @@ func TestLiveCollectorHydratesJournalRowWhenCowrieIsNewer(t *testing.T) {
 		ActorID:  journalID,
 		Raw:      "{}",
 	}
-	if err := st.InsertEvent(e); err != nil {
-		t.Fatalf("insert journal event: %v", err)
-	}
-	if err := SyncJournalEvent(st, e, AdminSet(nil)); err != nil {
+	if _, err := SyncJournalEvent(st, e, AdminSet(nil)); err != nil {
 		t.Fatalf("sync journal event: %v", err)
 	}
 
@@ -267,10 +289,7 @@ func TestLiveCollectorPerIPUserCap(t *testing.T) {
 			ActorID:  JournalActorID(ip),
 			Raw:      "{}",
 		}
-		if err := st.InsertEvent(e); err != nil {
-			t.Fatalf("insert: %v", err)
-		}
-		if err := SyncJournalEvent(st, e, admin); err != nil {
+		if _, err := SyncJournalEvent(st, e, admin); err != nil {
 			t.Fatalf("sync: %v", err)
 		}
 	}
