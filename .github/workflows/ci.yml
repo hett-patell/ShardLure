@@ -23,6 +23,12 @@ jobs:
       - name: Test release contracts
         run: python3 -m unittest scripts/test_release_contracts.py -v
 
+      - name: Test Cowrie pin and checkout contracts
+        run: python3 -m unittest scripts/test_shardlure.py -v
+
+      - name: Test Cowrie patch compatibility
+        run: bash scripts/check-cowrie-patches.sh
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:

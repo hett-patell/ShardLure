@@ -143,25 +143,13 @@ sudo chmod 600 "$KEYDIR"/ssh_host_*key
 sudo chown -R cowrie:cowrie "$COWRIE_HOME/honeyfs" "$COWRIE_HOME/etc" "$COWRIE_HOME/var"
 
 # --- Cowrie source patches (anti-fingerprint shell fixes) ---
-# We do NOT swallow patch failures: a silent no-op (e.g. upstream Cowrie
-# reformatted a target block) reverts the shell to fingerprintable behaviour
-# while claiming success. Track failures and report them loudly at the end;
-# non-fatal so the rest of the deploy still completes.
-if [[ -d "$PERSONA/patches" ]]; then
-  echo "[stealth] applying Cowrie source patches"
-  patch_failures=()
-  for patch in "$PERSONA/patches"/*.py; do
-    [[ -f "$patch" ]] || continue
-    echo "  patch: $(basename "$patch")"
-    if ! sudo python3 "$patch" "$COWRIE_HOME"; then
-      patch_failures+=("$(basename "$patch")")
-    fi
-  done
-  if (( ${#patch_failures[@]} > 0 )); then
-    echo "[stealth] WARN: Cowrie patches FAILED: ${patch_failures[*]}" >&2
-    echo "[stealth] WARN: honeypot may be fingerprintable — check for upstream Cowrie drift" >&2
-  fi
+ORCHESTRATOR="$PERSONA/apply-patches.py"
+if [[ ! -f "$ORCHESTRATOR" ]]; then
+  echo "[stealth] ERROR: Cowrie patch orchestrator missing: $ORCHESTRATOR" >&2
+  exit 1
 fi
+echo "[stealth] preflighting and applying Cowrie source patches"
+sudo python3 "$ORCHESTRATOR" "$COWRIE_HOME"
 
 echo "[stealth] restart cowrie"
 sudo systemctl restart cowrie

@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,8 @@ CONFIG_FILE = DATA_DIR / "shardlure.yaml"
 COWRIE_HOME = DATA_DIR / "cowrie"
 COWRIE_LOG = COWRIE_HOME / "var/log/cowrie/cowrie.json"
 COWRIE_USER = os.environ.get("COWRIE_USER", "cowrie")
+COWRIE_REPOSITORY = "https://github.com/cowrie/cowrie.git"
+COWRIE_PIN_FILE = ROOT / "install" / "cowrie.commit"
 BIN_DIR = Path("/usr/local/bin")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 
@@ -33,6 +36,62 @@ def die(msg: str) -> None:
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     log("$ " + " ".join(cmd))
     return subprocess.run(cmd, check=False, **kwargs)
+
+
+def read_cowrie_pin(path: Path) -> str:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) != 1 or re.fullmatch(r"[0-9a-f]{40}", lines[0]) is None:
+        raise ValueError(f"invalid Cowrie pin: {path}")
+    return lines[0]
+
+
+def ensure_cowrie_checkout(
+    target: Path,
+    pin: str,
+    repository: str = COWRIE_REPOSITORY,
+) -> None:
+    """Create the exact detached Cowrie checkout or validate an existing one."""
+    if (target / ".git").exists():
+        current = run(
+            ["git", "-C", str(target), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if current.returncode != 0:
+            die(f"cannot read Cowrie HEAD at {target}; move the checkout aside and rerun")
+        actual = current.stdout.strip()
+        if actual != pin:
+            die(
+                f"Cowrie checkout at {target} is {actual}, expected {pin}; "
+                "move it aside or check out the tested commit manually. "
+                "ShardLure is refusing to pull or reset an existing checkout"
+            )
+        log(f"existing Cowrie checkout matches tested commit {pin}")
+        return
+
+    if target.exists():
+        die(f"Cowrie target {target} exists but is not a Git checkout; move it aside and rerun")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix=".cowrie-checkout-", dir=str(target.parent)))
+    checkout = staging_root / "cowrie"
+    try:
+        run(["git", "init", "-q", str(checkout)]).check_returncode()
+        run(["git", "-C", str(checkout), "remote", "add", "origin", repository]).check_returncode()
+        run([
+            "git", "-C", str(checkout), "fetch", "--depth", "1", "origin", pin,
+        ]).check_returncode()
+        run(["git", "-C", str(checkout), "checkout", "--detach", pin]).check_returncode()
+        current = run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if current.returncode != 0 or current.stdout.strip() != pin:
+            die(f"Cowrie checkout verification failed: expected HEAD {pin}")
+        os.replace(checkout, target)
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
 
 
 def need_root() -> None:
@@ -341,16 +400,13 @@ def setup_authbind(honeypot_port: int) -> None:
 
 
 def install_cowrie(honeypot_port: int) -> None:
+    try:
+        pin = read_cowrie_pin(COWRIE_PIN_FILE)
+    except (OSError, ValueError) as exc:
+        die(f"cannot load tested Cowrie commit: {exc}")
     log(f"installing Cowrie into {COWRIE_HOME}")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not (COWRIE_HOME / ".git").exists():
-        run(["git", "clone", "--depth", "1", "https://github.com/cowrie/cowrie.git", str(COWRIE_HOME)]).check_returncode()
-    else:
-        # A failed fast-forward pull is non-fatal (the existing clone still
-        # builds), but surface it so the operator knows cowrie wasn't updated
-        # rather than silently running stale source.
-        if run(["git", "-C", str(COWRIE_HOME), "pull", "--ff-only"]).returncode != 0:
-            log("warning: cowrie 'git pull --ff-only' failed; continuing with existing checkout")
+    ensure_cowrie_checkout(COWRIE_HOME, pin)
     run([sys.executable, "-m", "venv", str(COWRIE_HOME / "venv")]).check_returncode()
     pip = COWRIE_HOME / "venv/bin/pip"
     run([str(pip), "install", "--upgrade", "pip", "wheel"]).check_returncode()
@@ -533,29 +589,14 @@ def deploy_time_persona() -> None:
 
 
 def deploy_patches() -> None:
-    """Apply Cowrie source patches (anti-fingerprint shell fixes).
-
-    Mirrors the patches step in scripts/apply-stealth.sh so a plain
-    `shardlure.py run` produces the same hardened honeypot as the standalone
-    re-apply script. Each patch is idempotent (skips if already applied) and
-    fails loudly if its target block is missing — we do NOT swallow errors,
-    because a silent patch failure reverts Cowrie to fingerprintable behaviour.
-    """
-    patches_dir = ROOT / "install" / "persona" / "patches"
-    if not patches_dir.is_dir():
-        return
+    """Preflight and apply all Cowrie source patches as one guarded batch."""
+    orchestrator = ROOT / "install" / "persona" / "apply-patches.py"
+    if not orchestrator.is_file():
+        die(f"Cowrie patch orchestrator missing: {orchestrator}")
     log("applying Cowrie source patches (anti-fingerprint)")
-    failed: list[str] = []
-    for patch in sorted(patches_dir.glob("*.py")):
-        proc = run([sys.executable, str(patch), str(COWRIE_HOME)])
-        if proc.returncode != 0:
-            failed.append(patch.name)
-    if failed:
-        # Loud, but non-fatal: the operator should know stealth is degraded
-        # (e.g. upstream Cowrie reformatted a target block) without the whole
-        # deploy aborting.
-        log("warning: Cowrie patches FAILED to apply: " + ", ".join(failed)
-            + " — honeypot may be fingerprintable; check for upstream drift")
+    proc = run([sys.executable, str(orchestrator), str(COWRIE_HOME)])
+    if proc.returncode != 0:
+        die("Cowrie patch preflight/apply failed; refusing to continue with a fingerprintable honeypot")
 
 
 def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:

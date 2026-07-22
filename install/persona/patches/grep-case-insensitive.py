@@ -7,7 +7,17 @@ compiled without re.IGNORECASE. This patch threads the flag through.
 import sys
 from pathlib import Path
 
-cowrie_home = Path(sys.argv[1])
+args = sys.argv[1:]
+if (
+    len(args) not in (1, 2)
+    or not args[0]
+    or args[0] == "--check"
+    or (len(args) == 2 and args[1] != "--check")
+):
+    print(f"usage: {Path(sys.argv[0]).name} COWRIE_HOME [--check]", file=sys.stderr)
+    sys.exit(2)
+check_only = len(args) == 2
+cowrie_home = Path(args[0])
 path = str(cowrie_home / "src/cowrie/commands/fs.py")
 with open(path) as f:
     content = f.read()
@@ -62,6 +72,10 @@ NEW_START_BEGIN = """\
 if OLD_START_BEGIN not in content:
     print(f"  [FAIL] {path}: start() begin block not found", file=sys.stderr)
     sys.exit(1)
+
+if check_only:
+    print(f"  [check] {path}: compatible")
+    sys.exit(0)
 
 content = content.replace(OLD_GREP_APP, NEW_GREP_APP)
 content = content.replace(OLD_START_OPTS, NEW_START_OPTS)

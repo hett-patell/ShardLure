@@ -11,7 +11,17 @@ Without this fix, $(./nonexistent 2>&1) returns empty instead of the error.
 import sys
 from pathlib import Path
 
-cowrie_home = Path(sys.argv[1])
+args = sys.argv[1:]
+if (
+    len(args) not in (1, 2)
+    or not args[0]
+    or args[0] == "--check"
+    or (len(args) == 2 and args[1] != "--check")
+):
+    print(f"usage: {Path(sys.argv[0]).name} COWRIE_HOME [--check]", file=sys.stderr)
+    sys.exit(2)
+check_only = len(args) == 2
+cowrie_home = Path(args[0])
 path = str(cowrie_home / "src/cowrie/shell/honeypot.py")
 with open(path) as f:
     content = f.read()
@@ -32,6 +42,10 @@ if "self.protocol.pp = temp_pp" in content:
 if OLD not in content:
     print(f"  [FAIL] {path}: target block not found", file=sys.stderr)
     sys.exit(1)
+
+if check_only:
+    print(f"  [check] {path}: compatible")
+    sys.exit(0)
 
 content = content.replace(OLD, NEW)
 with open(path, 'w') as f:

@@ -14,7 +14,17 @@ Bot recon scripts use these patterns extensively in their FILTER probes.
 import sys
 from pathlib import Path
 
-cowrie_home = Path(sys.argv[1])
+args = sys.argv[1:]
+if (
+    len(args) not in (1, 2)
+    or not args[0]
+    or args[0] == "--check"
+    or (len(args) == 2 and args[1] != "--check")
+):
+    print(f"usage: {Path(sys.argv[0]).name} COWRIE_HOME [--check]", file=sys.stderr)
+    sys.exit(2)
+check_only = len(args) == 2
+cowrie_home = Path(args[0])
 path = str(cowrie_home / "src/cowrie/shell/bashparse.py")
 with open(path) as f:
     content = f.read()
@@ -110,8 +120,8 @@ NEW2 = """\
                             continue
                 return SyntaxError_(token=self._error_token(line, node))"""
 
-# Check if already patched
-if "If a pipe follows (e.g. `( cmd1 ) | cmd2`)" in content:
+MARKER = "If a pipe follows (e.g. `( cmd1 ) | cmd2`)"
+if MARKER in content:
     print(f"  [skip] {path}: already patched")
     sys.exit(0)
 
@@ -122,6 +132,10 @@ if OLD1 not in content:
 if OLD2 not in content:
     print(f"  [FAIL] {path}: _parse_simple target block not found", file=sys.stderr)
     sys.exit(1)
+
+if check_only:
+    print(f"  [check] {path}: compatible")
+    sys.exit(0)
 
 content = content.replace(OLD1, NEW1)
 content = content.replace(OLD2, NEW2)
