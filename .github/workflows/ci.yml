@@ -20,6 +20,9 @@ jobs:
       - name: Check UTF-8 text
         run: bash scripts/check-utf8.sh
 
+      - name: Test release contracts
+        run: python3 -m unittest scripts/test_release_contracts.py -v
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -123,9 +126,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
+    concurrency:
+      group: release-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -140,9 +148,7 @@ jobs:
           (cd release && sha256sum shardlure-linux-* > SHA256SUMS)
           ls -lh release/
 
-      - name: Upload to GitHub Release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+        run: bash scripts/publish-release.sh

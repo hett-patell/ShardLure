@@ -653,7 +653,7 @@ git commit -m "docs: v2.0.0 theme docs (Signal default, Cobe-only); remove demos
 
 ## Post-plan: release (human-triggered)
 
-Not a task in this plan — after merge, the maintainer cuts the release: `git tag v2.0.0 && gh release create v2.0.0`. The version is ldflags-injected (`cmd/shardlure/main.go:33`); no source edit. Series continues v2.0.0 → v2.0.1 → …
+Not a task in this plan — after merge, the maintainer follows [the release procedure](../../RELEASING.md). The version is ldflags-injected (`cmd/shardlure/main.go:33`); no source edit. Series continues v2.0.0 → v2.0.1 → …
 
 ## Self-review notes
 
