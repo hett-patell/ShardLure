@@ -217,6 +217,68 @@ func TestShareHardCapsFreshnessBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestShareSkipsUnprovenExecutableBeforeNetwork(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "manual.exe")
+	payload := []byte("MZ" + strings.Repeat("x", 128))
+	if err := os.WriteFile(p, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		t.Error("unproven PE sample reached the network")
+		_, _ = w.Write([]byte(`{"query_status": "inserted"}`))
+	}))
+	defer srv.Close()
+
+	rec := newMemRecorder()
+	var progressStatus, progressReason string
+	var progressClass Classification
+	uploaded, skipped, err := Share(context.Background(), rec, []Candidate{{
+		SHA256:     "manual-mz-sample",
+		LocalPath:  p,
+		SizeBytes:  int64(len(payload)),
+		CreatedAt:  time.Now(),
+		Origin:     "manual",
+		ObservedAt: time.Now().Add(-time.Hour),
+	}}, Options{
+		APIKey:        "k",
+		Endpoint:      srv.URL,
+		MaxBytes:      1 << 20,
+		FreshnessDays: 10,
+		RateLimit:     time.Millisecond,
+		OnProgress: func(_ Candidate, cls Classification, result *Result, err error) {
+			progressClass = cls
+			if result != nil {
+				progressStatus = result.Status
+			}
+			if err != nil {
+				progressReason = err.Error()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("Share: %v", err)
+	}
+	if uploaded != 0 || skipped != 1 {
+		t.Errorf("want (uploaded=0, skipped=1), got (%d,%d)", uploaded, skipped)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("network calls = %d, want 0", got)
+	}
+	if len(rec.records) != 0 {
+		t.Errorf("unproven sample was recorded: %v", rec.records)
+	}
+	if progressStatus != "skipped" || !strings.Contains(progressReason, "unconfirmed") {
+		t.Errorf("progress = (status=%q, reason=%q), want skipped/unconfirmed", progressStatus, progressReason)
+	}
+	if progressClass.FileKind != "PE executable" || !containsTag(progressClass.Tags, "exe") {
+		t.Errorf("classification metadata lost: %+v", progressClass)
+	}
+}
+
 // TestShareSkipsOversize asserts the size cap is honoured client-side
 // so we never embarrass ourselves by sending a 4 GB cowrie sftp blob
 // to abuse.ch.

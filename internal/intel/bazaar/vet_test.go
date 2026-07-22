@@ -18,15 +18,29 @@ func TestVet(t *testing.T) {
 		wantSub string // substring expected in the reject reason (when !wantOK)
 	}{
 		{
-			name:   "fresh ELF binary accepts (structural)",
+			name:    "fresh manual ELF rejects (format is not proof)",
+			cand:    Candidate{SizeBytes: 1_500_000, Origin: "manual", ObservedAt: fresh},
+			cls:     Classification{FileKind: "ELF", Tags: []string{"elf", "aarch64", "linux"}},
+			wantOK:  false,
+			wantSub: "unconfirmed",
+		},
+		{
+			name:    "fresh manual PE rejects (format is not proof)",
+			cand:    Candidate{SizeBytes: 4096, Origin: "manual", ObservedAt: fresh},
+			cls:     Classification{FileKind: "PE executable", Tags: []string{"exe", "linux"}},
+			wantOK:  false,
+			wantSub: "unconfirmed",
+		},
+		{
+			name:   "fresh NOVEL ELF fetched in session accepts (provenance)",
 			cand:   Candidate{SizeBytes: 1_500_000, Origin: "cowrie_download", ObservedAt: fresh},
 			cls:    Classification{FileKind: "ELF", Tags: []string{"elf", "aarch64", "linux"}},
 			wantOK: true,
 		},
 		{
-			name:   "fresh known-family script accepts (signature)",
-			cand:   Candidate{SizeBytes: 4096, Origin: "cowrie_download", ObservedAt: fresh},
-			cls:    Classification{FileKind: "Shell script", Family: "RedTail", Tags: []string{"miner", "redtail", "dropper", "linux"}},
+			name:   "fresh manual known-family sample accepts (family)",
+			cand:   Candidate{SizeBytes: 4096, Origin: "manual", ObservedAt: fresh},
+			cls:    Classification{FileKind: "Shell script", Family: "RedTail", Tags: []string{"bash", "script", "linux"}},
 			wantOK: true,
 		},
 		{

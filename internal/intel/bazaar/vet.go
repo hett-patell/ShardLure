@@ -17,9 +17,9 @@ import (
 //
 // The design intent (operator's steer): attackers constantly ship NOVEL
 // scripts and binaries, so a known-family signature list alone would miss the
-// most valuable captures. Vet therefore confirms maliciousness from
-// STRUCTURE and PROVENANCE, not just signatures — while still hard-rejecting
-// provably-benign content, junk, and stale samples.
+// most valuable captures. Vet therefore confirms maliciousness from FAMILY /
+// BEHAVIOUR and PROVENANCE. Executable structure remains useful classification
+// metadata, but is not proof of malware by itself.
 
 const (
 	// minSampleBytes floors sample size. Below this it's control-plane noise
@@ -30,10 +30,10 @@ const (
 	defaultFreshnessDays = 10
 )
 
-// malwareTags are tags Classify attaches that, on their own, confirm the file
-// is malware (structural or family evidence), independent of provenance.
+// malwareTags are behaviour tags Classify attaches that, on their own, confirm
+// the file is malware, independent of provenance. Executable-format tags such
+// as elf/exe are classification metadata and deliberately do not appear here.
 var malwareTags = map[string]bool{
-	"elf": true, "exe": true, // any executable dropped on an SSH honeypot
 	"miner": true, "dropper": true, "botnet": true,
 	"scanner": true, "proxyware": true, "ransomware": true, "rootkit": true,
 }
@@ -90,8 +90,8 @@ func Vet(c Candidate, cls Classification, now time.Time, opts ...VetOptions) (bo
 	}
 
 	// --- confirmed-malware signals (accept if ANY) --------------------
-	// 1. Structural / signature: Classify tagged it as an executable, a known
-	//    family, or a malware behaviour class.
+	// 1. Family / behaviour: Classify recognised a known family or malware
+	//    behaviour class.
 	if cls.Family != "" {
 		return true, ""
 	}
@@ -109,5 +109,5 @@ func Vet(c Candidate, cls Classification, now time.Time, opts ...VetOptions) (bo
 
 	// Everything else: we can't confirm it's malware. Skip rather than risk
 	// shipping a benign/suspicious file.
-	return false, "unconfirmed: no structural, family, or provenance malware signal"
+	return false, "unconfirmed: no family, behaviour, or provenance malware signal"
 }
