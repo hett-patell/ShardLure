@@ -42,8 +42,8 @@ type Server struct {
 	// request time so a value saved from the Settings panel takes effect
 	// without a restart. The *Default fields hold the startup-resolved
 	// fallbacks (config/Options/env) used when the keystore has no value.
-	keys             *settings.Keystore
-	homeDefault      homePoint
+	keys                   *settings.Keystore
+	homeDefault            homePoint
 	bazaarKeyDefault       string // config intel.bazaar.api_key fallback (env/DB win)
 	bazaarEndpointDefault  string
 	bazaarTagsDefault      []string
@@ -148,6 +148,11 @@ type summaryStats struct {
 	IntentCounts   []store.LabelCount
 	PlaybookCounts []store.LabelCount
 	HourlyByKind   []store.HourlyKindCell
+	// Fingerprinted is the count of actors identified by behavioural HASSH
+	// (vs. IP-keyed fallback). Was queried uncached (SCAN actors) directly in
+	// handleDashboard on every 5s poll — folded in here so it shares the same
+	// statsTTL memoization as the rest of the landing-page aggregates.
+	Fingerprinted int
 }
 
 const statsTTL = 10 * time.Second
@@ -206,6 +211,9 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	if err != nil {
 		return s.statsCached, err
 	}
+	// Best-effort, like countries above: a transient error just leaves the
+	// fingerprinted count at 0 rather than failing the whole cache refresh.
+	fingerprinted, _, _ := s.st.HASSHCoverage()
 	s.statsCached = &summaryStats{
 		Events:         ec,
 		Actors:         ac,
@@ -219,6 +227,7 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 		IntentCounts:   intents,
 		PlaybookCounts: playbooks,
 		HourlyByKind:   hourlyByKind,
+		Fingerprinted:  fingerprinted,
 	}
 	s.statsAt = time.Now()
 	return s.statsCached, nil
@@ -347,18 +356,18 @@ func (s *Server) topCountriesCached() []topCountryRow {
 }
 
 type Options struct {
-	HomeLat         float64
-	HomeLon         float64
-	HomeCity        string
-	HomeCountry     string
-	HomeCC          string
-	GeoEnabled      bool
-	GeoInsecureHTTP bool
-	BazaarAPIKey           string
-	BazaarEndpoint         string
-	BazaarTags             []string
-	BazaarMaxBytes         int64
-	BazaarFreshnessDays    int
+	HomeLat             float64
+	HomeLon             float64
+	HomeCity            string
+	HomeCountry         string
+	HomeCC              string
+	GeoEnabled          bool
+	GeoInsecureHTTP     bool
+	BazaarAPIKey        string
+	BazaarEndpoint      string
+	BazaarTags          []string
+	BazaarMaxBytes      int64
+	BazaarFreshnessDays int
 
 	// AbuseIPDB opt-in reporting. AbuseReportEnabled + a key (from
 	// SHARDLURE_ABUSEIPDB_KEY, reused from enrichment) are both required to
@@ -777,8 +786,8 @@ type dashboardResponse struct {
 	TopCommands  []topCommandRow   `json:"topCommands"`
 	TopCountries []topCountryRow   `json:"topCountries"`
 	Hourly       []hourPoint       `json:"hourly"`
-	IntentCounts []store.LabelCount `json:"intentCounts"`
-	KindCounts   []store.LabelCount `json:"kindCounts"`
+	IntentCounts []labelCountRow   `json:"intentCounts"`
+	KindCounts   []labelCountRow   `json:"kindCounts"`
 	Home         homePoint         `json:"home"`
 }
 
@@ -909,15 +918,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// dashExtraCachedValues). They no longer fail the request — a transient DB
 	// error serves last-good rather than 500ing the whole dashboard.
 	hourly, shellSessions := s.dashExtraCachedValues()
-	var ec, ac, uniqueIPs, countries int
+	var ec, ac, uniqueIPs, countries, fingerprinted int
 	var topIPs, topUsers, topCommands []store.CountRow
-	var intentCounts, kindCounts []store.LabelCount
+	var intentCounts, kindCounts []labelCountRow
 	if stats, err := s.summaryStatsCached(); err == nil {
 		ec, ac, uniqueIPs, countries = stats.Events, stats.Actors, stats.UniqueIPs, stats.Countries
 		topIPs, topUsers, topCommands = stats.TopIPs, stats.TopUsers, stats.TopCommands
+		fingerprinted = stats.Fingerprinted
 		// Already computed and cached by summaryStatsCached — no extra query.
 		// The globe dashboard's threat gauge needs both to score intent mix.
-		intentCounts, kindCounts = stats.IntentCounts, stats.KindCounts
+		for _, k := range stats.IntentCounts {
+			intentCounts = append(intentCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
+		}
+		for _, k := range stats.KindCounts {
+			kindCounts = append(kindCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
+		}
 	}
 
 	resp := dashboardResponse{
@@ -1055,10 +1070,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp.Summary.UniqueIPs = uniqueIPs
-	// Identity-over-IP coverage: actors keyed by HASSH vs. all actors.
-	if fp, _, ferr := s.st.HASSHCoverage(); ferr == nil {
-		resp.Summary.Fingerprinted = fp
-	}
+	// Identity-over-IP coverage: actors keyed by HASSH vs. all actors. Read
+	// from the shared stats cache (summaryStatsCached already ran
+	// HASSHCoverage) rather than querying directly — this was the last
+	// uncached full scan (SCAN actors) on the 5s dashboard poll path.
+	resp.Summary.Fingerprinted = fingerprinted
 	// Countries: distinct CCs across the WHOLE geo cache, not just the top-25
 	// IPs that feed the topCountries chart — otherwise a 2600-IP dataset
 	// spanning 20+ countries reported ~7. This value comes from the shared

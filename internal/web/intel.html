@@ -2817,7 +2817,7 @@ function buildPalette(q) {
       out.push({
         group: 'Actors', label: ip || a.id,
         sub: (a.playbook || '') + ' · ' + (a.events || 0) + ' ev',
-        action: function () { selectedActor = a.id; loadActorDetail(a.id); closePalette(); }
+        action: function () { setActiveView('overview'); selectedActor = a.id; loadActorDetail(a.id); closePalette(); }
       });
     }
     if (ip && !seenIp[ip] && out.filter(function (r) { return r.group === 'IPs'; }).length < 5) {
@@ -2825,6 +2825,7 @@ function buildPalette(q) {
       out.push({
         group: 'IPs', label: ip, sub: 'enrich →',
         action: function () {
+          setActiveView('blue');
           var f = document.getElementById('enrich-ip');
           if (f) { f.value = ip; f.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); }
           closePalette();
