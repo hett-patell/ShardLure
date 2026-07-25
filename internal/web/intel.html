@@ -274,7 +274,20 @@
   }
   @keyframes livePulse { 0%,100% { box-shadow: 0 0 0 0 rgba(208,40,40,0.55); } 50% { box-shadow: 0 0 0 6px rgba(208,40,40,0); } }
 
-  .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; align-items: center; }
+  .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; align-items: center; position: relative; }
+  .palette {
+    position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 60;
+    max-height: 60vh; overflow: auto;
+    background: var(--panel-bg); border: 1px solid var(--line-strong);
+    border-radius: var(--radius); box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 35%, transparent);
+  }
+  .palette .pg { font: 600 9px var(--mono); letter-spacing: .14em; text-transform: uppercase;
+    color: var(--dim); padding: 8px 10px 4px; }
+  .palette .pi { display: flex; justify-content: space-between; gap: 10px;
+    padding: 6px 10px; font: 12px var(--mono); color: var(--text); cursor: pointer; }
+  .palette .pi:hover, .palette .pi.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .palette .pi .sub { color: var(--dim); }
+  .palette .pempty { padding: 10px; font: 11px var(--mono); color: var(--dim); }
   .chip {
     font-family: var(--mono); font-size: 10.5px; padding: 5px 9px; border-radius: 3px;
     border: 1px solid var(--line); color: var(--dim); background: rgba(0,0,0,0.25);
@@ -1124,6 +1137,7 @@
       <span class="chip" data-window="90d">90d</span>
       <span class="chip-sep">·</span>
       <input class="search" id="search-input" placeholder="search IP / user / command…" />
+      <div class="palette" id="palette" hidden role="listbox" aria-label="Search results"></div>
     </div>
   </div>
 </div>
@@ -2273,6 +2287,7 @@ async function refresh() {
   const r = await fetch('/api/intel?_=' + Date.now(), { cache: 'no-store' });
   if (!r.ok) return;
   const d = await r.json();
+  _lastIntel = d;
   document.getElementById('s-events').textContent = fmt(d.summary && d.summary.eventCount);
   document.getElementById('s-actors').textContent = fmt(d.summary && d.summary.actorCount);
   document.getElementById('s-ips').textContent = fmt(d.summary && d.summary.uniqueIps);
@@ -2760,24 +2775,156 @@ function onWindowChange(viewId, fn) {
 }
 
 const searchInput = document.getElementById('search-input');
-let searchTimer = 0;
+
+/* Module state caches feeding the command palette so it can find items
+ * that are NOT rendered in the current tab (the old row-hiding filter
+ * could only see the DOM). Populated by the respective fetch handlers. */
+var _lastIntel = null, _lastSessions = [], _lastPayloads = [];
+
+var _pal = { items: [], sel: -1 };
+
+function paletteEl() { return document.getElementById('palette'); }
+
+function closePalette() {
+  var el = paletteEl();
+  if (el) { el.hidden = true; el.innerHTML = ''; }
+  _pal = { items: [], sel: -1 };
+}
+
+/* Build grouped results from data already fetched into the page's state plus
+ * the /api/* payloads, so the palette finds items that are NOT rendered in the
+ * current tab (the old row-hiding filter could only see the DOM). */
+function buildPalette(q) {
+  q = (q || '').trim().toLowerCase();
+  if (!q) return [];
+  var out = [];
+  var seenIp = {};
+  (_lastIntel && _lastIntel.actors ? _lastIntel.actors : []).forEach(function (a) {
+    var ip = (a.primaryIp || a.ip || '');
+    var hay = (ip + ' ' + (a.id || '') + ' ' + (a.playbook || '') + ' ' + (a.cc || '')).toLowerCase();
+    if (hay.indexOf(q) < 0) return;
+    if (out.filter(function (r) { return r.group === 'Actors'; }).length < 5) {
+      out.push({
+        group: 'Actors', label: ip || a.id,
+        sub: (a.playbook || '') + ' · ' + (a.events || 0) + ' ev',
+        action: function () { selectedActor = a.id; loadActorDetail(a.id); closePalette(); }
+      });
+    }
+    if (ip && !seenIp[ip] && out.filter(function (r) { return r.group === 'IPs'; }).length < 5) {
+      seenIp[ip] = 1;
+      out.push({
+        group: 'IPs', label: ip, sub: 'enrich →',
+        action: function () {
+          var f = document.getElementById('enrich-ip');
+          if (f) { f.value = ip; f.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); }
+          closePalette();
+        }
+      });
+    }
+  });
+  (_lastIntel && _lastIntel.recentCommands ? _lastIntel.recentCommands : []).forEach(function (c) {
+    if ((c.command || '').toLowerCase().indexOf(q) < 0) return;
+    if (out.filter(function (r) { return r.group === 'Commands'; }).length >= 5) return;
+    out.push({
+      group: 'Commands', label: c.command, sub: c.ip || '',
+      action: function () { searchInput.value = c.command; applyClientSearch(); closePalette(); }
+    });
+  });
+  (_lastSessions || []).forEach(function (s) {
+    var hay = ((s.id || '') + ' ' + (s.ip || '') + ' ' + (s.user || '')).toLowerCase();
+    if (hay.indexOf(q) < 0) return;
+    if (out.filter(function (r) { return r.group === 'Sessions'; }).length >= 5) return;
+    out.push({
+      group: 'Sessions', label: s.id, sub: (s.ip || '') + ' · ' + (s.commands || 0) + ' cmds',
+      action: function () { openSession(s.id); closePalette(); }
+    });
+  });
+  (_lastPayloads || []).forEach(function (p) {
+    var hay = ((p.sha256 || '') + ' ' + (p.filename || '')).toLowerCase();
+    if (hay.indexOf(q) < 0) return;
+    if (out.filter(function (r) { return r.group === 'Payloads'; }).length >= 5) return;
+    out.push({
+      group: 'Payloads', label: p.filename || (p.sha256 || '').slice(0, 16),
+      sub: (p.family || p.fileKind || ''),
+      action: function () { openPayload(p.sha256); closePalette(); }
+    });
+  });
+  return out;
+}
+
+function renderPalette(items) {
+  var el = paletteEl();
+  if (!el) return;
+  _pal.items = items; _pal.sel = items.length ? 0 : -1;
+  if (!items.length) {
+    el.innerHTML = '<div class="pempty">no matches — press Esc to close</div>';
+    el.hidden = false;
+    return;
+  }
+  var html = '', group = '';
+  items.forEach(function (it, i) {
+    if (it.group !== group) { group = it.group; html += '<div class="pg">' + esc(group) + '</div>'; }
+    html += '<div class="pi' + (i === _pal.sel ? ' sel' : '') + '" data-i="' + i + '" role="option">' +
+      '<span>' + esc(it.label) + '</span><span class="sub">' + esc(it.sub || '') + '</span></div>';
+  });
+  el.innerHTML = html;
+  el.hidden = false;
+  el.querySelectorAll('.pi').forEach(function (row) {
+    row.addEventListener('click', function () {
+      var it = _pal.items[Number(row.getAttribute('data-i'))];
+      if (it && it.action) it.action();
+    });
+  });
+}
+
+function movePaletteSel(delta) {
+  if (!_pal.items.length) return;
+  _pal.sel = (_pal.sel + delta + _pal.items.length) % _pal.items.length;
+  var el = paletteEl();
+  el.querySelectorAll('.pi').forEach(function (row, i) {
+    row.classList.toggle('sel', i === _pal.sel);
+    if (i === _pal.sel && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function activatePaletteSel() {
+  var it = _pal.items[_pal.sel];
+  if (it && it.action) it.action();
+}
+
+var searchTimer = 0;
 searchInput.addEventListener('input', function() {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(function() {
+  searchTimer = setTimeout(function () {
     Filters.search = searchInput.value.trim().toLowerCase();
+    if (!Filters.search) { closePalette(); applyClientSearch(); return; }
+    renderPalette(buildPalette(Filters.search));
     applyClientSearch();
   }, 120);
 });
 
-/* Client-side filter applied to existing actor + command tables; the
- * server-side filtering will be added per slice as needs grow. */
+searchInput.addEventListener('keydown', function (e) {
+  if (e.key === 'ArrowDown') { e.preventDefault(); movePaletteSel(1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); movePaletteSel(-1); }
+  else if (e.key === 'Enter') { e.preventDefault(); activatePaletteSel(); }
+  else if (e.key === 'Escape') { closePalette(); }
+});
+
+document.addEventListener('click', function (e) {
+  if (!e.target.closest('#palette') && e.target !== searchInput) closePalette();
+});
+
+/* Client-side filter applied to existing actor + command tables, scoped to
+ * the active view only (the old document-wide query silently hid rows on
+ * hidden tabs). Kept as a fallback alongside the palette. */
 function applyClientSearch() {
   const q = Filters.search;
+  const root = document.querySelector('.view.active') || document;
   const matches = function(row) {
     if (!q) return true;
     return (row.textContent || '').toLowerCase().indexOf(q) >= 0;
   };
-  document.querySelectorAll(
+  root.querySelectorAll(
     '#actors-table tbody tr, #cmds-table tbody tr, #capture-table tbody tr,' +
     '#sessions-list .sess-row,' +
     '#ioc-table tbody tr,' +
@@ -2991,7 +3138,9 @@ async function refreshSessions() {
     const window = Filters.window || '24h';
     const r = await fetch('/api/intel/sessions?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
-    renderSessions(await r.json());
+    const resp = await r.json();
+    _lastSessions = resp.sessions || [];
+    renderSessions(resp);
   } catch (_) {}
 }
 
@@ -3704,6 +3853,7 @@ async function refreshPayloads() {
     ]);
     if (!pr.ok) return;
     var pd = await pr.json();
+    _lastPayloads = pd.rows || [];
     if (br.ok) {
       var freshSet = {};
       var bd = await br.json();
