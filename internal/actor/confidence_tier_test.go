@@ -7,10 +7,10 @@ func TestConfidenceTier(t *testing.T) {
 		in   int
 		want string
 	}{
-		{ConfidenceJournalBase, "LOW"},          // 55
-		{ConfidenceJournalHighAPH, "MEDIUM"},    // 70
-		{ConfidenceCowrieBase, "HIGH"},           // 72
-		{ConfidenceCowriePayload, "CONFIRMED"},   // 84
+		{ConfidenceJournalBase, "LOW"},         // 55
+		{ConfidenceJournalHighAPH, "MEDIUM"},   // 70
+		{ConfidenceCowrieBase, "HIGH"},         // 72
+		{ConfidenceCowriePayload, "CONFIRMED"}, // 84
 		{0, "LOW"},
 		{100, "CONFIRMED"},
 	}
