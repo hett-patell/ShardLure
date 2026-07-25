@@ -122,9 +122,16 @@
   .stat .num.warn { color: var(--warn); }
   .stat .label { color: var(--dim); font-size: 10px; margin-top: 4px; letter-spacing: 0.06em; text-transform: uppercase; }
 
+  /* The Threat panel is the left rail's trailing panel, so it absorbs the rail's
+     slack (see .rail.left > .panel:last-child). Make its content stretch with it
+     instead of bunching at the top: the panel becomes a flex column, the gauge
+     fills the free height, and the arc + breakdown space out evenly. */
+  .rail.left > .panel:last-child { display: flex; flex-direction: column; }
+  .rail.left > .panel:last-child > .gauge-outer { flex: 1 1 auto; justify-content: space-evenly; }
   .gauge-outer { display: flex; flex-direction: column; align-items: center; padding: 4px 0; }
-  .gauge-svg { width: 100%; max-width: 220px; height: auto; }
-  .gauge-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font: 10px var(--mono); color: var(--dim); margin-top: 8px; width: 100%; }
+  /* Let the arc grow with the panel but stay a sane size on short viewports. */
+  .gauge-svg { width: 100%; max-width: 260px; height: auto; }
+  .gauge-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font: 10px var(--mono); color: var(--dim); margin-top: 8px; width: 100%; }
   .gauge-breakdown .gb-row { display: flex; justify-content: space-between; }
   .gauge-breakdown .gb-val { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 
