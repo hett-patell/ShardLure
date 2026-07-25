@@ -365,23 +365,6 @@ html[data-theme="sprite"] .theme-card .tname {
 .globe-analytics .up { color: var(--ok); }
 .globe-analytics .dn { color: var(--danger); }
 
-.globe-node {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-.globe-node .globe-sat { transform: none; }
-.globe-node .globe-analytics {
-  transform: none;
-  max-width: 140px;
-}
-.globe-node .globe-analytics b { color: var(--accent); font-weight: 600; }
-.globe-node .globe-analytics .ip {
-  display: block; margin-top: 2px; color: var(--dim);
-  font-size: 9px; overflow: hidden; text-overflow: ellipsis;
-}
-
 /* Light themes: soften dark-theme glow assumptions */
 html[data-theme="meridian"] .title .dot,
 html[data-theme="sprite"] .title .dot,
@@ -411,9 +394,6 @@ html[data-theme="signal"][data-mode="light"] body {
 .globe-overlay--live .globe-live,
 .globe-overlay--analytics .globe-analytics {
   transform: none;
-}
-.globe-overlay--node {
-  transform: translate(-50%, calc(-100% - 6px));
 }
 .globe-overlay--sticker {
   transform: translate(-50%, calc(-100% - 4px));
@@ -636,8 +616,7 @@ html[data-theme="sprite"] #cobe-stage {
 #cobe-overlays .globe-overlay .globe-sticker,
 #cobe-overlays .globe-overlay .globe-sat,
 #cobe-overlays .globe-overlay .globe-live,
-#cobe-overlays .globe-overlay .globe-analytics,
-#cobe-overlays .globe-overlay .globe-node {
+#cobe-overlays .globe-overlay .globe-analytics {
   pointer-events: auto;
 }
 

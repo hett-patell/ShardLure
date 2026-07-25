@@ -117,37 +117,19 @@
   .stat .num.warn { color: var(--warn); }
   .stat .label { color: var(--dim); font-size: 10px; margin-top: 4px; letter-spacing: 0.06em; text-transform: uppercase; }
 
+  .gauge-outer { display: flex; flex-direction: column; align-items: center; padding: 4px 0; }
+  .gauge-svg { width: 100%; max-width: 220px; height: auto; }
+  .gauge-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font: 10px var(--mono); color: var(--dim); margin-top: 8px; width: 100%; }
+  .gauge-breakdown .gb-row { display: flex; justify-content: space-between; }
+
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; table-layout: fixed; }
   th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   th { color: var(--dim); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; padding-bottom: 7px; }
   td.n, th.n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
   td .ip { color: var(--accent-2); }
-  #top-countries th:nth-child(1), #top-countries td:nth-child(1) { width: calc(100% - 78px); }
-  #top-countries th:nth-child(2), #top-countries td:nth-child(2) { width: 78px; }
   #top-ips th:nth-child(1), #top-ips td:nth-child(1) { width: 44%; }
   #top-ips th:nth-child(2), #top-ips td:nth-child(2) { width: 36%; }
   #top-ips th:nth-child(3), #top-ips td:nth-child(3) { width: 20%; }
-
-  .rows {
-    max-height: 200px; overflow: auto;
-    font-family: var(--mono); font-size: 11px;
-  }
-  .rows.cmd-rows { max-height: 180px; min-height: 80px; }
-  .row {
-    padding: 5px 0; border-bottom: 1px dotted var(--line);
-    display: grid; grid-template-columns: 56px minmax(0,1fr) 72px; gap: 8px; align-items: baseline;
-  }
-  .row.cmd-row {
-    grid-template-columns: minmax(0,1fr) 52px;
-    align-items: start;
-  }
-  .row.cmd-row .p { color: var(--good); white-space: normal; word-break: break-all; line-height: 1.35; }
-  .row .t { color: var(--dim); }
-  .row .ip { color: var(--accent-2); }
-  .row .u { color: var(--warn); }
-  .row .p { color: var(--text); }
-  .row .r { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; }
-  .row > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
   .feed {
     flex: 1; overflow: hidden; position: relative;
@@ -172,54 +154,6 @@
   .feed-row .k { color: var(--text); }
   .feed-row .cmd { color: var(--good); display: block; margin-top: 3px; word-break: break-all; line-height: 1.35; }
   .feed-row .meta { color: var(--dim); font-size: 10px; margin-top: 2px; }
-  .empty { color: var(--dim); font-family: var(--mono); font-size: 11px; padding: 8px 0; }
-
-  .cap-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -2px 0 10px; }
-  .cap-head h2 { margin: 0; }
-  .cap-live {
-    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
-    padding: 3px 8px; border-radius: 3px; border: 1px solid rgba(72,184,120,0.35);
-    color: var(--good); background: rgba(72,184,120,0.08);
-  }
-  .cap-live.active { animation: capPulse 1.2s infinite; }
-  @keyframes capPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(72,184,120,0.45); }
-    50% { box-shadow: 0 0 0 6px rgba(72,184,120,0); }
-  }
-  .cap-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
-  .cap-stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 3px; padding: 8px 10px; }
-  .cap-stat .n { font-family: var(--mono); font-size: 16px; font-weight: 600; color: var(--good); }
-  .cap-stat .n.warn { color: var(--warn); }
-  .cap-stat .n.dim { color: var(--accent-2); }
-  .cap-stat .l { color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
-  .cap-rows { max-height: 200px; min-height: 72px; overflow: auto; }
-  .cap-row {
-    padding: 7px 0; border-bottom: 1px dotted var(--line);
-    display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 6px 8px; align-items: start;
-  }
-  .cap-row.new { animation: fadein 0.45s ease; }
-  .cap-row .t { color: var(--dim); font-size: 10px; }
-  .cap-row .url { color: var(--accent-2); word-break: break-all; line-height: 1.35; font-size: 10.5px; }
-  .cap-row .meta { color: var(--dim); font-size: 10px; margin-top: 3px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .cap-badge {
-    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
-    padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line);
-  }
-  .cap-badge.capturing { color: var(--warn); border-color: rgba(200,152,40,0.45); background: rgba(200,152,40,0.1); }
-  .cap-badge.fetched { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
-  .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
-
-  .users { display: flex; flex-wrap: wrap; gap: 6px; }
-  .users .pill {
-    background: var(--glass-2);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    padding: 3px 10px;
-    font-family: var(--mono); font-size: 11px;
-    color: var(--text);
-  }
-  .users .pill .n { color: var(--accent); margin-left: 5px; }
-
   .sparkline {
     position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
     z-index: 2;
@@ -344,21 +278,23 @@
   </section>
 
   <section class="panel">
-    <h2>By country</h2>
-    <table id="top-countries">
-      <thead><tr><th>Country</th><th class="n">Hits</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <section class="panel">
-    <h2>Top usernames tried <span style="font-size:11px;color:var(--dim);font-weight:400">(all-time)</span></h2>
-    <div class="users" id="top-users"></div>
-  </section>
-
-  <section class="panel">
-    <h2>Top actors</h2>
-    <div class="rows" id="actors"></div>
+    <h2>Threat Level</h2>
+    <div class="gauge-outer" id="threat-gauge">
+      <svg class="gauge-svg" viewBox="0 0 200 110">
+        <defs>
+          <linearGradient id="gg" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="var(--good)"/>
+            <stop offset="40%" stop-color="var(--accent-2)"/>
+            <stop offset="100%" stop-color="var(--accent)"/>
+          </linearGradient>
+        </defs>
+        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="12" stroke-linecap="round"/>
+        <path id="gauge-arc" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gg)" stroke-width="12" stroke-linecap="round" stroke-dasharray="0 251"/>
+        <text id="gauge-val" x="100" y="88" text-anchor="middle" fill="var(--text)" font-family="var(--mono)" font-size="36" font-weight="700">0</text>
+        <text id="gauge-lbl-svg" x="100" y="104" text-anchor="middle" fill="var(--dim)" font-family="var(--mono)" font-size="10" font-weight="600" letter-spacing="0.12em">LOW</text>
+      </svg>
+      <div class="gauge-breakdown" id="gauge-breakdown"></div>
+    </div>
   </section>
 </aside>
 
@@ -371,29 +307,6 @@
         <tbody></tbody>
       </table>
     </div>
-  </section>
-
-  <section class="panel" style="flex: 0 0 auto; min-height: 0; display: flex; flex-direction: column;">
-    <h2>Recent shell sessions <span id="sess-count" style="color: var(--dim); font-weight: 400; font-size: 0.85em;"></span></h2>
-    <div class="rows sess-rows" id="shell-sessions" style="max-height: 20vh; overflow:auto;"></div>
-  </section>
-
-  <section class="panel" style="flex: 0 0 auto; min-height: 0;">
-    <h2>Top commands <span style="font-size:11px;color:var(--dim);font-weight:400">(all-time)</span></h2>
-    <div class="rows cmd-rows" id="top-commands" style="max-height: 14vh; overflow: auto;"></div>
-  </section>
-
-  <section class="panel" style="flex: 0 0 auto; min-height: 0; display: flex; flex-direction: column;">
-    <div class="cap-head">
-      <h2>Payload capture</h2>
-      <span class="cap-live" id="cap-live">idle</span>
-    </div>
-    <div class="cap-stats">
-      <div class="cap-stat"><div class="n" id="cap-fetched">0</div><div class="l">saved</div></div>
-      <div class="cap-stat"><div class="n warn" id="cap-active">0</div><div class="l">fetching</div></div>
-      <div class="cap-stat"><div class="n dim" id="cap-bytes">0 B</div><div class="l">evidence</div></div>
-    </div>
-    <div class="rows cap-rows" id="capture-feed" style="max-height: 14vh; overflow: auto;"></div>
   </section>
 
   <section class="panel" style="flex: 1 1 auto; min-height: 200px; display: flex; flex-direction: column; overflow: hidden;">
@@ -549,25 +462,6 @@ const rel = function(ts) {
   if (s < 3600) return Math.floor(s / 60) + 'm';
   return Math.floor(s / 3600) + 'h';
 };
-const fmtBytes = function(n) {
-  n = Number(n || 0);
-  if (n < 1024) return n + ' B';
-  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
-  if (n < 1073741824) return (n / 1048576).toFixed(2) + ' MB';
-  return (n / 1073741824).toFixed(2) + ' GB';
-};
-const shortURL = function(u) {
-  u = String(u || '');
-  if (u.length <= 56) return u;
-  return u.slice(0, 28) + '…' + u.slice(-22);
-};
-const shortHash = function(h) {
-  h = String(h || '');
-  if (h.length <= 14) return h;
-  return h.slice(0, 10) + '…';
-};
-let lastCaptureKey = '';
-
 const flag = function(cc) {
   if (!cc || cc === '??' || cc.length !== 2 || !/^[A-Za-z]{2}$/.test(cc)) return '??';
   return String.fromCodePoint.apply(String, cc.toUpperCase().split('').map(function(c){ return 0x1F1A5 + c.charCodeAt(0); }));
@@ -659,22 +553,6 @@ function drawSpark(series) {
   ctx.stroke();
 }
 
-function renderTopCountries(rows) {
-  const body = document.querySelector('#top-countries tbody');
-  body.innerHTML = '';
-  if (!rows || !rows.length) {
-    body.innerHTML = '<tr><td colspan="2" class="empty">Resolving geo… refresh in a few seconds</td></tr>';
-    return;
-  }
-  (rows || []).slice(0, 10).forEach(function(r) {
-    const tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td>' + flag(r.cc) + ' ' + esc((r.country || r.cc || 'Unknown').slice(0, 18)) + '</td>' +
-      '<td class="n">' + fmt(r.hits) + '</td>';
-    body.appendChild(tr);
-  });
-}
-
 function renderTopIPs(rows) {
   const body = document.querySelector('#top-ips tbody');
   body.innerHTML = '';
@@ -687,85 +565,6 @@ function renderTopIPs(rows) {
       '<td>' + (r.cc ? flag(r.cc) + ' ' : '') + esc(String(locLabel).slice(0, 18)) + '</td>' +
       '<td class="n">' + fmt(r.hits) + '</td>';
     body.appendChild(tr);
-  });
-}
-
-function renderTopUsers(rows) {
-  const root = document.getElementById('top-users');
-  root.innerHTML = '';
-  (rows || []).slice(0, 16).forEach(function(r) {
-    const p = document.createElement('span');
-    p.className = 'pill';
-    p.textContent = String(r.user || '');
-    const n = document.createElement('span');
-    n.className = 'n';
-    n.textContent = fmt(r.hits);
-    p.appendChild(n);
-    root.appendChild(p);
-  });
-}
-
-function renderTopCommands(rows) {
-  const root = document.getElementById('top-commands');
-  root.innerHTML = '';
-  if (!rows || !rows.length) {
-    root.innerHTML = '<div class="empty">No shell commands yet (Cowrie input events)</div>';
-    return;
-  }
-  (rows || []).slice(0, 14).forEach(function(r) {
-    const row = document.createElement('div');
-    row.className = 'row cmd-row';
-    row.innerHTML =
-      '<span class="p" title="' + esc(r.command) + '">' + esc(r.command || '') + '</span>' +
-      '<span class="r">' + fmt(r.hits) + '</span>';
-    root.appendChild(row);
-  });
-}
-
-function renderShellSessions(rows) {
-  const root = document.getElementById('shell-sessions');
-  const count = document.getElementById('sess-count');
-  root.innerHTML = '';
-  if (!rows || !rows.length) {
-    count.textContent = '';
-    root.innerHTML = '<div class="empty">No sessions with shell access yet</div>';
-    return;
-  }
-  // The server caps this list at 30 (server.go RecentShellSessions(-24h,30)),
-  // so on a busy box rows.length is the page size, NOT the 24h total. Disclose
-  // the cap rather than presenting 30 as the population (the honesty pattern
-  // the intel sessions/payload/graph widgets already follow).
-  count.textContent = rows.length >= 30
-    ? '(newest ' + rows.length + ' shell sessions · last 24h)'
-    : '(' + rows.length + ' shell session' + (rows.length === 1 ? '' : 's') + ' · last 24h)';
-  rows.forEach(function(r) {
-    const row = document.createElement('a');
-    row.className = 'row sess-row';
-    row.href = withToken('/intel#session=' + encodeURIComponent(r.id));
-    row.style.cssText = 'display: flex; gap: 10px; padding: 6px 10px; align-items: baseline; text-decoration: none; color: inherit; border-radius: 4px;';
-    const loc = (r.cc ? r.cc + ' ' : '') + (r.city || r.country || '');
-    const sample = r.sample ? r.sample : '(' + r.cmdCount + ' commands)';
-    row.innerHTML =
-      '<span style="font-family: monospace; color: var(--accent); min-width: 110px;">' + esc(r.ip) + '</span>' +
-      '<span style="color: var(--dim); min-width: 70px;">' + esc(loc) + '</span>' +
-      '<span style="color: var(--dim); min-width: 60px;">' + esc(r.username || '?') + '</span>' +
-      '<span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="' + esc(sample) + '">' + esc(sample) + '</span>' +
-      '<span style="color: var(--good); min-width: 36px; text-align: right;">' + fmt(r.cmdCount) + '</span>';
-    root.appendChild(row);
-  });
-}
-
-function renderActors(rows) {
-  const root = document.getElementById('actors');
-  root.innerHTML = '';
-  (rows || []).slice(0, 14).forEach(function(a) {
-    const row = document.createElement('div');
-    row.className = 'row';
-    row.innerHTML =
-      '<span class="t">' + rel(a.lastSeen) + '</span>' +
-      '<span><span class="ip">' + esc(a.ip) + '</span> <span class="p">' + esc(a.playbook || 'unknown') + '</span></span>' +
-      '<span class="r">' + fmt(a.events) + '</span>';
-    root.appendChild(row);
   });
 }
 
@@ -788,57 +587,69 @@ function renderFeed(rows) {
   });
 }
 
-function renderCapture(d) {
-  const summary = d.summary || {};
-  const rows = d.artifacts || [];
-  const active = Number(summary.capturing || 0);
-  const live = document.getElementById('cap-live');
-  live.textContent = active > 0 ? 'capturing' : (summary.fetched > 0 ? 'live' : 'idle');
-  live.classList.toggle('active', active > 0);
-  document.getElementById('cap-fetched').textContent = fmt(summary.fetched || 0);
-  document.getElementById('cap-active').textContent = fmt(active);
-  document.getElementById('cap-bytes').textContent = fmtBytes(summary.totalBytes || 0);
-
-  const root = document.getElementById('capture-feed');
-  root.innerHTML = '';
-  if (!rows.length) {
-    root.innerHTML = '<div class="empty">Waiting for wget/curl payloads…</div>';
-    return;
-  }
-  const key = rows.map(function(a){ return a.url + '|' + a.status + '|' + a.sizeBytes; }).join(';');
-  const isNew = key !== lastCaptureKey;
-  lastCaptureKey = key;
-
-  rows.slice(0, 20).forEach(function(a) {
-    const row = document.createElement('div');
-    row.className = 'cap-row' + (isNew ? ' new' : '');
-    const st = String(a.status || 'unknown').toLowerCase();
-    const badge = '<span class="cap-badge ' + esc(st) + '">' + esc(st) + '</span>';
-    const size = a.sizeBytes > 0 ? fmtBytes(a.sizeBytes) : '';
-    const hash = a.sha256 ? ('sha ' + esc(shortHash(a.sha256))) : '';
-    const ip = a.srcIp ? ('from ' + esc(a.srcIp)) : '';
-    row.innerHTML =
-      '<span class="t">' + rel(a.createdAt || a.ts) + '</span>' +
-      '<div>' +
-        '<div class="url" title="' + esc(a.url) + '">' + esc(shortURL(a.url)) + '</div>' +
-        '<div class="meta">' + badge +
-          (size ? '<span>' + size + '</span>' : '') +
-          (hash ? '<span>' + hash + '</span>' : '') +
-          (ip ? '<span>' + ip + '</span>' : '') +
-        '</div>' +
-      '</div>';
-    root.appendChild(row);
+function renderGauge(summary, intentCounts, kindCounts) {
+  if (!summary) return;
+  var ev = summary.eventCount||0, ac = summary.actorCount||0, ips = summary.uniqueIps||0;
+  var dep = 0, probe = 0, classifiable = 0;
+  (intentCounts||[]).forEach(function(r){
+    if(r.label==='deploy') dep=r.hits;
+    if(r.label==='probe') probe=r.hits;
+    // Aggression denominator = actors whose intent was actually DETERMINED.
+    // CountsByIntent includes an 'unknown' bucket (journal failed-login actors
+    // have intent='unknown', a real stored value, not empty) — those can never
+    // be 'deploy', so counting them would re-dilute the score exactly as the
+    // old deploy/allActors did. Exclude 'unknown' so the ratio is deploy over
+    // {probe, proxy, deploy, mixed} — the cowrie actors with real intent.
+    if(r.label && r.label!=='unknown') classifiable += (r.hits||0);
   });
-}
+  var cmdCount = 0, dlCount = 0;
+  (kindCounts||[]).forEach(function(r){
+    if(r.label==='command') cmdCount=r.hits;
+    if(r.label==='file_download'||r.label==='file_upload') dlCount+=r.hits;
+  });
 
-async function refreshCapture() {
-  try {
-    const r = await fetch('/api/capture?_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return;
-    renderCapture(await r.json());
-  } catch (_) {}
-}
+  // log-scale scoring: each factor contributes 0-25 points
+  // volume: log10 scale — 100 events=5, 1K=12, 10K=20, 100K=25
+  var volScore = ev > 0 ? Math.min(25, Math.round(Math.log10(ev) * 5)) : 0;
+  // diversity: unique IPs — 10=5, 50=12, 200=18, 1000=22, 5000=25
+  var divScore = ips > 0 ? Math.min(25, Math.round(Math.log10(ips) * 6.7)) : 0;
+  // aggression: deploy ratio among CLASSIFIABLE actors — 0%=0, 10%=8, 30%=15,
+  // 50%+=25. Denominator is intent-classifiable actors, NOT all actors:
+  // journal actors are failed-login-only (no command/payload telemetry) so
+  // their intent is always 'unknown' and can never be 'deploy'. Dividing by
+  // ALL actors let a pile of journal brute-forcers structurally suppress the
+  // aggression score on a cowrie-active deployment. Fall back to total actors
+  // only if intent data is entirely absent.
+  var agrDenom = classifiable > 0 ? classifiable : ac;
+  var depRatio = agrDenom > 0 ? dep / agrDenom : 0;
+  var agrScore = Math.min(25, Math.round(depRatio * 50));
+  // weaponization: file downloads + commands relative to events
+  var weapRatio = ev > 0 ? (cmdCount + dlCount * 3) / ev : 0;
+  var weapScore = Math.min(25, Math.round(weapRatio * 80));
 
+  var score = Math.min(100, volScore + divScore + agrScore + weapScore);
+  var label, color;
+  if (score<=20){label='LOW';color='var(--good)'}
+  else if(score<=45){label='MODERATE';color='var(--accent-2)'}
+  else if(score<=70){label='HIGH';color='var(--accent)'}
+  else{label='CRITICAL';color='var(--accent)'}
+
+  var ARC_LEN = 251;
+  var arc=document.getElementById('gauge-arc');
+  if(arc)arc.setAttribute('stroke-dasharray',(score/100*ARC_LEN)+' '+ARC_LEN);
+  var val=document.getElementById('gauge-val');
+  if(val){val.textContent=score;val.setAttribute('fill',color)}
+  var svgLbl=document.getElementById('gauge-lbl-svg');
+  if(svgLbl){svgLbl.textContent=label;svgLbl.setAttribute('fill',color)}
+
+  var bd=document.getElementById('gauge-breakdown');
+  if(bd) bd.innerHTML=
+    '<div class="gb-row"><span>Volume</span><span class="gb-val">'+volScore+'/25</span></div>'+
+    '<div class="gb-row"><span>Diversity</span><span class="gb-val">'+divScore+'/25</span></div>'+
+    '<div class="gb-row"><span>Aggression</span><span class="gb-val">'+agrScore+'/25</span></div>'+
+    '<div class="gb-row"><span>Weaponization</span><span class="gb-val">'+weapScore+'/25</span></div>'+
+    '<div class="gb-row" style="grid-column:1/-1;border-top:1px solid var(--line);padding-top:3px;margin-top:3px"><span>'+fmt(ev)+' events · '+fmt(ac)+' actors · '+fmt(ips)+' IPs</span><span class="gb-val" style="color:'+color+'">'+score+'</span></div>';
+}
 
 /* ==== Theme globe overlays (Sprite stickers / Meridian sats) ==== */
 var STICKER_CYCLE = ['skull.svg', 'bolt.svg', 'bug.svg', 'controller.svg', 'shield.svg'];
@@ -1033,15 +844,9 @@ async function refresh() {
   document.getElementById('s-countries').textContent = fmt(summary.countries);
   document.getElementById('home-loc').textContent = flag(home.cc) + ' ' + [home.city, home.country].filter(Boolean).join(', ');
   document.getElementById('gen-at').textContent = new Date(d.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  renderGauge(d.summary, d.intentCounts, d.kindCounts);
 
-  renderTopCountries(d.topCountries);
   renderTopIPs(d.topIps);
-  renderTopUsers(d.topUsers);
-  renderTopCommands(d.topCommands);
-  renderShellSessions(d.sessions);
-  // "Top actors" widget uses the volume-ordered topActors list (the recent
-  // last-seen-ordered `actors` still drives the globe points/arcs below).
-  renderActors(d.topActors || actors);
   renderFeed(recent);
 
   sparkData = (d.hourly || []).slice(-72);
@@ -1059,11 +864,7 @@ async function refresh() {
 }
 
 refresh();
-refreshCapture();
 setInterval(refresh, 5000);
-// 5s, not 2s: capture data can only change on the 5s ingest tick, and
-// CaptureSummary aggregates the whole artifacts table per call.
-setInterval(refreshCapture, 5000);
 window.addEventListener('resize', function() { drawSpark(sparkData); });
 </script>
 
