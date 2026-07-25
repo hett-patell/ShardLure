@@ -777,6 +777,8 @@ type dashboardResponse struct {
 	TopCommands  []topCommandRow   `json:"topCommands"`
 	TopCountries []topCountryRow   `json:"topCountries"`
 	Hourly       []hourPoint       `json:"hourly"`
+	IntentCounts []store.LabelCount `json:"intentCounts"`
+	KindCounts   []store.LabelCount `json:"kindCounts"`
 	Home         homePoint         `json:"home"`
 }
 
@@ -908,9 +910,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	hourly, shellSessions := s.dashExtraCachedValues()
 	var ec, ac, uniqueIPs, countries int
 	var topIPs, topUsers, topCommands []store.CountRow
+	var intentCounts, kindCounts []store.LabelCount
 	if stats, err := s.summaryStatsCached(); err == nil {
 		ec, ac, uniqueIPs, countries = stats.Events, stats.Actors, stats.UniqueIPs, stats.Countries
 		topIPs, topUsers, topCommands = stats.TopIPs, stats.TopUsers, stats.TopCommands
+		// Already computed and cached by summaryStatsCached — no extra query.
+		// The globe dashboard's threat gauge needs both to score intent mix.
+		intentCounts, kindCounts = stats.IntentCounts, stats.KindCounts
 	}
 
 	resp := dashboardResponse{
@@ -919,7 +925,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			EventCount: ec,
 			ActorCount: ac,
 		},
-		Home: s.homeLive(),
+		IntentCounts: intentCounts,
+		KindCounts:   kindCounts,
+		Home:         s.homeLive(),
 	}
 
 	countryStats := map[string]*topCountryRow{}
