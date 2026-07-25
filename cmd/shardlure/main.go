@@ -408,9 +408,9 @@ func cmdActors(st *store.Store, args []string) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ACTOR\tIP\tPLAYBOOK\tEVENTS\tUSR\tRATE/h\tLAST\tCONF")
 	for _, a := range actors {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f\t%s\t%d\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f\t%s\t%s\n",
 			actor.TrimActorPrefix(a.ID), a.PrimaryIP, a.Playbook, a.EventCount, a.UniqueUsers,
-			a.AttemptsPerHour, a.LastSeen.Format(time.RFC3339), a.Confidence)
+			a.AttemptsPerHour, a.LastSeen.Format(time.RFC3339), actor.ConfidenceTier(a.Confidence))
 	}
 	w.Flush()
 }

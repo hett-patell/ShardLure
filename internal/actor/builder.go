@@ -106,6 +106,23 @@ const (
 	ConfidenceCowriePayload  = 84
 )
 
+// ConfidenceTier maps the coarse confidence constants to a human label.
+// Confidence is a fixed evidence TIER selected by source + signals, not a
+// calibrated probability — so it is presented as a named tier rather than a
+// percentage, which would imply precision the value does not carry.
+func ConfidenceTier(c int) string {
+	switch {
+	case c >= ConfidenceCowriePayload:
+		return "CONFIRMED"
+	case c >= ConfidenceCowrieBase:
+		return "HIGH"
+	case c >= ConfidenceJournalHighAPH:
+		return "MEDIUM"
+	default:
+		return "LOW"
+	}
+}
+
 // minWindowHours floors the observation window when computing attempts/hour
 // so a single burst of activity inside one minute does not produce a divide
 // near zero (and a meaningless 100k/hour rate). 15 minutes is empirically

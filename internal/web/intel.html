@@ -1381,7 +1381,7 @@
               <th style="width:34px" title="report priority 0-100">pri</th>
               <th>ip</th>
               <th>playbook</th>
-              <th class="num" title="our confidence this is a brute-forcer">probe</th>
+              <th class="num" title="ProbeScore 0-100: computed from event mix and attempt rate">probe</th>
               <th class="num" title="attempts per hour">rate/h</th>
               <th class="num" title="distinct usernames tried">users</th>
               <th>why</th>
@@ -1975,6 +1975,16 @@ const shortActor = function(a) {
   if (a.length <= 10) return a;
   return a.slice(0, 8) + '…';
 };
+/* Confidence is a coarse evidence tier (four fixed values by source + signals),
+ * NOT a calibrated probability — show a named tier, never a percentage.
+ * Thresholds mirror actor.ConfidenceTier in internal/actor/builder.go. */
+function confTier(c) {
+  c = Number(c) || 0;
+  if (c >= 84) return 'CONFIRMED';
+  if (c >= 72) return 'HIGH';
+  if (c >= 70) return 'MEDIUM';
+  return 'LOW';
+}
 let lastCaptureKey = '';
 const rel = function(ts) {
   const d = new Date(ts).getTime();
@@ -2119,7 +2129,7 @@ async function loadActorDetail(id) {
     '<span>Source</span><strong>' + esc(a.source) + '</strong>' +
     '<span>Intent</span><strong>' + esc(a.intent || '—') + '</strong>' +
     '<span>Events</span><strong>' + fmt(a.events) + ' · ' + fmt(a.uniqueUsers) + ' users · ' + (a.rateHour ? a.rateHour.toFixed(1) : '0') + '/h</strong>' +
-    '<span>Probe score</span><strong>' + esc(a.probeScore) + ' · conf ' + esc(a.confidence) + '%</strong>' +
+    '<span>Probe score</span><strong>' + esc(a.probeScore) + ' · ' + esc(confTier(a.confidence)) + '</strong>' +
     '<span>First / last</span><strong>' + esc(rel(a.firstSeen)) + ' ago → ' + esc(rel(a.lastSeen)) + ' ago</strong>' +
     '<span>Top users</span><strong>' + esc(users) + '</strong>' +
     (a.hassh ? '<span>HASSH</span><strong>' + esc(a.hassh) + '</strong>' : '') +
