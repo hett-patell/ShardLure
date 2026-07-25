@@ -50,6 +50,7 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Themes:** ships **Signal** (default — a near-black signal field with a light/dark toggle), plus **Meridian** and **Sprite**. Switchable live from the settings panel; the selected theme and Signal's mode persist in SQLite. One WebGL globe engine (Cobe) across all themes.
 - **3D Cobe globe:** WebGL globe with live arcs from attacker IPs to your home point, plus floating artifacts anchored to attacker coordinates — satellites, a LIVE badge at your origin, and per-actor analytics chips. Pointer-drag rotation, scroll zoom, double-click reset. Proper listener lifecycle (no leaks on theme switch).
 - **Two dashboards, split by job:** the **globe view** (`/`) is an ambient wall display — summary counts, threat-level gauge, events/hour sparkline, live feed, and the globe with its artifacts. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
+- **Command palette:** the search box in the intel console is a real lookup, not a row filter — type any IP, actor, session id, command, or payload hash and get grouped, actionable results (jump to an actor, enrich an IP, open a session transcript or payload) with arrow-key navigation. It searches the API, so it finds records that aren't on the current tab.
 - **Dashboard settings panel:** configure API keys, theme, home location, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
 - **AbuseIPDB reporting:** report confirmed brute-forcers back to AbuseIPDB from the dashboard (Report All) or CLI (`report abuseipdb`). Vetting gate enforces probe-score floor, private/admin IP exclusion, and 24h re-report dedup.
@@ -694,6 +695,9 @@ sudo userdel -r cowrie
 - [x] Runtime keystore (DB > env > config precedence, no restart needed)
 - [x] AbuseIPDB outbound reporting (CLI + dashboard Report All, vetting gate, 24h dedup)
 - [x] Tunnel/proxy target tracking (`direct-tcpip` aggregation + red-team widget)
+- [x] Globe artifacts on every theme (satellites, live badge, per-actor analytics chips)
+- [x] Ambient globe dashboard (analyst widgets consolidated in `/intel`)
+- [x] Intel command palette (actors / IPs / sessions / commands / payloads)
 - [ ] GeoLite2 MMDB enrichment (escape the ip-api.com rate limits arc)
 - [ ] Real-time WebSocket feed (current dashboard polls every 5s, which is fine but mid)
 
