@@ -869,12 +869,42 @@ function mergeActorsForGlobe(actors, topActors) {
 }
 
 function buildThemeOverlays(theme, home, actors) {
-  if (theme !== 'sprite' && theme !== 'meridian') return [];
+  if (theme !== 'sprite' && theme !== 'meridian' && theme !== 'signal') return [];
   var ranked = (actors || [])
     .filter(function (a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); })
     .sort(function (a, b) { return (b.events || 0) - (a.events || 0); })
     .slice(0, 6);
   var out = [];
+  if (theme === 'signal') {
+    var pkHomeS = 'home';
+    out.push({
+      lat: home.lat, lng: home.lon, kind: 'live', alt: 0.05,
+      rate: 'LIVE', sub: (home.city || 'home'), placeKey: pkHomeS,
+    });
+    out.push({
+      lat: home.lat, lng: home.lon, kind: 'sat', alt: 0.075,
+      label: 'HUB', placeKey: pkHomeS, hub: true, ringDelay: 0,
+    });
+    ranked.forEach(function (a, i) {
+      var pk = 'actor' + i;
+      var n = a.events || 0;
+      var r = Number(a.rateHour);
+      var rateLbl = Number.isFinite(r) && r > 0 ? r.toFixed(1) + '/h' : '';
+      out.push({
+        lat: a.lat, lng: a.lon, kind: 'sat', alt: 0.055 + (i % 3) * 0.01,
+        label: a.cc || a.ip || 'node', placeKey: pk, ringDelay: i * 0.4,
+      });
+      out.push({
+        lat: a.lat, lng: a.lon, kind: 'analytics', alt: 0.04,
+        placeKey: pk,
+        title: (a.cc || '??') + (a.city ? ' · ' + a.city : ''),
+        value: n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n),
+        rateLabel: rateLbl,
+        ip: a.ip || '',
+      });
+    });
+    return out;
+  }
   if (theme === 'sprite') {
     out.push({
       lat: home.lat, lng: home.lon, kind: 'sticker', alt: 0.04,
@@ -956,24 +986,6 @@ function makeOverlayEl(d) {
       esc(d.value || '') + ' <span class="' + (d.trend === 'dn' ? 'dn' : 'up') + '">' +
       esc(d.trendLabel || '') + '</span>';
     wrap.appendChild(chip);
-  } else if (d.kind === 'node') {
-    var node = document.createElement('div');
-    node.className = 'globe-node';
-    var satBox = document.createElement('div');
-    satBox.className = 'globe-sat';
-    var satImg = document.createElement('img');
-    satImg.src = '/stickers/sat.svg';
-    satImg.alt = d.label || 'satellite';
-    satBox.appendChild(satImg);
-    var chip = document.createElement('div');
-    chip.className = 'globe-analytics';
-    chip.innerHTML = '<span class="lbl">' + esc(d.title || '') + '</span>' +
-      '<b>' + esc(d.value || '') + '</b>' +
-      (d.rateLabel ? ' <span class="up">' + esc(d.rateLabel) + '</span>' : '') +
-      (d.ip ? '<span class="ip">' + esc(d.ip) + '</span>' : '');
-    node.appendChild(satBox);
-    node.appendChild(chip);
-    wrap.appendChild(node);
   }
   return wrap;
 }
