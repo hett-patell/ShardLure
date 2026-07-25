@@ -175,15 +175,30 @@ func (s *Store) topCounts(column string, limit int) ([]CountRow, error) {
 	return out, rows.Err()
 }
 
-// HASSHCoverage returns how many actors are identified by behavioural
-// fingerprint (a non-empty HASSH) versus the total actor count. This is the
-// honest measure of the "identity over IP" premise: actors without a HASSH
-// fall back to IP-keyed identity, so the operator should be able to see what
-// fraction of their actor set is genuinely fingerprinted.
+// HASSHCoverage reports how much observed Cowrie telemetry carries a
+// behavioural fingerprint: (events with a non-empty HASSH, total cowrie events).
+// It is the honest measure of the "identity over IP" premise — the share of what
+// we saw that we can attribute to a client fingerprint rather than an address.
+//
+// Two deliberate choices, both learned from a wrong first version of this metric:
+//
+//  1. EVENT-weighted, not actor-row-weighted. Counting actor rows inverts the
+//     result, because a HASSH-keyed row is a CONSOLIDATED identity while an
+//     IP-keyed row is a single IP. On a live honeypot 78 HASSH actors covered
+//     2509 IPs (one spanned 784) while 1977 IP-keyed actors covered 1977 IPs —
+//     so the row ratio said "3% fingerprinted" while 93.5% of events actually
+//     carried a HASSH. Row counting punishes the clustering for working.
+//  2. Cowrie only. HASSH comes from the SSH key exchange, which journald sshd
+//     lines never contain, so journal events cannot contribute a fingerprint.
+//     Including them would pad the denominator with rows that are structurally
+//     incapable of being fingerprinted.
+//
+// The ts>= restriction is deliberately absent: this is an all-time posture
+// number shown beside the other all-time summary tiles.
 func (s *Store) HASSHCoverage() (fingerprinted, total int, err error) {
 	row := s.db.QueryRow(`
 SELECT COUNT(*), COALESCE(SUM(CASE WHEN COALESCE(hassh,'') <> '' THEN 1 ELSE 0 END), 0)
-FROM actors`)
+FROM events WHERE source = 'cowrie'`)
 	if err = row.Scan(&total, &fingerprinted); err != nil {
 		return 0, 0, err
 	}

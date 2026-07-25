@@ -148,11 +148,14 @@ type summaryStats struct {
 	IntentCounts   []store.LabelCount
 	PlaybookCounts []store.LabelCount
 	HourlyByKind   []store.HourlyKindCell
-	// Fingerprinted is the count of actors identified by behavioural HASSH
-	// (vs. IP-keyed fallback). Was queried uncached (SCAN actors) directly in
-	// handleDashboard on every 5s poll — folded in here so it shares the same
-	// statsTTL memoization as the rest of the landing-page aggregates.
-	Fingerprinted int
+	// Fingerprinted / FingerprintTotal are the EVENT-weighted identity-over-IP
+	// coverage numbers from store.HASSHCoverage: cowrie events carrying a HASSH,
+	// out of all cowrie events. Event-weighted rather than actor-weighted on
+	// purpose — see the HASSHCoverage doc comment for why counting actor rows
+	// inverted the result. Queried uncached on every 5s poll originally; folded
+	// in here so it shares the same statsTTL memoization as the other aggregates.
+	Fingerprinted    int
+	FingerprintTotal int
 }
 
 const statsTTL = 10 * time.Second
@@ -213,21 +216,22 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	}
 	// Best-effort, like countries above: a transient error just leaves the
 	// fingerprinted count at 0 rather than failing the whole cache refresh.
-	fingerprinted, _, _ := s.st.HASSHCoverage()
+	fingerprinted, fingerprintTotal, _ := s.st.HASSHCoverage()
 	s.statsCached = &summaryStats{
-		Events:         ec,
-		Actors:         ac,
-		UniqueIPs:      ips,
-		Countries:      countries,
-		KindCounts:     kinds,
-		SourceCounts:   sources,
-		TopIPs:         topIPs,
-		TopUsers:       topUsers,
-		TopCommands:    topCommands,
-		IntentCounts:   intents,
-		PlaybookCounts: playbooks,
-		HourlyByKind:   hourlyByKind,
-		Fingerprinted:  fingerprinted,
+		Events:           ec,
+		Actors:           ac,
+		UniqueIPs:        ips,
+		Countries:        countries,
+		KindCounts:       kinds,
+		SourceCounts:     sources,
+		TopIPs:           topIPs,
+		TopUsers:         topUsers,
+		TopCommands:      topCommands,
+		IntentCounts:     intents,
+		PlaybookCounts:   playbooks,
+		HourlyByKind:     hourlyByKind,
+		Fingerprinted:    fingerprinted,
+		FingerprintTotal: fingerprintTotal,
 	}
 	s.statsAt = time.Now()
 	return s.statsCached, nil
@@ -813,11 +817,17 @@ type shellSessionRow struct {
 }
 
 type summaryBlock struct {
-	EventCount    int `json:"eventCount"`
-	ActorCount    int `json:"actorCount"`
-	UniqueIPs     int `json:"uniqueIps"`
-	Countries     int `json:"countries"`
-	Fingerprinted int `json:"fingerprinted"`
+	EventCount int `json:"eventCount"`
+	ActorCount int `json:"actorCount"`
+	UniqueIPs  int `json:"uniqueIps"`
+	Countries  int `json:"countries"`
+	// Fingerprinted / FingerprintTotal are EVENT-weighted over cowrie telemetry
+	// (see store.HASSHCoverage): how much of what we observed carries a client
+	// fingerprint. The UI shows this as a percentage; the total is the cowrie
+	// event count, NOT actorCount — dividing by actors inverted the result,
+	// because clustering collapses many IPs into one actor row.
+	Fingerprinted    int `json:"fingerprinted"`
+	FingerprintTotal int `json:"fingerprintTotal"`
 }
 
 type actorCard struct {
@@ -918,13 +928,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// dashExtraCachedValues). They no longer fail the request — a transient DB
 	// error serves last-good rather than 500ing the whole dashboard.
 	hourly, shellSessions := s.dashExtraCachedValues()
-	var ec, ac, uniqueIPs, countries, fingerprinted int
+	var ec, ac, uniqueIPs, countries, fingerprinted, fingerprintTotal int
 	var topIPs, topUsers, topCommands []store.CountRow
 	var intentCounts, kindCounts []labelCountRow
 	if stats, err := s.summaryStatsCached(); err == nil {
 		ec, ac, uniqueIPs, countries = stats.Events, stats.Actors, stats.UniqueIPs, stats.Countries
 		topIPs, topUsers, topCommands = stats.TopIPs, stats.TopUsers, stats.TopCommands
-		fingerprinted = stats.Fingerprinted
+		fingerprinted, fingerprintTotal = stats.Fingerprinted, stats.FingerprintTotal
 		// Already computed and cached by summaryStatsCached — no extra query.
 		// The globe dashboard's threat gauge needs both to score intent mix.
 		for _, k := range stats.IntentCounts {
@@ -1075,6 +1085,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// HASSHCoverage) rather than querying directly — this was the last
 	// uncached full scan (SCAN actors) on the 5s dashboard poll path.
 	resp.Summary.Fingerprinted = fingerprinted
+	resp.Summary.FingerprintTotal = fingerprintTotal
 	// Countries: distinct CCs across the WHOLE geo cache, not just the top-25
 	// IPs that feed the topCountries chart — otherwise a 2600-IP dataset
 	// spanning 20+ countries reported ~7. This value comes from the shared
