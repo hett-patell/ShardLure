@@ -9,10 +9,22 @@ import sys
 from pathlib import Path
 
 files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+
+# Genuinely-binary assets. This check exists to catch TEXT sources corrupted to
+# UTF-16 by scp (see the Deployment section of the README), so binary files are
+# skipped rather than the NUL test being weakened for everything. Keep this list
+# tight: anything not listed here is still held to strict UTF-8.
+BINARY_SUFFIXES = {".ico", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf",
+                   ".woff", ".woff2", ".ttf", ".otf", ".zip", ".gz", ".db"}
+
 bad = []
+skipped = 0
 for rel in files:
     p = Path(rel)
     if not p.is_file():
+        continue
+    if p.suffix.lower() in BINARY_SUFFIXES:
+        skipped += 1
         continue
     b = p.read_bytes()
     if b.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -31,5 +43,5 @@ if bad:
     for rel, msg in bad:
         print(f"  {rel}: {msg}", file=sys.stderr)
     sys.exit(1)
-print(f"OK: {len(files)} tracked files are UTF-8")
+print(f"OK: {len(files) - skipped} tracked text files are UTF-8 ({skipped} binary skipped)")
 PY

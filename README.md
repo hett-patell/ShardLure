@@ -10,7 +10,7 @@
 
 **Attacker identity engine for SSH honeypot telemetry.** Aka: it makes the bots think they hit a real prod box, then puts their entire playbook on blast.
 
-ShardLure clusters SSH bots by **playbook fingerprint** (OpenSSH journal lines) or **HASSH** (Cowrie sessions), not just IP. Same actor on three IPs? Still one actor. Different actor with the same address? Different rows. The vibe is "username taste profile, not who's-at-the-door." It ships with a VPS installer, Cowrie integration, live ingest, a forensic TUI, and a web dashboard that spins a globe at you.
+ShardLure clusters SSH bots by **playbook fingerprint** (OpenSSH journal lines) or **HASSH** (Cowrie sessions), not just IP. Same actor on three IPs? Still one actor — one live box has a single fingerprint spanning 784 addresses. Different actor with the same address? Different rows. HASSH clustering needs a completed SSH key exchange, so the dashboard shows you exactly what share of your traffic is fingerprinted rather than implying it's all of it (~93% of Cowrie events on a real honeypot; scans that never finish a handshake fall back to IP identity). The vibe is "username taste profile, not who's-at-the-door." It ships with a VPS installer, Cowrie integration, live ingest, a forensic TUI, and a web dashboard that spins a globe at you.
 
 ```text
 attacker -> port 22 (Cowrie) -> JSON/journal ingest -> SQLite actors -> dashboard
@@ -49,8 +49,10 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
 - **Themes:** ships **Signal** (default — a near-black signal field with a light/dark toggle), plus **Meridian** and **Sprite**. Switchable live from the settings panel; the selected theme and Signal's mode persist in SQLite. One WebGL globe engine (Cobe) across all themes.
 - **3D Cobe globe:** WebGL globe with live arcs from attacker IPs to your home point, plus floating artifacts anchored to attacker coordinates — satellites, a LIVE badge at your origin, and per-actor analytics chips. Pointer-drag rotation, scroll zoom, double-click reset. Proper listener lifecycle (no leaks on theme switch).
-- **Two dashboards, split by job:** the **globe view** (`/`) is an ambient wall display — summary counts, threat-level gauge, events/hour sparkline, live feed, and the globe with its artifacts. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
+- **Two dashboards, split by job:** the **globe view** (`/`) is an ambient wall display — summary counts (events, actors, unique IPs, countries, **fingerprint coverage**, shell sessions), threat-level gauge, a Cowrie honeypot status panel, events/hour sparkline, live feed, and the globe with its artifacts. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
 - **Command palette:** the search box in the intel console is a real lookup, not a row filter — type any IP, actor, session id, command, or payload hash and get grouped, actionable results (jump to an actor, enrich an IP, open a session transcript or payload) with arrow-key navigation. It searches the API, so it finds records that aren't on the current tab.
+- **Fingerprint coverage, stated honestly:** the globe's FINGERPRINTED tile is the share of Cowrie telemetry carrying a HASSH — event-weighted, because counting actor rows inverts the number (clustering collapses 784 IPs into one row, so successful clustering made coverage *look* worse). journald events are excluded from the denominator: sshd logs cannot carry a fingerprint at all.
+- **Honeypot status panel:** Cowrie's real uptime read from systemd (`ActiveEnterTimestamp`), plus seconds-since-last-event and total ingested. Strictly read-only — ShardLure never starts, stops, or reconfigures the Cowrie unit; the two systemd units stay independent with the JSON log as their only contract. On a host without systemd it reports `unknown` rather than inventing a number, and the last-event signal still works (a Cowrie that is "up" but not logging is the real failure mode).
 - **Dashboard settings panel:** configure API keys, theme, home location, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
 - **AbuseIPDB reporting:** report confirmed brute-forcers back to AbuseIPDB from the dashboard (Report All) or CLI (`report abuseipdb`). Vetting gate enforces probe-score floor, private/admin IP exclusion, and 24h re-report dedup.
@@ -238,7 +240,7 @@ sudo ./shardlure run
 | --- | --- |
 | `ingest journal <file> [--replace]` | Parse journal auth lines and build actors |
 | `ingest cowrie <file> [--replace]` | Parse Cowrie JSON logs and build actors |
-| `actors [--limit=N]` | List actors by last seen |
+| `actors [--limit=N]` | List actors by last seen. `CONF` is an evidence **tier** (`LOW`/`MEDIUM`/`HIGH`/`CONFIRMED`), not a percentage — it is a coarse label chosen by source and signals, so showing it as `55%` would imply a calibrated probability it does not have. `probe` (0-100) is the computed score. |
 | `actor show <id\|ip>` | Show one actor profile |
 | `dashboard`, `dash`, `tui` | Open the forensic TUI |
 | `web [:8080] [--tailscale]` | Serve the web dashboard |
@@ -298,6 +300,7 @@ journal:
 cowrie:
   home: /var/lib/shardlure/cowrie
   json_log: /var/lib/shardlure/cowrie/var/log/cowrie/cowrie.json
+  unit: cowrie          # systemd unit, read-only, for the honeypot uptime readout
 
 capture:
   enabled: true
