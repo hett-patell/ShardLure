@@ -156,6 +156,11 @@ type summaryStats struct {
 	// in here so it shares the same statsTTL memoization as the other aggregates.
 	Fingerprinted    int
 	FingerprintTotal int
+	// Sessions is the ALL-TIME distinct cowrie session count, for the Summary
+	// tile. Deliberately not len(RecentShellSessions): that slice is LIMITed to
+	// 30, so the tile would freeze at "30". Cached here rather than queried in
+	// handleDashboard to keep the 5s landing path fully memoized.
+	Sessions int
 }
 
 const statsTTL = 10 * time.Second
@@ -217,6 +222,8 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	// Best-effort, like countries above: a transient error just leaves the
 	// fingerprinted count at 0 rather than failing the whole cache refresh.
 	fingerprinted, fingerprintTotal, _ := s.st.HASSHCoverage()
+	// Best-effort like the others: 0 on error keeps the panel alive.
+	sessionCount, _ := s.st.CountSessions()
 	s.statsCached = &summaryStats{
 		Events:           ec,
 		Actors:           ac,
@@ -232,6 +239,7 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 		HourlyByKind:     hourlyByKind,
 		Fingerprinted:    fingerprinted,
 		FingerprintTotal: fingerprintTotal,
+		Sessions:         sessionCount,
 	}
 	s.statsAt = time.Now()
 	return s.statsCached, nil
@@ -828,6 +836,9 @@ type summaryBlock struct {
 	// because clustering collapses many IPs into one actor row.
 	Fingerprinted    int `json:"fingerprinted"`
 	FingerprintTotal int `json:"fingerprintTotal"`
+	// SessionCount is all-time distinct cowrie sessions (see summaryStats.Sessions
+	// for why this is not the length of the capped `sessions` slice below).
+	SessionCount int `json:"sessionCount"`
 }
 
 type actorCard struct {
@@ -928,13 +939,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// dashExtraCachedValues). They no longer fail the request — a transient DB
 	// error serves last-good rather than 500ing the whole dashboard.
 	hourly, shellSessions := s.dashExtraCachedValues()
-	var ec, ac, uniqueIPs, countries, fingerprinted, fingerprintTotal int
+	var ec, ac, uniqueIPs, countries, fingerprinted, fingerprintTotal, sessionCount int
 	var topIPs, topUsers, topCommands []store.CountRow
 	var intentCounts, kindCounts []labelCountRow
 	if stats, err := s.summaryStatsCached(); err == nil {
 		ec, ac, uniqueIPs, countries = stats.Events, stats.Actors, stats.UniqueIPs, stats.Countries
 		topIPs, topUsers, topCommands = stats.TopIPs, stats.TopUsers, stats.TopCommands
 		fingerprinted, fingerprintTotal = stats.Fingerprinted, stats.FingerprintTotal
+		sessionCount = stats.Sessions
 		// Already computed and cached by summaryStatsCached — no extra query.
 		// The globe dashboard's threat gauge needs both to score intent mix.
 		for _, k := range stats.IntentCounts {
@@ -1086,6 +1098,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// uncached full scan (SCAN actors) on the 5s dashboard poll path.
 	resp.Summary.Fingerprinted = fingerprinted
 	resp.Summary.FingerprintTotal = fingerprintTotal
+	resp.Summary.SessionCount = sessionCount
 	// Countries: distinct CCs across the WHOLE geo cache, not just the top-25
 	// IPs that feed the topCountries chart — otherwise a 2600-IP dataset
 	// spanning 20+ countries reported ~7. This value comes from the shared

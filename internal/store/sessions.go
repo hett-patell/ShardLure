@@ -246,3 +246,17 @@ FROM events WHERE source='cowrie' AND session_id=? ORDER BY ts ASC`, sessionID)
 	}
 	return out, rows.Err()
 }
+
+// CountSessions returns the all-time number of distinct cowrie sessions.
+// Companion to CountSessionsSince for the dashboard's Summary tiles, which are
+// all-time figures — using the 24h-windowed count there would sit inconsistently
+// beside all-time events/actors/IPs, and using len(RecentShellSessions) would be
+// worse still: that slice is LIMITed to 30, so the tile would read "30" forever
+// once a honeypot passed 30 sessions.
+func (s *Store) CountSessions() (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(DISTINCT session_id) FROM events
+WHERE source='cowrie' AND session_id != ''`).Scan(&n)
+	return n, err
+}

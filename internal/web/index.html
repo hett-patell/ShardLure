@@ -58,6 +58,11 @@
     pointer-events: none;
   }
   .rail.left  { left: 0; }
+  /* Fill the left rail's dead space: the last panel absorbs the remaining
+     height instead of leaving a gap under the gauge. Content-bearing panels
+     keep their natural size (flex: 0 0 auto is the .panel default), so only
+     the trailing one stretches. */
+  .rail.left > .panel:last-child { flex: 1 1 auto; }
   .rail.right { right: 0; }
   .rail > * { pointer-events: auto; }
 
@@ -276,6 +281,7 @@
       <div class="stat"><div class="num good" id="s-ips">0</div><div class="label">unique IPs</div></div>
       <div class="stat"><div class="num warn" id="s-countries">0</div><div class="label">countries</div></div>
       <div class="stat" title="Share of Cowrie telemetry carrying a client fingerprint (HASSH) — sshd/journal events cannot carry one"><div class="num" id="s-fingerprinted">0</div><div class="label">fingerprinted</div></div>
+      <div class="stat" title="Cowrie shell sessions observed (attackers who got far enough to open a shell)"><div class="num" id="s-sessions">0</div><div class="label">sessions</div></div>
     </div>
   </section>
 
@@ -851,6 +857,10 @@ async function refresh() {
   var fpN = summary.fingerprinted || 0, fpT = summary.fingerprintTotal || 0;
   document.getElementById('s-fingerprinted').textContent =
     fpT > 0 ? (Math.round(fpN / fpT * 1000) / 10) + '%' : '—';
+  // All-time distinct cowrie sessions. Uses summary.sessionCount, NOT
+  // d.sessions.length — that slice is server-capped at 30, so the tile would
+  // read a permanent "30" on any busy honeypot.
+  document.getElementById('s-sessions').textContent = fmt(summary.sessionCount || 0);
   document.getElementById('home-loc').textContent = flag(home.cc) + ' ' + [home.city, home.country].filter(Boolean).join(', ');
   document.getElementById('gen-at').textContent = new Date(d.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   renderGauge(d.summary, d.intentCounts, d.kindCounts);
