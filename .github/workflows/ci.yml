@@ -140,6 +140,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
+
+      # actions/checkout force-updates the TRIGGERING tag ref to the resolved
+      # COMMIT sha ("t [tag update] <sha> -> vX" in its log), so inside CI
+      # `git cat-file -t refs/tags/vX` reports "commit" while every other tag is
+      # a proper "tag" object. fetch-tags: true does NOT prevent this — checkout
+      # clobbers the ref after fetching it. publish-release.sh deliberately
+      # requires a real annotated tag object, so re-fetch that one ref to restore
+      # it, before the expensive artifact download. Verified from the v2.0.0 CI
+      # diagnostics: without this the guard aborts with "must be an annotated
+      # tag" on a tag that IS annotated on the remote.
+      - name: Restore annotated tag object
+        run: |
+          git fetch --force origin \
+            "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          test "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = tag
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4

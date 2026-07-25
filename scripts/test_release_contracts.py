@@ -293,16 +293,34 @@ class ReleaseContractTests(unittest.TestCase):
             "python3 -m unittest scripts/test_release_contracts.py -v", test_job
         )
 
-    def test_release_checkout_fetches_tags_and_main_history(self) -> None:
+    def test_release_checkout_restores_annotated_tag_and_main_history(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         release_job = workflow[workflow.index("  release:\n") :]
+        # Slice ends at the artifact download, so anything asserted below is also
+        # asserted to run BEFORE it: an unannotated tag must abort cheaply.
         checkout = release_job[
             release_job.index("      - name: Checkout\n") : release_job.index(
                 "      - name: Download all artifacts\n"
             )
         ]
 
+        # publish-release.sh needs origin/main present for its ancestry check.
         self.assertIn("fetch-depth: 0", checkout)
+        self.assertIn("fetch-tags: true", checkout)
+
+        # The load-bearing part. actions/checkout force-updates the TRIGGERING
+        # tag ref to the resolved commit sha, so refs/tags/vX is a commit object
+        # inside CI and publish-release.sh's annotated-tag guard rejects a
+        # correctly annotated release. fetch-tags does NOT prevent it. Only an
+        # explicit forced refspec for that one ref restores the tag object, so
+        # assert the refspec and its verification, not just fetch-tags.
+        self.assertIn("- name: Restore annotated tag object", checkout)
+        self.assertIn(
+            '"+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"', checkout
+        )
+        self.assertIn(
+            'test "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = tag', checkout
+        )
 
     def test_release_job_serializes_same_tag(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
