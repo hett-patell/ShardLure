@@ -820,3 +820,314 @@ git commit -m "docs: document the intel command palette"
 - **No-CSS constraint honoured:** Task 2 adds zero overlay CSS (the rules are unscoped/token-driven). Task 3 copies gauge classes because those *are* `intel.html`-local, which is a different thing and verified.
 - **Naming consistency:** `renderGauge(summary, intentCounts, kindCounts)` is used identically in Tasks 1 and 3; palette functions (`buildPalette`, `renderPalette`, `movePaletteSel`, `activatePaletteSel`, `closePalette`) are declared and referenced with the same names throughout Task 5.
 - **Removal is ID-driven** (Task 3 Step 1) because `renderTopCountries` uses `querySelector('#top-countries tbody')` and would be missed by an ID-only `getElementById` grep — the trap the spec called out.
+
+---
+
+## Added scope (from the product audit — user approved)
+
+Two credibility fixes found while auditing the product against its stated purpose
+("identity over IP", `PRODUCT.md`). Both ship in Wave 2.
+
+### Task 8: Confidence — replace the fake percentage with named evidence tiers
+
+`Confidence` is displayed as `conf 55%` with the tooltip "our confidence this is a
+brute-forcer", but it can only ever hold one of **four hardcoded constants** —
+`ConfidenceJournalBase 55`, `ConfidenceJournalHighAPH 70`, `ConfidenceCowrieBase 72`,
+`ConfidenceCowriePayload 84` (`internal/actor/builder.go:103-106`) — selected by source
+plus two booleans. It never varies with evidence volume, so the `%` asserts a calibrated
+probability the number does not have. **Decision: relabel as tiers; do NOT invent a
+computed score.** `ProbeScore` (0–100, genuinely computed) remains the numeric signal.
+
+The API keeps its numeric `confidence` field (no breaking change) — this is
+presentation-only.
+
+**Files:**
+- Modify: `internal/web/intel.html` (display string ~line 2108; column tooltip ~line 1370)
+- Modify: `cmd/shardlure/main.go` (`actors` table header + row, ~lines 409-414)
+
+**Interfaces:**
+- Consumes: `models.Actor.Confidence` (int, unchanged) and the four constants above.
+- Produces: a shared mapping from confidence int → tier label, used by both the web UI and the CLI.
+
+- [ ] **Step 1: Add the tier mapping to the actor package**
+
+In `internal/actor/builder.go`, next to the existing confidence constants, add:
+
+```go
+// ConfidenceTier maps the coarse confidence constants to a human label.
+// Confidence is a fixed evidence TIER selected by source + signals, not a
+// calibrated probability — so it is presented as a named tier rather than a
+// percentage, which would imply precision the value does not carry.
+func ConfidenceTier(c int) string {
+	switch {
+	case c >= ConfidenceCowriePayload:
+		return "CONFIRMED"
+	case c >= ConfidenceCowrieBase:
+		return "HIGH"
+	case c >= ConfidenceJournalHighAPH:
+		return "MEDIUM"
+	default:
+		return "LOW"
+	}
+}
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `internal/actor/confidence_tier_test.go`:
+
+```go
+package actor
+
+import "testing"
+
+func TestConfidenceTier(t *testing.T) {
+	cases := []struct {
+		in   int
+		want string
+	}{
+		{ConfidenceJournalBase, "LOW"},        // 55
+		{ConfidenceJournalHighAPH, "MEDIUM"},  // 70
+		{ConfidenceCowrieBase, "HIGH"},        // 72
+		{ConfidenceCowriePayload, "CONFIRMED"}, // 84
+		{0, "LOW"},
+		{100, "CONFIRMED"},
+	}
+	for _, c := range cases {
+		if got := ConfidenceTier(c.in); got != c.want {
+			t.Fatalf("ConfidenceTier(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+```
+
+- [ ] **Step 3: Run the test**
+
+Run: `go test ./internal/actor/ -run TestConfidenceTier -v`
+Expected: PASS (both the function from Step 1 and this test are new, so write Step 1 first if it fails to compile).
+
+- [ ] **Step 4: Use the tier in the CLI**
+
+In `cmd/shardlure/main.go` (`cmdActors`), change the header and row so `CONF` prints the tier:
+
+```go
+	fmt.Fprintln(w, "ACTOR\tIP\tPLAYBOOK\tEVENTS\tUSR\tRATE/h\tLAST\tCONF")
+	for _, a := range actors {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f\t%s\t%s\n",
+			actor.TrimActorPrefix(a.ID), a.PrimaryIP, a.Playbook, a.EventCount, a.UniqueUsers,
+			a.AttemptsPerHour, a.LastSeen.Format(time.RFC3339), actor.ConfidenceTier(a.Confidence))
+	}
+```
+
+(Note the final verb changes from `%d` to `%s`.)
+
+- [ ] **Step 5: Use the tier in the web UI**
+
+In `internal/web/intel.html`, the actor-detail line currently reads:
+
+```js
+    '<span>Probe score</span><strong>' + esc(a.probeScore) + ' · conf ' + esc(a.confidence) + '%</strong>' +
+```
+
+Replace it with a tier label (mirror the Go thresholds so the two never disagree):
+
+```js
+    '<span>Probe score</span><strong>' + esc(a.probeScore) + ' · ' + esc(confTier(a.confidence)) + '</strong>' +
+```
+
+And add the helper near the other small formatters in the same file:
+
+```js
+/* Confidence is a coarse evidence tier (four fixed values by source + signals),
+ * NOT a calibrated probability — show a named tier, never a percentage.
+ * Thresholds mirror actor.ConfidenceTier in internal/actor/builder.go. */
+function confTier(c) {
+  c = Number(c) || 0;
+  if (c >= 84) return 'CONFIRMED';
+  if (c >= 72) return 'HIGH';
+  if (c >= 70) return 'MEDIUM';
+  return 'LOW';
+}
+```
+
+- [ ] **Step 6: Fix the mislabeled column tooltip**
+
+The `probe` column's tooltip currently describes confidence, not probe score:
+
+```html
+              <th class="num" title="our confidence this is a brute-forcer">probe</th>
+```
+
+Change it to describe what the column actually shows:
+
+```html
+              <th class="num" title="ProbeScore 0-100: computed from event mix and attempt rate">probe</th>
+```
+
+- [ ] **Step 7: Verify no percentage remains**
+
+```bash
+grep -n "conf ' + esc(a.confidence)" internal/web/intel.html   # expect no match
+grep -c "confidence) + '%'" internal/web/intel.html            # expect 0
+grep -n "our confidence this is a brute-forcer" internal/web/intel.html  # expect no match
+go test ./internal/actor/ -run TestConfidenceTier
+bash scripts/check-utf8.sh && go vet ./... && go test ./... && bash scripts/ci-web-smoke.sh
+```
+Expected: the three greps find nothing / 0, tier test passes, full gate green.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add internal/actor/builder.go internal/actor/confidence_tier_test.go cmd/shardlure/main.go internal/web/intel.html
+git commit -m "fix(credibility): show confidence as an evidence tier, not a fake percentage"
+```
+
+---
+
+### Task 9: Surface HASSH fingerprint coverage
+
+The product's thesis is identity-over-IP, but that only holds for Cowrie actors that
+actually carry a HASSH — without one, `CowrieActorID` falls back to `cowrie:<ip>`, and
+journal actors are always `journal:<ip>`. Coverage is currently invisible, so an operator
+cannot tell whether the promise is being met on their data. Surface it as a plain metric.
+
+`actors.hassh` already exists (`internal/store/sqlite.go:126`), so this is one cheap
+`COUNT` — no schema change and no new table.
+
+**Files:**
+- Modify: `internal/store/dashboard.go` (new query)
+- Modify: `internal/web/server.go` (`summaryBlock` + populate)
+- Modify: `internal/web/index.html` (summary tile)
+- Test: `internal/store/hassh_coverage_test.go`
+
+**Interfaces:**
+- Produces: `(*Store).HASSHCoverage() (fingerprinted, total int, err error)`; JSON `summary.fingerprinted` alongside the existing `summary.actorCount`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `internal/store/hassh_coverage_test.go`:
+
+```go
+package store
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/networkshard/shardlure/pkg/models"
+)
+
+// TestHASSHCoverage verifies the identity-over-IP coverage metric: how many
+// actors are keyed by behavioural fingerprint vs. total actors.
+func TestHASSHCoverage(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "cov.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	now := time.Now().UTC()
+	agg := []*models.AggregatedActor{
+		{Actor: &models.Actor{ID: "cowrie:aa:bb", Source: models.SourceCowrie, PrimaryIP: "1.1.1.1", HASSH: "aa:bb", FirstSeen: now, LastSeen: now, EventCount: 3}},
+		{Actor: &models.Actor{ID: "cowrie:2.2.2.2", Source: models.SourceCowrie, PrimaryIP: "2.2.2.2", FirstSeen: now, LastSeen: now, EventCount: 2}},
+		{Actor: &models.Actor{ID: "journal:3.3.3.3", Source: models.SourceJournal, PrimaryIP: "3.3.3.3", FirstSeen: now, LastSeen: now, EventCount: 1}},
+	}
+	if err := st.AppendEventsAndUpsertActorsAgg(nil, agg); err != nil {
+		t.Fatal(err)
+	}
+
+	fp, total, err := st.HASSHCoverage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3", total)
+	}
+	if fp != 1 {
+		t.Fatalf("fingerprinted = %d, want 1 (only the hassh-keyed actor)", fp)
+	}
+}
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `go test ./internal/store/ -run TestHASSHCoverage -v`
+Expected: FAIL — `st.HASSHCoverage undefined`.
+
+- [ ] **Step 3: Implement the query**
+
+Append to `internal/store/dashboard.go`:
+
+```go
+// HASSHCoverage returns how many actors are identified by behavioural
+// fingerprint (a non-empty HASSH) versus the total actor count. This is the
+// honest measure of the "identity over IP" premise: actors without a HASSH
+// fall back to IP-keyed identity, so the operator should be able to see what
+// fraction of their actor set is genuinely fingerprinted.
+func (s *Store) HASSHCoverage() (fingerprinted, total int, err error) {
+	row := s.db.QueryRow(`
+SELECT COUNT(*), COALESCE(SUM(CASE WHEN COALESCE(hassh,'') <> '' THEN 1 ELSE 0 END), 0)
+FROM actors`)
+	if err = row.Scan(&total, &fingerprinted); err != nil {
+		return 0, 0, err
+	}
+	return fingerprinted, total, nil
+}
+```
+
+- [ ] **Step 4: Run the test again**
+
+Run: `go test ./internal/store/ -run TestHASSHCoverage -v`
+Expected: PASS.
+
+- [ ] **Step 5: Expose it on the dashboard API**
+
+In `internal/web/server.go`, add a field to `summaryBlock`:
+
+```go
+	Fingerprinted int `json:"fingerprinted"`
+```
+
+In `handleDashboard`, populate it (best-effort — a query error must not break the panel, matching how `countries` is already handled):
+
+```go
+	// Identity-over-IP coverage: actors keyed by HASSH vs. all actors.
+	if fp, _, ferr := s.st.HASSHCoverage(); ferr == nil {
+		resp.Summary.Fingerprinted = fp
+	}
+```
+
+- [ ] **Step 6: Show it in the summary tiles**
+
+In `internal/web/index.html`, add a tile next to the existing ones (the Summary panel holds `#s-events`, `#s-actors`, `#s-ips`, `#s-countries`):
+
+```html
+      <div class="stat" title="Actors identified by behavioural fingerprint (HASSH) rather than IP address">
+        <div class="num" id="s-fingerprinted">0</div>
+        <div class="lbl">FINGERPRINTED</div>
+      </div>
+```
+
+And set it in `refresh()` beside the other tiles:
+
+```js
+  document.getElementById('s-fingerprinted').textContent =
+    (d.summary.fingerprinted || 0) + ' / ' + (d.summary.actorCount || 0);
+```
+
+- [ ] **Step 7: Verify**
+
+```bash
+go test ./internal/store/ -run TestHASSHCoverage
+bash scripts/check-utf8.sh && go vet ./... && go test ./... && bash scripts/ci-web-smoke.sh
+grep -c 's-fingerprinted' internal/web/index.html   # expect 2 (markup + JS)
+```
+Expected: test passes, full gate green, grep returns 2.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add internal/store/dashboard.go internal/store/hassh_coverage_test.go internal/web/server.go internal/web/index.html
+git commit -m "feat(credibility): surface HASSH fingerprint coverage on the dashboard"
+```
