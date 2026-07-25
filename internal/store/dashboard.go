@@ -175,6 +175,21 @@ func (s *Store) topCounts(column string, limit int) ([]CountRow, error) {
 	return out, rows.Err()
 }
 
+// HASSHCoverage returns how many actors are identified by behavioural
+// fingerprint (a non-empty HASSH) versus the total actor count. This is the
+// honest measure of the "identity over IP" premise: actors without a HASSH
+// fall back to IP-keyed identity, so the operator should be able to see what
+// fraction of their actor set is genuinely fingerprinted.
+func (s *Store) HASSHCoverage() (fingerprinted, total int, err error) {
+	row := s.db.QueryRow(`
+SELECT COUNT(*), COALESCE(SUM(CASE WHEN COALESCE(hassh,'') <> '' THEN 1 ELSE 0 END), 0)
+FROM actors`)
+	if err = row.Scan(&total, &fingerprinted); err != nil {
+		return 0, 0, err
+	}
+	return fingerprinted, total, nil
+}
+
 type rowScanner interface {
 	Close() error
 	Next() bool

@@ -274,6 +274,7 @@
       <div class="stat"><div class="num blue" id="s-actors">0</div><div class="label">actors</div></div>
       <div class="stat"><div class="num good" id="s-ips">0</div><div class="label">unique IPs</div></div>
       <div class="stat"><div class="num warn" id="s-countries">0</div><div class="label">countries</div></div>
+      <div class="stat" title="Actors identified by behavioural fingerprint (HASSH) rather than IP address"><div class="num" id="s-fingerprinted">0</div><div class="label">fingerprinted</div></div>
     </div>
   </section>
 
@@ -842,6 +843,8 @@ async function refresh() {
   document.getElementById('s-actors').textContent = fmt(summary.actorCount);
   document.getElementById('s-ips').textContent = fmt(summary.uniqueIps);
   document.getElementById('s-countries').textContent = fmt(summary.countries);
+  document.getElementById('s-fingerprinted').textContent =
+    (summary.fingerprinted || 0) + ' / ' + (summary.actorCount || 0);
   document.getElementById('home-loc').textContent = flag(home.cc) + ' ' + [home.city, home.country].filter(Boolean).join(', ');
   document.getElementById('gen-at').textContent = new Date(d.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   renderGauge(d.summary, d.intentCounts, d.kindCounts);

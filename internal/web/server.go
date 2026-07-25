@@ -804,10 +804,11 @@ type shellSessionRow struct {
 }
 
 type summaryBlock struct {
-	EventCount int `json:"eventCount"`
-	ActorCount int `json:"actorCount"`
-	UniqueIPs  int `json:"uniqueIps"`
-	Countries  int `json:"countries"`
+	EventCount    int `json:"eventCount"`
+	ActorCount    int `json:"actorCount"`
+	UniqueIPs     int `json:"uniqueIps"`
+	Countries     int `json:"countries"`
+	Fingerprinted int `json:"fingerprinted"`
 }
 
 type actorCard struct {
@@ -1054,6 +1055,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp.Summary.UniqueIPs = uniqueIPs
+	// Identity-over-IP coverage: actors keyed by HASSH vs. all actors.
+	if fp, _, ferr := s.st.HASSHCoverage(); ferr == nil {
+		resp.Summary.Fingerprinted = fp
+	}
 	// Countries: distinct CCs across the WHOLE geo cache, not just the top-25
 	// IPs that feed the topCountries chart — otherwise a 2600-IP dataset
 	// spanning 20+ countries reported ~7. This value comes from the shared
