@@ -627,6 +627,24 @@ func (s *Server) RunContext(ctx context.Context) error {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		_, _ = w.Write(themesCSS)
 	})
+	// Brand assets. Unauthenticated like the other static files: a favicon is
+	// requested by the browser before any token is available, and the mark
+	// carries no telemetry. Long cache — these change only on release.
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/x-icon")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(faviconICO)
+	})
+	mux.HandleFunc("/logo.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(logoSVG)
+	})
+	mux.HandleFunc("/logo-180.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(logo180PNG)
+	})
 	mux.HandleFunc("/cobe-globe.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")

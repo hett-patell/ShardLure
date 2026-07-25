@@ -15,6 +15,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ShardLure Intel</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/logo-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Pixelify+Sans:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
@@ -221,6 +224,10 @@
     display: grid; place-items: center;
     font: 700 14px var(--sans); color: #1a0808; margin-bottom: 8px;
   }
+  /* The mark is inlined (not an <img>) so it inherits currentColor and tracks
+     the theme. It sits ON the accent chip, so it paints in the chip's ink
+     colour rather than the accent itself. */
+  .sb-brand .sb-logo { width: 20px; height: 20px; display: block; color: #1a0808; }
   .sb-item {
     width: 34px; height: 34px; border-radius: 4px;
     display: grid; place-items: center; color: var(--dim);
@@ -1114,7 +1121,7 @@
 <div class="shell">
 
 <nav class="sidebar">
-  <div class="sb-brand">S</div>
+  <div class="sb-brand" title="ShardLure"><svg class="sb-logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><path d="M32 4 L54 19 L48 45 L32 60 L16 45 L10 19 Z" fill="currentColor"/><path d="M32 4 L32 60 L16 45 L10 19 Z" fill="#000" opacity="0.30"/><path d="M32 4 L10 19 L16 45 Z" fill="#000" opacity="0.16"/></svg></div>
   <a class="sb-item" href="/" title="Globe"><svg viewBox="0 0 24 24"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg></a>
   <a class="sb-item on" href="/intel" title="Intel Console"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
   <div class="sb-spacer"></div>

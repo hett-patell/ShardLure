@@ -23,6 +23,19 @@ var cobeBootJS []byte
 //go:embed vendor/vis-network.min.js
 var visNetworkJS []byte
 
+// Brand assets. logo.svg is the scalable mark (also inlined into the sidebar
+// chip); favicon.ico carries 7 sizes (16-256) so browsers and bookmark bars pick
+// their own; logo-180.png is the apple-touch / share-card raster.
+//
+//go:embed logo.svg
+var logoSVG []byte
+
+//go:embed favicon.ico
+var faviconICO []byte
+
+//go:embed logo-180.png
+var logo180PNG []byte
+
 //go:embed stickers/*.svg
 var stickerFS embed.FS
 

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ShardLure">
+  <title>ShardLure</title>
+  <!--
+    ShardLure mark: a faceted crystal shard, cut by one hard diagonal.
+
+    Two earlier attempts and why this shape won:
+      1. Outline shard with interior facets and a curled hook. Read well at
+         128px, collapsed into a smudge at 16 to 32px, useless as a favicon.
+      2. Solid silhouette with a long tapered point. Legible small, but the
+         taper made it read as a kite or arrowhead rather than a shard.
+    So: a compact hexagonal crystal (broad shoulders, short blunt point) so the
+    outline alone says "shard", plus exactly ONE negative space facet, the only
+    interior detail that survives downscaling.
+
+    Fill uses a CSS custom property with a hardcoded fallback, so the mark
+    follows the active theme when inlined, works standalone as /logo.svg, and
+    rasterises cleanly into favicon.ico. The facets are semi transparent BLACK
+    rather than the background colour, so the split stays visible on any
+    backdrop, including the chartreuse sidebar chip where a background coloured
+    cut vanished entirely.
+
+    NOTE: keep double hyphens out of this comment. An earlier revision wrote the
+    property names with their leading dashes here and silently broke the file,
+    since a double hyphen is illegal inside an XML comment.
+  -->
+  <path d="M32 4 L54 19 L48 45 L32 60 L16 45 L10 19 Z"
+        fill="var(--logo-mark, #d1fe17)"/>
+  <path d="M32 4 L32 60 L16 45 L10 19 Z" fill="#000" opacity="0.30"/>
+  <path d="M32 4 L10 19 L16 45 Z" fill="#000" opacity="0.16"/>
+</svg>
