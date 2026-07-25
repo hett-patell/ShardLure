@@ -821,7 +821,7 @@
     display: inline-block; width: 10px; height: 10px;
     border-radius: 50%; margin-right: 4px;
   }
-  .lg-actor { background: #d02828; }
+  .lg-actor { background: var(--accent); }
   .lg-ip    { background: #c89828; }
   .lg-hassh { background: #d87030; }
   .lg-user  { background: #48b878; }
@@ -1998,7 +1998,7 @@ const rel = function(ts) {
 function heatmapPalette() {
   var cs = getComputedStyle(document.documentElement);
   var g = function (k, fb) { return (cs.getPropertyValue(k) || fb).trim(); };
-  var accent = g('--accent', '#d02828');
+  var accent = g('--accent', '#d1fe17');
   var accent2 = g('--accent-2', '#c89828');
   var good = g('--good', '#48b878');
   var warn = g('--warn', '#c89828');
@@ -2021,10 +2021,10 @@ function heatmapPalette() {
   };
 }
 const kindColors = {
-      invalid_user:'#d02828', failed_password:'#d02828', failed_publickey:'#d87030',
+      invalid_user:'#d1fe17', failed_password:'#d1fe17', failed_publickey:'#d87030',
       accepted:'#c89828', connect:'#a878c0', command:'#48b878',
       file_upload:'#c89828', file_download:'#c89828', tunnel:'#a878c0',
-      auth_fail:'#d02828', input:'#48b878', default:'#907068'
+      auth_fail:'#d1fe17', input:'#48b878', default:'#907068'
     };
 const flag = function(cc) {
   if (!cc || cc.length !== 2 || !/^[A-Za-z]{2}$/.test(cc)) return '';
@@ -4066,7 +4066,7 @@ window.__shardlureOnTheme = (function (prev) {
 
 
 const NODE_STYLE = {
-  actor: { color: '#d02828', shape: 'dot' },
+  actor: { shape: 'dot' },
   ip:    { color: '#c89828', shape: 'square' },
   hassh: { color: '#d87030', shape: 'diamond' },
   user:  { color: '#48b878', shape: 'triangle' },
@@ -4106,7 +4106,7 @@ function isLightGraphTheme() {
 function graphThemeColors() {
   var cs = getComputedStyle(document.documentElement);
   var text = (cs.getPropertyValue('--text') || '#e8dcd8').trim();
-  var accent = (cs.getPropertyValue('--accent') || '#d02828').trim();
+  var accent = (cs.getPropertyValue('--accent') || '#d1fe17').trim();
   var bg = (cs.getPropertyValue('--bg') || '#0a0608').trim();
   var line = (cs.getPropertyValue('--line') || 'rgba(200,120,100,0.15)').trim();
   var light = isLightGraphTheme();
@@ -4149,16 +4149,19 @@ function renderGraph(data) {
   var tc = graphThemeColors();
   const nodes = data.nodes.map(function(n) {
     const style = NODE_STYLE[n.kind] || NODE_STYLE.user;
-    var border = tc.nodeBorder || style.color;
+    // actor nodes read the accent colour at runtime instead of a hardcoded
+    // literal, so the graph tracks the active theme (see graphThemeColors).
+    var color = style.color || tc.accent;
+    var border = tc.nodeBorder || color;
     return {
       id: n.id,
       label: graphNodeLabel(n),
       shape: style.shape,
       color: {
-        background: style.color,
+        background: color,
         border: border,
-        highlight: { background: style.color, border: tc.accent },
-        hover: { background: style.color, border: tc.accent },
+        highlight: { background: color, border: tc.accent },
+        hover: { background: color, border: tc.accent },
       },
       font: {
         color: tc.text,
@@ -4523,6 +4526,47 @@ function renderGauge(summary, intentCounts, kindCounts) {
     '<div class="gb-row" style="grid-column:1/-1;border-top:1px solid var(--line);padding-top:3px;margin-top:3px"><span>'+fmt(ev)+' events · '+fmt(ac)+' actors · '+fmt(ips)+' IPs</span><span class="gb-val" style="color:'+color+'">'+score+'</span></div>';
 }
 
+/* Radar bars ramp from --warn (slow probes) to --accent (fastest probes) so the
+ * widget tracks the active theme. Previously these channels were hardcoded to
+ * ramp amber -> Dragon red, which left the radar red in every theme after the
+ * Dragon theme was removed. Resolved per call: the theme can change at runtime. */
+function radarRampColor(h) {
+  var cs = getComputedStyle(document.documentElement);
+  var lo = cssRGB(cs.getPropertyValue('--warn'), [200, 152, 40]);
+  var hi = cssRGB(cs.getPropertyValue('--accent'), [208, 40, 40]);
+  var r = Math.round(hi[0] * h + lo[0] * (1 - h));
+  var g = Math.round(hi[1] * h + lo[1] * (1 - h));
+  var b = Math.round(hi[2] * h + lo[2] * (1 - h));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+/* Parse a CSS colour value into [r,g,b]. Handles #rgb, #rrggbb and rgb()/rgba();
+ * returns the supplied fallback for anything else (e.g. a colour-mix() the
+ * browser hasn't resolved in this context). */
+function cssRGB(value, fallback) {
+  var v = (value || '').trim();
+  if (!v) return fallback;
+  var m = v.match(/^#([0-9a-f]{3})$/i);
+  if (m) {
+    return [
+      parseInt(m[1][0] + m[1][0], 16),
+      parseInt(m[1][1] + m[1][1], 16),
+      parseInt(m[1][2] + m[1][2], 16),
+    ];
+  }
+  m = v.match(/^#([0-9a-f]{6})$/i);
+  if (m) {
+    return [
+      parseInt(m[1].slice(0, 2), 16),
+      parseInt(m[1].slice(2, 4), 16),
+      parseInt(m[1].slice(4, 6), 16),
+    ];
+  }
+  m = v.match(/^rgba?\(\s*([0-9.]+)[\s,]+([0-9.]+)[\s,]+([0-9.]+)/i);
+  if (m) return [Math.round(+m[1]), Math.round(+m[2]), Math.round(+m[3])];
+  return fallback;
+}
+
 function renderRadar(rows) {
   var el=document.getElementById('radar-bars');
   if(!el)return;
@@ -4535,8 +4579,7 @@ function renderRadar(rows) {
   el.innerHTML=sorted.map(function(a){
     var p=Math.round(a.rateHour/mx*100);
     var h=a.rateHour/mx;
-    var cr=Math.round(208*h+200*(1-h)),cg=Math.round(40*h+152*(1-h)),cb=40;
-    var fc='rgb('+cr+','+cg+','+cb+')';
+    var fc = radarRampColor(h);
     return '<div class="radar-row"><span class="radar-ip">'+esc(a.ip)+'</span><span class="radar-track"><span class="radar-fill" style="width:'+p+'%;background:'+fc+'"></span></span><span class="radar-rate" style="color:'+fc+'">'+Math.round(a.rateHour)+'/h</span></div>';
   }).join('');
 }
