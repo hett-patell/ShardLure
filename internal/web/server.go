@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/hostsvc"
 	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
@@ -63,6 +64,9 @@ type Server struct {
 	abuseRewindowDefault   time.Duration
 	abuseCommentDefault    string
 	abuseAdmin             *netmatch.Set
+	// cowrieUnit names the sibling systemd unit running the honeypot. Used only
+	// to read its uptime for the dashboard; never to control it.
+	cowrieUnit string
 	// startedAt marks when this Server was constructed; surfaced as the
 	// dashboard "uptime" so the operator can tell at a glance how long the
 	// live process has been running (and spot an unexpected restart).
@@ -156,6 +160,12 @@ type summaryStats struct {
 	// in here so it shares the same statsTTL memoization as the other aggregates.
 	Fingerprinted    int
 	FingerprintTotal int
+	// CowrieUptime is how long the sibling Cowrie unit has been active, and
+	// CowrieUp reports whether that could be determined at all (false on a
+	// non-systemd host, or if the unit has never started). Cached with the rest
+	// so the systemctl exec happens at most once per statsTTL, never per poll.
+	CowrieUptime time.Duration
+	CowrieUp     bool
 	// Sessions is the ALL-TIME distinct cowrie session count, for the Summary
 	// tile. Deliberately not len(RecentShellSessions): that slice is LIMITed to
 	// 30, so the tile would freeze at "30". Cached here rather than queried in
@@ -224,6 +234,9 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	fingerprinted, fingerprintTotal, _ := s.st.HASSHCoverage()
 	// Best-effort like the others: 0 on error keeps the panel alive.
 	sessionCount, _ := s.st.CountSessions()
+	// Read-only liveness of the sibling honeypot unit. Best-effort: an unknown
+	// value simply hides the readout rather than failing the cache refresh.
+	cowrieUptime, cowrieUp := hostsvc.Uptime(context.Background(), s.cowrieUnit, time.Now())
 	s.statsCached = &summaryStats{
 		Events:           ec,
 		Actors:           ac,
@@ -240,6 +253,8 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 		Fingerprinted:    fingerprinted,
 		FingerprintTotal: fingerprintTotal,
 		Sessions:         sessionCount,
+		CowrieUptime:     cowrieUptime,
+		CowrieUp:         cowrieUp,
 	}
 	s.statsAt = time.Now()
 	return s.statsCached, nil
@@ -368,13 +383,17 @@ func (s *Server) topCountriesCached() []topCountryRow {
 }
 
 type Options struct {
-	HomeLat             float64
-	HomeLon             float64
-	HomeCity            string
-	HomeCountry         string
-	HomeCC              string
-	GeoEnabled          bool
-	GeoInsecureHTTP     bool
+	HomeLat         float64
+	HomeLon         float64
+	HomeCity        string
+	HomeCountry     string
+	HomeCC          string
+	GeoEnabled      bool
+	GeoInsecureHTTP bool
+	// CowrieUnit is the systemd unit running Cowrie, read ONLY to report the
+	// honeypot's uptime on the dashboard. Empty falls back to "cowrie"; a host
+	// without systemd simply reports uptime as unknown.
+	CowrieUnit          string
 	BazaarAPIKey        string
 	BazaarEndpoint      string
 	BazaarTags          []string
@@ -416,6 +435,10 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	var firstOpt Options
 	if len(opts) > 0 {
 		firstOpt = opts[0]
+	}
+	cowrieUnit := firstOpt.CowrieUnit
+	if cowrieUnit == "" {
+		cowrieUnit = "cowrie"
 	}
 	// Secrets (bazaar/abuseipdb keys, dashboard token) are NOT resolved here
 	// anymore — they're read live from the keystore at each use site, which
@@ -469,6 +492,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		abuseRewindowDefault:   abuseRewindow,
 		abuseCommentDefault:    firstOpt.AbuseComment,
 		abuseAdmin:             netmatch.New(firstOpt.AdminIPs),
+		cowrieUnit:             cowrieUnit,
 		startedAt:              time.Now(),
 	}
 }
@@ -839,6 +863,10 @@ type summaryBlock struct {
 	// SessionCount is all-time distinct cowrie sessions (see summaryStats.Sessions
 	// for why this is not the length of the capped `sessions` slice below).
 	SessionCount int `json:"sessionCount"`
+	// CowrieUptimeSeconds is how long the sibling Cowrie systemd unit has been
+	// active. -1 means "unknown" (no systemd, or the unit never started), which
+	// the UI renders as a dash rather than inventing a zero.
+	CowrieUptimeSeconds int64 `json:"cowrieUptimeSeconds"`
 }
 
 type actorCard struct {
@@ -940,6 +968,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// error serves last-good rather than 500ing the whole dashboard.
 	hourly, shellSessions := s.dashExtraCachedValues()
 	var ec, ac, uniqueIPs, countries, fingerprinted, fingerprintTotal, sessionCount int
+	cowrieUptime := int64(-1) // -1 = unknown; never silently render 0
 	var topIPs, topUsers, topCommands []store.CountRow
 	var intentCounts, kindCounts []labelCountRow
 	if stats, err := s.summaryStatsCached(); err == nil {
@@ -947,6 +976,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		topIPs, topUsers, topCommands = stats.TopIPs, stats.TopUsers, stats.TopCommands
 		fingerprinted, fingerprintTotal = stats.Fingerprinted, stats.FingerprintTotal
 		sessionCount = stats.Sessions
+		if stats.CowrieUp {
+			cowrieUptime = int64(stats.CowrieUptime.Seconds())
+		}
 		// Already computed and cached by summaryStatsCached — no extra query.
 		// The globe dashboard's threat gauge needs both to score intent mix.
 		for _, k := range stats.IntentCounts {
@@ -1099,6 +1131,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	resp.Summary.Fingerprinted = fingerprinted
 	resp.Summary.FingerprintTotal = fingerprintTotal
 	resp.Summary.SessionCount = sessionCount
+	resp.Summary.CowrieUptimeSeconds = cowrieUptime
 	// Countries: distinct CCs across the WHOLE geo cache, not just the top-25
 	// IPs that feed the topCountries chart — otherwise a 2600-IP dataset
 	// spanning 20+ countries reported ~7. This value comes from the shared

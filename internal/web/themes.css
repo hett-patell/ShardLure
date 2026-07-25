@@ -583,7 +583,7 @@ html[data-theme="signal"][data-mode="light"] .row {
   position: relative;
   width: min(72vh, 640px);
   height: min(72vh, 640px);
-  max-width: calc(100vw - 720px);
+  max-width: calc(100vw - 744px);
   max-height: calc(100vh - 80px);
 }
 #cobe {

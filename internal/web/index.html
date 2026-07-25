@@ -57,12 +57,16 @@
     height: 100vh; overflow-y: auto; overflow-x: hidden;
     pointer-events: none;
   }
-  .rail.left  { left: 0; }
-  /* Fill the left rail's dead space: the last panel absorbs the remaining
-     height instead of leaving a gap under the gauge. Content-bearing panels
-     keep their natural size (flex: 0 0 auto is the .panel default), so only
-     the trailing one stretches. */
-  .rail.left > .panel:last-child { flex: 1 1 auto; }
+  /* Left rail is a touch wider than the right: it carries the numeric readouts
+     (summary grid, gauge breakdown, honeypot status) which need the horizontal
+     room, while the right rail holds a narrow feed. */
+  .rail.left  { left: 0; width: 344px; }
+  /* Let the trailing panel absorb any leftover rail height, but never force it:
+     `flex: 1 1 auto` with min-height:auto grows into free space while still
+     shrinking to its content when the rail is full (with the Honeypot panel
+     added there is little slack, and a forced stretch clipped the gauge
+     breakdown off the bottom). */
+  .rail.left > .panel:last-child { flex: 1 1 auto; min-height: -moz-fit-content; min-height: fit-content; }
   .rail.right { right: 0; }
   .rail > * { pointer-events: auto; }
 
@@ -128,9 +132,17 @@
      fills the free height, and the arc + breakdown space out evenly. */
   .rail.left > .panel:last-child { display: flex; flex-direction: column; }
   .rail.left > .panel:last-child > .gauge-outer { flex: 1 1 auto; justify-content: space-evenly; }
-  .gauge-outer { display: flex; flex-direction: column; align-items: center; padding: 4px 0; }
-  /* Let the arc grow with the panel but stay a sane size on short viewports. */
-  .gauge-svg { width: 100%; max-width: 260px; height: auto; }
+  .hp-grid { display: grid; gap: 6px; font-family: var(--mono); font-size: 11.5px; }
+  .hp-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .hp-k { color: var(--dim); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .hp-v { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+  .hp-v.up { color: var(--good); }
+  .hp-v.down { color: var(--danger, var(--accent)); }
+  .hp-v.stale { color: var(--warn); }
+  .gauge-outer { display: flex; flex-direction: column; align-items: center; padding: 0; }
+  /* Sized so the four left-rail panels fit a 900px viewport without scrolling.
+     Was 260px when the rail had slack; the Honeypot panel took that room. */
+  .gauge-svg { width: 100%; max-width: 210px; height: auto; }
   .gauge-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font: 10px var(--mono); color: var(--dim); margin-top: 8px; width: 100%; }
   .gauge-breakdown .gb-row { display: flex; justify-content: space-between; }
   .gauge-breakdown .gb-val { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -289,6 +301,16 @@
       <div class="stat"><div class="num warn" id="s-countries">0</div><div class="label">countries</div></div>
       <div class="stat" title="Share of Cowrie telemetry carrying a client fingerprint (HASSH) — sshd/journal events cannot carry one"><div class="num" id="s-fingerprinted">0</div><div class="label">fingerprinted</div></div>
       <div class="stat" title="Cowrie shell sessions observed (attackers who got far enough to open a shell)"><div class="num" id="s-sessions">0</div><div class="label">sessions</div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Honeypot</h2>
+    <div class="hp-grid">
+      <div class="hp-row"><span class="hp-k">cowrie</span><span class="hp-v" id="hp-state">—</span></div>
+      <div class="hp-row"><span class="hp-k">uptime</span><span class="hp-v" id="hp-uptime">—</span></div>
+      <div class="hp-row"><span class="hp-k">last event</span><span class="hp-v" id="hp-last">—</span></div>
+      <div class="hp-row"><span class="hp-k">ingest</span><span class="hp-v" id="hp-ingest">—</span></div>
     </div>
   </section>
 
@@ -669,6 +691,17 @@ function renderGauge(summary, intentCounts, kindCounts) {
 /* ==== Theme globe overlays (Sprite stickers / Meridian sats) ==== */
 var STICKER_CYCLE = ['skull.svg', 'bolt.svg', 'bug.svg', 'controller.svg', 'shield.svg'];
 
+/* Compact duration: 3d 15h / 2h 14m / 47s. Used by the Honeypot panel. */
+function dur(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  var d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+  var m = Math.floor((sec % 3600) / 60), s2 = sec % 60;
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + s2 + 's';
+  return s2 + 's';
+}
+
 function themeAccentRGB() {
   var theme = currentThemeId();
   if (theme === 'meridian') return { r: 13, g: 92, b: 99, hex: '#0d5c63', hex2: '#a67c2d', text: '#1a2332', bg: 'rgba(244,246,248,0.96)', line: '#c5ccd6' };
@@ -868,6 +901,37 @@ async function refresh() {
   // d.sessions.length — that slice is server-capped at 30, so the tile would
   // read a permanent "30" on any busy honeypot.
   document.getElementById('s-sessions').textContent = fmt(summary.sessionCount || 0);
+
+  // Honeypot panel. Cowrie runs as a SEPARATE systemd unit from this daemon, so
+  // its uptime is read read-only from systemd (cowrieUptimeSeconds); -1 means
+  // "could not determine" (no systemd, or unit never started) and renders as a
+  // dash rather than a fake zero. "last event" is the independent liveness
+  // signal that matters: a Cowrie that is 'up' but not logging is the real
+  // failure mode, and it comes from the newest ingested event, not the process.
+  var up = Number(summary.cowrieUptimeSeconds);
+  var stEl = document.getElementById('hp-state');
+  var upEl = document.getElementById('hp-uptime');
+  if (Number.isFinite(up) && up >= 0) {
+    stEl.textContent = 'active';
+    stEl.className = 'hp-v up';
+    upEl.textContent = dur(up);
+  } else {
+    stEl.textContent = 'unknown';
+    stEl.className = 'hp-v';
+    upEl.textContent = '—';
+  }
+  var newest = (d.recent && d.recent.length) ? d.recent[0] : null;
+  var lastEl = document.getElementById('hp-last');
+  if (newest && newest.ts) {
+    var age = Math.max(0, Math.round((Date.now() - new Date(newest.ts).getTime()) / 1000));
+    lastEl.textContent = dur(age) + ' ago';
+    // Cowrie sees traffic constantly; minutes of silence is worth flagging.
+    lastEl.className = 'hp-v ' + (age > 900 ? 'stale' : 'up');
+  } else {
+    lastEl.textContent = '—';
+    lastEl.className = 'hp-v';
+  }
+  document.getElementById('hp-ingest').textContent = fmt(summary.eventCount || 0) + ' ev';
   document.getElementById('home-loc').textContent = flag(home.cc) + ' ' + [home.city, home.country].filter(Boolean).join(', ');
   document.getElementById('gen-at').textContent = new Date(d.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   renderGauge(d.summary, d.intentCounts, d.kindCounts);

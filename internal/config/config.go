@@ -35,6 +35,12 @@ type Config struct {
 	Cowrie struct {
 		Home    string `yaml:"home"`
 		JSONLog string `yaml:"json_log"`
+		// Unit is the systemd unit running Cowrie. Read-only: it is used solely
+		// to report the honeypot's uptime on the dashboard (systemctl show
+		// ActiveEnterTimestamp). ShardLure never starts/stops/reconfigures it —
+		// the two units stay independent, with the JSON log as their only data
+		// contract. Empty disables the uptime readout.
+		Unit string `yaml:"unit"`
 	} `yaml:"cowrie"`
 
 	Capture struct {
@@ -142,6 +148,7 @@ func Default() Config {
 	c.Dashboard.HomeCountry = "India"
 	c.Dashboard.HomeCC = "IN"
 	c.Cowrie.Home = filepath.Join(dir, "cowrie")
+	c.Cowrie.Unit = "cowrie"
 	c.Cowrie.JSONLog = filepath.Join(dir, "cowrie", "var", "log", "cowrie", "cowrie.json")
 	c.Capture.Enabled = true
 	c.Capture.QuarantineFetch = true

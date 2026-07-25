@@ -338,6 +338,8 @@ func webOptions(cfg config.Config) web.Options {
 		HomeCC:          cfg.Dashboard.HomeCC,
 		GeoEnabled:      cfg.GeoIP.Enabled,
 		GeoInsecureHTTP: cfg.GeoIP.InsecureHTTP,
+		// Read-only: used to show the honeypot's uptime on the dashboard.
+		CowrieUnit:          cfg.Cowrie.Unit,
 		BazaarAPIKey:        cfg.Intel.Bazaar.APIKey,
 		BazaarEndpoint:      cfg.Intel.Bazaar.Endpoint,
 		BazaarTags:          cfg.Intel.Bazaar.Tags,
