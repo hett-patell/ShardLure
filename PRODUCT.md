@@ -31,7 +31,7 @@ Success looks like a single operator having full situational awareness of their 
 - **Enterprise SIEM dashboards** (Splunk, QRadar, Sentinel): committee-designed, enterprise-blue, 47 tabs of noise. ShardLure is one operator, one screen, full picture.
 - **Startup SaaS security tools** (Snyk, Cloudflare dashboard): rounded cards, cheerful illustrations, gradient CTAs. Wrong register entirely — this tool watches malware, not uptime.
 - **Gamified hacking platforms** (HackTheBox neon-green, TryHackMe badges): XP bars and achievement unlocks trivialize what ShardLure takes seriously. The data is real threat intel, not a capture-the-flag arcade.
-- **Generic dark-mode dev tools**: VS Code / Linear clones with indigo accents and Inter everywhere. ShardLure's darkness is cinematic and warm (Dragon's blood-red-on-near-black), not office-neutral.
+- **Generic dark-mode dev tools**: VS Code / Linear clones with indigo accents and Inter everywhere. ShardLure's palettes are deliberate: Signal is high-contrast dark ops (with a light mode), Meridian is cool slate cartography, and Sprite is a chunky pixel console.
 
 ## Design Principles
 

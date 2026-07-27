@@ -53,11 +53,11 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Command palette:** the search box in the intel console is a real lookup, not a row filter — type any IP, actor, session id, command, or payload hash and get grouped, actionable results (jump to an actor, enrich an IP, open a session transcript or payload) with arrow-key navigation. It searches the API, so it finds records that aren't on the current tab.
 - **Fingerprint coverage, stated honestly:** the globe's FINGERPRINTED tile is the share of Cowrie telemetry carrying a HASSH — event-weighted, because counting actor rows inverts the number (clustering collapses 784 IPs into one row, so successful clustering made coverage *look* worse). journald events are excluded from the denominator: sshd logs cannot carry a fingerprint at all.
 - **Honeypot status panel:** Cowrie's real uptime read from systemd (`ActiveEnterTimestamp`), plus seconds-since-last-event and total ingested. Strictly read-only — ShardLure never starts, stops, or reconfigures the Cowrie unit; the two systemd units stay independent with the JSON log as their only contract. On a host without systemd it reports `unknown` rather than inventing a number, and the last-event signal still works (a Cowrie that is "up" but not logging is the real failure mode).
-- **Dashboard settings panel:** configure API keys, theme, home location, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save.
+- **Dashboard settings panel:** configure API keys, theme, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save. Home coordinates remain in YAML under `dashboard.home_*` and are not edited by Settings.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
 - **AbuseIPDB reporting:** report confirmed brute-forcers back to AbuseIPDB from the dashboard (Report All) or CLI (`report abuseipdb`). Vetting gate enforces probe-score floor, private/admin IP exclusion, and 24h re-report dedup.
 - **Seven-provider IP enrichment:** look up any attacker IP against AbuseIPDB, VirusTotal, GreyNoise, Shodan, AlienVault OTX, IPQualityScore, and IPinfo in parallel — normalized verdict + score + tags, cached 24h. Two work with no API key.
-- **Runtime keystore:** API keys and settings live in SQLite, editable from the settings panel. DB wins over env vars; env vars win over config file. No restart needed.
+- **Runtime keystore:** API keys and appearance settings live in SQLite, editable from the settings panel. DB wins over env vars; env vars win over config file. No restart needed.
 - **Tunnel tracking:** captures and aggregates `direct-tcpip` forwarding attempts (attacker proxy pivots) — powers the "Proxy Targets" widget and tunnel IOC export.
 - **Persistent geo cache:** IP geolocation results are stored in SQLite and survive restarts. No more "resolving..." on every page load.
 
@@ -677,7 +677,7 @@ sudo userdel -r cowrie
 - [x] Cowrie JSON ingest (HASSH, commands, payloads)
 - [x] Stealth persona and bait file planting
 - [x] Live journal tail and Cowrie append ingest
-- [x] Configurable dashboard home point
+- [x] Configurable dashboard home point via YAML (`dashboard.home_*`)
 - [x] Incremental Cowrie ingest (offset + inode tracking, no more O(file) per tick)
 - [x] Idempotent journal append (dedup against existing events)
 - [x] Graceful shutdown on SIGINT/SIGTERM (so Ctrl-C is no longer a war crime)
@@ -694,7 +694,7 @@ sudo userdel -r cowrie
 - [x] Full-window analytics — MITRE/TTP/IOC/graph/deobf cover the whole selected window (not a recent sample), with capped widgets disclosing "N of M"
 - [x] Multi-theme support (Signal, Meridian, Sprite) with live switching
 - [x] 3D Cobe globe with WebGL arcs, drag rotation, and proper listener lifecycle
-- [x] Dashboard settings panel (API keys, theme, home location — masked + connection-tested)
+- [x] Dashboard settings panel (API keys and theme — masked + connection-tested; home remains YAML)
 - [x] Runtime keystore (DB > env > config precedence, no restart needed)
 - [x] AbuseIPDB outbound reporting (CLI + dashboard Report All, vetting gate, 24h dedup)
 - [x] Tunnel/proxy target tracking (`direct-tcpip` aggregation + red-team widget)

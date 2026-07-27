@@ -34,6 +34,16 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          unformatted="$(git ls-files -z -- '*.go' | xargs -0 -r gofmt -l)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'Go files need gofmt:\n'
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
       - name: Download modules
         run: go mod download
 

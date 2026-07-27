@@ -10,8 +10,8 @@ set -euo pipefail
 # Options:
 #   --tag v1            Release tag (default: latest, detected via GitHub API)
 #   --no-cowrie         Skip cowrie honeypot installation
-#   --cowrie-branch BR  Branch/tag to clone cowrie from (default: auto-detect
-#                       remote HEAD, falling back to main then master)
+#   --cowrie-branch REF Explicit Cowrie branch/tag/commit override. The ref is
+#                       resolved once to a commit (default: this release's pin)
 #   --honeypot-port 22  SSH port for the honeypot listener (default: 2222, admin SSH stays on 22)
 #   --dash-port 8080    Dashboard port (default: 8080)
 #   --data-dir /var/lib/shardlure  Data directory (default: /var/lib/shardlure)
@@ -33,9 +33,210 @@ ARCH_MAP[x86_64]=$ABIN
 ARCH_MAP[amd64]=$ABIN
 ARCH_MAP[aarch64]=shardlure-linux-arm64
 ARCH_MAP[arm64]=shardlure-linux-arm64
+ARCH_MAP[armv7l]=shardlure-linux-armv7
+ARCH_MAP[armhf]=shardlure-linux-armv7
 
 log() { printf '\033[1;36m[shardlure-install]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[shardlure-install]\033[0m %s\n' "$*" >&2; exit 1; }
+
+initialize_data_paths() {
+  local data_dir_physical
+
+  if ! mkdir -p -- "$DATA_DIR"; then
+    err "could not create data directory: $DATA_DIR"
+  fi
+  if ! data_dir_physical=$(cd -P -- "$DATA_DIR" && pwd -P); then
+    err "could not resolve data directory: $DATA_DIR"
+  fi
+  DATA_DIR="$data_dir_physical"
+  COWRIE_HOME="$DATA_DIR/cowrie"
+  COWRIE_LOG="$COWRIE_HOME/var/log/cowrie/cowrie.json"
+  if ! mkdir -p -- "$DATA_DIR/captures" "$DATA_DIR/evidence" "$DATA_DIR/payloads"; then
+    err "could not create data subdirectories beneath $DATA_DIR"
+  fi
+}
+
+resolve_cowrie_commit() {
+  local pin_lines pin_bytes ref_output
+  local direct_commit="" direct_ref=""
+  local peeled_commit="" peeled_ref=""
+  local override_commit=""
+
+  COWRIE_REPO="${COWRIE_REPO:-https://github.com/cowrie/cowrie.git}"
+  if [[ -z "$COWRIE_BRANCH" ]]; then
+    # install.sh is commonly piped directly from GitHub, so the pin cannot
+    # be read from a local checkout. Fetch it from the exact ShardLure release
+    # selected above; never fall back to Cowrie's moving HEAD/main/master.
+    COWRIE_PIN_URL="https://raw.githubusercontent.com/$REPO/$TAG/install/cowrie.commit"
+    if ! curl -fsSL "$COWRIE_PIN_URL" -o "$DL_COWRIE_PIN"; then
+      err "could not download the Cowrie pin for ShardLure $TAG from $COWRIE_PIN_URL"
+    fi
+    pin_lines=$(wc -l < "$DL_COWRIE_PIN")
+    pin_bytes=$(wc -c < "$DL_COWRIE_PIN")
+    COWRIE_COMMIT="$(<"$DL_COWRIE_PIN")"
+    if [[ "$pin_lines" -ne 1 || "$pin_bytes" -ne 41 || ! "$COWRIE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+      err "invalid Cowrie pin at $COWRIE_PIN_URL: expected exactly one lowercase 40-hex SHA"
+    fi
+    return
+  fi
+
+  # A literal SHA is already immutable. Branch/tag overrides are accepted
+  # only when the remote resolves them unambiguously once; annotated tags use
+  # their single peeled commit rather than the tag object.
+  if [[ "$COWRIE_BRANCH" =~ ^[0-9a-f]{40}$ ]]; then
+    override_commit="$COWRIE_BRANCH"
+  else
+    if ! ref_output=$(git ls-remote "$COWRIE_REPO" "$COWRIE_BRANCH" "${COWRIE_BRANCH}^{}" 2>/dev/null); then
+      err "Cowrie override '$COWRIE_BRANCH' could not be resolved from $COWRIE_REPO"
+    fi
+    if [[ -z "$ref_output" ]]; then
+      err "Cowrie override '$COWRIE_BRANCH' must resolve to exactly one commit"
+    fi
+
+    while IFS=$'\t' read -r candidate_commit candidate_ref; do
+      if [[ ! "$candidate_commit" =~ ^[0-9a-f]{40}$ || -z "$candidate_ref" ]]; then
+        err "Cowrie override '$COWRIE_BRANCH' returned an invalid remote ref"
+      fi
+      if [[ "$candidate_ref" == *'^{}' ]]; then
+        if [[ -n "$peeled_commit" ]]; then
+          err "Cowrie override '$COWRIE_BRANCH' must resolve to exactly one commit"
+        fi
+        peeled_commit="$candidate_commit"
+        peeled_ref="$candidate_ref"
+      else
+        if [[ -n "$direct_commit" ]]; then
+          err "Cowrie override '$COWRIE_BRANCH' must resolve to exactly one commit"
+        fi
+        direct_commit="$candidate_commit"
+        direct_ref="$candidate_ref"
+      fi
+    done <<< "$ref_output"
+
+    if [[ -n "$peeled_commit" ]]; then
+      if [[ -z "$direct_ref" || "$peeled_ref" != "${direct_ref}^{}" ]]; then
+        err "Cowrie override '$COWRIE_BRANCH' must resolve to exactly one commit"
+      fi
+      override_commit="$peeled_commit"
+    elif [[ -n "$direct_commit" ]]; then
+      override_commit="$direct_commit"
+    else
+      err "Cowrie override '$COWRIE_BRANCH' must resolve to exactly one commit"
+    fi
+  fi
+  COWRIE_OVERRIDE_COMMIT="$override_commit"
+  COWRIE_COMMIT="$COWRIE_OVERRIDE_COMMIT"
+}
+
+validate_existing_cowrie_checkout() {
+  local COWRIE_EXISTING_COMMIT
+  local cowrie_safe_directory
+  if [[ -L "$COWRIE_HOME" ]]; then
+    err "Cowrie target must not be a symlink: $COWRIE_HOME"
+  fi
+  if ! cowrie_safe_directory=$(cd -P -- "$COWRIE_HOME" && pwd -P); then
+    err "could not read Cowrie HEAD at $COWRIE_HOME; refusing to alter the existing checkout"
+  fi
+  if ! COWRIE_EXISTING_COMMIT=$(git -c safe.directory="$cowrie_safe_directory" -C "$cowrie_safe_directory" rev-parse --verify HEAD 2>/dev/null); then
+    err "could not read Cowrie HEAD at $COWRIE_HOME; refusing to alter the existing checkout"
+  fi
+  if [[ "$COWRIE_EXISTING_COMMIT" != "$COWRIE_COMMIT" ]]; then
+    err "existing Cowrie commit $COWRIE_EXISTING_COMMIT does not match required commit $COWRIE_COMMIT; refusing to fetch, reset, or delete it"
+  fi
+  COWRIE_HOME="$cowrie_safe_directory"
+  log "cowrie already matches required commit $COWRIE_COMMIT; preserving existing checkout and dirty files; installer-managed cowrie.cfg may still be updated"
+}
+
+checkout_fresh_cowrie() {
+  local cowrie_parent
+  local cowrie_parent_physical
+  local cowrie_parent_identity
+  local cowrie_parent_current
+  local cowrie_parent_current_identity
+  local cowrie_final_name
+  local cowrie_final_path
+  local cowrie_staging
+  local cowrie_staging_identity
+  local cowrie_staging_current_identity
+  local cowrie_published_identity
+  local COWRIE_CHECKED_OUT_COMMIT
+
+  cowrie_parent=$(dirname -- "$COWRIE_HOME")
+  if [[ ! -d "$cowrie_parent" ]]; then
+    err "cowrie target parent does not exist: $cowrie_parent"
+  fi
+  if ! cowrie_parent_physical=$(cd -P -- "$cowrie_parent" && pwd -P); then
+    err "could not resolve Cowrie target parent: $cowrie_parent"
+  fi
+  if ! cowrie_parent_identity=$(stat -c '%d:%i' -- "$cowrie_parent_physical"); then
+    err "could not identify Cowrie target parent: $cowrie_parent"
+  fi
+  cowrie_final_name=$(basename -- "$COWRIE_HOME")
+  cowrie_final_path="$cowrie_parent_physical/$cowrie_final_name"
+  if [[ -e "$cowrie_final_path" || -L "$cowrie_final_path" ]]; then
+    err "cowrie target exists or is a symlink: $COWRIE_HOME. Move it aside or use --no-cowrie."
+  fi
+  if ! cowrie_staging=$(mktemp -d -- "$cowrie_parent_physical/.cowrie-install.XXXXXXXXXX"); then
+    err "could not create a private Cowrie staging checkout beneath $cowrie_parent"
+  fi
+  if ! cowrie_staging_identity=$(stat -c '%d:%i' -- "$cowrie_staging"); then
+    err "could not identify Cowrie staging checkout at $cowrie_staging; refusing to delete it"
+  fi
+
+  log "installing cowrie at immutable commit $COWRIE_COMMIT…"
+  if ! git -C "$cowrie_staging" init -q \
+    || ! git -C "$cowrie_staging" remote add origin "$COWRIE_REPO" \
+    || ! git -C "$cowrie_staging" fetch --depth 1 origin "$COWRIE_COMMIT" \
+    || ! git -C "$cowrie_staging" checkout --detach "$COWRIE_COMMIT"; then
+    err "could not fetch and check out pinned Cowrie commit $COWRIE_COMMIT; staging checkout left at $cowrie_staging"
+  fi
+  if ! COWRIE_CHECKED_OUT_COMMIT=$(git -C "$cowrie_staging" rev-parse --verify HEAD); then
+    err "could not verify pinned Cowrie commit $COWRIE_COMMIT; staging checkout left at $cowrie_staging"
+  fi
+  if [[ "$COWRIE_CHECKED_OUT_COMMIT" != "$COWRIE_COMMIT" ]]; then
+    err "Cowrie object $COWRIE_COMMIT did not resolve to that exact commit; staging checkout left at $cowrie_staging"
+  fi
+
+  if [[ -L "$cowrie_staging" || ! -d "$cowrie_staging" ]] \
+    || ! cowrie_staging_current_identity=$(stat -c '%d:%i' -- "$cowrie_staging") \
+    || [[ "$cowrie_staging_current_identity" != "$cowrie_staging_identity" ]]; then
+    err "Cowrie staging checkout changed unexpectedly at $cowrie_staging; refusing to publish or delete it"
+  fi
+  if ! cowrie_parent_current=$(cd -P -- "$cowrie_parent" && pwd -P) \
+    || [[ "$cowrie_parent_current" != "$cowrie_parent_physical" ]] \
+    || ! cowrie_parent_current_identity=$(stat -c '%d:%i' -- "$cowrie_parent_current") \
+    || [[ "$cowrie_parent_current_identity" != "$cowrie_parent_identity" ]]; then
+    err "Cowrie target parent changed during installation; refusing to publish or delete staging checkout $cowrie_staging"
+  fi
+  if ! mv -T --no-clobber -- "$cowrie_staging" "$cowrie_final_path"; then
+    if [[ -e "$cowrie_final_path" || -L "$cowrie_final_path" ]]; then
+      err "cowrie target appeared during installation: $COWRIE_HOME; refusing to overwrite it; verified staging checkout left at $cowrie_staging"
+    fi
+    err "could not atomically publish Cowrie checkout at $COWRIE_HOME; verified staging checkout left at $cowrie_staging"
+  fi
+  if [[ -e "$cowrie_staging" || -L "$cowrie_staging" ]]; then
+    if [[ -e "$cowrie_final_path" || -L "$cowrie_final_path" ]]; then
+      err "cowrie target appeared during installation: $COWRIE_HOME; refusing to overwrite it; verified staging checkout left at $cowrie_staging"
+    fi
+    err "atomic Cowrie publish left staging checkout at $cowrie_staging; refusing to alter either path"
+  fi
+  if ! cowrie_published_identity=$(stat -c '%d:%i' -- "$cowrie_final_path") \
+    || [[ "$cowrie_published_identity" != "$cowrie_staging_identity" ]]; then
+    err "published Cowrie checkout identity could not be verified at $COWRIE_HOME; refusing to alter it"
+  fi
+  if ! cowrie_parent_current=$(cd -P -- "$cowrie_parent" && pwd -P) \
+    || [[ "$cowrie_parent_current" != "$cowrie_parent_physical" ]] \
+    || ! cowrie_parent_current_identity=$(stat -c '%d:%i' -- "$cowrie_parent_current") \
+    || [[ "$cowrie_parent_current_identity" != "$cowrie_parent_identity" ]]; then
+    err "Cowrie target parent changed after publication; verified checkout remains at $cowrie_final_path; refusing further installation"
+  fi
+  COWRIE_HOME="$cowrie_final_path"
+}
+
+# Tests source the pure checkout functions above. Return before argument
+# parsing, root checks, downloads, package installation, or filesystem writes.
+if [[ "${SHARDLURE_INSTALL_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 # -- parse CLI overrides --------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -59,7 +260,7 @@ fi
 ARCH=$(uname -m)
 BIN_NAME="${ARCH_MAP[$ARCH]:-}"
 if [[ -z "$BIN_NAME" ]]; then
-  err "unsupported architecture: $ARCH (supported: x86_64, aarch64)"
+  err "unsupported architecture: $ARCH (supported: x86_64, amd64, aarch64, arm64, armv7l, armhf)"
 fi
 log "detected architecture: $ARCH → $BIN_NAME"
 
@@ -83,7 +284,8 @@ DEST="/usr/local/bin/shardlure"
 DL_BIN="$(mktemp /tmp/shardlure-dl.XXXXXX)"
 DL_SUMS="$(mktemp /tmp/shardlure-sums.XXXXXX)"
 DL_ERR="$(mktemp /tmp/shardlure-curlerr.XXXXXX)"
-trap 'rm -f "$DL_BIN" "$DL_SUMS" "$DL_ERR"' EXIT
+DL_COWRIE_PIN="$(mktemp /tmp/shardlure-cowrie-pin.XXXXXX)"
+trap 'rm -f "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN"' EXIT
 log "downloading $URL …"
 # `if !` form: under set -e a bare failing curl would abort before our
 # friendly error message could print.
@@ -119,7 +321,7 @@ install -m 755 "$DL_BIN" "$DEST"
 log "installed $DEST ($(wc -c < "$DEST") bytes)"
 
 # -- config ----------------------------------------------------------------
-mkdir -p "$DATA_DIR" "$DATA_DIR/captures" "$DATA_DIR/evidence" "$DATA_DIR/payloads"
+initialize_data_paths
 
 # Detect tailscale IP for admin_ips
 ADMIN_IPS=""
@@ -166,9 +368,6 @@ YAML
 log "config written to $DATA_DIR/shardlure.yaml"
 
 # -- systemd services ------------------------------------------------------
-COWRIE_HOME="$DATA_DIR/cowrie"
-COWRIE_LOG="$COWRIE_HOME/var/log/cowrie/cowrie.json"
-
 # The cowrie.service unit is written AFTER cowrie itself is installed, since
 # the ExecStart path depends on the cowrie layout (old: bin/cowrie shell
 # script, new: venv/bin/cowrie console_script created by 'pip install -e .').
@@ -215,49 +414,29 @@ log "shardlure-live systemd unit written (cowrie unit deferred until cowrie inst
 
 # -- cowrie installation ---------------------------------------------------
 if [[ "$COWRIE" -eq 1 ]]; then
+  # Resolve the required immutable commit before inspecting an existing
+  # checkout. This prevents an existing .git directory from bypassing either
+  # the release pin or an explicit operator override.
+  #
+  # git is also needed to validate an existing cowrie-owned checkout. Install
+  # the normal Cowrie dependencies first so fresh explicit refs can be resolved
+  # on hosts where git was not already present.
+  if command -v apt-get &>/dev/null; then
+    apt-get update -qq
+    apt-get install -y -qq python3-venv python3-dev build-essential libssl-dev libffi-dev authbind git 2>/dev/null
+  elif command -v dnf &>/dev/null; then
+    dnf install -y python3 python3-devel gcc openssl-devel libffi-devel authbind git 2>/dev/null
+  fi
+
+  resolve_cowrie_commit
+
   if [[ -d "$COWRIE_HOME/.git" ]]; then
-    log "cowrie already present at $COWRIE_HOME, skipping clone"
+    validate_existing_cowrie_checkout
   else
+    checkout_fresh_cowrie
+
     if ! id cowrie &>/dev/null; then
       useradd -r -s /bin/false -d "$COWRIE_HOME" cowrie
-    fi
-
-    # Dependencies
-    if command -v apt-get &>/dev/null; then
-      apt-get update -qq
-      apt-get install -y -qq python3-venv python3-dev build-essential libssl-dev libffi-dev authbind git 2>/dev/null
-    elif command -v dnf &>/dev/null; then
-      dnf install -y python3 python3-devel gcc openssl-devel libffi-devel authbind git 2>/dev/null
-    fi
-
-    # Resolve cowrie branch. Upstream renamed master -> main in 2024, and
-    # forks may still ship master. Try in order:
-    #   1. user override via --cowrie-branch / $COWRIE_BRANCH
-    #   2. remote HEAD (via ls-remote --symref)
-    #   3. main
-    #   4. master
-    COWRIE_REPO="https://github.com/cowrie/cowrie.git"
-    if [[ -z "$COWRIE_BRANCH" ]]; then
-      COWRIE_BRANCH=$(git ls-remote --symref "$COWRIE_REPO" HEAD 2>/dev/null \
-                      | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')
-    fi
-    CANDIDATES=()
-    [[ -n "$COWRIE_BRANCH" ]] && CANDIDATES+=("$COWRIE_BRANCH")
-    CANDIDATES+=(main master)
-
-    cloned=0
-    for br in "${CANDIDATES[@]}"; do
-      log "installing cowrie (trying branch: $br)…"
-      if git clone --depth 1 --branch "$br" "$COWRIE_REPO" "$COWRIE_HOME" 2>/dev/null; then
-        COWRIE_BRANCH="$br"
-        cloned=1
-        break
-      fi
-      # Clean up partial clone before retrying with the next candidate.
-      rm -rf "$COWRIE_HOME"
-    done
-    if [[ $cloned -ne 1 ]]; then
-      err "could not clone cowrie from $COWRIE_REPO (tried: ${CANDIDATES[*]}). Pass --cowrie-branch explicitly or --no-cowrie to skip."
     fi
     python3 -m venv "$COWRIE_HOME/venv"
     "$COWRIE_HOME/venv/bin/pip" install -q --upgrade pip setuptools wheel
@@ -332,7 +511,7 @@ fi
 
 if [[ "$COWRIE" -eq 1 ]]; then
   if [[ -z "$COWRIE_EXEC" ]]; then
-    err "could not locate cowrie entry point at $COWRIE_HOME/venv/bin/cowrie or $COWRIE_HOME/bin/cowrie. The clone may have failed or upstream layout changed again."
+    err "could not locate cowrie entry point at $COWRIE_HOME/venv/bin/cowrie or $COWRIE_HOME/bin/cowrie. The checkout may have failed or upstream layout changed again."
   fi
   cat > /etc/systemd/system/cowrie.service <<SVC
 [Unit]
