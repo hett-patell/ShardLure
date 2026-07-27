@@ -109,7 +109,7 @@ func sniffMagic(buf []byte, path string) (string, string) {
 	if len(buf) >= 3 && buf[0] == 0x1f && buf[1] == 0x8b && buf[2] == 0x08 {
 		return "gzip", "application/gzip"
 	}
-	if len(buf) >= 6 && string(buf[:6]) == "ustar\x00" {
+	if len(buf) >= 263 && (string(buf[257:263]) == "ustar\x00" || string(buf[257:263]) == "ustar ") {
 		return "tar", "application/x-tar"
 	}
 	if len(buf) >= 2 && buf[0] == '#' && buf[1] == '!' {

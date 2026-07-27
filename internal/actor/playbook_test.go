@@ -48,3 +48,36 @@ func TestClassifyPlaybook(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyIntentTruthTable(t *testing.T) {
+	cases := []struct {
+		name                                    string
+		hasTunnel, hasPayload, hasProbe, deploy bool
+		want                                    string
+	}{
+		{name: "none", want: "unknown"},
+		{name: "deploy command", deploy: true, want: "deploy"},
+		{name: "probe", hasProbe: true, want: "probe"},
+		{name: "probe and deploy command", hasProbe: true, deploy: true, want: "deploy"},
+		{name: "payload", hasPayload: true, want: "deploy"},
+		{name: "payload and deploy command", hasPayload: true, deploy: true, want: "deploy"},
+		{name: "payload and probe", hasPayload: true, hasProbe: true, want: "deploy"},
+		{name: "payload probe and deploy command", hasPayload: true, hasProbe: true, deploy: true, want: "deploy"},
+		{name: "tunnel", hasTunnel: true, want: "proxy"},
+		{name: "tunnel and deploy command", hasTunnel: true, deploy: true, want: "mixed"},
+		{name: "tunnel and probe", hasTunnel: true, hasProbe: true, want: "probe"},
+		{name: "tunnel probe and deploy command", hasTunnel: true, hasProbe: true, deploy: true, want: "mixed"},
+		{name: "tunnel and payload", hasTunnel: true, hasPayload: true, want: "mixed"},
+		{name: "tunnel payload and deploy command", hasTunnel: true, hasPayload: true, deploy: true, want: "mixed"},
+		{name: "tunnel payload and probe", hasTunnel: true, hasPayload: true, hasProbe: true, want: "mixed"},
+		{name: "all", hasTunnel: true, hasPayload: true, hasProbe: true, deploy: true, want: "mixed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClassifyIntent(tc.hasTunnel, tc.hasPayload, tc.hasProbe, tc.deploy)
+			if got != tc.want {
+				t.Fatalf("ClassifyIntent(%t, %t, %t, %t) = %q, want %q", tc.hasTunnel, tc.hasPayload, tc.hasProbe, tc.deploy, got, tc.want)
+			}
+		})
+	}
+}

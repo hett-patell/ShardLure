@@ -116,6 +116,9 @@ func isMostlyLowerAlpha(s string) bool {
 
 // ClassifyIntent from event mix (cowrie-rich later).
 func ClassifyIntent(hasTunnel, hasPayload, hasProbe, hasDeployCmd bool) string {
+	if hasTunnel && (hasPayload || hasDeployCmd) {
+		return "mixed"
+	}
 	if hasProbe && !hasPayload && !hasDeployCmd {
 		return "probe"
 	}
@@ -124,9 +127,6 @@ func ClassifyIntent(hasTunnel, hasPayload, hasProbe, hasDeployCmd bool) string {
 	}
 	if hasPayload || hasDeployCmd {
 		return "deploy"
-	}
-	if hasTunnel {
-		return "mixed"
 	}
 	return "unknown"
 }

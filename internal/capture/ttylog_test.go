@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // writeTTYFrame appends one ttylog frame to buf using the same on-disk format
@@ -125,6 +127,95 @@ func TestRenderTranscript_StripsANSI(t *testing.T) {
 	}
 }
 
+func TestRenderTranscript_PreservesUTF8SplitAcrossFrames(t *testing.T) {
+	t.Parallel()
+	runeBytes := []byte("界")
+	frames := []TTYFrame{
+		{TS: time.Unix(1, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: append([]byte("A"), runeBytes[:1]...)},
+		{TS: time.Unix(2, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: append(runeBytes[1:], 'B')},
+	}
+
+	got := RenderTranscript(frames, TranscriptOptions{StripANSI: true})
+	if want := "A界B"; got != want {
+		t.Fatalf("transcript = %q, want %q", got, want)
+	}
+}
+
+func TestRenderTranscript_StripsANSISplitAcrossFrames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "CSI", first: "plain\x1b[", second: "31mred\x1b[0m"},
+		{name: "OSC BEL", first: "plain\x1b]0;title", second: "\x07red"},
+		{name: "OSC ST", first: "plain\x1b]0;title\x1b", second: "\\red"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			frames := []TTYFrame{
+				{TS: time.Unix(1, 0), Op: ttyOpWrite, Direction: ttyDirOutput, Data: []byte(tc.first)},
+				{TS: time.Unix(2, 0), Op: ttyOpWrite, Direction: ttyDirOutput, Data: []byte(tc.second)},
+			}
+			got := RenderTranscript(frames, TranscriptOptions{IncludeOutput: true, StripANSI: true})
+			if want := "plainred"; got != want {
+				t.Fatalf("transcript = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRenderTranscript_KeepsANSIStatePerDirection(t *testing.T) {
+	t.Parallel()
+	frames := []TTYFrame{
+		{TS: time.Unix(1, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: []byte("I\x1b")},
+		{TS: time.Unix(2, 0), Op: ttyOpWrite, Direction: ttyDirOutput, Data: []byte("O")},
+		{TS: time.Unix(3, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: []byte("[31mred\x1b[0m")},
+	}
+
+	got := RenderTranscript(frames, TranscriptOptions{IncludeOutput: true, StripANSI: true})
+	if want := "IOred"; got != want {
+		t.Fatalf("transcript = %q, want %q", got, want)
+	}
+}
+
+func TestRenderTranscript_KeepsUTF8StatePerDirection(t *testing.T) {
+	t.Parallel()
+	runeBytes := []byte("界")
+	frames := []TTYFrame{
+		{TS: time.Unix(1, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: append([]byte("A"), runeBytes[:1]...)},
+		{TS: time.Unix(2, 0), Op: ttyOpWrite, Direction: ttyDirOutput, Data: []byte("雪")},
+		{TS: time.Unix(3, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: append(runeBytes[1:], 'B')},
+	}
+
+	got := RenderTranscript(frames, TranscriptOptions{IncludeOutput: true, StripANSI: true})
+	if want := "A雪界B"; got != want {
+		t.Fatalf("transcript = %q, want %q", got, want)
+	}
+}
+
+func TestStripANSIPreservesUTF8(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain", in: "雪だるま", want: "雪だるま"},
+		{name: "CSI", in: "\x1b[31m警告\x1b[0m", want: "警告"},
+		{name: "OSC BEL", in: "\x1b]0;攻撃者\x07接続", want: "接続"},
+		{name: "OSC ST", in: "\x1b]8;;https://example.test\x1b\\リンク\x1b]8;;\x1b\\", want: "リンク"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(stripANSI([]byte(tc.in))); got != tc.want {
+				t.Fatalf("stripANSI(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderTranscript_InputOnly(t *testing.T) {
 	t.Parallel()
 	frames := []TTYFrame{
@@ -149,5 +240,52 @@ func TestRenderTranscript_TruncatesAtMaxBytes(t *testing.T) {
 	}
 	if !strings.Contains(got, "[transcript truncated]") {
 		t.Fatalf("missing truncation marker: %q", got)
+	}
+}
+
+func TestRenderTranscript_TruncationPreservesUTF8(t *testing.T) {
+	t.Parallel()
+	frames := []TTYFrame{
+		{TS: time.Unix(1, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: []byte("A界B")},
+	}
+	got := RenderTranscript(frames, TranscriptOptions{IncludeOutput: false, StripANSI: false, MaxBytes: 3})
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated transcript is not valid UTF-8: %q", got)
+	}
+	if want := "A\n... [transcript truncated]\n"; got != want {
+		t.Fatalf("truncated transcript = %q, want %q", got, want)
+	}
+}
+
+func TestRenderTranscript_MaxBytesBoundsBuffering(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 1<<20)
+	payload[0], payload[1] = 'A', 'B'
+	frames := []TTYFrame{
+		{TS: time.Unix(1, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: payload},
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got := RenderTranscript(frames, TranscriptOptions{StripANSI: true, MaxBytes: 1})
+	runtime.ReadMemStats(&after)
+
+	if want := "A\n... [transcript truncated]\n"; got != want {
+		t.Fatalf("transcript = %q, want %q", got, want)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 128<<10 {
+		t.Fatalf("RenderTranscript allocated %d bytes after a 1-byte cap; want at most %d", allocated, 128<<10)
+	}
+}
+
+func TestRenderTranscript_ExactMaxWithoutMoreOutputIsNotTruncated(t *testing.T) {
+	t.Parallel()
+	frames := []TTYFrame{
+		{TS: time.Unix(1, 0), Op: ttyOpWrite, Direction: ttyDirInput, Data: []byte("A\x1b[31m\x1b[0m")},
+	}
+
+	got := RenderTranscript(frames, TranscriptOptions{StripANSI: true, MaxBytes: 1})
+	if want := "A"; got != want {
+		t.Fatalf("transcript = %q, want %q", got, want)
 	}
 }

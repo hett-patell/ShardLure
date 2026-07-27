@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -138,7 +139,7 @@ func indicatorToSTIX(ind Indicator) (stixObject, bool) {
 	)
 	switch ind.Kind {
 	case KindIP:
-		pattern = "[ipv4-addr:value = '" + stixEsc(ind.Value) + "']"
+		pattern = "[" + stixIPType(ind.Value) + ":value = '" + stixEsc(ind.Value) + "']"
 	case KindHash:
 		pattern = "[file:hashes.'SHA-256' = '" + stixEsc(strings.ToLower(ind.Value)) + "']"
 	case KindURL:
@@ -156,7 +157,7 @@ func indicatorToSTIX(ind Indicator) (stixObject, bool) {
 		host, port := splitTunnelValue(ind.Value)
 		refType := "domain-name"
 		if net.ParseIP(host) != nil {
-			refType = "ipv4-addr"
+			refType = stixIPType(host)
 		}
 		pattern = "[network-traffic:dst_ref.type = '" + refType +
 			"' AND network-traffic:dst_ref.value = '" + stixEsc(host) + "'"
@@ -194,6 +195,13 @@ func indicatorToSTIX(ind Indicator) (stixObject, bool) {
 		IndicatorTypes: []string{"malicious-activity"},
 		CreatedByRef:   stixIdentity,
 	}, true
+}
+
+func stixIPType(value string) string {
+	if addr, err := netip.ParseAddr(value); err == nil && addr.Is4() {
+		return "ipv4-addr"
+	}
+	return "ipv6-addr"
 }
 
 // splitTunnelValue splits a tunnel IOC value ("host:port") back into its host

@@ -42,6 +42,10 @@ func main() {
 		usage()
 		os.Exit(1)
 	}
+	if args[0] == "version" {
+		fmt.Printf("shardlure %s (commit %s)\n", version, commit)
+		return
+	}
 
 	path := *cfgPath
 	if path == "" {
@@ -125,8 +129,6 @@ func main() {
 		cmdShare(st, cfg, args[1:])
 	case "report":
 		cmdReport(st, cfg, args[1:])
-	case "version":
-		fmt.Printf("shardlure %s (commit %s)\n", version, commit)
 	default:
 		usage()
 		os.Exit(1)

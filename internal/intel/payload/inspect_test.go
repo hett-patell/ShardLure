@@ -1,6 +1,8 @@
 package payload
 
 import (
+	"archive/tar"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +57,51 @@ func TestSniffELF(t *testing.T) {
 	}
 	if !foundLD {
 		t.Errorf("ld string not surfaced: %+v", insp.Strings)
+	}
+}
+
+func TestSniffTarUsesArchiveHeaderMagic(t *testing.T) {
+	t.Parallel()
+	formats := []struct {
+		name   string
+		format tar.Format
+	}{
+		{name: "POSIX", format: tar.FormatUSTAR},
+		{name: "GNU", format: tar.FormatGNU},
+	}
+	for _, tc := range formats {
+		t.Run(tc.name, func(t *testing.T) {
+			var archive bytes.Buffer
+			tw := tar.NewWriter(&archive)
+			if err := tw.WriteHeader(&tar.Header{Name: "payload.bin", Mode: 0o600, Format: tc.format}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			magic, mime := sniffMagic(archive.Bytes(), "archive.bin")
+			if magic != "tar" || mime != "application/x-tar" {
+				t.Fatalf("%s tar detected as (%q, %q), want (%q, %q)", tc.name, magic, mime, "tar", "application/x-tar")
+			}
+		})
+	}
+}
+
+func TestSniffTarRejectsInvalidMagicTerminator(t *testing.T) {
+	t.Parallel()
+	buf := make([]byte, 263)
+	copy(buf[257:263], "ustarX")
+	magic, mime := sniffMagic(buf, "archive.bin")
+	if magic == "tar" || mime == "application/x-tar" {
+		t.Fatalf("invalid tar magic terminator detected as (%q, %q)", magic, mime)
+	}
+}
+
+func TestSniffTarRejectsLeadingUstar(t *testing.T) {
+	magic, mime := sniffMagic([]byte("ustar\x00"), "blob.bin")
+	if magic == "tar" || mime == "application/x-tar" {
+		t.Fatalf("leading ustar false positive detected as (%q, %q)", magic, mime)
 	}
 }
 

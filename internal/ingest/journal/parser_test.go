@@ -48,6 +48,17 @@ func TestParseIPv6Source(t *testing.T) {
 	}
 }
 
+func TestParseFailedPublicKeyForInvalidUser(t *testing.T) {
+	line := "2026-05-21T07:09:07+00:00 arm sshd[3152395]: Failed publickey for invalid user foo from 203.0.113.42 port 34400 ssh2"
+	e, ok := ParseLine(line)
+	if !ok {
+		t.Fatal("expected failed public-key line for an invalid user to parse")
+	}
+	if e.Username != "foo" {
+		t.Fatalf("username = %q, want %q", e.Username, "foo")
+	}
+}
+
 func TestJournalReplaceKeepsCowrieData(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

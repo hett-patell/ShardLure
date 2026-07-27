@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Cowrie TTY log binary format
@@ -143,84 +144,162 @@ func RenderTranscript(frames []TTYFrame, opts TranscriptOptions) string {
 	copy(sorted, frames)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].TS.Before(sorted[j].TS) })
 
-	var buf bytes.Buffer
+	stream := transcriptStream{stripANSI: opts.StripANSI, maxBytes: opts.MaxBytes}
 	for _, fr := range sorted {
+		var data []byte
+		var direction transcriptDirection
 		switch {
 		case fr.IsInput(), fr.IsExec():
-			data := fr.Data
-			if opts.StripANSI {
-				data = stripANSI(data)
-			}
-			buf.Write(data)
+			data = fr.Data
+			direction = transcriptInput
 		case fr.IsOutput():
 			if !opts.IncludeOutput {
 				continue
 			}
-			data := fr.Data
-			if opts.StripANSI {
-				data = stripANSI(data)
-			}
-			buf.Write(data)
+			data = fr.Data
+			direction = transcriptOutput
+		default:
+			continue
 		}
-		if opts.MaxBytes > 0 && buf.Len() >= opts.MaxBytes {
-			buf.Truncate(opts.MaxBytes)
-			buf.WriteString("\n... [transcript truncated]\n")
+		if !stream.Write(data, direction) {
 			break
 		}
 	}
-	return buf.String()
+	return stream.String()
+}
+
+type ansiStreamState uint8
+
+const (
+	ansiText ansiStreamState = iota
+	ansiEscape
+	ansiCSI
+	ansiOSC
+	ansiOSCEscape
+)
+
+type transcriptDirection uint8
+
+const (
+	transcriptInput transcriptDirection = iota
+	transcriptOutput
+)
+
+const transcriptTruncationMarker = "\n... [transcript truncated]\n"
+
+// transcriptStream sanitizes selected frame bytes incrementally. Decoder and
+// escape state survive frame boundaries, while the output buffer never grows
+// beyond maxBytes (apart from the fixed truncation marker).
+type transcriptStream struct {
+	out         bytes.Buffer
+	stripANSI   bool
+	maxBytes    int
+	ansiState   [2]ansiStreamState
+	utf8Pending [2][utf8.UTFMax]byte
+	utf8Len     [2]int
+	truncated   bool
+}
+
+// Write consumes one selected frame. It returns false as soon as the next
+// complete output rune would exceed maxBytes.
+func (s *transcriptStream) Write(in []byte, direction transcriptDirection) bool {
+	for _, b := range in {
+		if !s.stripANSI {
+			if !s.writeUTF8Byte(b, direction) {
+				return false
+			}
+			continue
+		}
+
+		switch s.ansiState[direction] {
+		case ansiText:
+			if b == 0x1b {
+				s.ansiState[direction] = ansiEscape
+				continue
+			}
+			if !s.writeUTF8Byte(b, direction) {
+				return false
+			}
+		case ansiEscape:
+			switch b {
+			case '[':
+				s.ansiState[direction] = ansiCSI
+			case ']':
+				s.ansiState[direction] = ansiOSC
+			default:
+				s.ansiState[direction] = ansiText
+			}
+		case ansiCSI:
+			if b >= 0x40 && b <= 0x7e {
+				s.ansiState[direction] = ansiText
+			}
+		case ansiOSC:
+			switch b {
+			case 0x07:
+				s.ansiState[direction] = ansiText
+			case 0x1b:
+				s.ansiState[direction] = ansiOSCEscape
+			}
+		case ansiOSCEscape:
+			switch b {
+			case '\\', 0x07:
+				s.ansiState[direction] = ansiText
+			case 0x1b:
+				// This ESC can begin the ST terminator on the next byte.
+			default:
+				s.ansiState[direction] = ansiOSC
+			}
+		}
+	}
+	return true
+}
+
+func (s *transcriptStream) writeUTF8Byte(b byte, direction transcriptDirection) bool {
+	s.utf8Pending[direction][s.utf8Len[direction]] = b
+	s.utf8Len[direction]++
+	for s.utf8Len[direction] > 0 && utf8.FullRune(s.utf8Pending[direction][:s.utf8Len[direction]]) {
+		r, size := utf8.DecodeRune(s.utf8Pending[direction][:s.utf8Len[direction]])
+		if r == utf8.RuneError && size == 1 {
+			s.shiftUTF8(1, direction)
+			continue
+		}
+		if !s.emitRune(r, s.utf8Pending[direction][:size]) {
+			return false
+		}
+		s.shiftUTF8(size, direction)
+	}
+	return true
+}
+
+func (s *transcriptStream) shiftUTF8(n int, direction transcriptDirection) {
+	copy(s.utf8Pending[direction][:], s.utf8Pending[direction][n:s.utf8Len[direction]])
+	s.utf8Len[direction] -= n
+}
+
+func (s *transcriptStream) emitRune(r rune, encoded []byte) bool {
+	if s.stripANSI && r != '\n' && r != '\r' && r != '\t' && !unicode.IsPrint(r) {
+		return true
+	}
+	if s.maxBytes > 0 && s.out.Len()+len(encoded) > s.maxBytes {
+		s.truncated = true
+		return false
+	}
+	s.out.Write(encoded)
+	return true
+}
+
+func (s *transcriptStream) String() string {
+	if s.truncated {
+		return s.out.String() + transcriptTruncationMarker
+	}
+	return s.out.String()
 }
 
 // stripANSI removes the most common CSI / OSC / cursor-control escape
 // sequences. This is intentionally conservative: we keep newlines, tabs, and
 // printable characters; we drop escape sequences and other control bytes.
 func stripANSI(in []byte) []byte {
-	out := make([]byte, 0, len(in))
-	i := 0
-	for i < len(in) {
-		b := in[i]
-		if b == 0x1b && i+1 < len(in) {
-			// ESC sequence: skip [ or ] introducer plus parameter bytes
-			// until a final byte in 0x40-0x7e for CSI, or BEL/ST for OSC.
-			next := in[i+1]
-			switch next {
-			case '[': // CSI
-				j := i + 2
-				for j < len(in) {
-					c := in[j]
-					if c >= 0x40 && c <= 0x7e {
-						j++
-						break
-					}
-					j++
-				}
-				i = j
-				continue
-			case ']': // OSC
-				j := i + 2
-				for j < len(in) {
-					if in[j] == 0x07 {
-						j++
-						break
-					}
-					if in[j] == 0x1b && j+1 < len(in) && in[j+1] == '\\' {
-						j += 2
-						break
-					}
-					j++
-				}
-				i = j
-				continue
-			default:
-				// two-byte sequence; skip both
-				i += 2
-				continue
-			}
-		}
-		if b == '\n' || b == '\r' || b == '\t' || unicode.IsPrint(rune(b)) {
-			out = append(out, b)
-		}
-		i++
-	}
-	return out
+	stream := transcriptStream{stripANSI: true}
+	stream.Write(in, transcriptInput)
+	return stream.out.Bytes()
 }

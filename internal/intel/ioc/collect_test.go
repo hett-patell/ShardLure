@@ -107,6 +107,34 @@ func TestWriteSTIX(t *testing.T) {
 	}
 }
 
+func TestSTIXUsesCorrectIPAddressFamily(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		kind  Kind
+		value string
+		want  string
+	}{
+		{name: "IPv4 indicator", kind: KindIP, value: "192.0.2.42", want: "[ipv4-addr:value = '192.0.2.42']"},
+		{name: "IPv6 indicator", kind: KindIP, value: "2001:db8::42", want: "[ipv6-addr:value = '2001:db8::42']"},
+		{name: "IPv4-mapped IPv6 indicator", kind: KindIP, value: "::ffff:192.0.2.1", want: "[ipv6-addr:value = '::ffff:192.0.2.1']"},
+		{name: "IPv4 tunnel", kind: KindTunnel, value: "192.0.2.10:443", want: "[network-traffic:dst_ref.type = 'ipv4-addr' AND network-traffic:dst_ref.value = '192.0.2.10' AND network-traffic:dst_port = 443]"},
+		{name: "IPv6 tunnel", kind: KindTunnel, value: "[2001:db8::10]:443", want: "[network-traffic:dst_ref.type = 'ipv6-addr' AND network-traffic:dst_ref.value = '2001:db8::10' AND network-traffic:dst_port = 443]"},
+		{name: "IPv4-mapped IPv6 tunnel", kind: KindTunnel, value: "[::ffff:192.0.2.1]:443", want: "[network-traffic:dst_ref.type = 'ipv6-addr' AND network-traffic:dst_ref.value = '::ffff:192.0.2.1' AND network-traffic:dst_port = 443]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj, ok := indicatorToSTIX(Indicator{Kind: tc.kind, Value: tc.value, FirstSeen: t0, LastSeen: t0, Count: 1})
+			if !ok {
+				t.Fatalf("indicatorToSTIX rejected %s %q", tc.kind, tc.value)
+			}
+			if obj.Pattern != tc.want {
+				t.Fatalf("pattern = %q, want %q", obj.Pattern, tc.want)
+			}
+		})
+	}
+}
+
 // TestWriteSTIXSpecShape parses the bundle and asserts STIX 2.1 structural
 // compliance rather than substring-matching: the 2.1 Bundle carries ONLY
 // type+id (spec_version was removed from the bundle in 2.1 and belongs on
