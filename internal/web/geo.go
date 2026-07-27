@@ -55,8 +55,8 @@ type geoResolver struct {
 	sem      chan struct{}
 	cfg      geoConfig
 	maxSize  int
-	now      func() time.Time  // injectable for tests
-	st       *store.Store      // persists geo lookups across restarts
+	now      func() time.Time   // injectable for tests
+	st       *store.Store       // persists geo lookups across restarts
 	keys     *settings.Keystore // live source of geo flags + ip-api key
 }
 

@@ -1491,7 +1491,15 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 	s.abuseReportMu.Unlock()
 
 	resp := reportAllResponse{Status: "ok", Reported: reported, Skipped: skipped}
-	if ferr != nil {
+	if errors.Is(ferr, abuseipdb.ErrRateLimited) {
+		log.Printf("web: abuseipdb report-all: %v", ferr)
+		if reported > 0 {
+			resp.Status = "partial"
+		} else {
+			resp.Status = "rate_limited"
+		}
+		resp.Error = "AbuseIPDB rate limit reached; batch stopped before completion"
+	} else if ferr != nil {
 		log.Printf("web: abuseipdb report-all: %v", ferr)
 		resp.Status = "partial"
 		resp.Error = "some reports failed — see server logs"

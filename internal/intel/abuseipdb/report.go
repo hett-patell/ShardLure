@@ -37,6 +37,7 @@ type Options struct {
 var (
 	ErrMissingAPIKey = errors.New("abuseipdb: missing API key")
 	ErrEmptyBatch    = errors.New("abuseipdb: no candidates to report")
+	ErrRateLimited   = errors.New("abuseipdb: rate limited (daily cap reached)")
 )
 
 // Report submits each confirmed brute-forcer to AbuseIPDB. The pipeline per
@@ -120,9 +121,9 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		if res.RateLimited {
 			// Daily report cap reached — stop cleanly rather than spam.
 			if opts.OnProgress != nil {
-				opts.OnProgress(cand, res, errors.New("rate limited (daily cap) — halting"))
+				opts.OnProgress(cand, res, ErrRateLimited)
 			}
-			return reported, skipped, firstErr
+			return reported, skipped, errors.Join(firstErr, ErrRateLimited)
 		}
 		if opts.OnProgress != nil {
 			opts.OnProgress(cand, res, nil)

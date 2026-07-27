@@ -62,9 +62,7 @@ func Vet(c ReportCandidate, admin *netmatch.Set, minProbe int) (bool, string) {
 	if parsed == nil {
 		return false, "malformed IP"
 	}
-	if parsed.IsLoopback() || parsed.IsPrivate() || parsed.IsUnspecified() ||
-		parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() ||
-		parsed.IsMulticast() || parsed.IsInterfaceLocalMulticast() {
+	if !netmatch.IsPublicIP(parsed) {
 		return false, "private/reserved IP — reporting it is an account strike"
 	}
 	if admin != nil && admin.Has(ip) {

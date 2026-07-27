@@ -20,21 +20,21 @@ func TestSetHas(t *testing.T) {
 		ip   string
 		want bool
 	}{
-		{"203.0.113.7", true},    // exact IPv4
-		{"203.0.113.8", false},   // adjacent, not listed
-		{"192.168.1.50", true},   // inside /16
-		{"192.169.0.1", false},   // outside /16
-		{"100.100.50.1", true},   // inside CGNAT /10 — the regression case
-		{"101.0.0.1", false},     // outside /10
-		{"2001:db8::dead", true}, // inside IPv6 /32
-		{"2001:dead::1", false},  // outside IPv6 /32
-		{"10.0.0.1", true},              // trimmed exact
-		{"::ffff:10.0.0.1", true},       // IPv4-mapped IPv6 must normalize and match
-		{"::ffff:203.0.113.7", true},    // IPv4-mapped of exact entry
-		{"::ffff:192.168.1.50", true},   // IPv4-mapped inside CIDR
-		{"::ffff:203.0.113.8", false},   // IPv4-mapped but not in set
-		{"", false},                     // empty
-		{"garbage", false},              // unparseable
+		{"203.0.113.7", true},         // exact IPv4
+		{"203.0.113.8", false},        // adjacent, not listed
+		{"192.168.1.50", true},        // inside /16
+		{"192.169.0.1", false},        // outside /16
+		{"100.100.50.1", true},        // inside CGNAT /10 — the regression case
+		{"101.0.0.1", false},          // outside /10
+		{"2001:db8::dead", true},      // inside IPv6 /32
+		{"2001:dead::1", false},       // outside IPv6 /32
+		{"10.0.0.1", true},            // trimmed exact
+		{"::ffff:10.0.0.1", true},     // IPv4-mapped IPv6 must normalize and match
+		{"::ffff:203.0.113.7", true},  // IPv4-mapped of exact entry
+		{"::ffff:192.168.1.50", true}, // IPv4-mapped inside CIDR
+		{"::ffff:203.0.113.8", false}, // IPv4-mapped but not in set
+		{"", false},                   // empty
+		{"garbage", false},            // unparseable
 	}
 	for _, c := range cases {
 		if got := s.Has(c.ip); got != c.want {

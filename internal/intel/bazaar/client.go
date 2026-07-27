@@ -86,6 +86,25 @@ type Result struct {
 	SampleURL string
 }
 
+// SemanticError means MalwareBazaar returned HTTP success but rejected the
+// submission in query_status. Fatal reports whether retrying more samples with
+// the same account/key would only repeat an account-level failure.
+type SemanticError struct {
+	Status string
+}
+
+func (e *SemanticError) Error() string {
+	status := e.Status
+	if status == "" {
+		status = "<empty>"
+	}
+	return fmt.Sprintf("bazaar: upload rejected with query_status %q", status)
+}
+
+func (e *SemanticError) Fatal() bool {
+	return e.Status == "no_api_key" || e.Status == "user_blacklisted"
+}
+
 // IsAccepted reports whether MalwareBazaar took the sample (either
 // freshly inserted or already known). Callers should record the row
 // when this is true and refuse to do so when it is false (so the next
@@ -199,6 +218,9 @@ func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha
 	r := &Result{Status: parsed.QueryStatus}
 	if r.IsAccepted() && sha256 != "" {
 		r.SampleURL = "https://bazaar.abuse.ch/sample/" + sha256 + "/"
+	}
+	if !r.IsAccepted() {
+		return r, &SemanticError{Status: r.Status}
 	}
 	return r, nil
 }

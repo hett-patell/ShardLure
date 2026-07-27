@@ -179,6 +179,10 @@ func TestBlockedIPReservedRanges(t *testing.T) {
 		"192.168.1.1",     // private
 		"224.0.0.1",       // multicast
 		"192.0.0.1",       // IETF protocol assignments
+		"192.0.2.1",       // TEST-NET-1
+		"198.51.100.1",    // TEST-NET-2
+		"203.0.113.10",    // TEST-NET-3
+		"2001:db8::1",     // IPv6 documentation
 		// NAT64 / 6to4 translation addresses that resolve to internal v4
 		// (MED-3 regression guard): a NAT64 gateway would route these inside.
 		"64:ff9b::7f00:1",    // NAT64 well-known -> 127.0.0.1
@@ -193,14 +197,14 @@ func TestBlockedIPReservedRanges(t *testing.T) {
 			t.Errorf("blockedIP(%s) = false, want true (must be blocked)", s)
 		}
 	}
-	allowed := []string{"8.8.8.8", "1.1.1.1", "203.0.113.10"}
+	allowed := []string{"8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"}
 	for _, s := range allowed {
 		if blockedIP(net.ParseIP(s), nil, false) {
 			t.Errorf("blockedIP(%s) = true, want false (public, should pass)", s)
 		}
 	}
 	// adminIPs CIDR is also blocked (operator range must not be fetched).
-	if !blockedIP(net.ParseIP("203.0.113.10"), netmatch.New([]string{"203.0.113.0/24"}), false) {
+	if !blockedIP(net.ParseIP("8.8.8.8"), netmatch.New([]string{"8.8.8.0/24"}), false) {
 		t.Error("blockedIP should block an IP inside an admin CIDR range")
 	}
 }

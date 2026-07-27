@@ -20,38 +20,40 @@ func TestSuggestRanksAndFilters(t *testing.T) {
 
 	inputs := []SuggestInput{
 		// Strong + active now → should rank #1.
-		{Cand: brute("203.0.113.10", 95, 5000, 60, 800), LastSeen: now.Add(-10 * time.Minute)},
+		{Cand: brute("8.8.8.8", 95, 5000, 60, 800), LastSeen: now.Add(-10 * time.Minute)},
 		// Equally strong but 5 days stale → ranks below the active one.
-		{Cand: brute("203.0.113.11", 95, 5000, 60, 800), LastSeen: now.Add(-120 * time.Hour)},
+		{Cand: brute("1.1.1.1", 95, 5000, 60, 800), LastSeen: now.Add(-120 * time.Hour)},
 		// Weak but passes floor, active → mid/low.
-		{Cand: brute("203.0.113.12", 62, 25, 4, 30), LastSeen: now.Add(-30 * time.Minute)},
+		{Cand: brute("9.9.9.9", 62, 25, 4, 30), LastSeen: now.Add(-30 * time.Minute)},
 		// Vet rejects: admin IP.
 		{Cand: brute("10.1.2.3", 95, 5000, 60, 800), LastSeen: now},
 		// Vet rejects: not a brute playbook.
 		{Cand: func() ReportCandidate {
-			c := brute("203.0.113.13", 95, 5000, 60, 800)
+			c := brute("8.8.4.4", 95, 5000, 60, 800)
 			c.Playbook = "crypto_target"
 			return c
 		}(), LastSeen: now},
 		// Vet rejects: below probe floor.
-		{Cand: brute("203.0.113.14", 40, 5000, 60, 800), LastSeen: now},
+		{Cand: brute("1.0.0.1", 40, 5000, 60, 800), LastSeen: now},
+		// Vet rejects: documentation-only address.
+		{Cand: brute("203.0.113.10", 95, 5000, 60, 800), LastSeen: now},
 	}
 
 	got := Suggest(inputs, admin, 60, 10, now, nil)
 	if len(got) != 3 {
 		t.Fatalf("expected 3 vetted suggestions, got %d: %+v", len(got), ips(got))
 	}
-	if got[0].SrcIP != "203.0.113.10" {
+	if got[0].SrcIP != "8.8.8.8" {
 		t.Fatalf("expected active strong actor first, got %s", got[0].SrcIP)
 	}
 	// The active-strong actor must outrank the identical-but-stale one purely on
 	// recency (this is the algorithm's headline behaviour).
 	var activeP, staleP int
 	for _, s := range got {
-		if s.SrcIP == "203.0.113.10" {
+		if s.SrcIP == "8.8.8.8" {
 			activeP = s.Priority
 		}
-		if s.SrcIP == "203.0.113.11" {
+		if s.SrcIP == "1.1.1.1" {
 			staleP = s.Priority
 		}
 	}
@@ -74,12 +76,12 @@ func TestSuggestRanksAndFilters(t *testing.T) {
 func TestSuggestExcludesAlreadyReported(t *testing.T) {
 	now := time.Now()
 	inputs := []SuggestInput{
-		{Cand: brute("203.0.113.10", 95, 5000, 60, 800), LastSeen: now},
-		{Cand: brute("203.0.113.11", 95, 5000, 60, 800), LastSeen: now},
+		{Cand: brute("8.8.8.8", 95, 5000, 60, 800), LastSeen: now},
+		{Cand: brute("1.1.1.1", 95, 5000, 60, 800), LastSeen: now},
 	}
-	reported := map[string]bool{"203.0.113.10": true}
+	reported := map[string]bool{"8.8.8.8": true}
 	got := Suggest(inputs, nil, 60, 10, now, func(ip string) bool { return reported[ip] })
-	if len(got) != 1 || got[0].SrcIP != "203.0.113.11" {
+	if len(got) != 1 || got[0].SrcIP != "1.1.1.1" {
 		t.Fatalf("expected only the unreported IP, got %+v", ips(got))
 	}
 }
@@ -88,7 +90,7 @@ func TestSuggestExcludesAlreadyReported(t *testing.T) {
 func TestSuggestLimit(t *testing.T) {
 	now := time.Now()
 	var inputs []SuggestInput
-	for _, ip := range []string{"203.0.113.10", "203.0.113.11", "203.0.113.12", "203.0.113.13"} {
+	for _, ip := range []string{"8.8.8.8", "1.1.1.1", "9.9.9.9", "8.8.4.4"} {
 		inputs = append(inputs, SuggestInput{Cand: brute(ip, 90, 1000, 20, 200), LastSeen: now})
 	}
 	got := Suggest(inputs, nil, 60, 2, now, nil)

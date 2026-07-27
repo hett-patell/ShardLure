@@ -2,6 +2,7 @@ package abuseipdb
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -61,7 +62,7 @@ func TestReportHappyPathAndDedup(t *testing.T) {
 
 	rec := newFakeRecorder()
 	cands := []ReportCandidate{{
-		SrcIP: "203.0.113.7", Playbook: "fast_dictionary_spray",
+		SrcIP: "8.8.8.8", Playbook: "fast_dictionary_spray",
 		ProbeScore: 90, EventCount: 400, UniqueUsers: 30,
 	}}
 	opts := Options{
@@ -127,9 +128,12 @@ func TestReportVetRejectsNeverPost(t *testing.T) {
 	}
 }
 
-// TestReportRateLimitHalts confirms a 429 stops the batch cleanly.
+// TestReportRateLimitHalts confirms a 429 stops the batch, preserves counts,
+// calls progress, and returns a machine-detectable error.
 func TestReportRateLimitHalts(t *testing.T) {
+	var posts int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"errors":[{"detail":"Daily rate limit"}]}`))
 	}))
@@ -137,16 +141,36 @@ func TestReportRateLimitHalts(t *testing.T) {
 
 	rec := newFakeRecorder()
 	cands := []ReportCandidate{
-		{SrcIP: "203.0.113.7", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30},
-		{SrcIP: "203.0.113.8", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30},
+		{SrcIP: "8.8.8.8", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30},
+		{SrcIP: "1.1.1.1", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30},
 	}
-	opts := Options{APIKey: "k", Endpoint: srv.URL, MinProbe: 60, Rewindow: time.Hour, RateLimit: time.Millisecond, Admin: netmatch.New(nil)}
-	reported, _, err := Report(context.Background(), rec, cands, opts)
-	if err != nil {
-		t.Fatalf("Report: %v", err)
+	var progressCalls int
+	var progressResult *Result
+	var progressErr error
+	opts := Options{
+		APIKey: "k", Endpoint: srv.URL, MinProbe: 60, Rewindow: time.Hour,
+		RateLimit: time.Millisecond, Admin: netmatch.New(nil),
+		OnProgress: func(_ ReportCandidate, result *Result, err error) {
+			progressCalls++
+			progressResult = result
+			progressErr = err
+		},
 	}
-	if reported != 0 {
-		t.Fatalf("429 should record 0 reports, got %d", reported)
+	reported, skipped, err := Report(context.Background(), rec, cands, opts)
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("Report error = %v, want ErrRateLimited", err)
+	}
+	if reported != 0 || skipped != 0 {
+		t.Fatalf("429 counts = (%d reported, %d skipped), want (0, 0)", reported, skipped)
+	}
+	if posts != 1 {
+		t.Fatalf("429 must halt batch after one POST, got %d", posts)
+	}
+	if progressCalls != 1 || progressResult == nil || !progressResult.RateLimited {
+		t.Fatalf("progress = calls:%d result:%+v, want one rate-limited result", progressCalls, progressResult)
+	}
+	if !errors.Is(progressErr, ErrRateLimited) {
+		t.Fatalf("progress error = %v, want ErrRateLimited", progressErr)
 	}
 }
 
@@ -158,7 +182,7 @@ func TestReportDryRunNoNetwork(t *testing.T) {
 	}))
 	defer srv.Close()
 	rec := newFakeRecorder()
-	cands := []ReportCandidate{{SrcIP: "203.0.113.7", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30}}
+	cands := []ReportCandidate{{SrcIP: "9.9.9.9", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30}}
 	opts := Options{Endpoint: srv.URL, DryRun: true, MinProbe: 60, Rewindow: time.Hour, Admin: netmatch.New(nil)}
 	if _, _, err := Report(context.Background(), rec, cands, opts); err != nil {
 		t.Fatalf("Report dry-run: %v", err)

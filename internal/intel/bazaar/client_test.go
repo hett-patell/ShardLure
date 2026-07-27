@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -111,6 +112,70 @@ func TestUploadDuplicate(t *testing.T) {
 	}
 	if !res.IsAccepted() {
 		t.Errorf("IsAccepted should be true for duplicates")
+	}
+}
+
+func TestUploadSemanticStatuses(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		accepted bool
+		fatal    bool
+	}{
+		{name: "inserted", status: "inserted", accepted: true},
+		{name: "already known", status: "file_already_known", accepted: true},
+		{name: "no API key", status: "no_api_key", fatal: true},
+		{name: "user blacklisted", status: "user_blacklisted", fatal: true},
+		{name: "HTTP POST expected", status: "http_post_expected"},
+		{name: "file expected", status: "file_expected"},
+		{name: "file too large", status: "file_too_large"},
+		{name: "file type not allowed", status: "file_type_not_allowed"},
+		{name: "empty status", status: ""},
+		{name: "unknown status", status: "future_status"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"query_status": tt.status})
+			}))
+			defer srv.Close()
+
+			res, err := NewClient(srv.URL).Upload(
+				context.Background(), "test-key", strings.NewReader("payload"), "abc123", Submission{Filename: "sample"},
+			)
+			if res == nil || res.Status != tt.status {
+				t.Fatalf("result = %+v, want status %q", res, tt.status)
+			}
+			if tt.accepted {
+				if err != nil {
+					t.Fatalf("accepted status returned error: %v", err)
+				}
+				if !res.IsAccepted() {
+					t.Fatal("accepted status classified as rejected")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("semantic rejection %q returned nil error", tt.status)
+			}
+			var semanticErr *SemanticError
+			if !errors.As(err, &semanticErr) {
+				t.Fatalf("error %T is not *SemanticError: %v", err, err)
+			}
+			if semanticErr.Status != tt.status {
+				t.Fatalf("SemanticError.Status = %q, want %q", semanticErr.Status, tt.status)
+			}
+			if semanticErr.Fatal() != tt.fatal {
+				t.Fatalf("SemanticError.Fatal() = %v, want %v", semanticErr.Fatal(), tt.fatal)
+			}
+			if res.IsAccepted() {
+				t.Fatalf("semantic rejection %q classified as accepted", tt.status)
+			}
+			if tt.status != "" && !strings.Contains(err.Error(), tt.status) {
+				t.Fatalf("error %q does not identify status %q", err, tt.status)
+			}
+		})
 	}
 }
 

