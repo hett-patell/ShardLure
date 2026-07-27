@@ -2,6 +2,7 @@ package store
 
 import (
 	"strings"
+	"time"
 )
 
 // cowrie emits a client's HASSH fingerprint only on the cowrie.client.kex
@@ -16,9 +17,11 @@ func (s *Store) ensureSessionHASSHIndex() error {
 	s.onceSessHASSH.Do(func() {
 		_, s.errSessHASSH = s.execWrite(`
 CREATE TABLE IF NOT EXISTS cowrie_session_hassh (
-  session_id TEXT PRIMARY KEY,
-  hassh      TEXT NOT NULL
-)`)
+  session_id  TEXT PRIMARY KEY,
+  hassh       TEXT NOT NULL,
+  observed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_cowrie_session_hassh_observed_at ON cowrie_session_hassh(observed_at);`)
 	})
 	return s.errSessHASSH
 }
@@ -35,10 +38,11 @@ func (s *Store) RecordSessionHASSH(sessionID, hassh string) error {
 	if err := s.ensureSessionHASSHIndex(); err != nil {
 		return err
 	}
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.execWrite(`
-INSERT INTO cowrie_session_hassh (session_id, hassh) VALUES (?, ?)
-ON CONFLICT(session_id) DO UPDATE SET hassh=excluded.hassh`,
-		sessionID, hassh)
+INSERT INTO cowrie_session_hassh (session_id, hassh, observed_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET hassh=excluded.hassh, observed_at=excluded.observed_at`,
+		sessionID, hassh, observedAt)
 	return err
 }
 

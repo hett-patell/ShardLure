@@ -82,10 +82,19 @@ func hasEnvFallback(key string) bool {
 
 // Keystore is the mutable runtime view of settings. Reads take an RLock; the
 // rare Set/Clear takes the write lock. It is safe for concurrent use.
+type settingsStore interface {
+	SetAppSetting(key, value string) error
+	DeleteAppSetting(key string) error
+}
+
 type Keystore struct {
-	mu   sync.RWMutex
-	st   *store.Store
-	vals map[string]string // DB-sourced values, seeded at Load and kept in sync
+	mu sync.RWMutex // protects vals; readers never wait on persistence
+	// writeMu preserves DB/cache ordering across the full Set or Clear. Without
+	// it, A can commit, B can commit+cache, then A can cache last and leave the
+	// in-memory value older than the durable row.
+	writeMu sync.Mutex
+	st      settingsStore
+	vals    map[string]string // DB-sourced values, seeded at Load and kept in sync
 }
 
 // Load builds a Keystore seeded from the DB's app_settings rows.
@@ -219,6 +228,8 @@ func (k *Keystore) Set(key, value string) error {
 	if value == "" {
 		return k.Clear(key)
 	}
+	k.writeMu.Lock()
+	defer k.writeMu.Unlock()
 	if err := k.st.SetAppSetting(key, value); err != nil {
 		return err
 	}
@@ -231,6 +242,8 @@ func (k *Keystore) Set(key, value string) error {
 // Clear deletes the DB row and the in-memory entry; subsequent Get falls back
 // to the environment (for SHARDLURE_* keys) or the caller's default.
 func (k *Keystore) Clear(key string) error {
+	k.writeMu.Lock()
+	defer k.writeMu.Unlock()
 	if err := k.st.DeleteAppSetting(key); err != nil {
 		return err
 	}

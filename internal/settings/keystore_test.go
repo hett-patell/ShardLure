@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/networkshard/shardlure/internal/store"
 )
@@ -150,4 +151,137 @@ func TestKeystoreConcurrent(t *testing.T) {
 		go func() { defer wg.Done(); _ = k.Set(KeyIPQS, "v") }()
 	}
 	wg.Wait()
+}
+
+func TestKeystoreSerializesSetSetPersistenceAndCache(t *testing.T) {
+	assertKeystoreWriteOrdering(t, func(k *Keystore, key string) error {
+		return k.Set(key, "B")
+	})
+}
+
+func TestKeystoreSerializesSetClearPersistenceAndCache(t *testing.T) {
+	assertKeystoreWriteOrdering(t, func(k *Keystore, key string) error {
+		return k.Clear(key)
+	})
+}
+
+// barrierSettingsStore wraps the real SQLite settings store and pauses write A
+// after its DB commit but before Keystore.Set can mutate the cache. Without a
+// keystore-level writer lock, write B can then commit and update the cache
+// before A resumes, deterministically producing A-DB/B-DB/B-cache/A-cache.
+type barrierSettingsStore struct {
+	st           *store.Store
+	firstDB      chan struct{}
+	releaseFirst chan struct{}
+	secondDB     chan struct{}
+}
+
+func (s *barrierSettingsStore) SetAppSetting(key, value string) error {
+	if err := s.st.SetAppSetting(key, value); err != nil {
+		return err
+	}
+	if value == "A" {
+		close(s.firstDB)
+		<-s.releaseFirst
+	} else {
+		close(s.secondDB)
+	}
+	return nil
+}
+
+func (s *barrierSettingsStore) DeleteAppSetting(key string) error {
+	if err := s.st.DeleteAppSetting(key); err != nil {
+		return err
+	}
+	close(s.secondDB)
+	return nil
+}
+
+func assertKeystoreWriteOrdering(t *testing.T, second func(*Keystore, string) error) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "ordering.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	barrier := &barrierSettingsStore{
+		st:           st,
+		firstDB:      make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+		secondDB:     make(chan struct{}),
+	}
+	k := &Keystore{st: barrier, vals: map[string]string{}}
+	const key = "ordering.test"
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- k.Set(key, "A") }()
+	waitKeystoreSignal(t, barrier.firstDB, "first DB write")
+	writerHeld := !k.writeMu.TryLock()
+	if !writerHeld {
+		k.writeMu.Unlock()
+		t.Error("keystore writer mutex was not held across the first DB/cache gap")
+	}
+
+	secondDone := make(chan error, 1)
+	secondStarted := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		secondDone <- second(k, key)
+	}()
+	waitKeystoreSignal(t, secondStarted, "second goroutine start")
+
+	// On the broken implementation B reaches the DB while A is paused. Wait
+	// for B to finish its cache mutation before releasing A, forcing the stale
+	// schedule exactly. On the fixed implementation TryLock proves A still owns
+	// the writer mutex, so B is serialized behind it and can finish only after
+	// A is released.
+	secondFinished := false
+	if !writerHeld {
+		waitKeystoreSignal(t, barrier.secondDB, "unserialized second DB write")
+		if err := waitKeystoreResult(t, secondDone, "second write"); err != nil {
+			t.Fatalf("second write: %v", err)
+		}
+		secondFinished = true
+	}
+	close(barrier.releaseFirst)
+	if err := waitKeystoreResult(t, firstDone, "first write"); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if !secondFinished {
+		waitKeystoreSignal(t, barrier.secondDB, "serialized second DB write")
+		if err := waitKeystoreResult(t, secondDone, "serialized second write"); err != nil {
+			t.Fatalf("second write: %v", err)
+		}
+	}
+
+	dbValue, dbOK, err := st.GetAppSetting(key)
+	if err != nil {
+		t.Fatalf("read DB value: %v", err)
+	}
+	k.mu.RLock()
+	cacheValue, cacheOK := k.vals[key]
+	k.mu.RUnlock()
+	if cacheOK != dbOK || cacheValue != dbValue {
+		t.Fatalf("cache = (%q, %v), DB = (%q, %v)", cacheValue, cacheOK, dbValue, dbOK)
+	}
+}
+
+func waitKeystoreSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func waitKeystoreResult(t *testing.T, ch <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		return nil
+	}
 }

@@ -114,6 +114,60 @@ func TestMaintenancePurgeDeletesOldRows(t *testing.T) {
 	}
 }
 
+func TestMaintenancePurgeDeletesExpiredSessionBindings(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "session-retention.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	for _, sid := range []string{"session-old", "session-fresh"} {
+		if err := s.RecordSessionHASSH(sid, "aa:bb"); err != nil {
+			t.Fatalf("record %s hassh: %v", sid, err)
+		}
+		if err := s.RecordSessionDuration(sid, 2267); err != nil {
+			t.Fatalf("record %s duration: %v", sid, err)
+		}
+		if err := s.RecordSessionArch(sid, "linux-x64-lsb"); err != nil {
+			t.Fatalf("record %s arch: %v", sid, err)
+		}
+	}
+	oldTS := time.Now().UTC().AddDate(0, 0, -90).Format(time.RFC3339Nano)
+	freshTS := time.Now().UTC().AddDate(0, 0, -1).Format(time.RFC3339Nano)
+	for _, table := range []string{"cowrie_session_hassh", "cowrie_session_meta"} {
+		if _, err := s.execWrite(`UPDATE `+table+` SET observed_at=? WHERE session_id='session-old'`, oldTS); err != nil {
+			t.Fatalf("backdate %s: %v", table, err)
+		}
+		if _, err := s.execWrite(`UPDATE `+table+` SET observed_at=? WHERE session_id='session-fresh'`, freshTS); err != nil {
+			t.Fatalf("freshen %s: %v", table, err)
+		}
+	}
+
+	if err := s.MaintenancePurge(30); err != nil {
+		t.Fatalf("MaintenancePurge: %v", err)
+	}
+	hasshes, err := s.HASSHForSessions([]string{"session-old", "session-fresh"})
+	if err != nil {
+		t.Fatalf("load remaining hasshes: %v", err)
+	}
+	if _, ok := hasshes["session-old"]; ok {
+		t.Fatal("expired hassh binding survived purge")
+	}
+	if hasshes["session-fresh"] != "aa:bb" {
+		t.Fatalf("fresh hassh binding = %q, want aa:bb", hasshes["session-fresh"])
+	}
+	meta, err := s.SessionMetaForSessions([]string{"session-old", "session-fresh"})
+	if err != nil {
+		t.Fatalf("load remaining session meta: %v", err)
+	}
+	if _, ok := meta["session-old"]; ok {
+		t.Fatal("expired session metadata survived purge")
+	}
+	if got := meta["session-fresh"]; got.DurationMs != 2267 || got.Arch != "linux-x64-lsb" {
+		t.Fatalf("fresh session metadata = %+v, want duration=2267 arch=linux-x64-lsb", got)
+	}
+}
+
 // TestMaintenancePurgeZeroIsNoop confirms retentionDays<=0 short
 // circuits without touching the DB or creating any tables.
 func TestMaintenancePurgeZeroIsNoop(t *testing.T) {

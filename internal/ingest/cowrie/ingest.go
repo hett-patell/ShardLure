@@ -481,15 +481,16 @@ func (b *sideBindings) addArch(sessionID, arch string) {
 // headSignature fingerprints the first bytes of a file so the append-mode
 // reader can detect copytruncate-style rotation (truncate-in-place + regrow,
 // which keeps the inode). Uses ReadAt so the file's read cursor is untouched.
-// Returns "" on any error — callers treat an empty/unknown signature as "can't
-// tell", falling back to the inode+size heuristic rather than over-resetting.
+// Only a complete fixed-size prefix is stable as the file grows: hashing a
+// short partial prefix would change on every ordinary append and look like an
+// in-place rotation. Returns "" until all 512 bytes are available or on error.
 func headSignature(f *os.File) string {
 	buf := make([]byte, 512)
 	n, err := f.ReadAt(buf, 0)
-	if n == 0 || (err != nil && err != io.EOF) {
+	if err != nil || n != len(buf) {
 		return ""
 	}
-	sum := sha256.Sum256(buf[:n])
+	sum := sha256.Sum256(buf)
 	return hex.EncodeToString(sum[:8]) // 64-bit prefix is plenty for change detection
 }
 

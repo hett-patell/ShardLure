@@ -53,6 +53,10 @@ type sqlExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
+type sqlQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -199,6 +203,19 @@ CREATE TABLE IF NOT EXISTS app_settings (
   key        TEXT PRIMARY KEY,
   value      TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cowrie_session_hassh (
+  session_id  TEXT PRIMARY KEY,
+  hassh       TEXT NOT NULL,
+  observed_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS cowrie_session_meta (
+  session_id  TEXT PRIMARY KEY,
+  duration_ms INTEGER DEFAULT 0,
+  arch        TEXT,
+  observed_at TEXT NOT NULL DEFAULT ''
 );
 `
 	if _, err := s.db.Exec(schema); err != nil {
@@ -513,13 +530,65 @@ CREATE INDEX IF NOT EXISTS idx_events_sha256 ON events(sha256) WHERE sha256 != '
 			return err
 		}
 	}
+
+	// v16: session side-channel retention. HASSH and session metadata are
+	// unbounded session-keyed tables, so give each row an observation time and
+	// an index that MaintenancePurge can use. Existing v15 rows have no source
+	// timestamp; backfill them to migration time so upgrading cannot
+	// immediately discard still-useful bindings. The transaction plus guarded
+	// ALTERs makes a retry safe while preserving all payload columns.
+	if current < 16 {
+		if err := s.WithTx(func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS cowrie_session_hassh (
+  session_id  TEXT PRIMARY KEY,
+  hassh       TEXT NOT NULL,
+  observed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS cowrie_session_meta (
+  session_id  TEXT PRIMARY KEY,
+  duration_ms INTEGER DEFAULT 0,
+  arch        TEXT,
+  observed_at TEXT NOT NULL DEFAULT ''
+);`); err != nil {
+				return err
+			}
+			for _, table := range []string{"cowrie_session_hassh", "cowrie_session_meta"} {
+				has, err := columnExistsIn(tx, table, "observed_at")
+				if err != nil {
+					return err
+				}
+				if !has {
+					if _, err := tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN observed_at TEXT NOT NULL DEFAULT ''`); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.Exec(`UPDATE `+table+` SET observed_at=? WHERE observed_at IS NULL OR observed_at=''`, now); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`
+CREATE INDEX IF NOT EXISTS idx_cowrie_session_hassh_observed_at ON cowrie_session_hassh(observed_at);
+CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session_meta(observed_at);`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (16, ?)`, now)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // columnExists reports whether a table has a given column (via PRAGMA
 // table_info). Used by migrations that ADD COLUMN idempotently.
 func (s *Store) columnExists(table, column string) (bool, error) {
-	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	return columnExistsIn(s.db, table, column)
+}
+
+func columnExistsIn(q sqlQueryer, table, column string) (bool, error) {
+	rows, err := q.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return false, err
 	}
@@ -943,13 +1012,14 @@ func (s *Store) LatestEventTime() (time.Time, error) {
 }
 
 // MaintenancePurge deletes rows older than retentionDays from the
-// four unbounded-growth tables: events, artifacts, ip_enrichment,
-// and cowrie_tty_index. Actor identity tables (actors, actor_ips,
+// unbounded-growth tables: events, artifacts, ip_enrichment,
+// cowrie_tty_index, cowrie_session_hassh, and cowrie_session_meta.
+// Actor identity tables (actors, actor_ips,
 // actor_users) are not pruned — their upper bound is the distinct
 // attacker set, not time. Runs as a single quick transaction so a
 // crash mid-purge won't leave partial state. Pass 0 to skip.
 //
-// artifacts, ip_enrichment and cowrie_tty_index are all created
+// The smaller retention tables are all created
 // lazily by their respective writers (ensureArtifactsTable etc.)
 // so a brand-new install would fail this purge with "no such
 // table" until the first artifact/enrichment/cowrie download
@@ -966,6 +1036,12 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		return err
 	}
 	if err := s.ensureArtifactsTable(); err != nil {
+		return err
+	}
+	if err := s.ensureSessionHASSHIndex(); err != nil {
+		return err
+	}
+	if err := s.ensureSessionMetaTable(); err != nil {
 		return err
 	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
@@ -1014,6 +1090,12 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM cowrie_tty_index WHERE ts < ?`, cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM cowrie_session_hassh WHERE observed_at < ?`, cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM cowrie_session_meta WHERE observed_at < ?`, cutoff); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM artifacts WHERE COALESCE(ts, created_at) < ?`, cutoff); err != nil {

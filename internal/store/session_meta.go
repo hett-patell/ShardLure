@@ -29,8 +29,10 @@ func (s *Store) ensureSessionMetaTable() error {
 CREATE TABLE IF NOT EXISTS cowrie_session_meta (
   session_id  TEXT PRIMARY KEY,
   duration_ms INTEGER DEFAULT 0,
-  arch        TEXT
-)`)
+  arch        TEXT,
+  observed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session_meta(observed_at);`)
 	})
 	return s.errSessMeta
 }
@@ -49,10 +51,11 @@ func (s *Store) RecordSessionDuration(sessionID string, durationMs int64) error 
 	// Preserve any arch already recorded for this session: INSERT sets arch to
 	// its column default (NULL) and the ON CONFLICT clause only touches
 	// duration_ms, so a prior params row's arch survives a later closed row.
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.execWrite(`
-INSERT INTO cowrie_session_meta (session_id, duration_ms) VALUES (?, ?)
-ON CONFLICT(session_id) DO UPDATE SET duration_ms=excluded.duration_ms`,
-		sessionID, durationMs)
+INSERT INTO cowrie_session_meta (session_id, duration_ms, observed_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET duration_ms=excluded.duration_ms, observed_at=excluded.observed_at`,
+		sessionID, durationMs, observedAt)
 	return err
 }
 
@@ -67,10 +70,11 @@ func (s *Store) RecordSessionArch(sessionID, arch string) error {
 	if err := s.ensureSessionMetaTable(); err != nil {
 		return err
 	}
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.execWrite(`
-INSERT INTO cowrie_session_meta (session_id, arch) VALUES (?, ?)
-ON CONFLICT(session_id) DO UPDATE SET arch=excluded.arch`,
-		sessionID, arch)
+INSERT INTO cowrie_session_meta (session_id, arch, observed_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET arch=excluded.arch, observed_at=excluded.observed_at`,
+		sessionID, arch, observedAt)
 	return err
 }
 
@@ -137,6 +141,7 @@ func (s *Store) RecordSessionBindings(bindings []SessionBinding) error {
 	if !needHASSH && !needMeta && !needTTY {
 		return nil
 	}
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	return s.WithTx(func(tx *sql.Tx) error {
 		for _, b := range bindings {
 			sid := strings.TrimSpace(b.SessionID)
@@ -145,22 +150,22 @@ func (s *Store) RecordSessionBindings(bindings []SessionBinding) error {
 			}
 			if h := strings.TrimSpace(b.HASSH); h != "" {
 				if _, err := tx.Exec(`
-INSERT INTO cowrie_session_hassh (session_id, hassh) VALUES (?, ?)
-ON CONFLICT(session_id) DO UPDATE SET hassh=excluded.hassh`, sid, h); err != nil {
+INSERT INTO cowrie_session_hassh (session_id, hassh, observed_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET hassh=excluded.hassh, observed_at=excluded.observed_at`, sid, h, observedAt); err != nil {
 					return err
 				}
 			}
 			if b.DurationMs > 0 {
 				if _, err := tx.Exec(`
-INSERT INTO cowrie_session_meta (session_id, duration_ms) VALUES (?, ?)
-ON CONFLICT(session_id) DO UPDATE SET duration_ms=excluded.duration_ms`, sid, b.DurationMs); err != nil {
+INSERT INTO cowrie_session_meta (session_id, duration_ms, observed_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET duration_ms=excluded.duration_ms, observed_at=excluded.observed_at`, sid, b.DurationMs, observedAt); err != nil {
 					return err
 				}
 			}
 			if a := strings.TrimSpace(b.Arch); a != "" {
 				if _, err := tx.Exec(`
-INSERT INTO cowrie_session_meta (session_id, arch) VALUES (?, ?)
-ON CONFLICT(session_id) DO UPDATE SET arch=excluded.arch`, sid, a); err != nil {
+INSERT INTO cowrie_session_meta (session_id, arch, observed_at) VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET arch=excluded.arch, observed_at=excluded.observed_at`, sid, a, observedAt); err != nil {
 					return err
 				}
 			}

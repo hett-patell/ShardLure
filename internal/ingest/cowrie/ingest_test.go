@@ -1,6 +1,7 @@
 package cowrie
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -436,6 +437,55 @@ func TestIngestFileAppendDedupsByEventIdentity(t *testing.T) {
 	}
 }
 
+func TestIngestFileAppendKeepsShortFileSignatureStable(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+
+	first := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:00.000000Z","src_ip":"1.2.3.4","username":"root","session":"short-1"}`
+	second := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-21T12:00:01.000000Z","src_ip":"1.2.3.4","username":"admin","session":"short-2"}`
+	if len(first)+len(second)+2 >= 512 {
+		t.Fatal("short-file fixture unexpectedly reached the signature prefix size")
+	}
+	path := filepath.Join(t.TempDir(), "cowrie.json")
+	if err := os.WriteFile(path, []byte(first+"\n"), 0o644); err != nil {
+		t.Fatalf("write first event: %v", err)
+	}
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	firstState, ok, err := st.GetIngestState(models.SourceCowrie, path)
+	if err != nil || !ok {
+		t.Fatalf("load first ingest state: found=%v err=%v", ok, err)
+	}
+
+	appendLine(t, path, second)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	secondState, ok, err := st.GetIngestState(models.SourceCowrie, path)
+	if err != nil || !ok {
+		t.Fatalf("load second ingest state: found=%v err=%v", ok, err)
+	}
+	if firstState.HeadSig != "" || secondState.HeadSig != "" {
+		t.Fatalf("short-file signatures = (%q, %q), want both empty", firstState.HeadSig, secondState.HeadSig)
+	}
+
+	events, err := st.EventsBySource(models.SourceCowrie)
+	if err != nil {
+		t.Fatalf("load cowrie events: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("event count after short-file append = %d, want 2", len(events))
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat short file: %v", err)
+	}
+	if secondState.Offset != fi.Size() {
+		t.Fatalf("saved offset = %d, want file size %d", secondState.Offset, fi.Size())
+	}
+}
+
 // TestIngestFileAppendDetectsCopytruncate guards LOW-1: a file truncated in
 // place and regrown past the old offset (logrotate copytruncate) keeps its
 // inode, so the inode+size heuristic alone would seek past — and skip — the new
@@ -458,22 +508,49 @@ func TestIngestFileAppendDetectsCopytruncate(t *testing.T) {
 	if err := os.WriteFile(path, []byte(gen1.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	gen1Info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat gen1: %v", err)
+	}
 	if _, err := IngestFileAppend(st, path, nil); err != nil {
 		t.Fatalf("gen1 append: %v", err)
 	}
+	prev, ok, err := st.GetIngestState(models.SourceCowrie, path)
+	if err != nil || !ok {
+		t.Fatalf("load gen1 ingest state: found=%v err=%v", ok, err)
+	}
 
-	// copytruncate: same path/inode, brand-new shorter content with a DIFFERENT
-	// first line (so the head signature changes).
-	gen2 := `{"eventid":"cowrie.login.failed","timestamp":"2026-05-22T09:00:00.000000Z","src_ip":"9.9.9.9","username":"admin","session":"g2-only"}` + "\n"
-	if err := os.WriteFile(path, []byte(gen2), 0o644); err != nil {
+	// copytruncate: same path/inode, brand-new content regrown BEYOND the old
+	// offset with a different full prefix. Size alone cannot detect this case.
+	// Only the first new line uses 9.9.9.9, so finding it proves ingest reset to
+	// byte zero rather than seeking into the replacement at the stale offset.
+	var gen2 strings.Builder
+	for i := 0; i < 40; i++ {
+		ip := "8.8.8.8"
+		if i == 0 {
+			ip = "9.9.9.9"
+		}
+		fmt.Fprintf(&gen2, `{"eventid":"cowrie.login.failed","timestamp":"2026-05-22T09:00:%02d.000000Z","src_ip":"%s","username":"admin","session":"g2-%02d"}`+"\n", i, ip, i)
+	}
+	if int64(gen2.Len()) <= prev.Offset {
+		t.Fatalf("gen2 size = %d, want beyond old offset %d", gen2.Len(), prev.Offset)
+	}
+	if err := os.WriteFile(path, []byte(gen2.String()), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	gen2Info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat gen2: %v", err)
+	}
+	if fileInode(gen2Info) != fileInode(gen1Info) {
+		t.Fatalf("copytruncate fixture replaced inode: gen1=%d gen2=%d", fileInode(gen1Info), fileInode(gen2Info))
 	}
 	if _, err := IngestFileAppend(st, path, nil); err != nil {
 		t.Fatalf("gen2 append: %v", err)
 	}
 
-	// The gen2 event (9.9.9.9) must have been ingested, not skipped because the
-	// saved offset pointed past the (now shorter) file's new content.
+	// The first gen2 event must have been ingested, not skipped because the
+	// stale offset pointed into the regrown replacement content.
 	events, err := st.EventsBySource(models.SourceCowrie)
 	if err != nil {
 		t.Fatal(err)
