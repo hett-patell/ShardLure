@@ -22,13 +22,6 @@ type Runner struct {
 	fetch      *SafeFetcher
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
 
-	// doneKeys remembers url-keys already confirmed recorded (either found
-	// in the DB or written by us) so steady-state ticks stop re-issuing an
-	// ArtifactURLRecorded COUNT query per URL/file/event, every 5 seconds,
-	// forever. The DB stays the source of truth — the memo only shortcuts
-	// keys we've already checked once this process lifetime. Keys are only
-	// added on terminal outcomes, so a transient failure is retried.
-	doneKeys map[string]struct{}
 	// ttySessionBound remembers tty url-keys whose artifact row has a
 	// session id stamped, ending the per-tick backfill lookups for them.
 	ttySessionBound map[string]struct{}
@@ -49,25 +42,15 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 			time.Duration(capCfg.TimeoutSec)*time.Second,
 			cfg.AdminIPs,
 		),
-		doneKeys:        map[string]struct{}{},
 		ttySessionBound: map[string]struct{}{},
 	}
 }
 
-// urlKeyDone reports whether key is already recorded, consulting the
-// in-memory memo before the DB and memoizing a positive DB answer.
+// urlKeyDone reports whether key is already recorded in the DB.
+// The DB is the sole source of truth — the UNIQUE index on url makes
+// this an O(log n) lookup that is fast enough for steady-state ticks.
 func (r *Runner) urlKeyDone(key string) (bool, error) {
-	if _, ok := r.doneKeys[key]; ok {
-		return true, nil
-	}
-	exists, err := r.st.ArtifactURLRecorded(key)
-	if err != nil {
-		return false, err
-	}
-	if exists {
-		r.doneKeys[key] = struct{}{}
-	}
-	return exists, nil
+	return r.st.ArtifactURLRecorded(key)
 }
 
 // Run processes recent command events and syncs Cowrie download artifacts.
@@ -220,7 +203,6 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 		}); err != nil {
 			return n, err
 		}
-		r.doneKeys[urlKey] = struct{}{}
 		if sessionID != "" {
 			r.ttySessionBound[urlKey] = struct{}{}
 		}
@@ -296,7 +278,7 @@ func (r *Runner) fetchFromCommands(ctx context.Context) (int, error) {
 			}
 			// The row exists in the DB from here on (success or failure),
 			// which is exactly what ArtifactURLRecorded would report.
-			r.doneKeys[rawURL] = struct{}{}
+
 			if art.Status == "fetched" {
 				n++
 			}
@@ -350,7 +332,6 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 		}); err != nil {
 			return n, err
 		}
-		r.doneKeys[urlKey] = struct{}{}
 		n++
 	}
 	return n, nil
@@ -413,7 +394,6 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		}); err != nil {
 			return n, err
 		}
-		r.doneKeys[urlKey] = struct{}{}
 		n++
 	}
 	return n, nil
@@ -518,4 +498,10 @@ func copyArtifact(src, dest string, maxBytes int64) (sha string, size int64, err
 	}
 	_ = os.Chmod(dest, 0o600)
 	return sum, n, nil
+}
+
+// Fetch returns the runner's SafeFetcher so it can be shared with the
+// artifact retry worker without creating a second evidence directory.
+func (r *Runner) Fetch() *SafeFetcher {
+	return r.fetch
 }

@@ -164,6 +164,12 @@ func TestSecurityHeaders(t *testing.T) {
 		"X-Frame-Options":        "DENY",
 		"Referrer-Policy":        "no-referrer",
 	}
+	// CSP must be present and restrict frame-ancestors to none.
+	if csp := rec.Header().Get("Content-Security-Policy"); csp == "" {
+		t.Error("Content-Security-Policy header missing")
+	} else if !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP missing frame-ancestors: %s", csp)
+	}
 	for k, v := range want {
 		if got := rec.Header().Get(k); got != v {
 			t.Errorf("%s = %q, want %q", k, got, v)

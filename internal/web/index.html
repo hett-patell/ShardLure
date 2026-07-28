@@ -264,6 +264,18 @@
     .sidebar { display: none; }
     .rail.left { left: 0; }
   }
+
+/* Reduced motion: disable CSS transitions and animations when the user
+   prefers reduced motion. The JS-side globe animation is also paused
+   in cobe-boot.js when this media query matches. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 </style>
 <link rel="stylesheet" href="/themes.css" />
 </head>
@@ -279,7 +291,7 @@
 
 <div id="cobe-stage" hidden>
   <div id="cobe-wrap">
-    <canvas id="cobe" width="1000" height="1000"></canvas>
+    <canvas id="cobe" width="1000" height="1000" role="img" aria-label="Interactive 3D globe showing attacker geolocation"></canvas>
     <div id="cobe-overlays"></div>
   </div>
 </div>
@@ -361,7 +373,7 @@
 
 <div class="sparkline panel">
   <div class="label"><span>Events / hour</span><span id="spark-max">peak 0</span></div>
-  <canvas id="spark"></canvas>
+  <canvas id="spark" role="img" aria-label="Sparkline chart of recent event activity"></canvas>
 </div>
 
 <script>

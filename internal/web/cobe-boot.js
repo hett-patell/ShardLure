@@ -82,6 +82,12 @@ function destroy() {
 
 async function ensure(theme, mode) {
   _mode = mode || "dark";
+  // Honor prefers-reduced-motion: skip globe creation entirely so no
+  // continuous rAF loop spins when the user opted out of motion.
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    destroy();
+    return null;
+  }
   if (theme !== "meridian" && theme !== "sprite" && theme !== "signal") {
     destroy();
     return null;

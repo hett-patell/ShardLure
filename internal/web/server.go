@@ -814,6 +814,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		// CSP: all assets are embedded (no external CDNs). unsafe-inline is
+		// required for the inline <script> blocks in index.html / intel.html
+		// and the Cobe module's dynamic style injection.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://esm.sh; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }

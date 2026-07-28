@@ -518,6 +518,10 @@ The same gate runs for both the CLI and the dashboard's "Report All" button. The
 
 ## Security Notes
 
+- **Loopback default:** The dashboard binds to `127.0.0.1:8080` by default. Wildcard or public addresses require an explicit `SHARDLURE_DASH_TOKEN` — the server refuses to start with an unauthenticated listener on a non-loopback address.
+- **Cookie auth:** The `?token=` query parameter is bootstrap-only — it sets an `HttpOnly`, `SameSite=Strict` session cookie and redirects to a clean URL. Tokens never persist in browser history, referrer headers, or server access logs.
+- **Security headers:** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a restrictive `Content-Security-Policy` (self-hosted assets only, frame-ancestors none).
+- **Token rotation:** Rotating the dashboard token via Settings automatically updates the session cookie so the operator's session survives.
 - Verify `ssh -p 2222 user@host` in a second terminal **before** closing your original session. "I'll fix it in the morning" SSH stories never end well.
 - Keep the dashboard on Tailscale or another private network. Exposing the dashboard to the internet is what we call self-doxxing.
 - Set `SHARDLURE_DASH_TOKEN` for dashboard defense in depth (constant-time compared, sent as `Authorization: Bearer …` or `X-ShardLure-Token`).

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 )
@@ -621,4 +622,120 @@ func scanEventRowsWithFile(rows rowScanner) ([]*EventRow, error) {
 		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+// DueArtifactCaptures returns up to limit artifact URLs that are eligible for
+// a capture attempt: status is "capturing" with no in-progress lease (the
+// previous attempt crashed or timed out) OR status is retryable ("failed")
+// with attempt_count < maxAttempts and next_attempt_at in the past.
+// Terminal rows ("fetched", "blocked") are excluded by the backfill in
+// migration v17 (attempt_count >= 1).
+func (s *Store) DueArtifactCaptures(now time.Time, limit, maxAttempts int) ([]string, error) {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+SELECT url FROM artifacts
+WHERE status IN ('capturing','failed')
+  AND attempt_count < ?
+  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+ORDER BY created_at ASC
+LIMIT ?`, maxAttempts, now.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var urls []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		urls = append(urls, u)
+	}
+	return urls, rows.Err()
+}
+
+// ClaimArtifactCapture marks a capturing artifact with a lease expiry so the
+// worker can detect stale claims. Succeeds only if the row still matches
+// expectedAttempt (optimistic concurrency — prevents two workers from
+// claiming the same artifact). Returns store.ErrClaimStale if the attempt
+// count moved underneath us.
+func (s *Store) ClaimArtifactCapture(url string, now, leaseUntil time.Time, expectedAttempt int) error {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return err
+	}
+	res, err := s.execWrite(`
+UPDATE artifacts
+SET status='capturing', next_attempt_at=?
+WHERE url=? AND attempt_count=?`,
+		leaseUntil.UTC().Format(time.RFC3339Nano), url, expectedAttempt)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrClaimStale
+	}
+	return nil
+}
+
+// ErrClaimStale is returned by ClaimArtifactCapture when another worker
+// already claimed or completed the artifact.
+var ErrClaimStale = errors.New("artifact claim stale")
+
+// CompleteArtifactCapture records the outcome of a capture attempt. On
+// success the status is set to "fetched" (terminal). On failure the
+// attempt_count is bumped and next_attempt_at is set for exponential backoff;
+// if the attempt budget is exhausted the status becomes "failed_permanently"
+// (terminal). Returns ErrClaimStale if the row's attempt_count moved.
+func (s *Store) CompleteArtifactCapture(url string, attempt int, status, detail, localPath, sha256 string, sizeBytes int64, nextAttempt *time.Time) error {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return err
+	}
+	var nextTS sql.NullString
+	if nextAttempt != nil {
+		nextTS.String = nextAttempt.UTC().Format(time.RFC3339Nano)
+		nextTS.Valid = true
+	}
+	if status == "fetched" {
+		// Terminal success: stamp final fields, clear lease.
+		res, err := s.execWrite(`
+UPDATE artifacts
+SET status='fetched', detail=?, local_path=?, sha256=?, size_bytes=?,
+    attempt_count=?, next_attempt_at=NULL
+WHERE url=? AND attempt_count=?`,
+			detail, localPath, sha256, sizeBytes, attempt, url, attempt-1)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ErrClaimStale
+		}
+		return nil
+	}
+	// Retryable failure: bump attempt, schedule next retry.
+	res, err := s.execWrite(`
+UPDATE artifacts
+SET status='failed', detail=?, attempt_count=?, next_attempt_at=?
+WHERE url=? AND attempt_count=?`,
+		detail, attempt, nextTS, url, attempt-1)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrClaimStale
+	}
+	return nil
+}
+
+// ArtifactAttemptCount reads the attempt_count for a single artifact URL.
+// Used by the worker to know the current attempt before claiming.
+func (s *Store) ArtifactAttemptCount(url string, count *int) error {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return err
+	}
+	return s.db.QueryRow(`SELECT attempt_count FROM artifacts WHERE url=?`, url).Scan(count)
 }

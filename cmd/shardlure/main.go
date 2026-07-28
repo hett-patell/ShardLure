@@ -255,6 +255,12 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Start the artifact retry worker in the background. It polls for failed
+	// captures and retries them with exponential backoff, bounded by the
+	// configured max attempts.
+	artWorker := capture.NewArtifactWorker(st, capRunner.Fetch(), 5, 2*time.Minute)
+	go artWorker.Run(ctx)
+
 	if journalSSH {
 		go func() {
 			// Restart the tail on failure with capped backoff. A scanner error

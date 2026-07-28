@@ -578,6 +578,61 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+
+	// v17: artifact retry with durable attempt tracking and lease-based
+	// claiming. Adds attempt_count for retry budget, next_attempt_at for
+	// backoff scheduling, and an index for the due-artifacts polling query.
+	// Backfills existing terminal rows (fetched/blocked) with attempt_count=1
+	// so the worker never retries already-completed captures.
+	if current < 17 {
+		if err := s.WithTx(func(tx *sql.Tx) error {
+			// Ensure the artifacts table exists — it is lazily created by
+			// ensureArtifactsTable, but the migration needs it now.
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  src_ip TEXT,
+  session_id TEXT,
+  actor_id TEXT,
+  url TEXT NOT NULL,
+  local_path TEXT,
+  sha256 TEXT,
+  size_bytes INTEGER DEFAULT 0,
+  origin TEXT NOT NULL,
+  status TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(url)
+)`); err != nil {
+				return err
+			}
+			for _, ddl := range []struct{ col, stmt string }{
+				{"attempt_count", `ALTER TABLE artifacts ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`},
+				{"next_attempt_at", `ALTER TABLE artifacts ADD COLUMN next_attempt_at TEXT`},
+			} {
+				has, err := columnExistsIn(tx, "artifacts", ddl.col)
+				if err != nil {
+					return err
+				}
+				if !has {
+					if _, err := tx.Exec(ddl.stmt); err != nil {
+						return err
+					}
+				}
+			}
+			// Backfill terminal rows so the worker never retries them.
+			if _, err := tx.Exec(`UPDATE artifacts SET attempt_count=1 WHERE status IN ('fetched','blocked') AND attempt_count=0`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_artifacts_capture_due ON artifacts(origin, status, next_attempt_at)`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (17, ?)`, now)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1046,37 +1101,12 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
 
-	// Collect the on-disk evidence files belonging to artifacts we're about to
-	// delete, so we can unlink them AFTER the row deletion commits. Without
-	// this the evidence/ dir grew without bound (the purge deleted only rows),
-	// eventually filling the disk and stopping all telemetry. local_path is
-	// always a path WE wrote (filepath.Join(EvidenceDir, ...)), never attacker
-	// input, so it is safe to remove directly.
+	// Reference-safe purge: collect files, delete expired rows, and determine
+	// which paths have zero remaining references — all under one continuous
+	// writeMu hold. Without this, a new artifact referencing the same local_path
+	// could be inserted between the file collection and the row deletion,
+	// causing us to unlink a file that is still live.
 	var artifactFiles []string
-	func() {
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
-		rows, err := s.db.Query(
-			`SELECT local_path FROM artifacts WHERE COALESCE(ts, created_at) < ? AND local_path IS NOT NULL AND local_path != ''`,
-			cutoff)
-		if err != nil {
-			// If we can't enumerate the files, their rows still get deleted
-			// below — log so the orphaned evidence files are noticed (a later
-			// purge won't see them once the rows are gone).
-			log.Printf("store: purge could not list artifact files (will orphan on disk): %v", err)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var p string
-			if err := rows.Scan(&p); err == nil && p != "" {
-				artifactFiles = append(artifactFiles, p)
-			}
-		}
-	}()
-
-	// Small reference tables: delete in one short transaction. Children first
-	// so application-level references don't dangle.
 	if err := func() error {
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
@@ -1085,6 +1115,7 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 			return err
 		}
 		defer tx.Rollback()
+
 		// Enrichment cache — column is fetched_at (see enrichment.go).
 		if _, err := tx.Exec(`DELETE FROM ip_enrichment WHERE fetched_at < ?`, cutoff); err != nil {
 			return err
@@ -1098,9 +1129,44 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		if _, err := tx.Exec(`DELETE FROM cowrie_session_meta WHERE observed_at < ?`, cutoff); err != nil {
 			return err
 		}
+
+		// Collect paths of artifacts we're about to delete, THEN delete the rows.
+		rows, err := tx.Query(
+			`SELECT local_path FROM artifacts WHERE COALESCE(ts, created_at) < ? AND local_path IS NOT NULL AND local_path != ''`,
+			cutoff)
+		if err != nil {
+			log.Printf("store: purge could not list artifact files (will orphan on disk): %v", err)
+		} else {
+			defer rows.Close()
+			for rows.Next() {
+				var p string
+				if err := rows.Scan(&p); err == nil && p != "" {
+					artifactFiles = append(artifactFiles, p)
+				}
+			}
+			_ = rows.Close()
+		}
+
 		if _, err := tx.Exec(`DELETE FROM artifacts WHERE COALESCE(ts, created_at) < ?`, cutoff); err != nil {
 			return err
 		}
+
+		// After deleting expired rows, check which paths are still referenced
+		// by remaining live artifacts. Only unlink zero-reference paths.
+		safeToUnlink := artifactFiles[:0]
+		for _, p := range artifactFiles {
+			var n int
+			if err := tx.QueryRow(
+				`SELECT COUNT(1) FROM artifacts WHERE local_path=?`, p).Scan(&n); err != nil {
+				// If we can't check, keep the file (safe default).
+				continue
+			}
+			if n == 0 {
+				safeToUnlink = append(safeToUnlink, p)
+			}
+		}
+		artifactFiles = safeToUnlink
+
 		return tx.Commit()
 	}(); err != nil {
 		return err

@@ -487,6 +487,18 @@ func (s *Server) handleTokenRotate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "token_rotate", err, http.StatusInternalServerError)
 		return
 	}
+	// Set the new token as the session cookie so the operator's session
+	// survives the rotation. Without this the old cookie value would no
+	// longer match and the next page load would force re-authentication.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "shardlure_session",
+		Value:    tok,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   r.TLS != nil,
+		MaxAge:   0, // session cookie
+	})
 	// This is the one place a token value is returned — to the authenticated
 	// operator who just rotated it, so their session survives.
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "rotated", "token": tok})

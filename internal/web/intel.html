@@ -1151,11 +1151,11 @@
 
 <div class="shell-main">
 <div class="wrap">
-  <div class="tabs" id="tabs">
-    <span class="tab active" data-view="overview"><span class="tdot"></span>Overview</span>
-    <span class="tab blue" data-view="blue"><span class="tdot" style="background:var(--blue-team)"></span>Blue Team</span>
-    <span class="tab red" data-view="red"><span class="tdot" style="background:var(--red-team)"></span>Red Team</span>
-    <span class="tab" data-view="settings"><span class="tdot" style="background:var(--dim)"></span>Settings</span>
+  <div class="tabs" id="tabs" role="tablist">
+    <span class="tab active" data-view="overview" role="tab" tabindex="0" aria-selected="true"><span class="tdot"></span>Overview</span>
+    <span class="tab blue" data-view="blue" role="tab" tabindex="0" aria-selected="false"><span class="tdot" style="background:var(--blue-team)"></span>Blue Team</span>
+    <span class="tab red" data-view="red" role="tab" tabindex="0" aria-selected="false"><span class="tdot" style="background:var(--red-team)"></span>Red Team</span>
+    <span class="tab" data-view="settings" role="tab" tabindex="0" aria-selected="false"><span class="tdot" style="background:var(--dim)"></span>Settings</span>
   </div>
 
   <!-- ============ OVERVIEW TAB ============ -->
@@ -2349,7 +2349,10 @@ const Filters = { window: '24h', search: '' };
 
 function setActiveView(name) {
   document.querySelectorAll('.tab').forEach(function(t) {
-    t.classList.toggle('active', t.getAttribute('data-view') === name);
+    var isActive = t.getAttribute('data-view') === name;
+    t.classList.toggle('active', isActive);
+    t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    t.setAttribute('tabindex', isActive ? '0' : '-1');
   });
   document.querySelectorAll('.view').forEach(function(v) {
     v.classList.toggle('active', v.id === 'view-' + name);
@@ -2370,6 +2373,29 @@ document.querySelectorAll('.tab').forEach(function(t) {
     var v = t.getAttribute('data-view');
     setActiveView(v);
     if (v === 'settings') loadSettings();
+  });
+  // ARIA keyboard semantics: Enter/Space activates; arrow keys move focus.
+  t.addEventListener('keydown', function(e) {
+    var tabs = Array.from(document.querySelectorAll('.tab'));
+    var idx = tabs.indexOf(t);
+    var next = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      next = (idx + 1) % tabs.length;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      next = (idx - 1 + tabs.length) % tabs.length;
+    } else if (e.key === 'Home') {
+      next = 0;
+    } else if (e.key === 'End') {
+      next = tabs.length - 1;
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      t.click();
+      return;
+    }
+    if (next >= 0) {
+      e.preventDefault();
+      tabs[next].focus();
+    }
   });
 });
 window.addEventListener('hashchange', function() {

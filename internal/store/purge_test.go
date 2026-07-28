@@ -266,3 +266,69 @@ func TestMaintenancePurgeChunkedEvents(t *testing.T) {
 		t.Errorf("want 1 fresh event left after chunked purge, got %d", n)
 	}
 }
+
+// TestMaintenancePurgeReferenceSafe verifies that the purge does not unlink an
+// artifact file when a surviving (non-expired) artifact still references the
+// same local_path. This is the reference-safety fix for Task 6.
+func TestMaintenancePurgeReferenceSafe(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "refsafe.db")
+	s, err := Open(p)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	evidenceDir := filepath.Join(t.TempDir(), "evidence")
+	if err := os.MkdirAll(evidenceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a shared file that two artifacts reference.
+	sharedPath := filepath.Join(evidenceDir, "shared-payload")
+	if err := os.WriteFile(sharedPath, []byte("shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	oldTS := now.AddDate(0, 0, -90)
+	freshTS := now.AddDate(0, 0, -1)
+
+	// Old artifact referencing the shared file.
+	if err := s.UpsertArtifact(Artifact{
+		TS:        oldTS,
+		URL:       "http://example.com/old",
+		LocalPath: sharedPath,
+		Origin:    "test",
+		Status:    "fetched",
+	}); err != nil {
+		t.Fatalf("upsert old: %v", err)
+	}
+	// Fresh artifact referencing the SAME file (different URL, same local_path).
+	if err := s.UpsertArtifact(Artifact{
+		TS:        freshTS,
+		URL:       "http://example.com/fresh",
+		LocalPath: sharedPath,
+		Origin:    "test",
+		Status:    "fetched",
+	}); err != nil {
+		t.Fatalf("upsert fresh: %v", err)
+	}
+
+	if err := s.MaintenancePurge(30); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// The shared file must survive because the fresh artifact still references it.
+	if _, err := os.Stat(sharedPath); err != nil {
+		t.Errorf("shared artifact file must survive purge (still referenced): %v", err)
+	}
+
+	// The old row must be deleted.
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM artifacts WHERE url='http://example.com/old'`).Scan(&n); err != nil {
+		t.Fatalf("count old: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("old artifact row should be deleted, got %d", n)
+	}
+}
