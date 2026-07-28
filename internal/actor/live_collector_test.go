@@ -316,6 +316,22 @@ func TestLiveCollectorPerIPUserCap(t *testing.T) {
 	if ent.stats.Count != 20 {
 		t.Errorf("Count = %d, want 20", ent.stats.Count)
 	}
+	// No real username key may carry the cumulative overflow count —
+	// each real key holds only its own per-username count, and the
+	// overflow bucket holds the sum of the dropped entries.
+	overflow := ent.stats.Users[liveUserOverflowKey]
+	for k, v := range ent.stats.Users {
+		if k == liveUserOverflowKey {
+			continue
+		}
+		if v == overflow {
+			t.Errorf("real key %q has overflow value %d — overflow leaked into a real username", k, v)
+		}
+	}
+	// Overflow should be the sum of the 16 usernames that were capped (20 - 4).
+	if overflow != 16 {
+		t.Errorf("overflow = %d, want 16", overflow)
+	}
 }
 
 // TestCapUsersMap exercises the hydration overflow logic in isolation.

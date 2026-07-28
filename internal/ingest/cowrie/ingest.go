@@ -142,6 +142,7 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	// not IP. Persisted first so a session whose kex landed in an earlier tail
 	// can still be recovered from the index below.
 	stampHASSH(st, events, bindings)
+	reconcileLateHASSH(st, bindings, adminIPs)
 
 	// Advance offset by exactly the bytes the scanner consumed, not by
 	// fi.Size(): cowrie may have appended more bytes between Stat() and
@@ -305,6 +306,50 @@ func stampHASSH(st *store.Store, events []*models.Event, bindings sideBindings) 
 		if h, ok := persisted[e.SessionID]; ok {
 			e.HASSH = h
 		}
+	}
+}
+
+// reconcileLateHASSH checks whether any session that received a new HASSH
+// binding in this parse pass already has committed events carrying a
+// different (IP-based) actor ID. If so, it rewrites those events to the
+// HASSH-based actor and rebuilds the affected aggregates atomically.
+//
+// This handles the common live case: connect/login events arrive in tick N
+// without a HASSH (cowrie emits it only on client.kex), so they are stamped
+// with actor ID "cowrie:<IP>". When client.kex arrives in tick N+1, the
+// earlier events must move to "cowrie:<HASSH>" for cross-IP clustering to
+// work. Without this reconciliation the actor is permanently fragmented.
+func reconcileLateHASSH(st *store.Store, bindings sideBindings, adminIPs []string) {
+	if len(bindings.hassh) == 0 {
+		return
+	}
+	admin := actor.AdminSet(adminIPs)
+	for sid, hassh := range bindings.hassh {
+		newActorID := actor.CowrieActorID("", hassh) // cowrie:<hassh>
+		// Check if this session has committed events with a different actor.
+		oldIDs, err := st.ActorIDsForSession(sid, newActorID)
+		if err != nil || len(oldIDs) == 0 {
+			continue
+		}
+		// Rebuild aggregates for every affected actor (old + new).
+		// The persisted events for the old actor still have HASSH="" (the
+		// fingerprint wasn't known when they were committed), so stamp the
+		// new HASSH on every event for this session before rebuilding so
+		// the CowrieCollector assigns them to the correct HASSH-based actor.
+		allIDs := append(oldIDs, newActorID)
+		var rebuilt []*models.AggregatedActor
+		cc := actor.NewCowrieCollector(admin)
+		if err := st.IterateEventsByActorIDs(allIDs, func(e *models.Event) error {
+			if e.SessionID == sid && e.HASSH == "" {
+				e.HASSH = hassh
+			}
+			cc.Add(e)
+			return nil
+		}); err != nil {
+			continue // best-effort; next tick will retry
+		}
+		rebuilt = cc.Finalize()
+		_ = st.ReconcileSessionHASSH(sid, newActorID, rebuilt)
 	}
 }
 

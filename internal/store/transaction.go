@@ -238,3 +238,111 @@ func deleteActorsTx(tx *sql.Tx, source models.Source) error {
 	_, err := tx.Exec("DELETE FROM actors WHERE source=?", source)
 	return err
 }
+
+// ReconcileSessionHASSH updates events for a cowrie session whose actor_id
+// was assigned before the session's HASSH fingerprint was known (the common
+// case: connect/login events arrive before cowrie.client.kex). It rewrites
+// every event for sessionID whose actor_id differs from newActorID to use
+// newActorID, then deletes and rewrites the aggregate rows for every old and
+// new actor ID involved. Zero-event actor rows (including the old IP-based
+// actor if all its events moved) are deleted so the dashboard never shows a
+// ghost actor. The caller supplies pre-rebuilt aggregates for the affected
+// actor IDs so this method is pure storage plumbing.
+func (s *Store) ReconcileSessionHASSH(sessionID, newActorID string, rebuilt []*models.AggregatedActor) error {
+	return s.WithTx(func(tx *sql.Tx) error {
+		// Discover old actor IDs: distinct actor_id values on this session's
+		// events that differ from newActorID.
+		oldRows, err := tx.Query(
+			`SELECT DISTINCT actor_id FROM events WHERE session_id=? AND actor_id<>? AND actor_id<>''`,
+			sessionID, newActorID)
+		if err != nil {
+			return err
+		}
+		var oldIDs []string
+		func() {
+			defer oldRows.Close()
+			for oldRows.Next() {
+				var id string
+				if err := oldRows.Scan(&id); err != nil {
+					return
+				}
+				oldIDs = append(oldIDs, id)
+			}
+		}()
+		if err := oldRows.Err(); err != nil {
+			return err
+		}
+		if len(oldIDs) == 0 {
+			return nil // nothing to reconcile
+		}
+
+		// Update the events' actor_id to the new value.
+		if _, err := tx.Exec(
+			`UPDATE events SET actor_id=? WHERE session_id=? AND actor_id<>? AND actor_id<>''`,
+			newActorID, sessionID, newActorID); err != nil {
+			return err
+		}
+
+		// Clear and rewrite aggregates for every affected actor ID (old + new).
+		allIDs := append(oldIDs, newActorID)
+		for _, id := range allIDs {
+			if err := deleteActorChildrenTx(tx, id); err != nil {
+				return err
+			}
+		}
+		for _, agg := range rebuilt {
+			if err := upsertActor(tx, agg.Actor); err != nil {
+				return err
+			}
+			for ip, st := range agg.IPs {
+				if err := upsertActorIP(tx, agg.Actor.ID, ip, st.First, st.Last, st.Count); err != nil {
+					return err
+				}
+			}
+			for username, count := range agg.Users {
+				if err := upsertActorUser(tx, agg.Actor.ID, username, count); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Delete any actor rows that now have zero events (the old IP-based
+		// actor that was fully subsumed by the HASSH actor).
+		for _, id := range oldIDs {
+			var n int
+			if err := tx.QueryRow(
+				`SELECT COUNT(1) FROM events WHERE actor_id=?`, id).Scan(&n); err != nil {
+				return err
+			}
+			if n == 0 {
+				if _, err := tx.Exec(`DELETE FROM actors WHERE id=?`, id); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// ActorIDsForSession returns the distinct actor_id values on committed events
+// for the given session, excluding excludeID. Used by the late-HASSH
+// reconciliation to discover whether a session's earlier events were
+// committed under a different (IP-based) actor ID.
+func (s *Store) ActorIDsForSession(sessionID, excludeID string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT actor_id FROM events WHERE session_id=? AND actor_id<>? AND actor_id<>''`,
+		sessionID, excludeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}

@@ -800,3 +800,33 @@ func TestParseReaderOversizedUnterminatedTailNotConsumed(t *testing.T) {
 		t.Fatalf("expected consumed=%d (offset before the partial poison tail), got %d", len(good)+1, consumed)
 	}
 }
+
+func TestLateHASSHReconciliation(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+	path := filepath.Join(t.TempDir(), "cowrie.json")
+
+	// Tick 1: login without HASSH — actor will be cowrie:1.2.3.4
+	line1 := `{"eventid":"cowrie.login.failed","timestamp":"2026-07-03T11:00:01.000000Z","src_ip":"1.2.3.4","username":"root","session":"sX"}` + "\n"
+	if err := os.WriteFile(path, []byte(line1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+
+	// Tick 2: kex arrives late with the HASSH — should reconcile.
+	appendLine(t, path, `{"eventid":"cowrie.client.kex","timestamp":"2026-07-03T11:00:02.000000Z","src_ip":"1.2.3.4","session":"sX","hassh":"hasshLATE"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+
+	actors := snapshotActors(t, st)
+	// After reconciliation, the actor should be cowrie:hasshLATE, not cowrie:1.2.3.4
+	if _, ok := actors["cowrie:hasshLATE"]; !ok {
+		t.Fatalf("expected cowrie:hasshLATE actor after reconciliation; actors: %+v", actors)
+	}
+	if _, ok := actors["cowrie:1.2.3.4"]; ok {
+		t.Errorf("old IP-based actor should have been removed after reconciliation; actors: %+v", actors)
+	}
+}
