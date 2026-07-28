@@ -227,6 +227,17 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 	if cowriePath == "" {
 		fatal(fmt.Errorf("cowrie path missing; set in config cowrie.json_log or pass --cowrie=<path>"))
 	}
+	// When --tailscale is set, resolve the Tailscale IP and bind to it
+	// explicitly so the dashboard is reachable from Tailscale clients.
+	if tailscaleHint {
+		if tsIP := tailscaleIPv4(); tsIP != "" {
+			if p := addrPort(addr); p > 0 {
+				addr = fmt.Sprintf("%s:%d", tsIP, p)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "warning: --tailscale set but tailscale0 interface not found; binding to", addr)
+		}
+	}
 	dashURL := addr
 	if p := addrPort(addr); p > 0 {
 		dashURL = fmt.Sprintf("http://127.0.0.1:%d", p)
