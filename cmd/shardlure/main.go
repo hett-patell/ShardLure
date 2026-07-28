@@ -104,7 +104,7 @@ func main() {
 				addr = a
 			}
 		}
-		fmt.Printf("serving live dashboard on http://127.0.0.1%s\n", addr)
+		fmt.Printf("serving live dashboard on http://%s\n", addr)
 		if tailscaleHint {
 			printTailscaleURL(addr)
 		}

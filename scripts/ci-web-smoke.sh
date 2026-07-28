@@ -38,13 +38,13 @@ cat > "$CFG" <<EOF
 data_dir: $TMPDIR/data
 EOF
 
-echo "[smoke] starting: $BIN -config $CFG web :$PORT"
-"$BIN" -config "$CFG" web ":$PORT" > "$LOG" 2>&1 &
+echo "[smoke] starting: $BIN -config $CFG web 127.0.0.1:$PORT"
+"$BIN" -config "$CFG" web "127.0.0.1:$PORT" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for listener (up to 10s). The first boot runs sqlite migrations,
 # which on a clean tmp DB takes <1s but we give margin for CI jitter.
-echo "[smoke] waiting for listener on :$PORT"
+echo "[smoke] waiting for listener on 127.0.0.1:$PORT"
 for i in $(seq 1 50); do
     if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
         echo "[smoke] listener up after ${i}00ms"
@@ -58,7 +58,7 @@ for i in $(seq 1 50); do
 done
 
 if ! ss -ltn 2>/dev/null | grep -q ":$PORT "; then
-    echo "[smoke] FAIL: listener never came up"
+    echo "[smoke] FAIL: listener on 127.0.0.1: never came up"
     exit 1
 fi
 
