@@ -104,13 +104,18 @@ func main() {
 				addr = a
 			}
 		}
+		if tailscaleHint {
+			if p := addrPort(addr); p > 0 {
+				addr = fmt.Sprintf("0.0.0.0:%d", p)
+			}
+		}
 		fmt.Printf("serving live dashboard on http://%s\n", addr)
 		if tailscaleHint {
 			printTailscaleURL(addr)
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
-		if err := web.New(st, keys, addr, webOptions(cfg)).RunContext(ctx); err != nil {
+		if err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx); err != nil {
 			fatal(err)
 		}
 	case "live":
@@ -227,15 +232,15 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 	if cowriePath == "" {
 		fatal(fmt.Errorf("cowrie path missing; set in config cowrie.json_log or pass --cowrie=<path>"))
 	}
-	// When --tailscale is set, resolve the Tailscale IP and bind to it
-	// explicitly so the dashboard is reachable from Tailscale clients.
+	// When --tailscale is set, bind to 0.0.0.0:PORT so the dashboard is
+	// reachable from both loopback (localhost) and Tailscale clients.
+	// Tailscale itself provides network-level access control; the security
+	// check allows wildcard binding when TailscaleMode is true.
 	if tailscaleHint {
-		if tsIP := tailscaleIPv4(); tsIP != "" {
-			if p := addrPort(addr); p > 0 {
-				addr = fmt.Sprintf("%s:%d", tsIP, p)
-			}
+		if p := addrPort(addr); p > 0 {
+			addr = fmt.Sprintf("0.0.0.0:%d", p)
 		} else {
-			fmt.Fprintln(os.Stderr, "warning: --tailscale set but tailscale0 interface not found; binding to", addr)
+			fmt.Fprintln(os.Stderr, "warning: --tailscale set but could not parse port from", addr)
 		}
 	}
 	dashURL := addr
@@ -343,7 +348,7 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 		}
 	}()
 
-	if err := web.New(st, keys, addr, webOptions(cfg)).RunContext(ctx); err != nil {
+	if err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx); err != nil {
 		fatal(err)
 	}
 }
@@ -373,6 +378,12 @@ func webOptions(cfg config.Config) web.Options {
 		AbuseComment:       cfg.Intel.AbuseIPDB.Comment,
 		AdminIPs:           cfg.AdminIPs,
 	}
+}
+
+func webOptionsWithTailscale(cfg config.Config, tailscale bool) web.Options {
+	o := webOptions(cfg)
+	o.TailscaleMode = tailscale
+	return o
 }
 
 func cmdRun(cfg config.Config) {

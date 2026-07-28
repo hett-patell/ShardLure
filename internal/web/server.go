@@ -67,6 +67,9 @@ type Server struct {
 	// cowrieUnit names the sibling systemd unit running the honeypot. Used only
 	// to read its uptime for the dashboard; never to control it.
 	cowrieUnit string
+	// tailscaleMode mirrors Options.TailscaleMode so RunContext can relax
+	// the wildcard-bind security check when Tailscale is the access control.
+	tailscaleMode bool
 	// startedAt marks when this Server was constructed; surfaced as the
 	// dashboard "uptime" so the operator can tell at a glance how long the
 	// live process has been running (and spot an unexpected restart).
@@ -410,6 +413,10 @@ type Options struct {
 	AbuseRewindowHours int
 	AbuseComment       string
 	AdminIPs           []string
+	// TailscaleMode is set when the operator explicitly passes --tailscale.
+	// Tailscale itself provides network-level access control, so wildcard
+	// binds (0.0.0.0:port) are allowed without a dashboard token.
+	TailscaleMode bool
 }
 
 func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options) *Server {
@@ -493,6 +500,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		abuseCommentDefault:    firstOpt.AbuseComment,
 		abuseAdmin:             netmatch.New(firstOpt.AdminIPs),
 		cowrieUnit:             cowrieUnit,
+		tailscaleMode:          firstOpt.TailscaleMode,
 		startedAt:              time.Now(),
 	}
 }
@@ -693,7 +701,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 				"Set a token, or bind to loopback/Tailscale", s.addr)
 		}
 		// Also fail for wildcard / unresolved addresses without a token.
-		if listenHostIP(s.addr) == nil {
+		if listenHostIP(s.addr) == nil && !s.tailscaleMode {
 			return fmt.Errorf("refusing to start: dashboard would bind a WILDCARD address (%s) with no "+
 				"SHARDLURE_DASH_TOKEN set - credential exports and pprof would be world-readable. "+
 				"Set a token, or bind to an explicit loopback address", s.addr)
