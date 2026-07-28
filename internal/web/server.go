@@ -414,7 +414,7 @@ type Options struct {
 
 func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options) *Server {
 	if addr == "" {
-		addr = ":8080"
+		addr = "127.0.0.1:8080"
 	}
 	home := defaultHomePoint()
 	if len(opts) > 0 {
@@ -689,8 +689,14 @@ func (s *Server) RunContext(ctx context.Context) error {
 	if s.dashboardToken() == "" {
 		if host := listenHostIP(s.addr); host != nil && isPublicIP(host) {
 			return fmt.Errorf("refusing to start: dashboard would bind a PUBLIC address (%s) with no "+
-				"SHARDLURE_DASH_TOKEN set — credential exports and pprof would be world-readable. "+
+				"SHARDLURE_DASH_TOKEN set - credential exports and pprof would be world-readable. "+
 				"Set a token, or bind to loopback/Tailscale", s.addr)
+		}
+		// Also fail for wildcard / unresolved addresses without a token.
+		if listenHostIP(s.addr) == nil {
+			return fmt.Errorf("refusing to start: dashboard would bind a WILDCARD address (%s) with no "+
+				"SHARDLURE_DASH_TOKEN set - credential exports and pprof would be world-readable. "+
+				"Set a token, or bind to an explicit loopback address", s.addr)
 		}
 		fmt.Fprintln(os.Stderr,
 			"shardlure: WARNING dashboard is UNAUTHENTICATED (SHARDLURE_DASH_TOKEN unset) — "+
@@ -700,7 +706,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:        s.addr,
-		Handler:     mux,
+		Handler:     securityHeaders(mux),
 		ReadTimeout: 10 * time.Second,
 		// 60s rather than 20s so /debug/pprof/profile?seconds=30 can
 		// complete. No handler is supposed to take longer than a few
@@ -802,27 +808,67 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 	return false
 }
 
+// securityHeaders adds defence-in-depth HTTP headers to every response.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requirePageAuth gates the two HTML page routes (/ and /intel). Unlike the API
-// gate it ALSO accepts a ?token= query param: a browser navigating to the
-// dashboard URL can't set a header, so the page must load first for its JS to
-// stash the token and set the header on every subsequent /api call. Without
-// this, a configured SHARDLURE_DASH_TOKEN made the dashboard unreachable in a
-// browser (the page 401'd before any JS ran). Token-in-URL exposure is confined
-// to these two GETs; all data endpoints stay header-only above.
+// gate it ALSO accepts a ?token= query param and a shardlure_session cookie.
+//
+// Cookie bootstrap: a valid ?token= on a page GET sets an HttpOnly,
+// SameSite=Strict session cookie and 302-redirects to the same path without
+// the token, so the bearer never persists in browser history, referrer
+// headers, or server access logs. Subsequent page loads authenticate via
+// the cookie alone.
+//
+// All /api endpoints remain header-only (Authorization / X-ShardLure-Token);
+// the cookie is only used by the two HTML page routes.
 func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardToken() == "" {
 		return true
 	}
+
+	// 1. Check Bearer / X-ShardLure-Token header (preferred).
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if strings.TrimSpace(token) == "" {
 		token = r.Header.Get("X-ShardLure-Token")
 	}
-	if strings.TrimSpace(token) == "" {
-		token = r.URL.Query().Get("token")
-	}
 	if s.tokenMatches(token) {
 		return true
 	}
+
+	// 2. Check the HttpOnly session cookie.
+	if ck, err := r.Cookie("shardlure_session"); err == nil && s.tokenMatches(ck.Value) {
+		return true
+	}
+
+	// 3. Check ?token= query param (bootstrap only). On success, set cookie
+	//    and redirect to the same URL without the token so it leaves history.
+	if qt := r.URL.Query().Get("token"); s.tokenMatches(qt) {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "shardlure_session",
+			Value:    qt,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			Secure:   r.TLS != nil,
+			MaxAge:   0, // session cookie - expires when the browser closes
+		})
+		// Strip token from the URL and redirect.
+		clean := *r.URL
+		q := clean.Query()
+		q.Del("token")
+		clean.RawQuery = q.Encode()
+		http.Redirect(w, r, clean.String(), http.StatusFound)
+		return false // redirect; don't serve the page
+	}
+
 	w.Header().Set("WWW-Authenticate", `Bearer realm="shardlure-dashboard"`)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return false

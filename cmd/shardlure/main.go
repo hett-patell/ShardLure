@@ -92,7 +92,7 @@ func main() {
 			fatal(err)
 		}
 	case "web":
-		addr := ":8080"
+		addr := "127.0.0.1:8080"
 		tailscaleHint := false
 		for _, a := range args[1:] {
 			switch a {
@@ -189,7 +189,7 @@ func cmdIngest(st *store.Store, cfg config.Config, args []string) {
 }
 
 func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args []string) {
-	addr := ":8080"
+	addr := "127.0.0.1:8080"
 	if cfg.Dashboard.Port > 0 {
 		addr = fmt.Sprintf(":%d", cfg.Dashboard.Port)
 	}
