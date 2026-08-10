@@ -73,9 +73,12 @@ type Verdict struct {
 	Reputation int `json:"reputation,omitempty"`
 	// TimesSubmitted counts how often the sample has been submitted to VT.
 	TimesSubmitted int `json:"times_submitted,omitempty"`
-	// FirstSeen / LastAnalysis are VT-side timestamps (zero when absent).
-	FirstSeen    time.Time `json:"first_seen,omitempty"`
-	LastAnalysis time.Time `json:"last_analysis,omitempty"`
+	// FirstSeen / LastAnalysis are VT-side timestamps, nil when VT didn't
+	// report them. Pointers because `omitempty` does NOT omit a zero
+	// time.Time (it's a struct, not an empty-able scalar) — without this the
+	// API emitted "0001-01-01T00:00:00Z" and the UI rendered year 1.
+	FirstSeen    *time.Time `json:"first_seen,omitempty"`
+	LastAnalysis *time.Time `json:"last_analysis,omitempty"`
 	// Permalink is the human-facing VT page for this hash. Constructed
 	// locally; VT does not return it on this endpoint.
 	Permalink string `json:"permalink,omitempty"`
@@ -235,10 +238,12 @@ func ParseFileReport(raw []byte, sha string) (*Verdict, error) {
 		FetchedAt:       time.Now().UTC(),
 	}
 	if a.FirstSubmission > 0 {
-		v.FirstSeen = time.Unix(a.FirstSubmission, 0).UTC()
+		t := time.Unix(a.FirstSubmission, 0).UTC()
+		v.FirstSeen = &t
 	}
 	if a.LastAnalysis > 0 {
-		v.LastAnalysis = time.Unix(a.LastAnalysis, 0).UTC()
+		t := time.Unix(a.LastAnalysis, 0).UTC()
+		v.LastAnalysis = &t
 	}
 	// Same thresholds as the IP-side provider so the two surfaces never
 	// disagree about what "suspicious" means.

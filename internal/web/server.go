@@ -725,18 +725,22 @@ func (s *Server) RunContext(ctx context.Context) error {
 	if s.dashboardToken() == "" {
 		if host := listenHostIP(s.addr); host != nil && isPublicIP(host) {
 			return fmt.Errorf("refusing to start: dashboard would bind a PUBLIC address (%s) with no "+
-				"SHARDLURE_DASH_TOKEN set - credential exports and pprof would be world-readable. "+
+				"SHARDLURE_DASH_TOKEN set - credential exports would be world-readable. "+
 				"Set a token, or bind to loopback/Tailscale", s.addr)
 		}
 		// Also fail for wildcard / unresolved addresses without a token.
 		if listenHostIP(s.addr) == nil && !s.tailscaleMode {
 			return fmt.Errorf("refusing to start: dashboard would bind a WILDCARD address (%s) with no "+
-				"SHARDLURE_DASH_TOKEN set - credential exports and pprof would be world-readable. "+
+				"SHARDLURE_DASH_TOKEN set - credential exports would be world-readable. "+
 				"Set a token, or bind to an explicit loopback address", s.addr)
 		}
+		// Note: /debug/* is NOT part of this exposure — guardDebug restricts it
+		// to loopback peers whenever the token is unset, so the warning
+		// deliberately no longer claims pprof is world-readable.
 		fmt.Fprintln(os.Stderr,
 			"shardlure: WARNING dashboard is UNAUTHENTICATED (SHARDLURE_DASH_TOKEN unset) — "+
-				"credential exports and pprof are world-readable to anyone who can reach this port. "+
+				"credential exports are world-readable to anyone who can reach this port "+
+				"(/debug/* stays loopback-only). "+
 				"Keep it on Tailscale/loopback or set SHARDLURE_DASH_TOKEN.")
 	}
 

@@ -131,7 +131,11 @@ func main() {
 	case "ioc":
 		cmdIOC(st)
 	case "share":
-		cmdShare(st, cfg, args[1:])
+		// keys is threaded in so the CLI honours the documented
+		// DB > env > config precedence: an Auth-Key saved from the dashboard
+		// Settings panel lives only in app_settings, so a config-only lookup
+		// would report "no key" on exactly the deployments that have one.
+		cmdShare(st, cfg, keys, args[1:])
 	case "report":
 		cmdReport(st, cfg, args[1:])
 	default:

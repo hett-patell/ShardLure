@@ -99,7 +99,7 @@ func TestParseFileReportRichFields(t *testing.T) {
 	if v.Reputation != -12 || v.TimesSubmitted != 57 {
 		t.Errorf("reputation=%d times=%d", v.Reputation, v.TimesSubmitted)
 	}
-	if v.FirstSeen.IsZero() || v.LastAnalysis.IsZero() {
+	if v.FirstSeen == nil || v.LastAnalysis == nil {
 		t.Error("expected both VT timestamps to be populated")
 	}
 	if v.TotalEngine != 61 {
@@ -343,5 +343,44 @@ func TestResolverCachedNeverHitsNetwork(t *testing.T) {
 	r := NewResolver(newMemCache(), mapKeys{KeyEnvVar: "k"}, srv.URL)
 	if _, ok := r.Cached(goodSHA); ok {
 		t.Error("empty cache should miss")
+	}
+}
+
+// omitempty does NOT omit a zero time.Time (it's a struct), which made the API
+// emit "0001-01-01T00:00:00Z" for samples VT had no dates for. The fields are
+// pointers so absent dates are genuinely absent from the JSON.
+func TestVerdictOmitsAbsentTimestamps(t *testing.T) {
+	// A report with no date fields at all.
+	v, err := ParseFileReport([]byte(`{"data":{"attributes":{"last_analysis_stats":{"malicious":1}}}}`), goodSHA)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(raw)
+	for _, forbidden := range []string{"0001-01-01", "first_seen", "last_analysis"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("absent timestamp leaked %q into JSON: %s", forbidden, body)
+		}
+	}
+
+	// And when VT DOES report them, they are present and correct.
+	withDates, err := ParseFileReport([]byte(`{"data":{"attributes":{
+		"last_analysis_stats":{"malicious":1},
+		"first_submission_date":1700000000,"last_analysis_date":1750000000}}}`), goodSHA)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if withDates.FirstSeen == nil || withDates.LastAnalysis == nil {
+		t.Fatal("expected both timestamps to be set")
+	}
+	if withDates.FirstSeen.Unix() != 1700000000 {
+		t.Errorf("first_seen = %v", withDates.FirstSeen)
+	}
+	raw2, _ := json.Marshal(withDates)
+	if !strings.Contains(string(raw2), "first_seen") {
+		t.Errorf("present timestamp missing from JSON: %s", raw2)
 	}
 }

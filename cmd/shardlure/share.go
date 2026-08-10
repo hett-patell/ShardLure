@@ -9,6 +9,7 @@ import (
 
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/intel/bazaar"
+	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -17,7 +18,7 @@ import (
 // malware-distribution URLs those samples came from. Both gate on a single
 // Vet function in their own package. Future destinations (dshield, …) slot in
 // as additional cases here.
-func cmdShare(st *store.Store, cfg config.Config, args []string) {
+func cmdShare(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
 	if len(args) < 1 {
 		fatal(fmt.Errorf("usage: shardlure share <bazaar|urlhaus> [flags]\n" +
 			"  bazaar  [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]\n" +
@@ -27,7 +28,7 @@ func cmdShare(st *store.Store, cfg config.Config, args []string) {
 	case "bazaar":
 		cmdShareBazaar(st, cfg, args[1:])
 	case "urlhaus":
-		cmdShareURLhaus(st, cfg, args[1:])
+		cmdShareURLhaus(st, cfg, keys, args[1:])
 	default:
 		fatal(fmt.Errorf("unknown share destination: %q (supported: bazaar, urlhaus)", args[0]))
 	}
