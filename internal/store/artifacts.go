@@ -72,6 +72,44 @@ func (s *Store) ArtifactURLRecorded(url string) (bool, error) {
 	return n > 0, err
 }
 
+// TouchArtifactTS advances an existing artifact row's ts to the given time
+// when (and only when) it is newer than the stored value. It exists for the
+// capture dedup paths: they skip the expensive copy+hash when the url-key is
+// already recorded (the fix for GB/min write amplification), but that skip
+// also froze the row's ts at first sight — an actively-redelivered payload
+// aged out of the dashboard's "last N days" payload window and undercounted
+// occurrences even though attackers were still dropping it.
+//
+// Read-before-write is deliberate: the capture tick re-examines the same
+// recent events every 5s, so the steady-state case is "ts unchanged" and must
+// stay a concurrent read — not a writeMu acquisition per artifact per tick.
+// The stored ts is parsed and compared in Go because RFC3339Nano trims
+// trailing zeros, making lexicographic comparison of timestamps unsafe.
+func (s *Store) TouchArtifactTS(url string, ts time.Time) error {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return err
+	}
+	if url == "" || ts.IsZero() {
+		return nil
+	}
+	var cur sql.NullString
+	err := s.db.QueryRow(`SELECT ts FROM artifacts WHERE url = ?`, url).Scan(&cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // no row to touch; caller's dedup check was stale
+	}
+	if err != nil {
+		return err
+	}
+	if cur.Valid && cur.String != "" {
+		if t, perr := time.Parse(time.RFC3339Nano, cur.String); perr == nil && !ts.After(t) {
+			return nil // already at least as fresh — the hot path, write-free
+		}
+	}
+	_, err = s.execWrite(`UPDATE artifacts SET ts = ? WHERE url = ?`,
+		ts.UTC().Format(time.RFC3339Nano), url)
+	return err
+}
+
 func (s *Store) UpsertArtifact(a Artifact) error {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err

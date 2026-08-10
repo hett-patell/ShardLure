@@ -2,7 +2,7 @@
  * Lazy-loaded Cobe engine — the only globe engine, shared by all themes
  * (Signal / Meridian / Sprite).
  */
-import createGlobe from "https://esm.sh/cobe@2.0.1";
+import createGlobe from "/vendor/cobe.esm.js";
 import {
   bindGlobeInteraction,
   startGlobeLoop,

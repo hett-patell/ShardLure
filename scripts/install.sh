@@ -521,6 +521,10 @@ After=network.target
 Type=simple
 User=cowrie
 WorkingDirectory=$COWRIE_HOME
+# TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
+# 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
+# host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.
+Environment=TZ=UTC
 $COWRIE_EXEC
 Restart=always
 RestartSec=5

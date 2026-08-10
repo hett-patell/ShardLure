@@ -653,6 +653,15 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
     required = {
         "honeypot": [
             ("hostname", "prod-app-server-01"),
+            # timezone=UTC is load-bearing, not cosmetic: cowrie's output
+            # plugin stamps the jsonlog 'timestamp' field with a 'Z' suffix
+            # only when TZ is UTC at process start. On a non-UTC host without
+            # this key, cowrie writes LOCAL time mislabeled as Zulu and every
+            # ShardLure event lands hours off from journal events in the same
+            # DB. Belt-and-braces with Environment=TZ=UTC in cowrie.service
+            # (cowrie sets os.environ['TZ'] from this key but never calls
+            # time.tzset(), so the unit env is what reliably wins).
+            ("timezone", "UTC"),
             ("sensor_name", "prod-app-server-01"),
             ("log_path", f"{COWRIE_HOME}/var/log/cowrie"),
             ("state_path", f"{COWRIE_HOME}/var/lib/cowrie"),
@@ -806,6 +815,7 @@ Group={COWRIE_USER}
 WorkingDirectory={COWRIE_HOME}
 Environment=PYTHONPATH={COWRIE_HOME}/src
 Environment=PATH={COWRIE_HOME}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=TZ=UTC
 ExecStart={cowrie_exec}
 Restart=always
 RestartSec=5

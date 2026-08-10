@@ -23,6 +23,14 @@ var cobeBootJS []byte
 //go:embed vendor/vis-network.min.js
 var visNetworkJS []byte
 
+// cobe.esm.js is the vendored globe engine (see the file header for
+// provenance). Serving it locally keeps the dashboard functional on
+// air-gapped / egress-filtered networks and removes the esm.sh CDN from
+// the supply chain of an authenticated page.
+//
+//go:embed vendor/cobe.esm.js
+var cobeESMJS []byte
+
 // Brand assets. logo.svg is the scalable mark (also inlined into the sidebar
 // chip); favicon.ico carries 7 sizes (16-256) so browsers and bookmark bars pick
 // their own; logo-180.png is the apple-touch / share-card raster.

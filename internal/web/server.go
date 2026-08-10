@@ -630,6 +630,11 @@ func (s *Server) RunContext(ctx context.Context) error {
 		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 		_, _ = w.Write(visNetworkJS)
 	})
+	mux.HandleFunc("/vendor/cobe.esm.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+		_, _ = w.Write(cobeESMJS)
+	})
 	mux.HandleFunc("/themes.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
@@ -678,16 +683,23 @@ func (s *Server) RunContext(ctx context.Context) error {
 	// pprof imports register on http.DefaultServeMux as a side
 	// effect; we re-register the handlers explicitly on our own mux
 	// to avoid leaking them on the unauthenticated path.
-	mux.HandleFunc("/debug/pprof/", s.guard(pprof.Index))
-	mux.HandleFunc("/debug/pprof/cmdline", s.guard(pprof.Cmdline))
-	mux.HandleFunc("/debug/pprof/profile", s.guard(pprof.Profile))
-	mux.HandleFunc("/debug/pprof/symbol", s.guard(pprof.Symbol))
-	mux.HandleFunc("/debug/pprof/trace", s.guard(pprof.Trace))
-	mux.HandleFunc("/debug/runtime", s.guard(s.handleRuntimeStats))
+	// guardDebug, not guard: unlike /api/* (which is deliberately open in
+	// token-less Tailscale/loopback mode), the profiling endpoints get NO
+	// open mode on non-loopback peers. pprof heap/goroutine/cmdline dumps
+	// leak file paths, flag values, and memory contents — with an empty
+	// token they are reachable by anything on the tailnet/LAN, and the UI
+	// never calls them, so there is no usability cost to failing closed.
+	mux.HandleFunc("/debug/pprof/", s.guardDebug(pprof.Index))
+	mux.HandleFunc("/debug/pprof/cmdline", s.guardDebug(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/profile", s.guardDebug(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/symbol", s.guardDebug(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", s.guardDebug(pprof.Trace))
+	mux.HandleFunc("/debug/runtime", s.guardDebug(s.handleRuntimeStats))
 
-	// With SHARDLURE_DASH_TOKEN unset every endpoint is open — including the
-	// credential/password wordlist export and /debug/pprof/*. The dashboard is
-	// meant to live on Tailscale/loopback.
+	// With SHARDLURE_DASH_TOKEN unset every /api/* endpoint is open —
+	// including the credential/password wordlist export. (/debug/* is the
+	// exception: guardDebug still requires a loopback peer in open mode.)
+	// The dashboard is meant to live on Tailscale/loopback.
 	//
 	// Fail CLOSED for the one config that's almost certainly a mistake: an
 	// unauthenticated bind to a public, routable address (exposing credential
@@ -822,10 +834,14 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		// CSP: all assets are embedded (no external CDNs). unsafe-inline is
-		// required for the inline <script> blocks in index.html / intel.html
-		// and the Cobe module's dynamic style injection.
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://esm.sh; frame-ancestors 'none'")
+		// CSP: all SCRIPTS are embedded (vis-network + the vendored Cobe globe
+		// engine under /vendor/), so script-src and connect-src are 'self' only
+		// — no CDN in the supply chain of an authenticated page, and the globe
+		// works on air-gapped networks. Fonts remain on Google Fonts because
+		// they degrade gracefully (system fallback) when unreachable.
+		// unsafe-inline is required for the inline <script> blocks in
+		// index.html / intel.html and Cobe's dynamic style injection.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1276,6 +1292,36 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
+}
+
+// guardDebug wraps the /debug/* endpoints. With a token configured it behaves
+// exactly like guard. With NO token (open mode) it additionally requires the
+// TCP peer to be loopback — profiling data is operator-only and must not ride
+// along with the "dashboard is open on Tailscale" convenience mode.
+func (s *Server) guardDebug(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.dashboardToken() == "" && !isLoopbackPeer(r.RemoteAddr) {
+			http.Error(w, "debug endpoints require a dashboard token or a loopback connection", http.StatusForbidden)
+			return
+		}
+		if !s.requireDashboardAuth(w, r) {
+			return
+		}
+		h(w, r)
+	}
+}
+
+// isLoopbackPeer reports whether the request's direct TCP peer is a loopback
+// address. RemoteAddr is set by net/http from the accepted connection (not
+// from any spoofable header), so this is a trustworthy check for "the caller
+// is on this host".
+func isLoopbackPeer(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // handleRuntimeStats returns a tiny JSON snapshot of process memory

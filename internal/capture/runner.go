@@ -245,7 +245,15 @@ func (r *Runner) fetchFromCommands(ctx context.Context) (int, error) {
 	for _, e := range events {
 		for _, rawURL := range ExtractURLs(e.Command) {
 			exists, err := r.urlKeyDone(rawURL)
-			if err != nil || exists {
+			if err != nil {
+				continue
+			}
+			if exists {
+				// Redelivery: a new command referenced an already-captured
+				// URL. Keep the row's recency truthful without re-fetching —
+				// otherwise an actively-circulating payload ages out of the
+				// dashboard window. No-op unless e.TS is newer than the row.
+				_ = r.st.TouchArtifactTS(rawURL, e.TS)
 				continue
 			}
 			pending := store.Artifact{
@@ -310,7 +318,16 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 		// can be skipped without re-reading and re-hashing it every tick.
 		urlKey := "cowrie-download:" + ent.Name()
 		exists, err := r.urlKeyDone(urlKey)
-		if err != nil || exists {
+		if err != nil {
+			continue
+		}
+		if exists {
+			// Redelivery: cowrie rewrites the same (sha-named) file when an
+			// attacker drops it again, updating its mtime. Bump the row's ts
+			// so recency stays truthful — still no copy+hash on this path.
+			if info, ierr := ent.Info(); ierr == nil {
+				_ = r.st.TouchArtifactTS(urlKey, info.ModTime().UTC())
+			}
 			continue
 		}
 		src := filepath.Join(dl, ent.Name())
@@ -361,7 +378,15 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 			urlKey = "cowrie-event:" + fmt.Sprint(e.ID)
 		}
 		exists, err := r.urlKeyDone(urlKey)
-		if err != nil || exists {
+		if err != nil {
+			continue
+		}
+		if exists {
+			// Redelivery: a fresh file_download event for an already-archived
+			// URL. Bump the row's ts (no-op unless newer) so the payload
+			// panel's window/occurrence math sees it as current — the
+			// copy+hash skip that fixed the write amplification stays intact.
+			_ = r.st.TouchArtifactTS(urlKey, e.TS)
 			continue
 		}
 		src := filepath.Join(r.cowrieDownloadsDir(), filepath.Base(e.Filename))
