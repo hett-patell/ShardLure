@@ -13,17 +13,23 @@ import (
 )
 
 // cmdShare is the dispatcher for "shardlure share <destination>".
-// Currently only "bazaar" is wired up; future destinations (urlhaus,
-// abuseipdb, dshield) would slot in as additional cases here.
+// "bazaar" ships malware SAMPLES to MalwareBazaar; "urlhaus" ships the
+// malware-distribution URLs those samples came from. Both gate on a single
+// Vet function in their own package. Future destinations (dshield, …) slot in
+// as additional cases here.
 func cmdShare(st *store.Store, cfg config.Config, args []string) {
 	if len(args) < 1 {
-		fatal(fmt.Errorf("usage: shardlure share <bazaar> [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]"))
+		fatal(fmt.Errorf("usage: shardlure share <bazaar|urlhaus> [flags]\n" +
+			"  bazaar  [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]\n" +
+			"  urlhaus [--dry-run] [--limit N] [--active-days N] [--anonymous] [--status]"))
 	}
 	switch args[0] {
 	case "bazaar":
 		cmdShareBazaar(st, cfg, args[1:])
+	case "urlhaus":
+		cmdShareURLhaus(st, cfg, args[1:])
 	default:
-		fatal(fmt.Errorf("unknown share destination: %q (supported: bazaar)", args[0]))
+		fatal(fmt.Errorf("unknown share destination: %q (supported: bazaar, urlhaus)", args[0]))
 	}
 }
 

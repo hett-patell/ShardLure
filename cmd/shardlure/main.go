@@ -362,6 +362,7 @@ func webOptions(cfg config.Config) web.Options {
 		HomeCC:          cfg.Dashboard.HomeCC,
 		GeoEnabled:      cfg.GeoIP.Enabled,
 		GeoInsecureHTTP: cfg.GeoIP.InsecureHTTP,
+		GeoMMDB:         cfg.GeoIP.MMDB,
 		// Read-only: used to show the honeypot's uptime on the dashboard.
 		CowrieUnit:          cfg.Cowrie.Unit,
 		BazaarAPIKey:        cfg.Intel.Bazaar.APIKey,
@@ -504,6 +505,7 @@ Usage:
   shardlure status
   shardlure ioc
   shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 240h] [--anonymous] [--status]
+  shardlure share urlhaus [--dry-run] [--limit N] [--active-days 3] [--anonymous] [--status]
   shardlure report abuseipdb [--dry-run] [--limit N] [--min-probe 60] [--status]
 
 Config: ~/.local/share/shardlure/ or -config shardlure.yaml

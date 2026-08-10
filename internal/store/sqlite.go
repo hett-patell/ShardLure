@@ -32,21 +32,25 @@ type Store struct {
 	// statement under writeMu, adding pointless lock contention on hot paths.
 	// A sync.Once per table runs the DDL exactly once; subsequent calls are a
 	// cheap atomic check with no lock.
-	onceArtifacts   sync.Once
-	onceEnrich      sync.Once
-	onceBazaar      sync.Once
-	onceTTY         sync.Once
-	onceSessHASSH   sync.Once
-	onceSessMeta    sync.Once
-	onceAbuseReport sync.Once
+	onceArtifacts    sync.Once
+	onceEnrich       sync.Once
+	onceBazaar       sync.Once
+	onceTTY          sync.Once
+	onceSessHASSH    sync.Once
+	onceSessMeta     sync.Once
+	onceAbuseReport  sync.Once
+	onceURLhaus      sync.Once
+	oncePayloadIntel sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
-	errArtifacts   error
-	errEnrich      error
-	errBazaar      error
-	errTTY         error
-	errSessHASSH   error
-	errSessMeta    error
-	errAbuseReport error
+	errArtifacts    error
+	errEnrich       error
+	errBazaar       error
+	errTTY          error
+	errSessHASSH    error
+	errSessMeta     error
+	errAbuseReport  error
+	errURLhaus      error
+	errPayloadIntel error
 }
 
 type sqlExecer interface {
@@ -1099,6 +1103,13 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	if err := s.ensureSessionMetaTable(); err != nil {
 		return err
 	}
+	// payload_intel is a CACHE of third-party payload verdicts, so it ages out
+	// with everything else. Note the deliberate asymmetry: bazaar_uploads and
+	// urlhaus_submissions are NOT purged — they are dedup ledgers, and dropping
+	// a row there would make us re-submit the same sample/URL upstream.
+	if err := s.ensurePayloadIntelTable(); err != nil {
+		return err
+	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
 
 	// Reference-safe purge: collect files, delete expired rows, and determine
@@ -1127,6 +1138,9 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM cowrie_session_meta WHERE observed_at < ?`, cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM payload_intel WHERE fetched_at < ?`, cutoff); err != nil {
 			return err
 		}
 

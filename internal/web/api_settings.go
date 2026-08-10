@@ -358,11 +358,28 @@ func (s *Server) testBazaar(ctx context.Context) (bool, string) {
 	}
 }
 
-// testIPAPI hits the geo lookup URL for a test IP and checks status:success.
+// testIPAPI reports how geolocation would resolve a test IP. The local MMDB
+// tier is checked first so the Settings panel tells the truth about which tier
+// is actually serving lookups — an operator with a GeoLite2 database should not
+// be told "geo lookups not enabled" merely because outbound HTTP is off.
 func (s *Server) testIPAPI(ctx context.Context, ip string) (bool, string) {
+	if s.geo != nil && s.geo.mmdb.ready() {
+		if ent, ok := s.geo.mmdb.lookup(ip, time.Now()); ok {
+			where := ent.Country
+			if ent.City != "" {
+				where = ent.City + ", " + ent.Country
+			}
+			return true, fmt.Sprintf("resolved locally from mmdb (%s) — no outbound request", where)
+		}
+		// Fall through: this IP isn't in the database, so report on the tier
+		// that would actually answer it.
+	}
+	if s.geo != nil && s.geo.mmdb != nil && s.geo.mmdb.err != "" {
+		return false, "mmdb unusable (" + s.geo.mmdb.err + ")"
+	}
 	url := geoLookupURL(ip, geoConfig{}, s.keys)
 	if url == "" {
-		return false, "geo lookups not enabled (need ip-api key or insecure-http)"
+		return false, "geo lookups not enabled (need mmdb, ip-api key, or insecure-http)"
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

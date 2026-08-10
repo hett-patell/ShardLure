@@ -58,19 +58,45 @@ type geoResolver struct {
 	now      func() time.Time   // injectable for tests
 	st       *store.Store       // persists geo lookups across restarts
 	keys     *settings.Keystore // live source of geo flags + ip-api key
+
+	// mmdb is the local, zero-egress tier tried before any HTTP lookup.
+	// nil when the operator hasn't configured a database. See geo_mmdb.go.
+	mmdb *mmdbResolver
+
+	// lookupURLOverride replaces geoLookupURL in tests so the HTTP tier can be
+	// pointed at an httptest server. nil in production.
+	lookupURLOverride func(ip string) string
 }
 
-// isEnabled reports whether outbound geo HTTP is currently allowed. Evaluated
-// live (not frozen at construction) so toggling the geo flags from the Settings
-// panel takes effect without a restart. It is a couple of cheap string
-// compares, so calling it per lookup is fine.
+// isEnabled reports whether geolocation can be resolved at all, by ANY tier.
+// Evaluated live (not frozen at construction) so toggling the geo flags from
+// the Settings panel takes effect without a restart. It is a couple of cheap
+// string compares, so calling it per lookup is fine.
+//
+// A configured MMDB satisfies this on its own: local lookups need no outbound
+// HTTP, so an operator who ships a GeoLite2 file gets a populated globe with
+// geo.http left off entirely (the zero-egress configuration).
 func (g *geoResolver) isEnabled() bool {
+	if g.mmdb.ready() {
+		return true
+	}
+	return geoEnabled(g.cfg, g.keys)
+}
+
+// httpTierEnabled reports whether the outbound ip-api tier may be used. Split
+// out from isEnabled so the MMDB tier can be live while HTTP stays disabled.
+func (g *geoResolver) httpTierEnabled() bool {
 	return geoEnabled(g.cfg, g.keys)
 }
 
 type geoConfig struct {
 	Enabled      bool
 	InsecureHTTP bool
+	// MMDB is a filesystem path to a MaxMind GeoLite2/GeoIP2 City database.
+	// Empty disables the local tier. Read once at startup (a live path change
+	// would mean swapping an open mmap under concurrent readers), unlike the
+	// keystore-backed flags above.
+	MMDB string
 }
 
 // geoEnabled and its helpers read the geo flags + ip-api key through the
@@ -126,7 +152,16 @@ func newGeoResolver(cfg geoConfig, st *store.Store, keys *settings.Keystore) *ge
 	if st != nil {
 		_ = st.EnsureEnrichmentTable()
 	}
+	mmdb := openMMDB(cfg.MMDB)
+	if mmdb != nil {
+		if mmdb.err != "" {
+			fmt.Printf("geo: mmdb %s unusable (%s); using HTTP tier only\n", cfg.MMDB, mmdb.err)
+		} else {
+			fmt.Printf("geo: mmdb %s loaded (local lookups, no outbound geo HTTP)\n", cfg.MMDB)
+		}
+	}
 	return &geoResolver{
+		mmdb:     mmdb,
 		cache:    map[string]*geoEntry{},
 		lru:      list.New(),
 		inflight: map[string]bool{},
@@ -278,10 +313,10 @@ func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
 	if len(need) == 0 {
 		return
 	}
-	// releaseClaims clears inflight marks for IPs we claimed above but
-	// will not actually fetch (over the per-call cap, or past the
-	// deadline). Without this they'd stay marked in-flight forever and
-	// block future prefetches of those IPs.
+	// releaseClaims clears inflight marks for IPs we claimed above but will not
+	// actually fetch (over the per-call cap, past the deadline, or skipped
+	// because the HTTP tier is off). Without this they'd stay marked in-flight
+	// forever and block future prefetches of those IPs.
 	releaseClaims := func(ips []string) {
 		if len(ips) == 0 {
 			return
@@ -291,6 +326,35 @@ func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
 			delete(g.inflight, ip)
 		}
 		g.mu.Unlock()
+	}
+	// Tier 1 sweep: resolve everything the local database can answer, with NO
+	// per-call cap and no budget check. This is the coverage fix — the 48-IP
+	// cap and wall-clock budget below exist purely to bound OUTBOUND HTTP, and
+	// applying them to memory-mapped reads is what left ~77% of attacker IPs
+	// permanently unresolved. Only the leftovers continue to the HTTP tier.
+	if g.mmdb.ready() {
+		remaining := need[:0]
+		for _, ip := range need {
+			if ent, ok := g.mmdb.lookup(ip, g.now()); ok {
+				g.mu.Lock()
+				delete(g.inflight, ip)
+				g.putLocked(ip, ent)
+				g.mu.Unlock()
+				g.persist(ip, ent)
+				continue
+			}
+			remaining = append(remaining, ip)
+		}
+		need = remaining
+		if len(need) == 0 {
+			return
+		}
+		// MMDB-only deployment: don't fall through to the network. Release the
+		// claims so a later poll can retry (e.g. after a database swap).
+		if !g.httpTierEnabled() {
+			releaseClaims(need)
+			return
+		}
 	}
 	if len(need) > 48 {
 		releaseClaims(need[48:])
@@ -328,7 +392,34 @@ func (g *geoResolver) fetch(ip string) {
 	}
 	defer func() { <-g.sem }()
 
+	// Tier 1: local MMDB. No network, no quota, no third-party disclosure.
+	// Checked here (not only in prefetch) so every path that can reach fetch
+	// — including a single-IP actor-detail lookup — gets the local answer.
+	if ent, ok := g.mmdb.lookup(ip, g.now()); ok {
+		g.mu.Lock()
+		delete(g.inflight, ip)
+		g.putLocked(ip, ent)
+		g.mu.Unlock()
+		g.persist(ip, ent)
+		return
+	}
+
+	// Tier 2: ip-api HTTP. Only if the operator has enabled it; an MMDB-only
+	// deployment stops here rather than silently egressing.
+	if !g.httpTierEnabled() {
+		g.mu.Lock()
+		delete(g.inflight, ip)
+		// Negative-cache briefly so an MMDB gap (e.g. an IP the database
+		// doesn't cover) doesn't re-lookup on every 5s poll.
+		g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Minute)})
+		g.mu.Unlock()
+		return
+	}
+
 	url := geoLookupURL(ip, g.cfg, g.keys)
+	if g.lookupURLOverride != nil {
+		url = g.lookupURLOverride(ip)
+	}
 	if url == "" {
 		g.mu.Lock()
 		delete(g.inflight, ip)
@@ -382,17 +473,25 @@ func (g *geoResolver) fetch(ip string) {
 	g.putLocked(ip, ent)
 	g.mu.Unlock()
 
-	if ent.OK && g.st != nil {
-		payload, _ := json.Marshal(struct {
-			OK      bool    `json:"ok"`
-			Lat     float64 `json:"lat"`
-			Lon     float64 `json:"lon"`
-			Country string  `json:"country"`
-			City    string  `json:"city"`
-			CC      string  `json:"cc"`
-		}{true, ent.Lat, ent.Lon, ent.Country, ent.City, ent.CC})
-		_ = g.st.PutEnrichment(ip, "geo", string(payload))
+	g.persist(ip, ent)
+}
+
+// persist writes a resolved entry to the enrichment cache so it survives a
+// restart. Shared by both tiers; only successful lookups are stored, matching
+// the enrich package's "never cache a failure" rule.
+func (g *geoResolver) persist(ip string, ent geoEntry) {
+	if !ent.OK || g.st == nil {
+		return
 	}
+	payload, _ := json.Marshal(struct {
+		OK      bool    `json:"ok"`
+		Lat     float64 `json:"lat"`
+		Lon     float64 `json:"lon"`
+		Country string  `json:"country"`
+		City    string  `json:"city"`
+		CC      string  `json:"cc"`
+	}{true, ent.Lat, ent.Lon, ent.Country, ent.City, ent.CC})
+	_ = g.st.PutEnrichment(ip, "geo", string(payload))
 }
 
 func isPrivateIP(s string) bool {

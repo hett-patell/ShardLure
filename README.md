@@ -249,6 +249,7 @@ sudo ./shardlure run
 | `status` | Print event and actor counts |
 | `ioc` | Export a small IOC slice |
 | `share bazaar [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]` | Upload captured payloads to MalwareBazaar (abuse.ch) |
+| `share urlhaus [--dry-run] [--limit N] [--active-days N] [--anonymous] [--status]` | Submit the malware-distribution URLs those payloads came from to URLhaus (abuse.ch) |
 | `report abuseipdb [--dry-run] [--limit N] [--min-probe N] [--rewindow N] [--status]` | Report confirmed brute-forcers to AbuseIPDB |
 | `version` | Print version |
 
@@ -450,6 +451,46 @@ You can also share payloads from the web dashboard: open the payload inspector m
 Neither `--since` nor `--sha` bypasses `Vet`; they only choose which local artifacts enter the sharing pipeline.
 
 **Why MalwareBazaar?** It's the de-facto sharing hub for honeypot-captured Linux malware. Their submission policy (confirmed malware only, no PUPs/adware, no file infectors, samples must not be older than 10 days) is enforced by the vetting gate described above before any upload, and again server-side by abuse.ch. Repeated violations get accounts banned — see `internal/intel/bazaar/vet.go` for the policy gate and `internal/intel/bazaar/client.go` for the fatal-status handling that halts the run on `user_blacklisted`. `--since` defaults from `intel.bazaar.freshness_days`.
+
+## URLhaus URL Submission
+
+MalwareBazaar receives the payload **files**; [URLhaus](https://urlhaus.abuse.ch/) receives the **URLs those payloads were served from**. Since ShardLure's capture runner fetches attacker-supplied URLs itself (`origin=quarantine_fetch`), a successful fetch is first-hand proof that the URL was live and serving a payload — exactly what URLhaus wants.
+
+```bash
+shardlure share urlhaus --dry-run     # see what would go out
+shardlure share urlhaus --limit 25    # submit
+shardlure share urlhaus --status      # submission log
+```
+
+abuse.ch issues **one Auth-Key per account** for both services, so if `intel.bazaar.api_key` is set you're already configured; `intel.urlhaus.api_key` only exists to override it.
+
+**The vetting gate** (`internal/intel/urlhaus/vet.go`) enforces URLhaus's submission policy locally, before any network call. Hard rejects always win:
+
+| Rule | Why |
+| --- | --- |
+| must be a real `http(s)://` URL | rejects the capture runner's internal dedup pseudo-keys (`cowrie-download:`, `cowrie-event:`, `cowrie-tty:`), which are keys, not addresses |
+| `origin=quarantine_fetch` only | we must have fetched it ourselves; cowrie-side origins carry no verified URL |
+| `status=fetched` + real payload hash + ≥ 64 bytes | proves the URL actually served a file (a failed fetch proves the opposite) |
+| public IP / hostname only | policy explicitly forbids RFC1597/RFC6890 addresses for automated submitters; also keeps your own tailnet out of a public dataset |
+| no URL shorteners / redirectors | they host no payload |
+| no SSH keys, no unclassifiable blobs | "payload" means a file that harms once executed |
+| fetched within `active_days` (default 3) | URLhaus does not want dead URLs |
+
+Re-running is safe: submitted URLs are recorded in `urlhaus_submissions` and skipped next run. That ledger is **never purged** (unlike caches) — dropping a row would mean re-submitting the same URL upstream.
+
+Submitting is CLI-only by design: it publishes to a dataset other people consume as blocklist IOCs, which deserves a deliberate operator step rather than a mis-clickable button. The dashboard exposes read-only state at `/api/intel/urlhaus` (submitted count, pending estimate, recent log).
+
+## VirusTotal Payload Lookup
+
+Captured payload hashes can be checked against VirusTotal without ever uploading a file — only the sha256 leaves the host, so nothing about the honeypot or session is disclosed.
+
+- `GET /api/intel/payload/vt?sha=<sha256>` — **on-demand** single lookup (spends quota)
+- `GET /api/intel/payload/vt?sha=<sha256>&cache=1` — cache-only, never calls out
+- `GET /api/intel/payloads/vt/cached?shas=a,b,c` — bulk cache-only decorator for list views
+
+VirusTotal's free tier allows roughly **4 requests/minute**, which drives the design: lookups are on-demand (an analyst opening a payload), never a background sweep, and verdicts are cached in `payload_intel` for **30 days** (7 days for "not found"). That long TTL is safe because a file hash is immutable — unlike an IP reputation. Concurrent lookups of the same hash collapse into one API call, and rate-limit/error responses are **never** cached, so a transient 429 can't poison the cache. On a live-fetch failure a stale cached verdict is returned rather than blanking a verdict the analyst already had.
+
+A `404` from VirusTotal is surfaced as a first-class result (`found: false`), not an error — for a honeypot, "nobody has ever seen this sample" is a genuinely interesting finding. Uses the same `SHARDLURE_VT_KEY` as IP enrichment (one VT account covers both).
 
 ## AbuseIPDB Reporting
 
@@ -705,7 +746,9 @@ sudo userdel -r cowrie
 - [x] Globe artifacts on every theme (satellites, live badge, per-actor analytics chips)
 - [x] Ambient globe dashboard (analyst widgets consolidated in `/intel`)
 - [x] Intel command palette (actors / IPs / sessions / commands / payloads)
-- [ ] GeoLite2 MMDB enrichment (escape the ip-api.com rate limits arc)
+- [x] GeoLite2 MMDB enrichment (local tier-1 geo: full coverage, zero egress, works air-gapped)
+- [x] URLhaus URL submission (share the malware-distribution URLs, not just the payloads)
+- [x] VirusTotal payload-hash lookup (on-demand, long-TTL cached — free tier is ~4 req/min)
 - [ ] Real-time WebSocket feed (current dashboard polls every 5s, which is fine but mid)
 
 ## FAQ (Frequently Asked Vibes)

@@ -52,9 +52,14 @@ type Config struct {
 	} `yaml:"capture"`
 
 	GeoIP struct {
-		// MMDB is parsed for forward-compat but not yet read by the
-		// geo resolver (only ip-api.com HTTP lookups are wired up).
-		// See README roadmap: "GeoLite2 MMDB enrichment".
+		// MMDB is a path to a MaxMind GeoLite2/GeoIP2 City database. When set,
+		// geolocation resolves locally — no quota, no third-party disclosure of
+		// attacker IPs, and it works air-gapped. It is tier 1; the ip-api.com
+		// HTTP path below is only consulted for IPs the database can't answer
+		// (and only when enabled), so an MMDB-only setup does zero geo egress.
+		//
+		// GeoLite2 requires a free MaxMind account; download GeoLite2-City.mmdb
+		// and point this at it. Overridable with SHARDLURE_GEO_MMDB.
 		MMDB         string `yaml:"mmdb"`
 		Enabled      bool   `yaml:"enabled"`
 		InsecureHTTP bool   `yaml:"insecure_http"`
@@ -91,6 +96,26 @@ type Config struct {
 			// hard 10-day policy; 0 uses the default of 10.
 			FreshnessDays int `yaml:"freshness_days"`
 		} `yaml:"bazaar"`
+		URLhaus struct {
+			// APIKey is the abuse.ch Auth-Key. abuse.ch issues ONE key per
+			// account covering both MalwareBazaar and URLhaus, so leaving this
+			// empty falls back to intel.bazaar.api_key rather than forcing the
+			// operator to paste the same secret twice.
+			APIKey string `yaml:"api_key"`
+			// Endpoint overrides the submission URL. Defaults to
+			// https://urlhaus.abuse.ch/api/. Useful for tests.
+			Endpoint string `yaml:"endpoint"`
+			// Tags are attached to every submitted URL. URLhaus only permits
+			// [A-Za-z0-9.- ]; anything else is stripped before submission.
+			Tags []string `yaml:"tags"`
+			// ActiveDays bounds how long after our last successful fetch a URL
+			// is still considered "actively serving". URLhaus does not want
+			// dead URLs. Values 1..3 may only tighten the default of 3.
+			ActiveDays int `yaml:"active_days"`
+			// Anonymous hides the abuse.ch handle on the public record.
+			// abuse.ch still attributes the submission internally.
+			Anonymous bool `yaml:"anonymous"`
+		} `yaml:"urlhaus"`
 		AbuseIPDB struct {
 			// ReportEnabled is the master opt-in for outbound reporting of
 			// confirmed brute-forcers to AbuseIPDB. Reporting stays OFF unless
@@ -159,12 +184,30 @@ func Default() Config {
 	c.Intel.Bazaar.Tags = []string{"shardlure", "honeypot"}
 	c.Intel.Bazaar.MaxBytes = 32 << 20
 	c.Intel.Bazaar.FreshnessDays = 10
+	c.Intel.URLhaus.Endpoint = "https://urlhaus.abuse.ch/api/"
+	c.Intel.URLhaus.Tags = []string{"shardlure", "honeypot"}
+	c.Intel.URLhaus.ActiveDays = 3
 	c.Intel.AbuseIPDB.ReportEnabled = false
 	c.Intel.AbuseIPDB.Endpoint = "https://api.abuseipdb.com/api/v2/report"
 	c.Intel.AbuseIPDB.Categories = []int{18, 22} // 18=Brute-Force, 22=SSH
 	c.Intel.AbuseIPDB.MinProbeScore = 60
 	c.Intel.AbuseIPDB.RewindowHours = 24
 	return c
+}
+
+// applyEnvOverrides lets a few deployment-shaped settings come from the
+// environment. Deliberately narrow: API keys and UI knobs belong in the
+// settings keystore (which already has a SHARDLURE_* fallback and can be
+// changed live), so this covers only values needed BEFORE the store is open —
+// currently the GeoIP database path, which is read once at startup because it
+// backs an open mmap that can't be swapped under concurrent readers.
+//
+// Applied on every Load path, including the "no config file" early return, so
+// an env-only deployment (systemd/docker with no shardlure.yaml) still works.
+func applyEnvOverrides(c *Config) {
+	if v := strings.TrimSpace(os.Getenv("SHARDLURE_GEO_MMDB")); v != "" {
+		c.GeoIP.MMDB = v
+	}
 }
 
 func Load(path string) (Config, error) {
@@ -175,6 +218,7 @@ func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			applyEnvOverrides(&c)
 			return c, nil
 		}
 		return c, err
@@ -182,6 +226,7 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &c); err != nil {
 		return c, err
 	}
+	applyEnvOverrides(&c)
 	if c.DataDir == "" {
 		c.DataDir = Default().DataDir
 	}

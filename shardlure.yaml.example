@@ -40,10 +40,20 @@ capture:
 
 geoip:
   # Required for globe arcs / country stats (resolves attacker IPs).
+  # These two flags control the ip-api.com HTTP tier only.
   enabled: true
   insecure_http: true
-  # mmdb (offline GeoLite2 lookup) is parsed but NOT implemented yet —
-  # see the README roadmap. Setting it has no effect today.
+  #
+  # mmdb: path to a MaxMind GeoLite2/GeoIP2 City database. STRONGLY
+  # recommended. It is tier 1 — tried before any HTTP lookup — and it:
+  #   * resolves EVERY attacker IP, not just the ~48/poll the HTTP tier
+  #     can afford (ip-api coverage is structurally partial)
+  #   * sends nothing to a third party (the free ip-api tier is PLAIN HTTP,
+  #     so every attacker IP you look up is visible on the wire)
+  #   * works air-gapped / behind an egress filter
+  # With mmdb set you can turn the flags above OFF for zero geo egress.
+  # Get GeoLite2-City.mmdb free (account required) from MaxMind, or point
+  # this at any GeoIP2 City database. Overridable with SHARDLURE_GEO_MMDB.
   # mmdb: /var/lib/shardlure/GeoLite2-City.mmdb
 
 # Outbound threat-intel sharing. Each destination is opt-in; leaving
@@ -64,6 +74,24 @@ intel:
     # Valid values are 0..10 (0 uses the 10-day default). --since and
     # --sha only select local candidates; neither bypasses the Vet gate.
     freshness_days: 10
+  urlhaus:
+    # URLhaus receives the malware-distribution URLs the payloads came
+    # from (bazaar receives the payload FILES). abuse.ch issues ONE
+    # Auth-Key per account for both, so leaving this empty reuses
+    # intel.bazaar.api_key above.
+    api_key: ""
+    # Tags attached to every submitted URL. URLhaus only permits
+    # [A-Za-z0-9.- ]; anything else is stripped before submission.
+    tags: ["shardlure", "honeypot"]
+    # URLhaus only wants URLs that are still ACTIVELY serving a payload.
+    # A URL is eligible only if our own fetch succeeded within this many
+    # days. Valid values are 1..3 (0 uses the 3-day default); larger
+    # values cannot loosen the gate.
+    active_days: 3
+    # Hide your abuse.ch handle on the public record. abuse.ch still
+    # attributes the submission internally (anonymous submissions are
+    # not accepted at all).
+    anonymous: false
   abuseipdb:
     # Outbound REPORTING of confirmed brute-forcers to AbuseIPDB (the
     # give-back to the community feed). OFF by default. Enrichment /check

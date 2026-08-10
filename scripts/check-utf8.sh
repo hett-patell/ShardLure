@@ -15,7 +15,11 @@ files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 # skipped rather than the NUL test being weakened for everything. Keep this list
 # tight: anything not listed here is still held to strict UTF-8.
 BINARY_SUFFIXES = {".ico", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf",
-                   ".woff", ".woff2", ".ttf", ".otf", ".zip", ".gz", ".db"}
+                   ".woff", ".woff2", ".ttf", ".otf", ".zip", ".gz", ".db",
+                   # MaxMind GeoIP2/GeoLite2 databases (the geo MMDB test
+                   # fixture in internal/web/testdata) are memory-mapped
+                   # binary blobs, not text sources.
+                   ".mmdb"}
 
 bad = []
 skipped = 0

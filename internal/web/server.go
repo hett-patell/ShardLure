@@ -19,6 +19,7 @@ import (
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/hostsvc"
+	"github.com/networkshard/shardlure/internal/intel/vt"
 	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
@@ -43,7 +44,13 @@ type Server struct {
 	// request time so a value saved from the Settings panel takes effect
 	// without a restart. The *Default fields hold the startup-resolved
 	// fallbacks (config/Options/env) used when the keystore has no value.
-	keys                   *settings.Keystore
+	keys *settings.Keystore
+	// vt resolves captured payload hashes on VirusTotal. Built lazily (see
+	// vtResolver) because it reads the API key through the keystore at request
+	// time. vtEndpoint is a test seam.
+	vtOnce                 sync.Once
+	vt                     *vt.Resolver
+	vtEndpoint             string
 	homeDefault            homePoint
 	bazaarKeyDefault       string // config intel.bazaar.api_key fallback (env/DB win)
 	bazaarEndpointDefault  string
@@ -393,6 +400,9 @@ type Options struct {
 	HomeCC          string
 	GeoEnabled      bool
 	GeoInsecureHTTP bool
+	// GeoMMDB is the path to a MaxMind GeoLite2/GeoIP2 City database. When
+	// set, geolocation is resolved locally with no outbound HTTP.
+	GeoMMDB string
 	// CowrieUnit is the systemd unit running Cowrie, read ONLY to report the
 	// honeypot's uptime on the dashboard. Empty falls back to "cowrie"; a host
 	// without systemd simply reports uptime as unknown.
@@ -613,6 +623,12 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/deobf", s.guard(s.handleIntelDeobf))
 	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
 	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
+	// VirusTotal payload-hash lookups. /vt is ON DEMAND (one hash, spends
+	// quota); /vt/cached is a cache-only bulk decorator safe to call from a
+	// list render. See api_vt.go for why the split exists.
+	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.handleIntelPayloadVT))
+	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guard(s.handleIntelPayloadsVTCached))
+	mux.HandleFunc("/api/intel/urlhaus", s.guard(s.handleIntelURLhaus))
 	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
 	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
 	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guard(s.handleAbuseIPDBSuggestions))
@@ -1025,7 +1041,7 @@ func geoOpts(has bool, o Options) geoConfig {
 	if !has {
 		return geoConfig{}
 	}
-	return geoConfig{Enabled: o.GeoEnabled, InsecureHTTP: o.GeoInsecureHTTP}
+	return geoConfig{Enabled: o.GeoEnabled, InsecureHTTP: o.GeoInsecureHTTP, MMDB: o.GeoMMDB}
 }
 
 func defaultHomePoint() homePoint {
