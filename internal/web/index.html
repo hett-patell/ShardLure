@@ -277,7 +277,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=9" />
+<link rel="stylesheet" href="/themes.css?v=11" />
 </head>
 <body>
 
@@ -779,45 +779,107 @@ function mergeActorsForGlobe(actors, topActors) {
   return Object.keys(byIp).map(function (k) { return byIp[k]; });
 }
 
+/**
+ * Choose overlays that will actually be legible, in volume order.
+ *
+ * Real attacker geography is heavily clustered: the busiest actors are
+ * routinely several machines in ONE datacentre city, so a plain volume slice
+ * stacks overlays on top of each other. Two Amsterdam actors were observed
+ * projecting to byte-identical screen coordinates, which reads as overlays
+ * simply not existing. Every theme therefore picks by separation, not rank.
+ *
+ * Returns {a, i} where `i` is the index in the ORIGINAL pool, because marker
+ * ids are built from that ordering and anchoring to `a<i>` of a re-indexed list
+ * puts an overlay on the wrong actor.
+ *
+ *   minSepDeg  great-circle degrees required between any two picks
+ *   max        hard cap; past a handful they stop being readable
+ *   seeds      points already occupied that picks must also clear (e.g. home)
+ *   keyOf      optional label key per candidate (Sprite: country). A candidate
+ *              whose key is taken, or which has none, is skipped.
+ *   seedKeys   keys pre-marked as taken (Sprite: the operator's own country)
+ */
+function pickSpreadOverlays(pool, opts) {
+  var minSep = opts.minSepDeg, max = opts.max;
+  var seeds = opts.seeds || [], keyOf = opts.keyOf || null;
+  var taken = {};
+  (opts.seedKeys || []).forEach(function (k) { if (k) taken[k] = true; });
+  var picked = [];
+  for (var i = 0; i < pool.length && picked.length < max; i++) {
+    var a = pool[i], key = keyOf ? keyOf(a) : null;
+    if (keyOf && (!key || taken[key])) continue;
+    var clash = false;
+    for (var si = 0; si < seeds.length && !clash; si++) {
+      if (greatCircleDeg(seeds[si], a) < minSep) clash = true;
+    }
+    for (var pi = 0; pi < picked.length && !clash; pi++) {
+      if (greatCircleDeg(picked[pi].a, a) < minSep) clash = true;
+    }
+    if (clash) continue;
+    if (keyOf) taken[key] = true;
+    picked.push({ a: a, i: i, key: key });
+  }
+  return picked;
+}
+
+/**
+ * Meridian and Signal render the same composition: a live badge and hub
+ * satellite over home, then a satellite plus an analytics chip per attacker.
+ * They are ONE function rather than two identical branches because that is
+ * exactly how they drifted - the stacking fix landed in Meridian and left
+ * Signal broken, with no visible difference in the source to hint at it.
+ */
+function buildSatChipOverlays(home, pool) {
+  var out = [];
+  out.push({
+    lat: home.lat, lng: home.lon, kind: 'live', alt: 0.05,
+    rate: 'LIVE', sub: (home.city || 'home'), placeKey: 'home',
+  });
+  out.push({
+    lat: home.lat, lng: home.lon, kind: 'sat', alt: 0.075,
+    label: 'HUB', placeKey: 'home', hub: true, ringDelay: 0,
+  });
+  // Home is deliberately NOT a seed here. A chip near it is still informative
+  // and the declutter pass resolves the overlap at render time in the home
+  // badge's favour; dropping the pick outright would lose an attacker in the
+  // operator's own region, which is the most interesting one to see.
+  pickSpreadOverlays(pool, { minSepDeg: 25, max: 6 }).forEach(function (p, i) {
+    var a = p.a, n = a.events || 0;
+    var rate = Number(a.rateHour);
+    var rateLbl = Number.isFinite(rate) && rate > 0 ? rate.toFixed(1) + '/h' : '';
+    var pk = 'actor' + i;
+    out.push({
+      lat: a.lat, lng: a.lon, kind: 'sat', alt: 0.055 + (i % 3) * 0.01,
+      label: a.cc || a.ip || 'node', placeKey: pk, ringDelay: i * 0.4,
+    });
+    out.push({
+      lat: a.lat, lng: a.lon, kind: 'analytics', alt: 0.04,
+      placeKey: pk,
+      title: (a.cc || '??') + (a.city ? ' \u00b7 ' + a.city : ''),
+      value: n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n),
+      rateLabel: rateLbl,
+      ip: a.ip || '',
+    });
+  });
+  return out;
+}
+
 function buildThemeOverlays(theme, home, actors) {
   if (theme !== 'sprite' && theme !== 'meridian' && theme !== 'signal') return [];
   var geoActors = (actors || [])
     .filter(function (a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); })
     .sort(function (a, b) { return (b.events || 0) - (a.events || 0); });
-  // Meridian/Signal place a fixed handful of sats+chips, so they keep the top-6
-  // slice. Sprite selects stickers by country and angular spread, which needs a
-  // wider candidate pool — filtering 6 candidates left only two survivors.
-  var ranked = geoActors.slice(0, 6);
+  // The candidate pool is the deduped MARKER ordering, so one datacentre city
+  // yields one overlay. It must never be pre-sliced: the selectors below filter
+  // by country and separation, and filtering a 6-item slice left two survivors.
+  // Falls back to raw volume order only before Cobe has data, which the 25 deg
+  // separation rule still de-clusters adequately.
+  var satChipPool = (window.ShardCobe && window.ShardCobe.actorOrder)
+    ? (window.ShardCobe.actorOrder() || geoActors)
+    : geoActors;
   var out = [];
-  if (theme === 'signal') {
-    var pkHomeS = 'home';
-    out.push({
-      lat: home.lat, lng: home.lon, kind: 'live', alt: 0.05,
-      rate: 'LIVE', sub: (home.city || 'home'), placeKey: pkHomeS,
-    });
-    out.push({
-      lat: home.lat, lng: home.lon, kind: 'sat', alt: 0.075,
-      label: 'HUB', placeKey: pkHomeS, hub: true, ringDelay: 0,
-    });
-    ranked.forEach(function (a, i) {
-      var pk = 'actor' + i;
-      var n = a.events || 0;
-      var r = Number(a.rateHour);
-      var rateLbl = Number.isFinite(r) && r > 0 ? r.toFixed(1) + '/h' : '';
-      out.push({
-        lat: a.lat, lng: a.lon, kind: 'sat', alt: 0.055 + (i % 3) * 0.01,
-        label: a.cc || a.ip || 'node', placeKey: pk, ringDelay: i * 0.4,
-      });
-      out.push({
-        lat: a.lat, lng: a.lon, kind: 'analytics', alt: 0.04,
-        placeKey: pk,
-        title: (a.cc || '??') + (a.city ? ' · ' + a.city : ''),
-        value: n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n),
-        rateLabel: rateLbl,
-        ip: a.ip || '',
-      });
-    });
-    return out;
+  if (theme === 'signal' || theme === 'meridian') {
+    return buildSatChipOverlays(home, satChipPool);
   }
   if (theme === 'sprite') {
     out.push({
@@ -841,110 +903,43 @@ function buildThemeOverlays(theme, home, actors) {
       ? window.ShardCobe.actorOrder()
       : null;
     if (!ordered) return out;
-    // Pick stickers that will actually be readable, in volume order:
-    //   - one per COUNTRY, because several cities in one country stack up on
-    //     screen and "which countries" is what a flag answers anyway;
-    //   - at least MIN_SEP degrees of great-circle from every sticker already
-    //     chosen, because distinct countries can still overlap (Amsterdam /
-    //     Frankfurt / London sit on top of each other at this globe size);
-    //   - capped, because past a handful they stop being legible.
-    // Emit a flag for MANY countries, not a token few. Overlap is resolved at
-    // RENDER time by the declutter pass in cobe-globe.js, which hides whichever
-    // of a colliding pair is lower priority for as long as they collide. That
-    // means the globe can represent the whole attacker spread and simply reveals
-    // different countries as it rotates, instead of freezing on 4 of them.
+    // Emit a flag for MANY countries, not a token few: overlap is resolved at
+    // RENDER time by the declutter pass, which hides whichever of a colliding
+    // pair is lower priority for as long as they collide. The globe can
+    // therefore represent the whole attacker spread and reveal different
+    // countries as it rotates, instead of freezing on four of them.
     //
-    // MIN_SEP stays small: it only separates near-identical points (two cities
-    // that would sit under the same flag no matter the rotation), since anything
-    // rotation-dependent is the declutter pass's job.
-    var MAX_STICKERS = 18, MIN_SEP = 6;
-    // Seed with HOME so the rules apply against it too: otherwise an attacker
+    // One flag per COUNTRY, since that is what a flag answers, and a small
+    // separation to catch near-identical points that would sit under the same
+    // flag at any rotation (Amsterdam / Frankfurt / London at this globe size).
+    // It stays small because anything rotation-dependent is declutter's job.
+    // HOME is a seed so the rules apply against it too - otherwise an attacker
     // in the operator's own country renders a second identical flag right next
     // to the home one (observed: two India flags 13px apart).
-    var picked = [];
-    var seenCC = {};
-    if (home && home.cc) seenCC[home.cc] = true;
-    var homePt = { lat: home.lat, lon: home.lon };
-    ordered.forEach(function (a, i) {
-      if (picked.length >= MAX_STICKERS) return;
-      var cc = a.cc || '';
-      if (!cc || cc === '??') return;   // no flag without a country; skip rather than invent one
-      if (seenCC[cc]) return;
-      if (greatCircleDeg(homePt, a) < MIN_SEP) return;
-      for (var k = 0; k < picked.length; k++) {
-        if (greatCircleDeg(picked[k].a, a) < MIN_SEP) return;
-      }
-      seenCC[cc] = true;
-      picked.push({ a: a, i: i, cc: cc });
+    var picked = pickSpreadOverlays(ordered, {
+      minSepDeg: 6,
+      max: 18,
+      seeds: [{ lat: home.lat, lon: home.lon }],
+      keyOf: function (a) { var cc = a.cc || ''; return cc === '??' ? '' : cc; },
+      seedKeys: [home && home.cc],
     });
     picked.forEach(function (p, n) {
       out.push({
         lat: p.a.lat, lng: p.a.lon, kind: 'sticker', alt: 0.03,
-        emoji: flag(p.cc),
-        label: p.cc + ' · ' + (p.a.city || p.a.ip || ''),
+        emoji: flag(p.key),
+        label: p.key + ' · ' + (p.a.city || p.a.ip || ''),
         // marker index must be the one from the MARKER ordering, not this
         // sticker's own index, or the flag anchors to a different actor.
         placeKey: 'a' + p.i, marker: 'a' + p.i,
         tilt: STICKER_TILTS[n % STICKER_TILTS.length]
       });
     });
-  } else {
-    // Meridian: hub sat + live badge at home; separate floating sats + side analytics per actor.
-    var pkHome = 'home';
-    out.push({
-      lat: home.lat, lng: home.lon, kind: 'live', alt: 0.05,
-      rate: 'LIVE', sub: (home.city || 'home'),
-      placeKey: pkHome,
-    });
-    out.push({
-      lat: home.lat, lng: home.lon, kind: 'sat', alt: 0.075,
-      label: 'HUB', placeKey: pkHome, hub: true, ringDelay: 0,
-    });
-    // Geo-dedupe first. `ranked` is raw volume order, so on a real deployment
-    // the top 6 are frequently several actors in the SAME datacentre city -
-    // observed two Amsterdam actors projecting to byte-identical coordinates,
-    // which stacks their chips perfectly and looks like half the tags are
-    // missing. actorOrder() is deduped by ~1 deg bucket, so one city yields one
-    // chip. Falls back to raw order only before Cobe has data.
-    var mPool = (window.ShardCobe && window.ShardCobe.actorOrder)
-      ? (window.ShardCobe.actorOrder() || ranked)
-      : ranked;
-    // Spread the picks geographically, in volume order. Taking the plain top 6
-    // gave five European datacentres inside a few degrees: the declutter pass
-    // then had to suppress four of them, so the globe showed two tags out of six
-    // and looked like the rest were missing. A separation rule fixes the cause
-    // rather than hiding the symptom, and covers more of the world at once.
-    var M_SEP = 25;
-    var mActors = [];
-    for (var mi = 0; mi < mPool.length && mActors.length < 6; mi++) {
-      var cand = mPool[mi];
-      var clash = false;
-      for (var mj = 0; mj < mActors.length; mj++) {
-        if (greatCircleDeg(mActors[mj], cand) < M_SEP) { clash = true; break; }
-      }
-      if (!clash) mActors.push(cand);
-    }
-    mActors.forEach(function (a, i) {
-      var pk = 'actor' + i;
-      var n = a.events || 0;
-      var rate = Number(a.rateHour);
-      var rateLbl = Number.isFinite(rate) && rate > 0 ? rate.toFixed(1) + '/h' : '';
-      out.push({
-        lat: a.lat, lng: a.lon, kind: 'sat', alt: 0.055 + (i % 3) * 0.01,
-        label: a.cc || a.ip || 'node', placeKey: pk, ringDelay: i * 0.4,
-      });
-      out.push({
-        lat: a.lat, lng: a.lon, kind: 'analytics', alt: 0.04,
-        placeKey: pk,
-        title: (a.cc || '??') + (a.city ? ' · ' + a.city : ''),
-        value: n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n),
-        rateLabel: rateLbl,
-        ip: a.ip || '',
-      });
-    });
   }
   return out;
 }
+
+/** kind -> declutter group; see data-dc-group in makeOverlayEl. */
+var DECLUTTER_GROUP = { sticker: 'sticker', analytics: 'label', live: 'label', sat: 'mark' };
 
 function makeOverlayEl(d) {
   var wrap = document.createElement('div');
@@ -1029,9 +1024,11 @@ function applyGlobeOverlays(force) {
     // library places the anchor with the same projection it draws with. Only
     // set it when the id really is a marker id (home / a<i>).
     if (d.marker) el.setAttribute('data-marker', d.marker);
-    // Declutter group: overlays only contend with others of the same kind, so a
-    // satellite mark never suppresses its own analytics chip.
-    el.setAttribute('data-dc-group', d.kind || 'x');
+    // Declutter group is the VISUAL CLASS, not the kind. Text competes with
+    // text: an analytics chip and the LIVE badge are both reading matter and
+    // must not overlap, while a satellite mark and its own chip deliberately
+    // share a place (mark on the point, chip beside it) and have to coexist.
+    el.setAttribute('data-dc-group', DECLUTTER_GROUP[d.kind] || 'label');
     if (d.tilt != null) el.style.setProperty('--tilt', d.tilt + 'deg');
     if (d.kind === 'sticker' || d.kind === 'sat') el.setAttribute('data-offset', 'float');
     else if (d.kind === 'live' || d.kind === 'analytics') el.setAttribute('data-offset', 'side');
