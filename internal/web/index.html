@@ -277,7 +277,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=8" />
+<link rel="stylesheet" href="/themes.css?v=9" />
 </head>
 <body>
 
@@ -900,7 +900,31 @@ function buildThemeOverlays(theme, home, actors) {
       lat: home.lat, lng: home.lon, kind: 'sat', alt: 0.075,
       label: 'HUB', placeKey: pkHome, hub: true, ringDelay: 0,
     });
-    ranked.slice(0, 6).forEach(function (a, i) {
+    // Geo-dedupe first. `ranked` is raw volume order, so on a real deployment
+    // the top 6 are frequently several actors in the SAME datacentre city -
+    // observed two Amsterdam actors projecting to byte-identical coordinates,
+    // which stacks their chips perfectly and looks like half the tags are
+    // missing. actorOrder() is deduped by ~1 deg bucket, so one city yields one
+    // chip. Falls back to raw order only before Cobe has data.
+    var mPool = (window.ShardCobe && window.ShardCobe.actorOrder)
+      ? (window.ShardCobe.actorOrder() || ranked)
+      : ranked;
+    // Spread the picks geographically, in volume order. Taking the plain top 6
+    // gave five European datacentres inside a few degrees: the declutter pass
+    // then had to suppress four of them, so the globe showed two tags out of six
+    // and looked like the rest were missing. A separation rule fixes the cause
+    // rather than hiding the symptom, and covers more of the world at once.
+    var M_SEP = 25;
+    var mActors = [];
+    for (var mi = 0; mi < mPool.length && mActors.length < 6; mi++) {
+      var cand = mPool[mi];
+      var clash = false;
+      for (var mj = 0; mj < mActors.length; mj++) {
+        if (greatCircleDeg(mActors[mj], cand) < M_SEP) { clash = true; break; }
+      }
+      if (!clash) mActors.push(cand);
+    }
+    mActors.forEach(function (a, i) {
       var pk = 'actor' + i;
       var n = a.events || 0;
       var rate = Number(a.rateHour);
@@ -1005,6 +1029,9 @@ function applyGlobeOverlays(force) {
     // library places the anchor with the same projection it draws with. Only
     // set it when the id really is a marker id (home / a<i>).
     if (d.marker) el.setAttribute('data-marker', d.marker);
+    // Declutter group: overlays only contend with others of the same kind, so a
+    // satellite mark never suppresses its own analytics chip.
+    el.setAttribute('data-dc-group', d.kind || 'x');
     if (d.tilt != null) el.style.setProperty('--tilt', d.tilt + 'deg');
     if (d.kind === 'sticker' || d.kind === 'sat') el.setAttribute('data-offset', 'float');
     else if (d.kind === 'live' || d.kind === 'analytics') el.setAttribute('data-offset', 'side');

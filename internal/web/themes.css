@@ -375,6 +375,9 @@ html[data-theme="sprite"] .theme-card .tname {
   50% { opacity: 0.4; transform: scale(0.85); }
 }
 .globe-live b { color: var(--ink); font-weight: 600; }
+/* Declutter fades these (see declutterTarget in cobe-globe.js); the wrapper's
+   opacity stays the front/back signal, so the two multiply. */
+.globe-analytics, .globe-sat, .globe-live { transition: opacity 0.22s ease; }
 .globe-analytics {
   font: 500 10px var(--mono); color: var(--ink);
   background: color-mix(in srgb, var(--sheet) 96%, transparent);

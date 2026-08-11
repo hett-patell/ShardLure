@@ -362,32 +362,55 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   const DWELL_MS = 420;
   let lastDeclutter = 0;
 
+  /**
+   * The inner visual to fade. Never the wrapper: its opacity belongs to Cobe's
+   * --cobe-visible-<id> for anchored stickers, and to syncLabels' front/back
+   * test for projected overlays. Fading a child multiplies with either one
+   * instead of fighting it.
+   */
+  const declutterTarget = (el) =>
+    el.querySelector(".globe-sticker, .globe-analytics, .globe-sat, .globe-live") || el;
+
   const setDeclutter = (el, shown, now) => {
     if (el._dcShown === shown) return;
     if (el._dcAt && now - el._dcAt < DWELL_MS) return; // too soon; let it settle
     el._dcShown = shown;
     el._dcAt = now;
-    const glyph = el.querySelector(".globe-sticker") || el;
+    const glyph = declutterTarget(el);
     glyph.style.opacity = shown ? "1" : "0";
   };
 
-  const declutterAnchored = () => {
+  // Overlays only compete with others of the SAME kind. A satellite mark and its
+  // analytics chip deliberately share a place (the mark sits on the point, the
+  // chip is offset beside it), so decluttering them against each other would
+  // have the mark suppress its own label.
+  const declutterGroup = (el) => el.getAttribute("data-dc-group") || "default";
+
+  const declutterOverlays = () => {
     const now = performance.now();
     if (now - lastDeclutter < 120) return;
     lastDeclutter = now;
-    const kept = [];
+    const keptByGroup = new Map();
     for (const el of labelEls) {
-      if (!el._cobeAnchored) continue;
-      // Cobe drives the outer opacity via --cobe-visible-<id>; a back-facing
-      // sticker is already invisible and must not reserve space. Rotating out of
-      // view bypasses the dwell timer: it is not a contested decision, and
-      // holding it would leave a ghost over the wrong hemisphere.
+      // Applies to projected overlays as well as anchored ones: Meridian's
+      // chips cluster in the same datacentre cities and stacked into an
+      // illegible pile, which read as most of the tags simply not existing.
+      const group = declutterGroup(el);
+      let kept = keptByGroup.get(group);
+      if (!kept) {
+        kept = [];
+        keptByGroup.set(group, kept);
+      }
+      // The wrapper's opacity is the front/back signal (Cobe's variable for
+      // anchored elements, syncLabels' projection test for the rest). Something
+      // already invisible must not reserve space. Rotating out of view bypasses
+      // the dwell timer: it is not a contested decision, and holding it would
+      // leave a ghost over the wrong hemisphere.
       const r = el.getBoundingClientRect();
       if (parseFloat(getComputedStyle(el).opacity || "0") < 0.5 || !r.width) {
         el._dcShown = false;
         el._dcAt = now;
-        const glyph = el.querySelector(".globe-sticker") || el;
-        glyph.style.opacity = "0";
+        declutterTarget(el).style.opacity = "0";
         continue;
       }
       const wasShown = el._dcShown !== false;
@@ -401,14 +424,14 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
       );
       setDeclutter(el, !hit, now);
       // Reserve space whenever it is currently drawn, including during a
-      // dwell-held state, so a lower-priority sticker cannot slide underneath
+      // dwell-held state, so a lower-priority overlay cannot slide underneath
       // one that is still fading out.
       if (el._dcShown !== false) kept.push(r);
     }
   };
 
   const syncLabels = (phi, theta) => {
-    declutterAnchored();
+    declutterOverlays();
     for (const el of labelEls) {
       const id = el.getAttribute("data-place");
       const place = placeById[id];
