@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 )
 
 // DefaultEndpoint is the production MalwareBazaar v1 submission URL.
@@ -225,32 +227,11 @@ func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha
 	return r, nil
 }
 
-// sanitiseTags strips characters disallowed by the abuse.ch tag
-// validator ([A-Za-z0-9.- ]) so the upload doesn't reject the whole
-// submission over a stray slash in an attacker-supplied filename.
-func sanitiseTags(in []string) []string {
-	out := make([]string, 0, len(in))
-	seen := map[string]bool{}
-	for _, t := range in {
-		var b strings.Builder
-		for _, r := range t {
-			switch {
-			case r >= 'A' && r <= 'Z',
-				r >= 'a' && r <= 'z',
-				r >= '0' && r <= '9',
-				r == '.', r == '-', r == ' ':
-				b.WriteRune(r)
-			}
-		}
-		s := strings.TrimSpace(b.String())
-		if s == "" || seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	return out
-}
+// sanitiseTags applies abuse.ch's shared tag rule. MalwareBazaar and URLhaus
+// use the same validator ([A-Za-z0-9.- ], whole-submission rejection on a
+// stray character), so the implementation lives in intelutil rather than being
+// copied per destination.
+func sanitiseTags(in []string) []string { return intelutil.SanitiseAbuseChTags(in) }
 
 func truncateForError(b []byte) string {
 	const max = 400

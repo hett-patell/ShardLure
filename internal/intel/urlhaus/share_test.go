@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -202,7 +203,7 @@ func TestShareStopsOnUnauthorized(t *testing.T) {
 	var cands []Candidate
 	for i := 0; i < 60; i++ { // > default batch size, so >1 batch would be sent
 		c := goodCandidate()
-		c.URL = "http://185.7.214.3/bins/x86-" + itoa(i)
+		c.URL = "http://185.7.214.3/bins/x86-" + strconv.Itoa(i)
 		cands = append(cands, c)
 	}
 	submitted, _, err := Share(context.Background(), rec, cands,
@@ -230,7 +231,7 @@ func TestShareBatchesLargeSets(t *testing.T) {
 	var cands []Candidate
 	for i := 0; i < 55; i++ {
 		c := goodCandidate()
-		c.URL = "http://185.7.214.3/x-" + itoa(i)
+		c.URL = "http://185.7.214.3/x-" + strconv.Itoa(i)
 		cands = append(cands, c)
 	}
 	submitted, _, err := Share(context.Background(), rec, cands,
@@ -291,16 +292,4 @@ func TestClientAnonymousFlagIsStringy(t *testing.T) {
 	if got := cs.bodies[0].Anonymous; got != "1" {
 		t.Errorf("anonymous = %q, want \"1\"", got)
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }

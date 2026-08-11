@@ -256,6 +256,11 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	sessionCount, _ := s.st.CountSessions()
 	// Read-only liveness of the sibling honeypot unit. Best-effort: an unknown
 	// value simply hides the readout rather than failing the cache refresh.
+	//
+	// context.Background() is deliberate, NOT an oversight: this populates a
+	// shared 10s cache, so binding it to whichever request happened to trigger
+	// the refresh would let one client disconnecting abort the refresh for
+	// everyone. StartedAt applies its own 2s timeout, so nothing can hang.
 	cowrieUptime, cowrieUp := hostsvc.Uptime(context.Background(), s.cowrieUnit, time.Now())
 	s.statsCached = &summaryStats{
 		Events:           ec,
@@ -763,7 +768,10 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/ioc/csv", s.guard(s.handleIOCCSV))
 	mux.HandleFunc("/api/ioc/stix", s.guard(s.handleIOCSTIX))
 	mux.HandleFunc("/api/actor", s.guard(s.handleActorDetail))
-	mux.HandleFunc("/", s.handleIndex) // page route
+	// Unmatched /api/* — guarded like every other API route so a 404 can only
+	// be observed by an authorised caller (no route enumeration).
+	mux.HandleFunc("/api/", s.guard(s.handleAPINotFound))
+	mux.HandleFunc("/", s.handleIndex) // page route (also the 404 catch-all)
 	mux.HandleFunc("/api/dashboard", s.guard(s.handleDashboard))
 	mux.HandleFunc("/api/capture", s.guard(s.handleCapture))
 
@@ -856,11 +864,33 @@ func (s *Server) RunContext(ctx context.Context) error {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	// "/" is a catch-all in net/http's ServeMux, so without this every typo
+	// (/dashbaord, /favicon.png, a scanner probing /wp-admin) returned 200 with
+	// the whole dashboard HTML. Auth is still checked first so an unauthorised
+	// caller cannot enumerate which paths exist by comparing 401 vs 404.
 	if !s.requirePageAuth(w, r) {
+		return
+	}
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(indexHTML))
+}
+
+// handleAPINotFound answers unmatched /api/* paths. Registered as the "/api/"
+// subtree so it catches typos and probes that would otherwise fall through to
+// "/" and receive the dashboard HTML — an API client asking for JSON should
+// get JSON, and an unknown /api path should not be answered by the page-auth
+// gate (which accepts ?token=) instead of the header-only API gate.
+//
+// Exact patterns like "/api/dashboard" still win: ServeMux prefers the longest
+// matching pattern, and non-slash-terminated patterns match exactly.
+func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "no such endpoint"})
 }
 
 // tokenMatches is the constant-time token comparison shared by the API

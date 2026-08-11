@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -156,7 +157,7 @@ func TestGeoPrefetchMMDBIgnores48Cap(t *testing.T) {
 	// the 48-per-call HTTP cap.
 	var ips []string
 	for i := 130; i < 250; i++ {
-		ips = append(ips, "81.2.69."+itoa(i))
+		ips = append(ips, "81.2.69."+strconv.Itoa(i))
 	}
 	g.prefetch(ips, 3*time.Second)
 
@@ -208,17 +209,4 @@ func TestGeoMMDBMissFallsThroughToHTTP(t *testing.T) {
 	if ent := g.cached("8.8.8.8"); ent.CC != "TL" {
 		t.Errorf("expected the HTTP tier's answer, got %+v", ent)
 	}
-}
-
-// itoa avoids importing strconv just for the loop above.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }

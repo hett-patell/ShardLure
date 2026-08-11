@@ -3,10 +3,10 @@ package urlhaus
 import (
 	"context"
 	"errors"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 )
 
 // SubmitRecorder is the slice of *store.Store this package depends on. Kept
@@ -39,25 +39,10 @@ const defaultBatchSize = 25
 // (ErrMissingAPIKey / ErrUnauthorized / ErrNoEntries live in client.go.)
 var ErrEmptyBatch = errors.New("urlhaus: no candidates to submit")
 
-// tagSanitise strips characters URLhaus disallows in tags. The documented
-// allowed set is [A-Za-z0-9.- ]; anything else is dropped rather than
-// substituted so a tag can never smuggle punctuation upstream.
-var tagInvalid = regexp.MustCompile(`[^A-Za-z0-9.\- ]+`)
-
-func sanitiseTags(in []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, t := range in {
-		t = strings.TrimSpace(tagInvalid.ReplaceAllString(t, ""))
-		if t == "" || seen[t] {
-			continue
-		}
-		seen[t] = true
-		out = append(out, t)
-	}
-	sort.Strings(out) // deterministic payloads make submissions diffable
-	return out
-}
+// sanitiseTags applies abuse.ch's shared tag rule. MalwareBazaar and URLhaus
+// use the same validator, so the implementation lives in intelutil rather than
+// being copied per destination.
+func sanitiseTags(in []string) []string { return intelutil.SanitiseAbuseChTags(in) }
 
 // Share submits each vetted candidate URL to URLhaus. The pipeline:
 //

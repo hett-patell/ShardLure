@@ -743,6 +743,29 @@
   #bazaar-table td.bz-sha a { color: var(--purple); text-decoration: none; }
   #bazaar-table td.bz-sha a:hover { color: var(--accent); text-decoration: underline; }
 
+  /* VirusTotal verdict badges in the payload library. Colour encodes the
+     coarse bucket; the engine ratio stays readable as text so the badge is
+     still meaningful to a colour-blind reader. */
+  .vt-bad, .vt-warn, .vt-ok, .vt-unknown {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-family: var(--mono, monospace); font-size: 11px; border: 1px solid;
+  }
+  .vt-bad     { color: var(--red-team);  border-color: var(--red-team); }
+  .vt-warn    { color: var(--accent-2);  border-color: var(--accent-2); }
+  .vt-ok      { color: var(--accent);    border-color: var(--accent); }
+  .vt-unknown { color: var(--dim-2);     border-color: var(--line-strong); }
+  /* .vt-btn is deliberately NOT .bz-btn: several MalwareBazaar flows select
+     '.bz-btn' inside a payload row (one of them across two tables), and the
+     VirusTotal cell sits earlier in the row — sharing the class let upload
+     state be written onto the wrong button. */
+  .vt-btn {
+    font-family: var(--mono, monospace); font-size: 11px; padding: 1px 6px;
+    background: transparent; color: var(--blue-team);
+    border: 1px solid var(--line-strong); border-radius: 3px; cursor: pointer;
+  }
+  .vt-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+  .vt-btn:disabled { opacity: .55; cursor: default; }
+
   /* URLhaus sharing table. Attacker URLs are long and untrusted, so the cell
      truncates with an ellipsis (full value stays in the title attribute)
      rather than blowing out the table width. */
@@ -1519,11 +1542,12 @@
               <th>last url</th>
               <th>last actor</th>
               <th>status</th>
+              <th style="width:96px" title="VirusTotal engine verdict for this hash. Cached results show automatically; 'check' spends one lookup (free tier is ~4/min).">virustotal</th>
               <th style="width:78px">bazaar</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="7"><div class="empty">loading…</div></td></tr>
+            <tr><td colspan="8"><div class="empty">loading…</div></td></tr>
           </tbody>
         </table>
         </div>
@@ -3988,6 +4012,94 @@ function fmtSize(b) {
   return (b/1024/1024).toFixed(2) + 'MB';
 }
 
+// ==== VirusTotal payload verdicts ================================
+// Two endpoints by design, mirroring the server split:
+//   /api/intel/payloads/vt/cached  — bulk, cache-only, safe on every render
+//   /api/intel/payload/vt          — single hash, spends one lookup
+// VT's free tier allows roughly 4 lookups/minute, so the list view NEVER
+// triggers live traffic; the operator opts in per row via "check".
+var _vtVerdicts = {};      // sha -> verdict object
+var _vtConfigured = false; // an API key is present
+
+function vtBadgeClass(verdict) {
+  if (verdict === 'malicious') return 'vt-bad';
+  if (verdict === 'suspicious') return 'vt-warn';
+  if (verdict === 'benign') return 'vt-ok';
+  return 'vt-unknown';
+}
+
+// vtCellHTML renders the cell for one hash from whatever we already know.
+function vtCellHTML(sha) {
+  if (!sha || sha === '\u2014') return '<span style="color:var(--dim-2)">\u2014</span>';
+  var v = _vtVerdicts[sha];
+  if (!v) {
+    if (!_vtConfigured) {
+      return '<span class="vt-unknown" title="Add a VirusTotal API key in Settings to enable hash lookups">\u2014</span>';
+    }
+    return '<button class="vt-btn" onclick="event.stopPropagation();checkVT(\'' + escHtml(sha) + '\',this)" ' +
+      'title="Look this hash up on VirusTotal (spends one of ~4 lookups/minute)">check</button>';
+  }
+  if (!v.found) {
+    // Genuinely interesting for a honeypot: nobody has ever submitted this.
+    return '<a href="' + safeUrl(v.permalink || '#') + '" target="_blank" rel="noopener" class="vt-unknown" ' +
+      'style="text-decoration:none" onclick="event.stopPropagation()" title="VirusTotal has never seen this hash \u2014 possibly a novel sample">novel</a>';
+  }
+  var label = v.threatLabel ? ' \u00b7 ' + v.threatLabel : '';
+  var title = v.malicious + '/' + v.totalEngines + ' engines flagged malicious' + label +
+    (v.typeDescription ? ' \u00b7 ' + v.typeDescription : '') +
+    (v.cached ? ' (cached)' : '');
+  return '<a href="' + safeUrl(v.permalink || '#') + '" target="_blank" rel="noopener" ' +
+    'class="' + vtBadgeClass(v.verdict) + '" style="text-decoration:none" onclick="event.stopPropagation()" ' +
+    'title="' + escHtml(title) + '">' + v.malicious + '/' + v.totalEngines + '</a>';
+}
+
+// refreshVTBadges fetches cached verdicts for the rendered page in ONE request.
+async function refreshVTBadges(rows) {
+  var shas = (rows || []).map(function(r) { return r.sha256; })
+    .filter(function(s) { return s && s !== '\u2014'; });
+  if (!shas.length) return;
+  try {
+    var r = await fetch('/api/intel/payloads/vt/cached?shas=' + encodeURIComponent(shas.join(',')) +
+      '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    var d = await r.json();
+    _vtConfigured = !!d.configured;
+    Object.keys(d.verdicts || {}).forEach(function(sha) { _vtVerdicts[sha] = d.verdicts[sha]; });
+    repaintVTCells();
+  } catch (_) {}
+}
+
+function repaintVTCells() {
+  document.querySelectorAll('#payloads-table td.vt-cell').forEach(function(td) {
+    td.innerHTML = vtCellHTML(td.dataset.sha);
+  });
+}
+
+// checkVT performs the ONE on-demand lookup for a single hash.
+async function checkVT(sha, btn) {
+  if (!sha) return;
+  btn.disabled = true;
+  btn.textContent = '\u2026';
+  try {
+    var r = await fetch('/api/intel/payload/vt?sha=' + encodeURIComponent(sha) + '&_=' + Date.now(),
+      { cache: 'no-store' });
+    var d = await r.json().catch(function() { return {}; });
+    if (d.verdict) {
+      _vtVerdicts[sha] = d.verdict;
+      repaintVTCells();
+      return;
+    }
+    // Rate limit / missing key / bad hash all arrive in-band on HTTP 200.
+    btn.disabled = false;
+    btn.textContent = 'retry';
+    btn.title = d.error || 'lookup failed';
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'retry';
+    btn.title = 'request failed';
+  }
+}
+
 function renderPayloads(data) {
   const tb = document.querySelector('#payloads-table tbody');
   const meta = document.getElementById('payloads-meta');
@@ -4004,7 +4116,7 @@ function renderPayloads(data) {
   meta.textContent = fmt(unique) + ' unique · ' + capturesLabel + ' · ' + data.windowHours + 'h window';
 
   if (!data.rows || data.rows.length === 0) {
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty">no captured payloads in window</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">no captured payloads in window</div></td></tr>';
     return;
   }
   let html = '';
@@ -4043,10 +4155,15 @@ function renderPayloads(data) {
       '<td>' + url + '</td>' +
       '<td>' + escHtml(p.actor || '—') + '</td>' +
       '<td><span class="pl-' + escHtml(status) + '">' + escHtml(status) + '</span></td>' +
-      '<td>' + shareBtn + '</td>' +
+      '<td class="vt-cell" data-sha="' + escHtml(sha) + '">' + vtCellHTML(sha) + '</td>' +
+      '<td class="bz-cell">' + shareBtn + '</td>' +
       '</tr>';
   });
   tb.innerHTML = html;
+  // Decorate with any ALREADY-CACHED VirusTotal verdicts. This is a single
+  // cache-only request: VT's free tier is ~4 lookups/minute, so a list render
+  // must never trigger live lookups (that is why the endpoint is split).
+  refreshVTBadges(data.rows || []);
   tb.querySelectorAll('tr[data-sha]').forEach(function(row) {
     row.querySelector('td').addEventListener('click', function() {
       const sha = row.dataset.sha;
@@ -4977,12 +5094,12 @@ async function uploadAllToBazaar(masterBtn) {
   masterBtn.textContent = '0/' + total + ' uploading…';
   for (var j = 0; j < shas.length; j++) {
     var sha = shas[j];
-    var liveBtn = document.querySelector('#payloads-table tr[data-sha="'+sha+'"] .bz-btn');
+    var liveBtn = document.querySelector('#payloads-table tr[data-sha="'+sha+'"] .bz-cell .bz-btn');
     if (liveBtn) { liveBtn.disabled = true; liveBtn.textContent = 'uploading…'; }
     try {
       var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(sha), {method:'POST'});
       var d = await r.json();
-      liveBtn = document.querySelector('#payloads-table tr[data-sha="'+sha+'"] .bz-btn');
+      liveBtn = document.querySelector('#payloads-table tr[data-sha="'+sha+'"] .bz-cell .bz-btn');
       if (d.status === 'inserted' || d.status === 'file_already_known') {
         ok++; _bazaarSharedSet[sha] = d.mbUrl || true;
         if (liveBtn) { liveBtn.className = 'bz-btn ok'; liveBtn.textContent = '✓ ' + d.status; }

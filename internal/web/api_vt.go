@@ -29,6 +29,13 @@ func (a vtCacheAdapter) PutPayloadIntel(sha, source, payload string) error {
 // vtResolver lazily builds the resolver on first use. Lazy because building it
 // touches the keystore, and the server is constructed before settings are
 // necessarily seeded.
+//
+// Note the deliberate asymmetry with bazaar/urlhaus: those expose an endpoint
+// override in Settings, VirusTotal does NOT. s.vtEndpoint is a test-only seam.
+// An operator-settable endpoint for a service we send an API key to is a
+// key-exfiltration path (point it at attacker-controlled host, receive the
+// x-apikey header), and unlike the abuse.ch endpoints there is no operational
+// reason to ever change it.
 func (s *Server) vtResolver() *vt.Resolver {
 	s.vtOnce.Do(func() {
 		s.vt = vt.NewResolver(vtCacheAdapter{st: s.st}, s.keys, s.vtEndpoint)

@@ -220,10 +220,14 @@ func TestUploadHTTPError(t *testing.T) {
 // characters and dedupes — both are user-facing contract that an
 // inattentive caller (or attacker-supplied filename) can't slip
 // junk into the upload.
+//
+// Output is SORTED: the rule is shared with URLhaus via
+// intelutil.SanitiseAbuseChTags, and sorting makes repeated submissions
+// byte-identical (diffable in logs). Tag order carries no meaning upstream.
 func TestSanitiseTags(t *testing.T) {
 	in := []string{"elf", "elf", "linux/x86", "x86_64!", "  ", "shardlure", "shardlure"}
 	got := sanitiseTags(in)
-	want := []string{"elf", "linuxx86", "x8664", "shardlure"}
+	want := []string{"elf", "linuxx86", "shardlure", "x8664"}
 	if len(got) != len(want) {
 		t.Fatalf("len: got %v want %v", got, want)
 	}
