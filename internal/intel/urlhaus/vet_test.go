@@ -73,6 +73,19 @@ func TestVetHardRejects(t *testing.T) {
 		{"test-net-1", func(c *Candidate) { c.URL = "http://192.0.2.8/x" }, "private or special-purpose"},
 		{"test-net-3", func(c *Candidate) { c.URL = "http://203.0.113.9/x" }, "private or special-purpose"},
 		{"ipv6 loopback", func(c *Candidate) { c.URL = "http://[::1]/x" }, "private or special-purpose"},
+		// RFC6890 special-use blocks a naive private-IP check misses. These are
+		// the ranges the previous hand-rolled isPublicIP would have leaked to a
+		// public dataset; netmatch.IsPublicIP is the shared, complete definition.
+		{"unspecified 0.0.0.0/8", func(c *Candidate) { c.URL = "http://0.1.2.3/x" }, "private or special-purpose"},
+		{"ietf protocol assignments", func(c *Candidate) { c.URL = "http://192.0.0.8/x" }, "private or special-purpose"},
+		{"as112-v4", func(c *Candidate) { c.URL = "http://192.31.196.1/x" }, "private or special-purpose"},
+		{"deprecated 6to4 relay anycast", func(c *Candidate) { c.URL = "http://192.88.99.1/x" }, "private or special-purpose"},
+		{"as112 direct delegation", func(c *Candidate) { c.URL = "http://192.175.48.1/x" }, "private or special-purpose"},
+		{"benchmarking 198.18/15", func(c *Candidate) { c.URL = "http://198.19.0.1/x" }, "private or special-purpose"},
+		{"ipv6 nat64 well-known", func(c *Candidate) { c.URL = "http://[64:ff9b::1]/x" }, "private or special-purpose"},
+		{"ipv6 6to4", func(c *Candidate) { c.URL = "http://[2002::1]/x" }, "private or special-purpose"},
+		{"ipv6 link-local", func(c *Candidate) { c.URL = "http://[fe80::1]/x" }, "private or special-purpose"},
+		{"ipv6 discard-only", func(c *Candidate) { c.URL = "http://[100::1]/x" }, "private or special-purpose"},
 		{"ipv6 unique local", func(c *Candidate) { c.URL = "http://[fd00::1]/x" }, "private or special-purpose"},
 		{"ipv6 doc range", func(c *Candidate) { c.URL = "http://[2001:db8::1]/x" }, "private or special-purpose"},
 

@@ -45,9 +45,18 @@ const (
 	NotFoundTTL = 7 * 24 * time.Hour
 )
 
-// Verdict is the parsed, UI-shaped result of one hash lookup. It is what gets
-// JSON-encoded into the payload_intel cache, so field names are part of the
-// on-disk format — add fields, don't rename them.
+// Verdict is the parsed, UI-shaped result of one hash lookup.
+//
+// Field names are camelCase to match the rest of the dashboard API (this
+// object is nested inside camelCase envelopes, so snake_case here read as a
+// foreign body). Note the deliberate contrast with vtFileResp below, which
+// keeps VirusTotal's own snake_case because that IS the upstream wire format.
+//
+// These names are also the on-disk format of the payload_intel cache, so add
+// fields rather than renaming them; a rename silently zeroes cached rows.
+// Resolver.Cached defends against that by treating a decoded-but-empty verdict
+// as a miss, so a format change self-heals on the next lookup instead of
+// rendering blanks.
 type Verdict struct {
 	SHA256 string `json:"sha256"`
 	// Found is false when VirusTotal has never seen this hash (HTTP 404).
@@ -61,29 +70,29 @@ type Verdict struct {
 	Suspicious  int `json:"suspicious"`
 	Harmless    int `json:"harmless"`
 	Undetected  int `json:"undetected"`
-	TotalEngine int `json:"total_engines"`
+	TotalEngine int `json:"totalEngines"`
 	// ThreatLabel is VT's popular_threat_classification suggestion, e.g.
 	// "trojan.mirai/gafgyt". Empty when VT has no consensus.
-	ThreatLabel string `json:"threat_label,omitempty"`
+	ThreatLabel string `json:"threatLabel,omitempty"`
 	// TypeDescription is VT's file-type string, e.g. "ELF" or "Bash script".
-	TypeDescription string `json:"type_description,omitempty"`
+	TypeDescription string `json:"typeDescription,omitempty"`
 	// MeaningfulName is the most common filename VT has seen for this hash.
-	MeaningfulName string `json:"meaningful_name,omitempty"`
+	MeaningfulName string `json:"meaningfulName,omitempty"`
 	// Reputation is VT's community score (can be negative).
 	Reputation int `json:"reputation,omitempty"`
 	// TimesSubmitted counts how often the sample has been submitted to VT.
-	TimesSubmitted int `json:"times_submitted,omitempty"`
+	TimesSubmitted int `json:"timesSubmitted,omitempty"`
 	// FirstSeen / LastAnalysis are VT-side timestamps, nil when VT didn't
 	// report them. Pointers because `omitempty` does NOT omit a zero
 	// time.Time (it's a struct, not an empty-able scalar) — without this the
 	// API emitted "0001-01-01T00:00:00Z" and the UI rendered year 1.
-	FirstSeen    *time.Time `json:"first_seen,omitempty"`
-	LastAnalysis *time.Time `json:"last_analysis,omitempty"`
+	FirstSeen    *time.Time `json:"firstSeen,omitempty"`
+	LastAnalysis *time.Time `json:"lastAnalysis,omitempty"`
 	// Permalink is the human-facing VT page for this hash. Constructed
 	// locally; VT does not return it on this endpoint.
 	Permalink string `json:"permalink,omitempty"`
 	// FetchedAt is when we obtained this verdict.
-	FetchedAt time.Time `json:"fetched_at"`
+	FetchedAt time.Time `json:"fetchedAt"`
 	// Cached reports that the value came from the local cache rather than a
 	// live call. Not persisted (it's derived per response).
 	Cached bool `json:"cached,omitempty"`

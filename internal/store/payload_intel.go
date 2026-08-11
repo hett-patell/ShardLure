@@ -42,14 +42,6 @@ CREATE INDEX IF NOT EXISTS idx_payload_intel_fetched ON payload_intel(fetched_at
 	return s.errPayloadIntel
 }
 
-// EnsurePayloadIntelTable exposes the lazy creation so callers batching several
-// writes can create the table BEFORE opening a transaction. ensure* helpers
-// take writeMu via execWrite and writeMu is not reentrant, so ensuring inside a
-// transaction deadlocks (see RecordSessionBindings for the same hazard).
-func (s *Store) EnsurePayloadIntelTable() error {
-	return s.ensurePayloadIntelTable()
-}
-
 // GetPayloadIntel returns the cached verdict for (sha256, source).
 func (s *Store) GetPayloadIntel(sha, source string) (PayloadIntel, bool, error) {
 	if sha == "" || source == "" {
@@ -144,18 +136,7 @@ func (s *Store) PayloadIntelBySource(source string, shas []string) (map[string]P
 	return out, rows.Err()
 }
 
-// PurgePayloadIntelBefore deletes cached verdicts older than cutoff. Called by
-// MaintenancePurge so the cache can't grow without bound on a long-lived
-// honeypot.
-func (s *Store) PurgePayloadIntelBefore(cutoff time.Time) (int64, error) {
-	if err := s.ensurePayloadIntelTable(); err != nil {
-		return 0, err
-	}
-	res, err := s.execWrite(`DELETE FROM payload_intel WHERE fetched_at < ?`,
-		cutoff.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
-}
+// NOTE: there is deliberately no exported PurgePayloadIntel* helper. Ageing
+// this cache out happens inside MaintenancePurge's single transaction (next to
+// the other cache deletes) so one writeMu hold covers the whole purge; a
+// separate exported helper would be a second, unused way to do it.

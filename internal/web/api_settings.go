@@ -31,8 +31,13 @@ const (
 	kindText                      // free text (comment, city…)
 	kindBool                      // "1"/"0"-ish flags
 	kindInt                       // numeric knobs
-	kindFloat                     // lat/lon
-	kindIntCSV                    // categories "18,22"
+	// kindFloat (lat/lon) is currently UNUSED by settingsRegistry: the globe's
+	// home origin was deliberately moved back to shardlure.yaml (see the
+	// geolocation section of the registry), so nothing reaches its branch in
+	// validateSetting. Kept, with its range checks, so re-exposing a coordinate
+	// field is a one-line registry addition rather than a re-derivation.
+	kindFloat
+	kindIntCSV // categories "18,22"
 )
 
 // settingMeta describes one operator-editable setting. testProvider names the

@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/netmatch"
 )
 
 // URLhaus submission policy (https://urlhaus.abuse.ch/api/, "Submission
@@ -154,7 +156,13 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 	//    and also stops us publishing a link to a host inside our own network.
 	host := u.Hostname()
 	if ip := net.ParseIP(host); ip != nil {
-		if !isPublicIP(ip) {
+		// netmatch.IsPublicIP is the ONE conservative definition of "public"
+		// shared with the capture fetcher and the AbuseIPDB gate. Do not
+		// hand-roll this: it covers RFC6890 special-use blocks a naive check
+		// misses (AS112, NAT64, 6to4, IETF protocol assignments, benchmarking,
+		// documentation), which is exactly what URLhaus's automated-submission
+		// policy forbids.
+		if !netmatch.IsPublicIP(ip) {
 			return false, "private or special-purpose IP address"
 		}
 	} else if !isSubmittableHostname(host) {
@@ -190,46 +198,6 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 		return false, "payload shape unrecognised — cannot confirm it is malware"
 	}
 	return true, ""
-}
-
-// isPublicIP rejects anything RFC1918/RFC6890-special: loopback, link-local,
-// multicast, unspecified, documentation ranges, CGNAT, and IPv6 equivalents.
-// Mirrors the SSRF-defence posture used by the capture fetcher and enrichment.
-func isPublicIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
-		return false
-	}
-	// Carrier-grade NAT (100.64.0.0/10) — also where Tailscale lives, so this
-	// keeps our own tailnet out of a public dataset.
-	if v4 := ip.To4(); v4 != nil {
-		switch {
-		case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127:
-			return false
-		case v4[0] == 192 && v4[1] == 0 && v4[2] == 2: // TEST-NET-1
-			return false
-		case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19): // benchmarking
-			return false
-		case v4[0] == 198 && v4[1] == 51 && v4[2] == 100: // TEST-NET-2
-			return false
-		case v4[0] == 203 && v4[1] == 0 && v4[2] == 113: // TEST-NET-3
-			return false
-		case v4[0] >= 240: // reserved
-			return false
-		}
-		return true
-	}
-	// IPv6: reject unique-local (fc00::/7) and documentation (2001:db8::/32).
-	if len(ip) == net.IPv6len {
-		if ip[0]&0xfe == 0xfc {
-			return false
-		}
-		if ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8 {
-			return false
-		}
-	}
-	return true
 }
 
 // isSubmittableHostname rejects names that can't be a public payload host:

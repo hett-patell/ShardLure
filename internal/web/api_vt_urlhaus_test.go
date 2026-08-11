@@ -261,8 +261,10 @@ func TestHandleIntelURLhausReportsStateAndKeySharing(t *testing.T) {
 	}
 }
 
-// Verdict JSON field names are the on-disk cache format; a rename would
-// silently invalidate every cached row.
+// Verdict JSON field names are BOTH the dashboard API contract and the
+// on-disk cache format. They are camelCase to match every other endpoint; a
+// rename silently zeroes cached rows (Resolver.Cached self-heals that, but the
+// contract should still be pinned).
 func TestVerdictJSONFieldNamesAreStable(t *testing.T) {
 	raw, err := json.Marshal(vt.Verdict{SHA256: "aa", Found: true, Verdict: "malicious", Malicious: 3})
 	if err != nil {
@@ -272,7 +274,7 @@ func TestVerdictJSONFieldNamesAreStable(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, key := range []string{"sha256", "found", "verdict", "malicious", "total_engines", "fetched_at"} {
+	for _, key := range []string{"sha256", "found", "verdict", "malicious", "totalEngines", "fetchedAt"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("missing expected JSON key %q in %s", key, raw)
 		}

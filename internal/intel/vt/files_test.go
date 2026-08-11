@@ -360,7 +360,7 @@ func TestVerdictOmitsAbsentTimestamps(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	body := string(raw)
-	for _, forbidden := range []string{"0001-01-01", "first_seen", "last_analysis"} {
+	for _, forbidden := range []string{"0001-01-01", "firstSeen", "lastAnalysis"} {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("absent timestamp leaked %q into JSON: %s", forbidden, body)
 		}
@@ -380,7 +380,52 @@ func TestVerdictOmitsAbsentTimestamps(t *testing.T) {
 		t.Errorf("first_seen = %v", withDates.FirstSeen)
 	}
 	raw2, _ := json.Marshal(withDates)
-	if !strings.Contains(string(raw2), "first_seen") {
+	if !strings.Contains(string(raw2), "firstSeen") {
 		t.Errorf("present timestamp missing from JSON: %s", raw2)
+	}
+}
+
+// A cache row written in an older field naming still decodes cleanly
+// (encoding/json ignores unknown keys) but yields an empty Verdict. With a
+// 30-day TTL that would render a blank badge for a month, so Cached() must
+// treat it as a miss and let the next lookup rewrite it.
+func TestResolverSelfHealsStaleCacheFormat(t *testing.T) {
+	cache := newMemCache()
+	// Legacy snake_case payload — none of these keys map to current fields.
+	legacy := `{"sha256":"` + goodSHA + `","found":true,"verdict":"","total_engines":61,` +
+		`"threat_label":"trojan.mirai/gafgyt","fetched_at":"2026-01-01T00:00:00Z"}`
+	if err := cache.PutPayloadIntel(goodSHA, Source, legacy); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	r := NewResolver(cache, mapKeys{KeyEnvVar: "k"}, "")
+	if _, ok := r.Cached(goodSHA); ok {
+		t.Fatal("a stale-format row must be reported as a cache MISS, not rendered blank")
+	}
+
+	// And a live lookup rewrites it in the current format.
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"data":{"attributes":{"last_analysis_stats":{"malicious":9,"undetected":50}}}}`))
+	}))
+	defer srv.Close()
+	r.Client = NewClient(srv.URL)
+
+	v, err := r.Lookup(context.Background(), goodSHA)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if v.Verdict != "malicious" || calls != 1 {
+		t.Errorf("expected one re-fetch producing a real verdict, got %+v calls=%d", v, calls)
+	}
+	// Now it round-trips from cache.
+	got, ok := r.Cached(goodSHA)
+	if !ok || got.Verdict != "malicious" {
+		t.Errorf("rewritten row should hit: ok=%v %+v", ok, got)
+	}
+	raw, _, _, _ := cache.GetPayloadIntel(goodSHA, Source)
+	if !strings.Contains(raw, "totalEngines") {
+		t.Errorf("row not rewritten in current camelCase format: %s", raw)
 	}
 }

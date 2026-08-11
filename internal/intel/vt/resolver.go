@@ -73,6 +73,14 @@ func (r *Resolver) Cached(sha string) (Verdict, bool) {
 	if err := json.Unmarshal([]byte(payload), &v); err != nil {
 		return Verdict{}, false
 	}
+	// Self-heal a stale cache FORMAT. A row written by an older field naming
+	// still decodes cleanly (encoding/json ignores unknown keys) but yields an
+	// empty Verdict — which would render as a blank badge forever, since the
+	// TTL is 30 days. Treating that as a miss re-fetches once and rewrites the
+	// row in the current format, so no migration is needed.
+	if v.Verdict == "" {
+		return Verdict{}, false
+	}
 	if v.FetchedAt.IsZero() {
 		v.FetchedAt = fetchedAt
 	}
@@ -109,6 +117,10 @@ func (r *Resolver) Lookup(ctx context.Context, sha string) (Verdict, error) {
 		fresh, ferr = r.Client.Lookup(ctx, r.Keys.Get(KeyEnvVar), sha)
 		if ferr == nil && fresh != nil && r.Cache != nil {
 			if payload, mErr := json.Marshal(fresh); mErr == nil {
+				// A cache-write failure is deliberately non-fatal: we already
+				// spent one of the ~4 requests/minute and hold a good verdict,
+				// so returning it beats failing the lookup over a DB hiccup.
+				// The only cost is that the next lookup re-fetches.
 				_ = r.Cache.PutPayloadIntel(sha, Source, string(payload))
 			}
 		}
