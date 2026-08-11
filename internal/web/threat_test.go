@@ -1,6 +1,7 @@
 package web
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +183,51 @@ func TestThreatWeightsDownloadsAboveCommands(t *testing.T) {
 	if dls.Score <= cmds.Score {
 		t.Errorf("300 downloads scored %d, not more than 300 commands at %d",
 			dls.Score, cmds.Score)
+	}
+}
+
+// TestNeitherDashboardScoresTheGaugeItself is the guard for how this bug
+// survived so long. BOTH pages render a Threat Level panel, and both used to
+// compute it in their own template from all-time totals — so the value was
+// frozen twice over, and fixing one page left the other wrong. Scoring belongs
+// in Go; these pages may only draw what the API sends.
+func TestNeitherDashboardScoresTheGaugeItself(t *testing.T) {
+	for name, body := range map[string]string{"index.html": indexHTML, "intel.html": intelHTML} {
+		if !strings.Contains(body, "renderGauge(d.threat)") {
+			t.Errorf("%s: gauge is not fed from the server-scored d.threat block", name)
+		}
+		// Scoring fingerprints. Any of these inside a page means the calibration
+		// has leaked back into a template, where it cannot be tested and will
+		// drift from the other page.
+		for _, banned := range []string{
+			"volScore", "divScore", "agrScore", "weapScore",
+			"Math.log10", "classifiable",
+		} {
+			if strings.Contains(body, banned) {
+				t.Errorf("%s contains %q: gauge scoring must stay in threat.go, not in a "+
+					"template where the two dashboards can disagree", name, banned)
+			}
+		}
+		// The footer must describe the window it measured, not lifetime totals.
+		if !strings.Contains(body, "(threat.windowHours||24)+'h") {
+			t.Errorf("%s: gauge footer does not state the window; it previously printed "+
+				"all-time totals beside a windowed score", name)
+		}
+	}
+}
+
+// TestBothDashboardsServeTheSameThreatBlock pins that the two APIs share one
+// scored block from one cache, rather than each deriving their own.
+func TestBothDashboardsServeTheSameThreatBlock(t *testing.T) {
+	src := readSource(t, "server.go")
+	if !strings.Contains(src, "Threat *threatBlock") || !strings.Contains(src, "Threat:       threat") {
+		t.Error("/api/dashboard does not serve the shared threatBlock")
+	}
+	if !strings.Contains(src, "s.threatBlockCached()") {
+		t.Error("/api/dashboard must reuse the cached block, not recompute the window")
+	}
+	intel := readSource(t, "intel.go")
+	if !strings.Contains(intel, "s.threatBlockCached()") {
+		t.Error("/api/intel must reuse the same cached block")
 	}
 }

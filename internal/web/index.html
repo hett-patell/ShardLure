@@ -292,7 +292,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=13" />
+<link rel="stylesheet" href="/themes.css?v=14" />
 </head>
 <body>
 
@@ -677,52 +677,18 @@ function renderFeed(rows) {
   });
 }
 
-function renderGauge(summary, intentCounts, kindCounts) {
-  if (!summary) return;
-  var ev = summary.eventCount||0, ac = summary.actorCount||0, ips = summary.uniqueIps||0;
-  var dep = 0, probe = 0, classifiable = 0;
-  (intentCounts||[]).forEach(function(r){
-    if(r.label==='deploy') dep=r.hits;
-    if(r.label==='probe') probe=r.hits;
-    // Aggression denominator = actors whose intent was actually DETERMINED.
-    // CountsByIntent includes an 'unknown' bucket (journal failed-login actors
-    // have intent='unknown', a real stored value, not empty) — those can never
-    // be 'deploy', so counting them would re-dilute the score exactly as the
-    // old deploy/allActors did. Exclude 'unknown' so the ratio is deploy over
-    // {probe, proxy, deploy, mixed} — the cowrie actors with real intent.
-    if(r.label && r.label!=='unknown') classifiable += (r.hits||0);
-  });
-  var cmdCount = 0, dlCount = 0;
-  (kindCounts||[]).forEach(function(r){
-    if(r.label==='command') cmdCount=r.hits;
-    if(r.label==='file_download'||r.label==='file_upload') dlCount+=r.hits;
-  });
-
-  // log-scale scoring: each factor contributes 0-25 points
-  // volume: log10 scale — 100 events=5, 1K=12, 10K=20, 100K=25
-  var volScore = ev > 0 ? Math.min(25, Math.round(Math.log10(ev) * 5)) : 0;
-  // diversity: unique IPs — 10=5, 50=12, 200=18, 1000=22, 5000=25
-  var divScore = ips > 0 ? Math.min(25, Math.round(Math.log10(ips) * 6.7)) : 0;
-  // aggression: deploy ratio among CLASSIFIABLE actors — 0%=0, 10%=8, 30%=15,
-  // 50%+=25. Denominator is intent-classifiable actors, NOT all actors:
-  // journal actors are failed-login-only (no command/payload telemetry) so
-  // their intent is always 'unknown' and can never be 'deploy'. Dividing by
-  // ALL actors let a pile of journal brute-forcers structurally suppress the
-  // aggression score on a cowrie-active deployment. Fall back to total actors
-  // only if intent data is entirely absent.
-  var agrDenom = classifiable > 0 ? classifiable : ac;
-  var depRatio = agrDenom > 0 ? dep / agrDenom : 0;
-  var agrScore = Math.min(25, Math.round(depRatio * 50));
-  // weaponization: file downloads + commands relative to events
-  var weapRatio = ev > 0 ? (cmdCount + dlCount * 3) / ev : 0;
-  var weapScore = Math.min(25, Math.round(weapRatio * 80));
-
-  var score = Math.min(100, volScore + divScore + agrScore + weapScore);
-  var label, color;
-  if (score<=20){label='LOW';color='var(--good)'}
-  else if(score<=45){label='MODERATE';color='var(--accent-2)'}
-  else if(score<=70){label='HIGH';color='var(--accent)'}
-  else{label='CRITICAL';color='var(--accent)'}
+function renderGauge(threat) {
+  /* Draw only. Scoring is server-side in internal/web/threat.go and shared with
+   * /api/intel, deliberately: this page and intel.html each used to compute the
+   * gauge in their own template from all-time cumulative totals, so the value
+   * ratcheted to a constant (52 for months) AND the fix had to be applied twice.
+   * Keeping the arithmetic in Go means there is one calibration, unit-tested
+   * against real history, and these two panels cannot disagree. */
+  if (!threat) return;                       // keep the last reading on a hiccup
+  var score = threat.score || 0;
+  var color = score<=20 ? 'var(--good)'
+            : score<=45 ? 'var(--accent-2)'
+            : 'var(--accent)';
 
   var ARC_LEN = 251;
   var arc=document.getElementById('gauge-arc');
@@ -730,15 +696,24 @@ function renderGauge(summary, intentCounts, kindCounts) {
   var val=document.getElementById('gauge-val');
   if(val){val.textContent=score;val.setAttribute('fill',color)}
   var svgLbl=document.getElementById('gauge-lbl-svg');
-  if(svgLbl){svgLbl.textContent=label;svgLbl.setAttribute('fill',color)}
+  if(svgLbl){svgLbl.textContent=threat.label||'';svgLbl.setAttribute('fill',color)}
 
   var bd=document.getElementById('gauge-breakdown');
-  if(bd) bd.innerHTML=
-    '<div class="gb-row"><span>Volume</span><span class="gb-val">'+volScore+'/25</span></div>'+
-    '<div class="gb-row"><span>Diversity</span><span class="gb-val">'+divScore+'/25</span></div>'+
-    '<div class="gb-row"><span>Aggression</span><span class="gb-val">'+agrScore+'/25</span></div>'+
-    '<div class="gb-row"><span>Weaponization</span><span class="gb-val">'+weapScore+'/25</span></div>'+
-    '<div class="gb-row" style="grid-column:1/-1;border-top:1px solid var(--line);padding-top:3px;margin-top:3px"><span>'+fmt(ev)+' events · '+fmt(ac)+' actors · '+fmt(ips)+' IPs</span><span class="gb-val" style="color:'+color+'">'+score+'</span></div>';
+  if(!bd) return;
+  var rows=(threat.components||[]).map(function(c){
+    /* A capped factor is flagged: at the ceiling further escalation cannot move
+     * the score, which is exactly the failure the old gauge hid. */
+    var cap = c.capped ? ' title="at ceiling: further escalation will not raise this factor"' : '';
+    var mark = c.capped ? ' \u2191' : '';
+    return '<div class="gb-row"'+cap+'><span>'+esc(c.label)+'</span>'+
+           '<span class="gb-val">'+c.score+'/'+c.max+mark+'</span></div>';
+  }).join('');
+  /* Footer reports the WINDOW measured, not lifetime totals. */
+  bd.innerHTML = rows +
+    '<div class="gb-row" style="grid-column:1/-1;border-top:1px solid var(--line);padding-top:3px;margin-top:3px">'+
+      '<span>last '+(threat.windowHours||24)+'h \u00b7 '+fmt(threat.events||0)+' events \u00b7 '+
+      fmt(threat.uniqueIps||0)+' IPs</span>'+
+      '<span class="gb-val" style="color:'+color+'">'+score+'</span></div>';
 }
 
 /* ==== Theme globe overlays (Sprite stickers / Meridian sats) ====
@@ -1120,7 +1095,7 @@ async function refresh() {
   document.getElementById('hp-ingest').textContent = fmt(summary.eventCount || 0) + ' ev';
   document.getElementById('home-loc').textContent = flag(home.cc) + ' ' + [home.city, home.country].filter(Boolean).join(', ');
   document.getElementById('gen-at').textContent = new Date(d.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  renderGauge(d.summary, d.intentCounts, d.kindCounts);
+  renderGauge(d.threat);
 
   renderTopIPs(d.topIps);
   renderFeed(recent);

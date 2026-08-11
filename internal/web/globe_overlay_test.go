@@ -1,6 +1,7 @@
 package web
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -241,4 +242,15 @@ func TestEntityOptsForwardsEveryKnob(t *testing.T) {
 	if len(seen) == 0 {
 		t.Error("found no opts.* reads; the check is not actually looking at anything")
 	}
+}
+
+// readSource reads a file from this package for assertions about wiring that is
+// not observable through the embedded assets.
+func readSource(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return string(b)
 }

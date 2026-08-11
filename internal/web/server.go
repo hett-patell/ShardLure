@@ -1068,6 +1068,11 @@ type dashboardResponse struct {
 	IntentCounts []labelCountRow   `json:"intentCounts"`
 	KindCounts   []labelCountRow   `json:"kindCounts"`
 	Home         homePoint         `json:"home"`
+	// Threat is the SAME server-scored block /api/intel serves, from the same
+	// 10s cache. Both dashboards render a Threat Level panel, and they used to
+	// each compute it in their own template - so the fix for the frozen gauge
+	// landed in one page and left the other reading a stale formula.
+	Threat *threatBlock `json:"threat,omitempty"`
 }
 
 // shellSessionRow is a flattened cowrie session for the "Recent shell
@@ -1214,6 +1219,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	cowrieUptime := int64(-1) // -1 = unknown; never silently render 0
 	var topIPs, topUsers, topCommands []store.CountRow
 	var intentCounts, kindCounts []labelCountRow
+	// Shares /api/intel's cache entry, so serving both dashboards costs one
+	// query per 10s regardless of how many tabs are open.
+	var threat *threatBlock
+	if tb, err := s.threatBlockCached(); err == nil {
+		threat = tb
+	}
 	if stats, err := s.summaryStatsCached(); err == nil {
 		ec, ac, uniqueIPs, countries = stats.Events, stats.Actors, stats.UniqueIPs, stats.Countries
 		topIPs, topUsers, topCommands = stats.TopIPs, stats.TopUsers, stats.TopCommands
@@ -1223,7 +1234,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			cowrieUptime = int64(stats.CowrieUptime.Seconds())
 		}
 		// Already computed and cached by summaryStatsCached — no extra query.
-		// The globe dashboard's threat gauge needs both to score intent mix.
+		// These drive the intent/kind bar charts. They no longer feed the threat
+		// gauge: it is scored server-side over a window (see threat.go).
 		for _, k := range stats.IntentCounts {
 			intentCounts = append(intentCounts, labelCountRow{Label: k.Label, Hits: k.Hits})
 		}
@@ -1240,6 +1252,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		},
 		IntentCounts: intentCounts,
 		KindCounts:   kindCounts,
+		Threat:       threat,
 		Home:         s.homeLive(),
 	}
 
