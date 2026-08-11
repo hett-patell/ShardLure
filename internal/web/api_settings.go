@@ -73,6 +73,13 @@ var settingsRegistry = []settingMeta{
 	{Key: settings.KeyBazaarMaxBytes, Kind: kindInt, Label: "Max upload size (bytes)", MinInt: 1, MaxInt: 1073741824, HasIntRange: true},
 	{Key: settings.KeyBazaarFreshnessDays, Kind: kindInt, Label: "Freshness window (days)", MinInt: 1, MaxInt: 10, HasIntRange: true},
 
+	// --- URLhaus sharing knobs (non-secret; the Auth-Key is the shared
+	// MalwareBazaar one above — there is deliberately no urlhaus key field) ---
+	{Key: settings.KeyURLhausEndpoint, Kind: kindText, Label: "API endpoint"},
+	{Key: settings.KeyURLhausTags, Kind: kindText, Label: "URL tags"},
+	{Key: settings.KeyURLhausActiveDays, Kind: kindInt, Label: "Active window (days)", MinInt: 1, MaxInt: 3, HasIntRange: true},
+	{Key: settings.KeyURLhausAnonymous, Kind: kindBool, Label: "Anonymous submissions"},
+
 	// --- geolocation (non-secret) ---
 	// Only the geo-HTTP toggles are exposed here: they meaningfully enable /
 	// disable outbound attacker-IP geolocation. The globe's home origin
@@ -271,7 +278,7 @@ func validateSetting(m settingMeta, val string) string {
 				return "mode must be dark or light"
 			}
 		}
-		if m.Key == settings.KeyBazaarEndpoint {
+		if m.Key == settings.KeyBazaarEndpoint || m.Key == settings.KeyURLhausEndpoint {
 			if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
 				return "endpoint must be an http(s) URL"
 			}
@@ -307,6 +314,8 @@ func (s *Server) handleSettingsTest(w http.ResponseWriter, r *http.Request) {
 	switch req.Provider {
 	case "bazaar":
 		ok, msg = s.testBazaar(ctx)
+	case "urlhaus":
+		ok, msg = s.testURLhaus(ctx)
 	case "ipapi":
 		ok, msg = s.testIPAPI(ctx, testIP)
 	default:
@@ -316,11 +325,31 @@ func (s *Server) handleSettingsTest(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": ok, "message": msg})
 }
 
+// testURLhaus validates the abuse.ch Auth-Key for URLhaus.
+//
+// It deliberately does NOT contact the URLhaus endpoint: that endpoint is
+// POST-only and its only verb is "submit", so a connectivity probe risks
+// publishing something to a public dataset. Because abuse.ch issues ONE
+// Auth-Key per account for both services, validating it against
+// MalwareBazaar's read-only get_info proves the exact same credential URLhaus
+// will receive. The message makes that reasoning explicit rather than implying
+// we spoke to URLhaus.
+func (s *Server) testURLhaus(ctx context.Context) (bool, string) {
+	if s.abuseCHKeyLive() == "" {
+		return false, "no abuse.ch Auth-Key configured (set the MalwareBazaar key — it covers URLhaus too)"
+	}
+	ok, msg := s.testBazaar(ctx)
+	if !ok {
+		return false, msg
+	}
+	return true, "abuse.ch Auth-Key accepted (same key authenticates URLhaus submissions)"
+}
+
 // testBazaar does a read-only MalwareBazaar liveness check: a get_info query
 // with a dummy hash. A JSON response (any query_status) means the API is
 // reachable and, for an authed key, accepted. Never uploads.
 func (s *Server) testBazaar(ctx context.Context) (bool, string) {
-	key := s.bazaarKeyLive()
+	key := s.abuseCHKeyLive()
 	if key == "" {
 		return false, "no API key configured"
 	}
@@ -434,7 +463,11 @@ func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 		{Key: settings.KeyOTX, Label: "OTX", Armed: s.keys.Has(settings.KeyOTX)},
 		{Key: settings.KeyIPQS, Label: "IPQualityScore", Armed: s.keys.Has(settings.KeyIPQS)},
 		{Key: settings.KeyIPinfo, Label: "IPinfo", Armed: s.keys.Has(settings.KeyIPinfo)},
-		{Key: settings.KeyBazaar, Label: "MalwareBazaar", Armed: s.bazaarKeyLive() != ""},
+		{Key: settings.KeyBazaar, Label: "MalwareBazaar", Armed: s.abuseCHKeyLive() != ""},
+		// URLhaus has no key of its own — one abuse.ch Auth-Key arms both, so
+		// it reports the same armed state. Listed separately so the operator
+		// can see at a glance that setting the key lit up two services.
+		{Key: "urlhaus", Label: "URLhaus", Armed: s.abuseCHKeyLive() != ""},
 	}
 
 	stats, _ := s.st.AbuseReportStats()

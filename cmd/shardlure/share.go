@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ func cmdShare(st *store.Store, cfg config.Config, keys *settings.Keystore, args 
 	}
 	switch args[0] {
 	case "bazaar":
-		cmdShareBazaar(st, cfg, args[1:])
+		cmdShareBazaar(st, cfg, keys, args[1:])
 	case "urlhaus":
 		cmdShareURLhaus(st, cfg, keys, args[1:])
 	default:
@@ -34,7 +35,37 @@ func cmdShare(st *store.Store, cfg config.Config, keys *settings.Keystore, args 
 	}
 }
 
-func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
+// abuseCHKey resolves THE abuse.ch Auth-Key for the CLI, following the
+// project-wide DB > env > config precedence.
+//
+// The keystore comes first because that is where a key saved from the
+// dashboard Settings panel lives — config is seeded INTO the keystore at
+// startup, never the reverse, so a config-only lookup reported "no key" on
+// precisely the deployments that had one. abuse.ch issues one key per account
+// covering both MalwareBazaar and URLhaus, so this is the single resolution
+// path for both subcommands (mirroring the server's abuseCHKeyLive).
+func abuseCHKey(cfg config.Config, keys *settings.Keystore, extraEnv ...string) string {
+	if keys != nil {
+		lookups := append([]string{}, extraEnv...)
+		lookups = append(lookups, settings.KeyBazaar, settings.KeyBazaarAlt)
+		for _, k := range lookups {
+			if v := strings.TrimSpace(keys.Get(k)); v != "" {
+				return v
+			}
+		}
+	}
+	if k := strings.TrimSpace(cfg.Intel.Bazaar.APIKey); k != "" {
+		return k
+	}
+	for _, env := range extraEnv {
+		if k := strings.TrimSpace(os.Getenv(env)); k != "" {
+			return k
+		}
+	}
+	return ""
+}
+
+func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
 	// intel.bazaar.freshness_days tightens both the default candidate-selection
 	// window and Vet. --since may widen local selection, but never Vet policy.
 	freshDays := cfg.Intel.Bazaar.FreshnessDays
@@ -57,9 +88,9 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, args []string) {
 		return
 	}
 
-	apiKey := strings.TrimSpace(cfg.Intel.Bazaar.APIKey)
+	apiKey := abuseCHKey(cfg, keys)
 	if apiKey == "" && !*dryRun {
-		fatal(fmt.Errorf("intel.bazaar.api_key is empty in %s — sign up at https://auth.abuse.ch/ and paste your Auth-Key into shardlure.yaml", config.DefaultConfigPath()))
+		fatal(fmt.Errorf("no abuse.ch Auth-Key found — save one in the dashboard Settings panel (MalwareBazaar), set intel.bazaar.api_key in %s, or export SHARDLURE_BAZAAR_KEY; sign up at https://auth.abuse.ch/", config.DefaultConfigPath()))
 	}
 
 	cands, err := collectShareCandidates(st, *sha, *since)

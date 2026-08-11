@@ -100,6 +100,16 @@ type Server struct {
 	// concurrent callers instead of queueing.
 	abuseReportBatchMu sync.Mutex
 
+	// urlhausBatchMu serializes URLhaus submit batches. Without it a
+	// double-clicked "Submit All" could race the dedup ledger and publish the
+	// same URL twice to a public dataset.
+	urlhausBatchMu sync.Mutex
+	// URLhaus startup defaults (config), overridden live by the keystore.
+	urlhausEndpointDefault   string
+	urlhausTagsDefault       []string
+	urlhausActiveDaysDefault int
+	urlhausAnonymousDefault  bool
+
 	// countriesCache memoizes the (relatively expensive) full-table
 	// hits-by-country aggregation, which both /api/dashboard and /api/intel
 	// render on every poll. The result changes slowly, so a few-second TTL
@@ -406,10 +416,16 @@ type Options struct {
 	// CowrieUnit is the systemd unit running Cowrie, read ONLY to report the
 	// honeypot's uptime on the dashboard. Empty falls back to "cowrie"; a host
 	// without systemd simply reports uptime as unknown.
-	CowrieUnit          string
-	BazaarAPIKey        string
-	BazaarEndpoint      string
-	BazaarTags          []string
+	CowrieUnit     string
+	BazaarAPIKey   string
+	BazaarEndpoint string
+	BazaarTags     []string
+	// URLhaus knobs. There is no URLhausAPIKey: abuse.ch issues one Auth-Key
+	// per account, so BazaarAPIKey arms URLhaus too (see abuseCHKeyLive).
+	URLhausEndpoint     string
+	URLhausTags         []string
+	URLhausActiveDays   int
+	URLhausAnonymous    bool
 	BazaarMaxBytes      int64
 	BazaarFreshnessDays int
 
@@ -470,6 +486,18 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	if len(bzTags) == 0 {
 		bzTags = []string{"shardlure", "honeypot"}
 	}
+	uhEndpoint := firstOpt.URLhausEndpoint
+	if uhEndpoint == "" {
+		uhEndpoint = "https://urlhaus.abuse.ch/api/"
+	}
+	uhTags := firstOpt.URLhausTags
+	if len(uhTags) == 0 {
+		uhTags = []string{"shardlure", "honeypot"}
+	}
+	uhActive := firstOpt.URLhausActiveDays
+	if uhActive < 1 || uhActive > 3 {
+		uhActive = 3
+	}
 	bzMax := firstOpt.BazaarMaxBytes
 	if bzMax <= 0 {
 		bzMax = 33 << 20
@@ -492,26 +520,32 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		abuseRewindow = 24 * time.Hour
 	}
 	return &Server{
-		st:                     st,
-		addr:                   addr,
-		keys:                   keys,
-		geo:                    newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st, keys),
-		homeDefault:            home,
-		bazaarKeyDefault:       firstOpt.BazaarAPIKey,
-		bazaarEndpointDefault:  bzEndpoint,
-		bazaarTagsDefault:      bzTags,
-		bazaarMaxBytesDefault:  bzMax,
-		bazaarFreshnessDefault: bzFresh,
-		abuseEndpoint:          abuseEndpoint,
-		abuseEnabledDefault:    firstOpt.AbuseReportEnabled,
-		abuseCategoriesDefault: abuseCats,
-		abuseMinProbeDefault:   firstOpt.AbuseMinProbe,
-		abuseRewindowDefault:   abuseRewindow,
-		abuseCommentDefault:    firstOpt.AbuseComment,
-		abuseAdmin:             netmatch.New(firstOpt.AdminIPs),
-		cowrieUnit:             cowrieUnit,
-		tailscaleMode:          firstOpt.TailscaleMode,
-		startedAt:              time.Now(),
+		st:                    st,
+		addr:                  addr,
+		keys:                  keys,
+		geo:                   newGeoResolver(geoOpts(len(opts) > 0, firstOpt), st, keys),
+		homeDefault:           home,
+		bazaarKeyDefault:      firstOpt.BazaarAPIKey,
+		bazaarEndpointDefault: bzEndpoint,
+		bazaarTagsDefault:     bzTags,
+		// URLhaus shares bazaarKeyDefault (one abuse.ch Auth-Key); only the
+		// non-secret knobs are separate.
+		urlhausEndpointDefault:   uhEndpoint,
+		urlhausTagsDefault:       uhTags,
+		urlhausActiveDaysDefault: uhActive,
+		urlhausAnonymousDefault:  firstOpt.URLhausAnonymous,
+		bazaarMaxBytesDefault:    bzMax,
+		bazaarFreshnessDefault:   bzFresh,
+		abuseEndpoint:            abuseEndpoint,
+		abuseEnabledDefault:      firstOpt.AbuseReportEnabled,
+		abuseCategoriesDefault:   abuseCats,
+		abuseMinProbeDefault:     firstOpt.AbuseMinProbe,
+		abuseRewindowDefault:     abuseRewindow,
+		abuseCommentDefault:      firstOpt.AbuseComment,
+		abuseAdmin:               netmatch.New(firstOpt.AdminIPs),
+		cowrieUnit:               cowrieUnit,
+		tailscaleMode:            firstOpt.TailscaleMode,
+		startedAt:                time.Now(),
 	}
 }
 
@@ -520,7 +554,16 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 // resolved in New(). These are the single read path for every secret/knob the
 // Settings panel can change, so a save takes effect on the next request.
 
-func (s *Server) bazaarKeyLive() string {
+// abuseCHKeyLive resolves THE abuse.ch Auth-Key. abuse.ch issues exactly one
+// key per account (https://auth.abuse.ch/) and it authenticates every abuse.ch
+// service we talk to — MalwareBazaar sample uploads AND URLhaus URL
+// submissions. Both surfaces resolve the key through this single function so
+// they can never disagree about whether sharing is configured: setting the key
+// once in Settings arms both.
+//
+// Precedence is the project-wide DB > env > config (the keystore Get already
+// does DB-then-env; bazaarKeyDefault is the startup-resolved config value).
+func (s *Server) abuseCHKeyLive() string {
 	if k := s.keys.Get(settings.KeyBazaar); k != "" {
 		return k
 	}
@@ -530,12 +573,42 @@ func (s *Server) bazaarKeyLive() string {
 	return s.bazaarKeyDefault
 }
 
+// bazaarKeyLive is the MalwareBazaar-facing name for the shared abuse.ch key.
+// Kept as a thin alias so existing call sites read naturally at the point of
+// use while there remains exactly ONE resolution path.
+func (s *Server) bazaarKeyLive() string { return s.abuseCHKeyLive() }
+
 func (s *Server) bazaarEndpointLive() string {
 	return s.keys.GetOr(settings.KeyBazaarEndpoint, s.bazaarEndpointDefault)
 }
 
 func (s *Server) bazaarTagsLive() []string {
 	return s.keys.GetStringCSV(settings.KeyBazaarTags, s.bazaarTagsDefault)
+}
+
+// ---- URLhaus live knobs (the Auth-Key comes from abuseCHKeyLive) ----------
+
+func (s *Server) urlhausEndpointLive() string {
+	return s.keys.GetOr(settings.KeyURLhausEndpoint, s.urlhausEndpointDefault)
+}
+
+func (s *Server) urlhausTagsLive() []string {
+	return s.keys.GetStringCSV(settings.KeyURLhausTags, s.urlhausTagsDefault)
+}
+
+// urlhausActiveDaysLive clamps to 1..3. Larger values must not loosen the
+// liveness window — urlhaus.Vet enforces the same ceiling, this just keeps the
+// UI and the gate telling the same story.
+func (s *Server) urlhausActiveDaysLive() int {
+	v := s.keys.GetInt(settings.KeyURLhausActiveDays, s.urlhausActiveDaysDefault)
+	if v < 1 || v > 3 {
+		return 3
+	}
+	return v
+}
+
+func (s *Server) urlhausAnonymousLive() bool {
+	return s.keys.GetBool(settings.KeyURLhausAnonymous, s.urlhausAnonymousDefault)
 }
 
 func (s *Server) bazaarMaxBytesLive() int64 {
@@ -629,6 +702,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.handleIntelPayloadVT))
 	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guard(s.handleIntelPayloadsVTCached))
 	mux.HandleFunc("/api/intel/urlhaus", s.guard(s.handleIntelURLhaus))
+	mux.HandleFunc("/api/intel/urlhaus/submit", s.guard(s.handleURLhausSubmit))
 	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
 	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
 	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guard(s.handleAbuseIPDBSuggestions))

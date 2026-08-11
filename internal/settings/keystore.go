@@ -70,6 +70,15 @@ const (
 	KeyBazaarTags          = "bazaar.tags" // comma-separated
 	KeyBazaarMaxBytes      = "bazaar.max_bytes"
 	KeyBazaarFreshnessDays = "bazaar.freshness_days"
+
+	// URLhaus sharing knobs. There is deliberately NO urlhaus API-key setting:
+	// abuse.ch issues one Auth-Key per account covering both MalwareBazaar and
+	// URLhaus, so KeyBazaar is the single source of truth. Adding a second key
+	// field would let the two drift apart and silently half-arm sharing.
+	KeyURLhausEndpoint   = "urlhaus.endpoint"
+	KeyURLhausTags       = "urlhaus.tags" // comma-separated
+	KeyURLhausActiveDays = "urlhaus.active_days"
+	KeyURLhausAnonymous  = "urlhaus.anonymous"
 )
 
 // hasEnvFallback reports whether a key participates in the os.Getenv fallback.

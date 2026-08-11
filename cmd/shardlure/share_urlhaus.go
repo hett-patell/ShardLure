@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -15,40 +14,17 @@ import (
 	"github.com/networkshard/shardlure/internal/store"
 )
 
-// urlhausAPIKey resolves the abuse.ch Auth-Key for URLhaus, following the
-// project's documented DB > env > config precedence.
-//
-// The keystore comes FIRST because that is where a key saved from the dashboard
-// Settings panel lives — config is only ever seeded into the keystore at
-// startup, never the reverse, so a config-only lookup reports "no key" on
-// precisely the deployments that do have one.
-//
-// abuse.ch issues ONE key per account covering both MalwareBazaar and URLhaus,
-// so a bazaar-configured deployment is URLhaus-ready with no extra setup.
+// urlhausAPIKey resolves the abuse.ch Auth-Key for URLhaus. It delegates to
+// the shared abuseCHKey resolver so bazaar and urlhaus can never disagree about
+// whether sharing is configured; the only URLhaus-specific parts are the
+// optional intel.urlhaus.api_key override and the SHARDLURE_URLHAUS_KEY env
+// name, both of which exist purely to let an operator point the two services at
+// different accounts if they ever want to.
 func urlhausAPIKey(cfg config.Config, keys *settings.Keystore) string {
-	if keys != nil {
-		for _, k := range []string{
-			"SHARDLURE_URLHAUS_KEY",
-			settings.KeyBazaar,
-			settings.KeyBazaarAlt,
-		} {
-			if v := strings.TrimSpace(keys.Get(k)); v != "" {
-				return v
-			}
-		}
-	}
 	if k := strings.TrimSpace(cfg.Intel.URLhaus.APIKey); k != "" {
 		return k
 	}
-	if k := strings.TrimSpace(cfg.Intel.Bazaar.APIKey); k != "" {
-		return k
-	}
-	// Direct env fallback for the URLhaus-specific name, which the keystore
-	// registry doesn't know about.
-	if k := strings.TrimSpace(os.Getenv("SHARDLURE_URLHAUS_KEY")); k != "" {
-		return k
-	}
-	return ""
+	return abuseCHKey(cfg, keys, "SHARDLURE_URLHAUS_KEY")
 }
 
 func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {

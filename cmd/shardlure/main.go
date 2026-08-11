@@ -375,6 +375,13 @@ func webOptions(cfg config.Config) web.Options {
 		BazaarMaxBytes:      cfg.Intel.Bazaar.MaxBytes,
 		BazaarFreshnessDays: cfg.Intel.Bazaar.FreshnessDays,
 
+		// URLhaus reuses the bazaar Auth-Key (one abuse.ch account), so only
+		// the non-secret knobs are passed through.
+		URLhausEndpoint:   cfg.Intel.URLhaus.Endpoint,
+		URLhausTags:       cfg.Intel.URLhaus.Tags,
+		URLhausActiveDays: cfg.Intel.URLhaus.ActiveDays,
+		URLhausAnonymous:  cfg.Intel.URLhaus.Anonymous,
+
 		AbuseReportEnabled: cfg.Intel.AbuseIPDB.ReportEnabled,
 		AbuseEndpoint:      cfg.Intel.AbuseIPDB.Endpoint,
 		AbuseCategories:    cfg.Intel.AbuseIPDB.Categories,

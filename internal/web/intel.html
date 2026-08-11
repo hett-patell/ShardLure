@@ -743,6 +743,20 @@
   #bazaar-table td.bz-sha a { color: var(--purple); text-decoration: none; }
   #bazaar-table td.bz-sha a:hover { color: var(--accent); text-decoration: underline; }
 
+  /* URLhaus sharing table. Attacker URLs are long and untrusted, so the cell
+     truncates with an ellipsis (full value stays in the title attribute)
+     rather than blowing out the table width. */
+  #urlhaus-table { table-layout: fixed; width: 100%; }
+  #urlhaus-table td.bz-sha, #urlhaus-log td.bz-sha {
+    max-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono, monospace);
+    color: var(--purple);
+  }
+  #urlhaus-log { table-layout: fixed; width: 100%; }
+
   /* payload modal */
   .pm-grid {
     display: grid; grid-template-columns: 110px 1fr; gap: 4px 14px;
@@ -1403,6 +1417,45 @@
         </div>
       </section>
 
+      <section class="panel full" id="panel-urlhaus">
+        <div class="panel-head">
+          <h2>URLhaus URL sharing</h2>
+          <span class="meta" id="urlhaus-meta">abuse.ch malware-URL blocklist</span>
+          <button class="bz-btn" id="urlhaus-submit-all-btn" onclick="submitAllURLhaus(this)" style="margin-left:auto;display:none">▲ Submit All to URLhaus</button>
+        </div>
+        <div class="panel-body">
+        <div class="stats" id="urlhaus-stats" style="grid-template-columns: repeat(4,1fr); margin-bottom: 12px;">
+          <div class="stat"><div class="num accent" id="uh-submitted">0</div><div class="label">submitted</div></div>
+          <div class="stat"><div class="num" style="color:var(--accent-2)" id="uh-eligible">0</div><div class="label">eligible now</div></div>
+          <div class="stat"><div class="num" style="color:var(--purple)" id="uh-pending">0</div><div class="label">candidates</div></div>
+          <div class="stat"><div class="num" style="color:var(--dim)" id="uh-last">—</div><div class="label">last submitted</div></div>
+        </div>
+        <div id="urlhaus-note" class="abuse-note" style="display:none"></div>
+        <table class="dense" id="urlhaus-table">
+          <thead>
+            <tr>
+              <th>url</th>
+              <th style="width:110px">kind</th>
+              <th class="num" style="width:74px">size</th>
+              <th style="width:96px" title="when our fetch last confirmed this URL was serving a payload">confirmed</th>
+              <th title="vetting-gate decision — the same policy the CLI applies">gate</th>
+              <th style="width:92px">action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        <div id="urlhaus-log-wrap" style="margin-top:14px;display:none">
+          <div class="meta" style="margin-bottom:6px">recent submissions</div>
+          <table class="dense" id="urlhaus-log">
+            <thead><tr><th>url</th><th style="width:110px">status</th><th style="width:150px">submitted</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        </div>
+      </section>
+
       <section class="panel full" id="panel-enrich">
         <div class="panel-head">
           <h2>Threat intel enrichment</h2>
@@ -1721,6 +1774,21 @@
         <div class="panel-body"><div class="set-rows" id="set-bazaar-rows">
           <div class="empty">loading…</div>
         </div></div>
+      </section>
+
+      <section class="panel full" id="panel-set-urlhaus">
+        <div class="panel-head"><h2>URLhaus sharing</h2>
+          <span class="meta">malware-URL submissions · uses the MalwareBazaar Auth-Key above</span></div>
+        <div class="panel-body">
+          <div class="set-note" style="margin-bottom:10px">
+            abuse.ch issues <strong>one Auth-Key per account</strong>. The MalwareBazaar key
+            set above authenticates URLhaus submissions too — there is deliberately no
+            separate key here, so the two can never drift apart.
+          </div>
+          <div class="set-rows" id="set-urlhaus-rows">
+            <div class="empty">loading…</div>
+          </div>
+        </div>
       </section>
 
       <section class="panel full" id="panel-set-reports">
@@ -2443,6 +2511,9 @@ function knobRowHTML(s) {
     var ph = 'default';
     if (s.key === 'bazaar.tags') ph = 'e.g. shardlure, honeypot';
     else if (s.key === 'bazaar.endpoint') ph = 'https://mb-api.abuse.ch/api/v1/';
+    else if (s.key === 'urlhaus.tags') ph = 'e.g. shardlure, honeypot';
+    else if (s.key === 'urlhaus.endpoint') ph = 'https://urlhaus.abuse.ch/api/';
+    else if (s.key === 'urlhaus.active_days') ph = '1-3 (default 3)';
     ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="' + (s.kind === 'intcsv' ? 'e.g. 18,22' : ph) + '">';
   }
   return '<div class="set-row" data-key="' + esc(s.key) + '" data-kind="' + esc(s.kind) + '">'
@@ -2519,7 +2590,7 @@ async function loadSettings() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     var data = await r.json();
     _settingsLoaded = true;
-    var buckets = { keys: [], abuse: [], bazaar: [], geo: [], token: [] };
+    var buckets = { keys: [], abuse: [], bazaar: [], urlhaus: [], geo: [], token: [] };
     var themeVal = 'signal';
     var modeVal = localStorage.getItem('shardlure_mode') || 'dark';
     (data.settings || []).forEach(function (s) {
@@ -2534,6 +2605,7 @@ async function loadSettings() {
       if (s.key === 'SHARDLURE_DASH_TOKEN') buckets.token.push(s);
       else if (s.key === 'SHARDLURE_BAZAAR_KEY') buckets.bazaar.push(s);
       else if (s.key.indexOf('bazaar.') === 0) buckets.bazaar.push(s);
+      else if (s.key.indexOf('urlhaus.') === 0) buckets.urlhaus.push(s);
       else if (s.kind === 'secret') buckets.keys.push(s);
       else if (s.key.indexOf('abuseipdb.') === 0) buckets.abuse.push(s);
       else buckets.geo.push(s);
@@ -2551,6 +2623,8 @@ async function loadSettings() {
       buckets.bazaar.map(function (s) {
         return s.kind === 'secret' ? secretRowHTML(s) : knobRowHTML(s);
       }).join('') || '<div class="empty">none</div>';
+    document.getElementById('set-urlhaus-rows').innerHTML =
+      buckets.urlhaus.map(knobRowHTML).join('') || '<div class="empty">none</div>';
     document.getElementById('set-geo-rows').innerHTML =
       buckets.geo.map(knobRowHTML).join('') || '<div class="empty">none</div>';
     document.getElementById('set-token-rows').innerHTML = tokenPanelHTML(buckets.token[0]);
@@ -3446,13 +3520,187 @@ setActiveView = function(name) {
     // isn't mistaken for a fresh result.
     const note = document.getElementById('abuse-suggest-note');
     if (note) note.dataset.sticky = '';
+    const uhNote = document.getElementById('urlhaus-note');
+    if (uhNote) uhNote.dataset.sticky = '';
     refreshAbuseSuggest();
+    refreshURLhaus();
   }
 };
 setInterval(function() {
-  if (document.getElementById('view-blue').classList.contains('active')) refreshAbuseSuggest();
+  if (document.getElementById('view-blue').classList.contains('active')) {
+    refreshAbuseSuggest();
+    refreshURLhaus();
+  }
 }, 30000);
-if (readTabFromHash() === 'blue') refreshAbuseSuggest();
+if (readTabFromHash() === 'blue') { refreshAbuseSuggest(); refreshURLhaus(); }
+
+// ==== URLhaus URL sharing =========================================
+// Companion to the MalwareBazaar panel on the Red tab: bazaar ships the payload
+// FILES, URLhaus ships the distribution URLs those payloads came from. Lives on
+// Blue because publishing to a blocklist is a give-back/defensive action.
+//
+// The server runs the real urlhaus.Vet gate and returns a per-candidate reason,
+// so this view never re-implements policy — it renders the gate's decision.
+
+function fmtBytesShort(n) {
+  if (!n && n !== 0) return '\u2014';
+  if (n < 1024) return n + 'B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + 'K';
+  return (n / 1048576).toFixed(1) + 'M';
+}
+
+// showURLhausBanner writes a durable, colour-coded result line into the panel's
+// note element. Marked sticky so the 30s auto-refresh below doesn't wipe a
+// submission result the operator hasn't read yet.
+function showURLhausBanner(msg, kind) {
+  const note = document.getElementById('urlhaus-note');
+  if (!note) return;
+  const colors = { ok: 'var(--accent)', warn: 'var(--accent-2)', bad: 'var(--red-team)', pending: 'var(--dim)' };
+  note.style.display = 'block';
+  note.style.borderLeftColor = colors[kind] || 'var(--dim)';
+  note.style.color = kind === 'pending' ? 'var(--dim)' : '';
+  note.textContent = msg;
+  note.dataset.sticky = kind === 'pending' ? '' : '1';
+}
+
+function renderURLhaus(d) {
+  const tb = document.querySelector('#urlhaus-table tbody');
+  const meta = document.getElementById('urlhaus-meta');
+  const note = document.getElementById('urlhaus-note');
+  const cands = d.candidates || [];
+  const eligible = cands.filter(function(c) { return c.eligible; });
+
+  document.getElementById('uh-submitted').textContent = d.totalSubmitted || 0;
+  document.getElementById('uh-eligible').textContent = eligible.length;
+  document.getElementById('uh-pending').textContent = cands.length;
+  document.getElementById('uh-last').textContent = d.lastSubmittedAt ? fmtShortTime(d.lastSubmittedAt) : '\u2014';
+  meta.textContent = 'abuse.ch malware-URL blocklist \u00b7 active window ' + (d.activeDays || 3) + 'd';
+
+  // Submit All appears only when a key is configured AND something passes the gate.
+  const allBtn = document.getElementById('urlhaus-submit-all-btn');
+  if (allBtn) allBtn.style.display = (d.configured && eligible.length) ? '' : 'none';
+
+  if (!d.configured) {
+    note.style.display = 'block';
+    note.dataset.sticky = '';
+    note.style.borderLeftColor = 'var(--blue-team)';
+    note.style.color = 'var(--dim)';
+    note.textContent = 'No abuse.ch Auth-Key configured \u2014 this list is advisory. Set the MalwareBazaar key in Settings; abuse.ch issues one key per account and it arms URLhaus too.';
+  } else if (note.dataset.sticky !== '1') {
+    note.style.display = 'none';
+  }
+
+  if (!cands.length) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">no fetched payload URLs in the active window (or all already submitted)</div></td></tr>';
+  } else {
+    tb.innerHTML = cands.map(function(c) {
+      const gate = c.eligible
+        ? '<span class="why-tag" style="border-color:var(--accent);color:var(--accent)">eligible</span>'
+        : '<span class="why-tag" title="' + escHtml(c.reason || '') + '">' + escHtml(c.reason || 'rejected') + '</span>';
+      const btn = (d.configured && c.eligible)
+        ? '<button class="bz-btn sg-btn" data-url="' + escHtml(c.url) + '" onclick="submitOneURLhaus(this)">\u25b2 submit</button>'
+        : '<span class="sg-disabled" title="' + escHtml(c.eligible ? 'set an abuse.ch key to arm' : (c.reason || 'held back by policy')) + '">\u2014</span>';
+      return '<tr data-url="' + escHtml(c.url) + '"' + (c.eligible ? '' : ' style="opacity:.62"') + '>' +
+        '<td class="bz-sha" title="' + escHtml(c.url) + '">' + escHtml(c.url) + '</td>' +
+        '<td>' + escHtml(c.fileKind || '\u2014') + '</td>' +
+        '<td class="num">' + fmtBytesShort(c.sizeBytes) + '</td>' +
+        '<td class="range">' + (c.fetchedAt ? fmtShortTime(c.fetchedAt) : '\u2014') + '</td>' +
+        '<td class="why">' + gate + '</td>' +
+        '<td>' + btn + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  // Submission log (only shown once something has been submitted).
+  const rows = d.rows || [];
+  const wrap = document.getElementById('urlhaus-log-wrap');
+  const logTb = document.querySelector('#urlhaus-log tbody');
+  if (rows.length) {
+    wrap.style.display = '';
+    logTb.innerHTML = rows.map(function(rw) {
+      return '<tr>' +
+        '<td class="bz-sha" title="' + escHtml(rw.url) + '">' + escHtml(rw.url) + '</td>' +
+        '<td>' + escHtml(rw.status || '\u2014') + '</td>' +
+        '<td class="range">' + (rw.submittedAt ? fmtShortTime(rw.submittedAt) : '\u2014') + '</td>' +
+        '</tr>';
+    }).join('');
+  } else {
+    wrap.style.display = 'none';
+    logTb.innerHTML = '';
+  }
+}
+
+async function refreshURLhaus() {
+  try {
+    const r = await fetch('/api/intel/urlhaus?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderURLhaus(await r.json());
+  } catch (_) {}
+}
+
+// submitOneURLhaus submits a single vetted URL. The server re-runs the gate, so
+// a stale row in a long-open tab can't push through something now ineligible.
+async function submitOneURLhaus(btn) {
+  const url = btn.dataset.url;
+  if (!url) return;
+  if (!window.confirm('Submit this URL to URLhaus now?\n\n' + url +
+      '\n\nThis is a LIVE, public submission to an abuse.ch blocklist consumed by others as IOCs.')) return;
+  btn.disabled = true;
+  btn.textContent = '\u2026';
+  try {
+    const r = await fetch('/api/intel/urlhaus/submit?url=' + encodeURIComponent(url) + '&_=' + Date.now(),
+      { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function() { return {}; });
+    const row = btn.closest('tr');
+    if ((d.status === 'ok' || d.status === 'partial') && (d.submitted || 0) > 0) {
+      if (row) { row.style.opacity = '0.5'; row.style.textDecoration = 'line-through'; }
+      btn.replaceWith(document.createTextNode('submitted \u2713'));
+      setTimeout(refreshURLhaus, 800);
+    } else {
+      btn.disabled = false;
+      btn.textContent = '\u25b2 submit';
+      btn.title = d.error || d.status || 'failed';
+      showURLhausBanner('\u2717 submit failed: ' + (d.error || d.status || 'unknown'), 'bad');
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '\u25b2 submit';
+    btn.title = 'request failed';
+  }
+}
+
+// submitAllURLhaus batch-submits every currently-eligible URL. Confirms with an
+// explicit count first \u2014 this publishes to a public dataset and cannot be undone.
+async function submitAllURLhaus(btn) {
+  const rows = document.querySelectorAll('#urlhaus-table tbody tr[data-url] button.sg-btn');
+  const n = rows.length;
+  if (!n) { showURLhausBanner('nothing to submit \u2014 no URL currently passes the vetting gate.', 'warn'); return; }
+  if (!window.confirm('Submit ' + n + ' URL' + (n === 1 ? '' : 's') + ' to URLhaus now?\n\n' +
+      'This is a LIVE, public submission to an abuse.ch blocklist that others consume as IOCs. ' +
+      'Only URLs we fetched a payload from within the active window are sent.')) return;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'submitting\u2026';
+  showURLhausBanner('submitting ' + n + ' URL' + (n === 1 ? '' : 's') + '\u2026', 'pending');
+  try {
+    const r = await fetch('/api/intel/urlhaus/submit?_=' + Date.now(), { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function() { return {}; });
+    if (d.status === 'ok' || d.status === 'partial') {
+      showURLhausBanner('\u2713 submitted ' + (d.submitted || 0) + ' \u00b7 skipped ' + (d.skipped || 0) +
+        (d.status === 'partial' ? ' \u00b7 some failed \u2014 check server logs' : '') +
+        ' \u00b7 at ' + new Date().toLocaleTimeString(),
+        d.status === 'partial' ? 'warn' : 'ok');
+      setTimeout(refreshURLhaus, 800);
+    } else {
+      showURLhausBanner('\u2717 submit failed: ' + (d.error || d.status || 'unknown'), 'bad');
+    }
+  } catch (e) {
+    showURLhausBanner('\u2717 request failed', 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
 
 // ==== Slice D: IOC export =========================================
 const IOC = { kind: 'ip' };

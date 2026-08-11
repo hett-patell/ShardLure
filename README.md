@@ -462,7 +462,7 @@ shardlure share urlhaus --limit 25    # submit
 shardlure share urlhaus --status      # submission log
 ```
 
-abuse.ch issues **one Auth-Key per account** for both services, so if `intel.bazaar.api_key` is set you're already configured; `intel.urlhaus.api_key` only exists to override it.
+abuse.ch issues **one Auth-Key per account** for both services. Setting the MalwareBazaar key — in the Settings panel, `intel.bazaar.api_key`, or `SHARDLURE_BAZAAR_KEY` — arms URLhaus at the same time; the Settings status strip shows both as armed off that single key. `intel.urlhaus.api_key` / `SHARDLURE_URLHAUS_KEY` exist only to point the two at different accounts. The CLI and the dashboard resolve the key through the same DB > env > config path, so they can never disagree about whether sharing is configured.
 
 **The vetting gate** (`internal/intel/urlhaus/vet.go`) enforces URLhaus's submission policy locally, before any network call. Hard rejects always win:
 
@@ -478,7 +478,21 @@ abuse.ch issues **one Auth-Key per account** for both services, so if `intel.baz
 
 Re-running is safe: submitted URLs are recorded in `urlhaus_submissions` and skipped next run. That ledger is **never purged** (unlike caches) — dropping a row would mean re-submitting the same URL upstream.
 
-Submitting is CLI-only by design: it publishes to a dataset other people consume as blocklist IOCs, which deserves a deliberate operator step rather than a mis-clickable button. The dashboard exposes read-only state at `/api/intel/urlhaus` (submitted count, pending estimate, recent log).
+### Dashboard panel (Blue Team)
+
+The **Blue Team** tab carries a *URLhaus URL sharing* panel — the defensive counterpart to the Red tab's MalwareBazaar panel (bazaar ships the payload files, URLhaus ships the URLs). It shows submitted / eligible / candidate counts and a per-candidate table that renders **the vetting gate's actual decision**, including the reason anything was held back:
+
+| url | kind | size | confirmed | gate | action |
+| --- | --- | --- | --- | --- | --- |
+| `http://185.7.214.3/bins/x86.sh` | Shell script | 210B | 04:44 | eligible | ▲ submit |
+| `http://10.0.0.7/internal.sh` | Shell script | 210B | 03:44 | private or special-purpose IP address | — |
+| `http://bit.ly/abc123` | Shell script | 210B | 02:44 | URL shortener / redirector, not a payload host | — |
+
+Rejected rows are dimmed and have no button, so the policy is legible instead of silently dropping rows. **Submit All** and the per-row buttons both confirm with an explicit count first — this is a live, public, irreversible submission.
+
+The button is not a policy bypass: the server re-runs `urlhaus.Vet` on every request, so a hand-crafted `?url=` for something ineligible is refused, and a stale row in a long-open tab can't push through a URL that has since gone stale. A batch mutex stops a double-click from racing the dedup ledger. Endpoints: `GET /api/intel/urlhaus` (read-only state) and `POST /api/intel/urlhaus/submit` (optionally `?url=` for one row).
+
+The non-secret knobs (endpoint, tags, active window, anonymous) live in **Settings → URLhaus sharing** and apply live. There is deliberately **no URLhaus key field** there — one abuse.ch key covers both services, and a second field would let them drift apart.
 
 ## VirusTotal Payload Lookup
 
