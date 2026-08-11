@@ -277,7 +277,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=3" />
+<link rel="stylesheet" href="/themes.css?v=4" />
 </head>
 <body>
 
@@ -836,12 +836,16 @@ function buildThemeOverlays(theme, home, actors) {
     //     chosen, because distinct countries can still overlap (Amsterdam /
     //     Frankfurt / London sit on top of each other at this globe size);
     //   - capped, because past a handful they stop being legible.
-    // 4 stickers at >=32 deg. Great-circle separation is only a proxy for
-    // SCREEN separation — two points 22 deg apart foreshorten to ~12px when they
-    // sit near the limb, and the globe auto-rotates, so no static rule can
-    // guarantee no overlap. Fewer, further-apart stickers is the robust answer;
-    // past a handful they stop being readable anyway.
-    var MAX_STICKERS = 4, MIN_SEP = 32;
+    // Emit a flag for MANY countries, not a token few. Overlap is resolved at
+    // RENDER time by the declutter pass in cobe-globe.js, which hides whichever
+    // of a colliding pair is lower priority for as long as they collide. That
+    // means the globe can represent the whole attacker spread and simply reveals
+    // different countries as it rotates, instead of freezing on 4 of them.
+    //
+    // MIN_SEP stays small: it only separates near-identical points (two cities
+    // that would sit under the same flag no matter the rotation), since anything
+    // rotation-dependent is the declutter pass's job.
+    var MAX_STICKERS = 18, MIN_SEP = 6;
     // Seed with HOME so the rules apply against it too: otherwise an attacker
     // in the operator's own country renders a second identical flag right next
     // to the home one (observed: two India flags 13px apart).

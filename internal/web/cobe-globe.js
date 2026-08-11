@@ -336,7 +336,55 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
 
   rebindLabels(places);
 
+  // ---- runtime declutter for anchor-positioned stickers -------------------
+  // Anchored stickers are placed by CSS, so we cannot know at BUILD time which
+  // ones will overlap: that depends on the live rotation, and two points 22°
+  // apart foreshorten to ~12px near the limb. Rather than emit a handful of
+  // widely-separated flags and hide the rest of the world, emit many and let
+  // geometry decide each pass — as the globe turns, different countries become
+  // readable and take their turn.
+  //
+  // Priority is DOM order, which callers emit in volume order, so the busiest
+  // country always wins a contested spot. Throttled because it reads layout;
+  // the globe itself only paints at 12-30fps when idle.
+  let lastDeclutter = 0;
+  const declutterAnchored = () => {
+    const now = performance.now();
+    if (now - lastDeclutter < 120) return;
+    lastDeclutter = now;
+    const kept = [];
+    const PAD = 3; // px of breathing room between two stickers
+    for (const el of labelEls) {
+      if (!el._cobeAnchored) continue;
+      // Cobe drives opacity via --cobe-visible-<id>; a back-facing sticker is
+      // already invisible and must not block a front-facing one.
+      if (parseFloat(getComputedStyle(el).opacity || "0") < 0.5) {
+        el.style.visibility = "hidden";
+        continue;
+      }
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) {
+        el.style.visibility = "hidden";
+        continue;
+      }
+      const hit = kept.some(
+        (k) =>
+          r.left < k.right + PAD &&
+          r.right > k.left - PAD &&
+          r.top < k.bottom + PAD &&
+          r.bottom > k.top - PAD
+      );
+      if (hit) {
+        el.style.visibility = "hidden";
+      } else {
+        el.style.visibility = "visible";
+        kept.push(r);
+      }
+    }
+  };
+
   const syncLabels = (phi, theta) => {
+    declutterAnchored();
     for (const el of labelEls) {
       const id = el.getAttribute("data-place");
       const place = placeById[id];
