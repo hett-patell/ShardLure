@@ -11,30 +11,89 @@ import (
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
 	"github.com/networkshard/shardlure/internal/netmatch"
+	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
 // cmdReport is the dispatcher for "shardlure report <destination>". Kept
 // separate from `share` (payloads → MalwareBazaar) because reporting operates
 // on ACTORS, not artifacts, and has different safety semantics.
-func cmdReport(st *store.Store, cfg config.Config, args []string) {
+func cmdReport(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
 	if len(args) < 1 {
 		fatal(fmt.Errorf("usage: shardlure report <abuseipdb> [--dry-run] [--limit N] [--min-probe N] [--status]"))
 	}
 	switch args[0] {
 	case "abuseipdb":
-		cmdReportAbuseIPDB(st, cfg, args[1:])
+		cmdReportAbuseIPDB(st, cfg, keys, args[1:])
 	default:
 		fatal(fmt.Errorf("unknown report destination: %q (supported: abuseipdb)", args[0]))
 	}
 }
 
-func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, args []string) {
-	minProbeDefault := cfg.Intel.AbuseIPDB.MinProbeScore
+// abuseSettings resolves every AbuseIPDB knob the way the dashboard does:
+// keystore first (DB value, then the SHARDLURE_* env fallback the keystore
+// already performs), then the config file.
+//
+// This exists because the CLI and the dashboard were reading different sources
+// for the SAME settings. An operator who configured AbuseIPDB entirely from the
+// Settings panel got a CLI that refused to run ("report_enabled is false"),
+// could not find the key, and — had it run — would have used the config's
+// categories, comment and thresholds rather than the ones actually in effect.
+// These mirror the server's abuse*Live() accessors one-for-one.
+type abuseSettings struct {
+	APIKey     string
+	Enabled    bool
+	MinProbe   int
+	RewindowH  int
+	Categories []int
+	Comment    string
+}
+
+func resolveAbuseSettings(cfg config.Config, keys *settings.Keystore) abuseSettings {
+	a := abuseSettings{
+		Enabled:    cfg.Intel.AbuseIPDB.ReportEnabled,
+		MinProbe:   cfg.Intel.AbuseIPDB.MinProbeScore,
+		RewindowH:  cfg.Intel.AbuseIPDB.RewindowHours,
+		Categories: cfg.Intel.AbuseIPDB.Categories,
+		Comment:    cfg.Intel.AbuseIPDB.Comment,
+	}
+	if keys != nil {
+		a.APIKey = strings.TrimSpace(keys.Get(settings.KeyAbuseIPDB))
+		a.Enabled = keys.GetBool(settings.KeyAbuseReportEnabled, a.Enabled)
+		a.MinProbe = keys.GetInt(settings.KeyAbuseMinProbe, a.MinProbe)
+		if h := keys.GetInt(settings.KeyAbuseRewindowHours, 0); h > 0 {
+			a.RewindowH = h
+		}
+		a.Categories = keys.GetIntCSV(settings.KeyAbuseCategories, a.Categories)
+		a.Comment = keys.GetOr(settings.KeyAbuseComment, a.Comment)
+	}
+	if a.APIKey == "" {
+		// Keystore absent (or key unset there): fall back to the raw env var,
+		// preserving the pre-keystore behaviour for env-only deployments.
+		a.APIKey = strings.TrimSpace(os.Getenv("SHARDLURE_ABUSEIPDB_KEY"))
+	}
+	if a.MinProbe <= 0 {
+		a.MinProbe = 60
+	}
+	if a.RewindowH <= 0 {
+		a.RewindowH = 24
+	}
+	if len(a.Categories) == 0 {
+		a.Categories = []int{18, 22} // 18=Brute-Force, 22=SSH
+	}
+	return a
+}
+
+func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
+	set := resolveAbuseSettings(cfg, keys)
+	// Flag DEFAULTS come from the resolved (keystore-first) settings, so the
+	// CLI's behaviour matches what the Settings panel shows. An explicitly
+	// passed flag still wins, since flag.Parse overwrites the default.
+	minProbeDefault := set.MinProbe
 	if minProbeDefault <= 0 {
 		minProbeDefault = 60
 	}
-	rewindowDefault := cfg.Intel.AbuseIPDB.RewindowHours
+	rewindowDefault := set.RewindowH
 	if rewindowDefault <= 0 {
 		rewindowDefault = 24
 	}
@@ -55,12 +114,12 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, args []string) {
 	// Reporting requires the operator to have explicitly opted in. Even a
 	// --dry-run respects the gate for the live POST, but we let --dry-run run
 	// without the enabled flag so an operator can preview candidates safely.
-	if !cfg.Intel.AbuseIPDB.ReportEnabled && !*dryRun {
-		fatal(fmt.Errorf("intel.abuseipdb.report_enabled is false in %s — set it to true to report (or use --dry-run to preview)", config.DefaultConfigPath()))
+	if !set.Enabled && !*dryRun {
+		fatal(fmt.Errorf("AbuseIPDB reporting is disabled — enable it in the dashboard Settings panel, or set intel.abuseipdb.report_enabled: true in %s (or use --dry-run to preview)", config.DefaultConfigPath()))
 	}
-	apiKey := strings.TrimSpace(os.Getenv("SHARDLURE_ABUSEIPDB_KEY"))
+	apiKey := set.APIKey
 	if apiKey == "" && !*dryRun {
-		fatal(fmt.Errorf("SHARDLURE_ABUSEIPDB_KEY is empty — export it (same key as enrichment /check) before reporting"))
+		fatal(fmt.Errorf("no AbuseIPDB API key found — save one in the dashboard Settings panel, or export SHARDLURE_ABUSEIPDB_KEY (same key as enrichment /check)"))
 	}
 
 	cands, err := collectReportCandidates(st, *minProbe)
@@ -79,10 +138,7 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, args []string) {
 	if *endpoint != "" {
 		ep = *endpoint
 	}
-	cats := cfg.Intel.AbuseIPDB.Categories
-	if len(cats) == 0 {
-		cats = []int{18, 22}
-	}
+	cats := set.Categories
 
 	fmt.Printf("candidates: %d  dry-run=%v  min-probe=%d  endpoint=%s\n", len(cands), *dryRun, *minProbe, ep)
 	if *dryRun {
@@ -93,7 +149,7 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, args []string) {
 		APIKey:     apiKey,
 		Endpoint:   ep,
 		Categories: cats,
-		Comment:    cfg.Intel.AbuseIPDB.Comment,
+		Comment:    set.Comment,
 		DryRun:     *dryRun,
 		MinProbe:   *minProbe,
 		Rewindow:   time.Duration(*rewindowHours) * time.Hour,

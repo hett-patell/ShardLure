@@ -137,7 +137,7 @@ func main() {
 		// would report "no key" on exactly the deployments that have one.
 		cmdShare(st, cfg, keys, args[1:])
 	case "report":
-		cmdReport(st, cfg, args[1:])
+		cmdReport(st, cfg, keys, args[1:])
 	default:
 		usage()
 		os.Exit(1)
