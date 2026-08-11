@@ -13,9 +13,12 @@ Single Go module: `github.com/networkshard/shardlure` (Go 1.22). One binary, sub
 ```bash
 make build          # go mod tidy && go build -o shardlure ./cmd/shardlure
 make test           # go test ./...
+make fuzz           # opt-in fuzzing of the 3 attacker-input parsers (FUZZTIME=5m to extend)
 go test ./internal/store/ -run TestName   # single package / single test
 go vet ./...        # CI runs this; keep it clean
 ```
+
+**Fuzz targets** cover the three parsers that eat attacker-controlled bytes: `journal.FuzzParseLine`, `cowrie.FuzzParseReader`, `capture.FuzzDecodeTTYReader` (the packed `<iLiiLL` TTY struct — sharpest edge, since its own length arithmetic could over-read). CI does **not** fuzz, but `go test ./...` runs each target's seed corpus, so known-bad inputs stay covered. Only *failing* inputs get written to `testdata/fuzz/`, and those files are binary — don't commit them (`check-utf8.sh` would reject them); pin the finding as a readable unit test instead, as `TestParseLineSanitisesInvalidUTF8AndNUL` does.
 
 CI (`.github/workflows/ci.yml`) runs on push to `main`, tags `v*`, and all PRs: `check-utf8.sh` → `go mod verify` → `go vet` → `go test -coverprofile` → build → `version` smoke → `ci-web-smoke.sh` (boots the web server and checks it serves). Then a cross-build job. There is **no separate lint step** beyond `go vet`; do not add one without asking.
 

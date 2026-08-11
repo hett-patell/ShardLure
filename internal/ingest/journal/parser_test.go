@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
@@ -107,4 +109,72 @@ func splitLines(s string) []string {
 		out = append(out, s[start:])
 	}
 	return out
+}
+
+// Regression: found by FuzzParseLine. journald hands us the line verbatim and
+// an attacker picks the username/client string inside it, so arbitrary bytes
+// reached Event.Raw and Event.Username. Nothing crashed, but the bytes were
+// stored in SQLite as invalid UTF-8 while the dashboard served U+FFFD
+// (encoding/json substitutes on marshal) — storage and presentation disagreed.
+// The cowrie path never had this because json.Unmarshal already substitutes,
+// so the two ingest sources gave different guarantees for the same columns.
+func TestParseLineSanitisesInvalidUTF8AndNUL(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+	}{
+		{
+			"invalid utf-8 in hostname (the fuzzer's find)",
+			"0000-01-10T0:00:00+0000 \x88 sshd[0]: Failed password for 0from 0.0.0.0",
+		},
+		{
+			"invalid utf-8 in username",
+			"2026-08-10T12:00:00+0000 arm sshd[1]: Failed password for ro\xffot from 1.2.3.4 port 22 ssh2",
+		},
+		{
+			"NUL in username",
+			"2026-08-10T12:00:00+0000 arm sshd[1]: Failed password for ro\x00ot from 1.2.3.4 port 22 ssh2",
+		},
+		{
+			"lone surrogate bytes in client string",
+			"2026-08-10T12:00:00+0000 arm sshd[1]: Invalid user \xed\xa0\x80 from 1.2.3.4 port 22",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev, ok := ParseLine(c.line)
+			if !ok {
+				return // not matching a known pattern is a fine outcome
+			}
+			for name, v := range map[string]string{
+				"Raw": ev.Raw, "Username": ev.Username, "SrcIP": ev.SrcIP,
+				"SSHClient": ev.SSHClient,
+			} {
+				if !utf8.ValidString(v) {
+					t.Errorf("%s is not valid UTF-8: %q", name, v)
+				}
+				if strings.ContainsRune(v, 0) {
+					t.Errorf("%s contains a NUL byte: %q", name, v)
+				}
+			}
+		})
+	}
+}
+
+// Sanitisation must not disturb ordinary lines, including legitimate non-ASCII.
+func TestSanitiseTextPreservesValidInput(t *testing.T) {
+	for _, s := range []string{
+		"", "plain ascii", "root", "1.2.3.4",
+		"üñïçø∂é user", "日本語", "emoji 🔥 ok",
+	} {
+		if got := sanitiseText(s); got != s {
+			t.Errorf("sanitiseText(%q) = %q, want unchanged", s, got)
+		}
+	}
+	if got := sanitiseText("a\x00b"); got != "ab" {
+		t.Errorf("NUL should be dropped, got %q", got)
+	}
+	if got := sanitiseText("a\xffb"); got != "a\uFFFDb" {
+		t.Errorf("invalid byte should become U+FFFD, got %q", got)
+	}
 }

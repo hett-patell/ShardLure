@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -45,8 +46,35 @@ func SanitizeUser(u string) string {
 	return s
 }
 
+// sanitiseText coerces attacker-controlled bytes to valid UTF-8, replacing any
+// invalid sequence with U+FFFD, and drops NULs.
+//
+// Why this is needed HERE: journald hands us the line verbatim, and an attacker
+// chooses the username and client string inside it, so arbitrary bytes reach
+// Event.Raw/Username. The cowrie path never had this problem because
+// json.Unmarshal already performs the same replacement — so without this the
+// two ingest sources produced different guarantees for the same columns.
+//
+// Doing it at the parse boundary (rather than at render time) means storage and
+// presentation agree: previously SQLite held the raw bytes while the dashboard
+// silently served U+FFFD, because encoding/json substitutes on marshal. A NUL
+// is dropped outright — it terminates strings in some SQLite tooling and is
+// exactly what scripts/check-utf8.sh exists to keep out of this project.
+func sanitiseText(s string) string {
+	if s == "" {
+		return s
+	}
+	if strings.IndexByte(s, 0) >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "")
+	}
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
 func ParseLine(line string) (*models.Event, bool) {
-	line = strings.TrimSpace(line)
+	line = sanitiseText(strings.TrimSpace(line))
 	if line == "" {
 		return nil, false
 	}
