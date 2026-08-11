@@ -218,11 +218,16 @@ function keepOverlaysLastInCobeWrapper() {
 }
 
 /** Density + marker-scale knobs a theme may override (see cobeThemeConfig). */
+// This is an explicit whitelist, so a knob added to a theme config does nothing
+// until it is listed here. Keep it in step with the options buildCobeEntities
+// reads, or the theme silently falls back to the default.
 function entityOpts(cfg) {
   return {
     maxArcs: cfg.maxArcs,
     maxMarkers: cfg.maxMarkers,
     markerSize: cfg.markerSize,
+    hotArcRatio: cfg.hotArcRatio,
+    hotMarkerRatio: cfg.hotMarkerRatio,
   };
 }
 

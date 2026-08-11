@@ -629,8 +629,12 @@ export function cobeThemeConfig(theme, mode) {
         glowColor: [0.85, 0.86, 0.80],
         markerElevation: 0.022,
         arcColor: [0.55, 0.68, 0.0],
-        arcWidth: 0.5,
+        arcWidth: 0.35,
         arcHeight: 0.3,
+        // Same density cap as dark mode; the pile-up is a function of how many
+        // arcs converge on one point, not of the palette.
+        maxArcs: 26,
+        maxMarkers: 26,
         colors: {
           home: [0.55, 0.68, 0.0],
           hot: [0.77, 0.12, 0.15],
@@ -639,6 +643,11 @@ export function cobeThemeConfig(theme, mode) {
         },
       };
     }
+    // Signal read as too glowy, and measurement put the cause in arc DENSITY
+    // rather than the palette: 80 acid-lime arcs converging on one point, each
+    // 0.5 wide. Capping to 26 and thinning to 0.35 cut mean globe luminance 22%
+    // and blown-out pixels 65% while keeping the attack fan legible — the hue is
+    // Signal's identity and is deliberately left at full saturation.
     return {
       dark: 1,
       diffuse: 1.05,
@@ -650,8 +659,10 @@ export function cobeThemeConfig(theme, mode) {
       glowColor: [0.12, 0.14, 0.10],
       markerElevation: 0.03,
       arcColor: [0.82, 0.99, 0.09],
-      arcWidth: 0.5,
+      arcWidth: 0.35,
       arcHeight: 0.32,
+      maxArcs: 26,
+      maxMarkers: 26,
       colors: {
         home: [0.82, 0.99, 0.09],
         hot: [0.90, 0.16, 0.19],
@@ -695,6 +706,12 @@ export function cobeThemeConfig(theme, mode) {
       // as a deliberate cap (reported exactly that way at 12 vs 24).
       maxArcs: 24,
       maxMarkers: 24,
+      // Most arcs draw in the muted marker ink rather than the coral arcColor.
+      // That began as an accident - the highlight was a fixed 16 arcs, which at
+      // this cap is two thirds of them - but it is the look that shipped and was
+      // signed off, so it is pinned here explicitly instead of being changed as
+      // a side effect of fixing the scaling. 0.65 x 24 rounds to the same 16.
+      hotArcRatio: 0.65,
       markerSize: { base: 0.02, cap: 0.024, div: 900 },
       colors: {
         home: [0.91, 0.36, 0.3],
@@ -815,6 +832,19 @@ export function buildCobeEntities(home, actors, colors, opts = {}) {
       color: homeC,
     },
   ];
+  // How much of the globe gets the `hot` highlight. These were absolute counts
+  // (16 arcs, 12 markers) tuned for the 80-entity default, which silently became
+  // a majority once a theme lowered its cap: at Sprite's 24 it made two THIRDS
+  // of the arcs hot. Expressing them as ratios keeps "the worst few" meaning the
+  // worst few at any density, and the defaults reproduce 16 and 12 exactly at
+  // the 80 default so uncapped themes are untouched.
+  //
+  // A theme may override the ratio. Sprite does, because its shipped look was
+  // produced by the old absolute count and is deliberately preserved rather than
+  // quietly restyled: see hotArcRatio in its config.
+  const hotMarkers = Math.max(2, Math.round(maxMarkers * (opts.hotMarkerRatio ?? 0.15)));
+  const hotArcs = Math.max(3, Math.round(maxArcs * (opts.hotArcRatio ?? 0.2)));
+
   spread.slice(0, maxMarkers).forEach((a, i) => {
     const n = a.events || 0;
     const size = szBase + Math.min(szCap, Math.sqrt(n) / szDiv);
@@ -822,7 +852,7 @@ export function buildCobeEntities(home, actors, colors, opts = {}) {
       id: "a" + i,
       location: [a.lat, a.lon],
       size,
-      color: i < 12 ? hot : cool,
+      color: i < hotMarkers ? hot : cool,
     });
   });
 
@@ -830,7 +860,7 @@ export function buildCobeEntities(home, actors, colors, opts = {}) {
     id: "arc" + i,
     from: [a.lat, a.lon],
     to: [home.lat, home.lon],
-    color: i < 16 ? hot : arc,
+    color: i < hotArcs ? hot : arc,
   }));
 
   return { markers, arcs };

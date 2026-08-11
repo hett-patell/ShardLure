@@ -147,3 +147,98 @@ func extractFunc(t *testing.T, body, decl string) string {
 	}
 	return rest
 }
+
+// TestHotHighlightScalesWithCap pins a bug that only shows up once a theme lowers
+// its entity cap: the `hot` highlight used absolute counts (16 arcs, 12 markers)
+// tuned for the 80-entity default, so at Sprite's cap of 24 two THIRDS of the
+// arcs were hot and the highlight became the majority.
+func TestHotHighlightScalesWithCap(t *testing.T) {
+	js := string(cobeGlobeJS)
+	for _, abs := range []string{"i < 16 ? hot", "i < 12 ? hot"} {
+		if strings.Contains(js, abs) {
+			t.Errorf("found absolute hot-count %q; it must scale with the cap or a "+
+				"theme that lowers maxArcs turns the highlight into the majority", abs)
+		}
+	}
+	if !strings.Contains(js, "hotArcs") || !strings.Contains(js, "hotMarkers") {
+		t.Fatal("expected proportional hotArcs/hotMarkers")
+	}
+	// The DEFAULT ratios must reproduce the historical 16 arcs / 12 markers at the
+	// 80-entity default, so a theme that never set a cap is untouched. Asserted on
+	// the default values themselves rather than on the surrounding expression,
+	// which is free to be refactored.
+	for knob, def := range map[string]string{
+		"hotArcRatio":    "?? 0.2",
+		"hotMarkerRatio": "?? 0.15",
+	} {
+		if !strings.Contains(js, "opts."+knob+" "+def) {
+			t.Errorf("default for %s is not %q; 0.2 and 0.15 are what reproduce the "+
+				"historical 16 arcs / 12 markers at the 80 default", knob, def)
+		}
+	}
+}
+
+// TestSignalGlobeDensityIsCapped keeps Signal from drifting back to the 80-arc
+// default that made it too glowy (measured: 22% higher mean luminance, 65% more
+// blown-out pixels).
+func TestSignalGlobeDensityIsCapped(t *testing.T) {
+	js := string(cobeGlobeJS)
+	i := strings.Index(js, `if (theme === "signal")`)
+	if i < 0 {
+		t.Fatal("signal theme config not found")
+	}
+	sig := js[i:]
+	if j := strings.Index(sig, `if (theme === "sprite")`); j > 0 {
+		sig = sig[:j]
+	}
+	// Both modes (light and dark) must be capped: density is not a palette issue.
+	if n := strings.Count(sig, "maxArcs: 26"); n != 2 {
+		t.Errorf("signal declares maxArcs: 26 %d times, want 2 (light + dark)", n)
+	}
+	if strings.Contains(sig, "arcWidth: 0.5,") {
+		t.Error("signal still uses the wide 0.5 arc; it was thinned to 0.35 to cut glow")
+	}
+}
+
+// TestEntityOptsForwardsEveryKnob guards a silent-failure mode: entityOpts is an
+// explicit whitelist, so a knob added to a theme config has no effect at all
+// until it is listed there. hotArcRatio was added and dropped exactly this way.
+func TestEntityOptsForwardsEveryKnob(t *testing.T) {
+	globe := string(cobeGlobeJS)
+	boot := string(cobeBootJS)
+
+	// Every `opts.X` buildCobeEntities reads must appear in entityOpts.
+	i := strings.Index(boot, "function entityOpts(cfg) {")
+	if i < 0 {
+		t.Fatal("entityOpts not found")
+	}
+	forward := boot[i : i+strings.Index(boot[i:], "}")]
+
+	// Scope to buildCobeEntities. Other exports (bindGlobeInteraction) take their
+	// own unrelated opts, and scanning the whole file reports those as failures.
+	b := strings.Index(globe, "export function buildCobeEntities")
+	if b < 0 {
+		t.Fatal("buildCobeEntities not found")
+	}
+	body := globe[b:]
+	if e := strings.Index(body[1:], "\nexport function "); e >= 0 {
+		body = body[:e+1]
+	}
+
+	read := regexp.MustCompile(`opts\.([A-Za-z]+)`).FindAllStringSubmatch(body, -1)
+	seen := map[string]bool{}
+	for _, m := range read {
+		knob := m[1]
+		if seen[knob] {
+			continue
+		}
+		seen[knob] = true
+		if !strings.Contains(forward, knob+": cfg."+knob) {
+			t.Errorf("buildCobeEntities reads opts.%s but entityOpts does not forward it; "+
+				"the theme setting would be silently ignored", knob)
+		}
+	}
+	if len(seen) == 0 {
+		t.Error("found no opts.* reads; the check is not actually looking at anything")
+	}
+}

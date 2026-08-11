@@ -259,6 +259,21 @@
     0%,100% { box-shadow: 0 0 4px var(--accent); }
     50% { box-shadow: 0 0 14px var(--accent), 0 0 24px color-mix(in srgb, var(--accent) 15%, transparent); }
   }
+  /* Accent dot halos, Signal only. The shared 10-24px acid-lime bloom is mild on
+     the pale themes but glares on a near-black ground, so Signal gets a tighter
+     one rather than every theme losing the effect. */
+  html[data-theme="signal"] .title .dot {
+    box-shadow: 0 0 0 0 var(--accent), 0 0 5px color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+  html[data-theme="signal"] .sb-dot {
+    box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 60%, transparent);
+    animation: none;
+  }
+  html[data-theme="signal"] .title .dot { animation: pulseSignal 1.8s infinite; }
+  @keyframes pulseSignal {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent), 0 0 5px color-mix(in srgb, var(--accent) 55%, transparent); }
+    100% { box-shadow: 0 0 0 10px transparent, 0 0 5px color-mix(in srgb, var(--accent) 55%, transparent); }
+  }
   .rail.left { left: 52px; }
   @media (max-width: 760px) {
     .sidebar { display: none; }
@@ -277,7 +292,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=11" />
+<link rel="stylesheet" href="/themes.css?v=12" />
 </head>
 <body>
 
