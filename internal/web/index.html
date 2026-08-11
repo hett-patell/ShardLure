@@ -277,7 +277,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css" />
+<link rel="stylesheet" href="/themes.css?v=2" />
 </head>
 <body>
 
@@ -707,8 +707,13 @@ function renderGauge(summary, intentCounts, kindCounts) {
     '<div class="gb-row" style="grid-column:1/-1;border-top:1px solid var(--line);padding-top:3px;margin-top:3px"><span>'+fmt(ev)+' events · '+fmt(ac)+' actors · '+fmt(ips)+' IPs</span><span class="gb-val" style="color:'+color+'">'+score+'</span></div>';
 }
 
-/* ==== Theme globe overlays (Sprite stickers / Meridian sats) ==== */
-var STICKER_CYCLE = ['skull.svg', 'bolt.svg', 'bug.svg', 'controller.svg', 'shield.svg'];
+/* ==== Theme globe overlays (Sprite stickers / Meridian sats) ====
+   Sprite stickers are COUNTRY FLAGS derived from the actor's real `cc`, not
+   invented artwork: the flag is the one piece of iconography the data actually
+   supports, it needs no shipped assets (emoji are font glyphs), and it matches
+   how flags are already rendered in the Top Source IPs table and origin line.
+   A cycle of decorative glyphs told you nothing about the attacker. */
+var STICKER_TILTS = [-8, 6, -4, 10];
 
 /* Compact duration: 3d 15h / 2h 14m / 47s. Used by the Honeypot panel. */
 function dur(sec) {
@@ -786,14 +791,26 @@ function buildThemeOverlays(theme, home, actors) {
   if (theme === 'sprite') {
     out.push({
       lat: home.lat, lng: home.lon, kind: 'sticker', alt: 0.04,
-      sticker: 'shield.svg', label: 'HOME', tilt: -4
+      emoji: flag(home.cc), label: 'HOME · ' + (home.city || ''),
+      placeKey: 'home', marker: 'home', tilt: -4
     });
-    ranked.forEach(function (a, i) {
+    // Iterate the MARKER ordering, not the raw actor list: markers come from a
+    // geo-deduped set, so raw index i and marker `a<i>` are different actors
+    // whenever two actors share a bucket (Amsterdam/Frankfurt collapse often).
+    // Anchoring to the wrong marker is exactly how a flag ends up on the wrong
+    // city, so the index has to come from the same source the markers did.
+    var ordered = (window.ShardCobe && window.ShardCobe.actorOrder)
+      ? window.ShardCobe.actorOrder(ranked)
+      : ranked;
+    ordered.forEach(function (a, i) {
+      var cc = a.cc || '';
+      if (!cc || cc === '??') return;   // no flag without a country; skip rather than invent one
       out.push({
         lat: a.lat, lng: a.lon, kind: 'sticker', alt: 0.03 + (i % 3) * 0.01,
-        sticker: STICKER_CYCLE[i % STICKER_CYCLE.length],
-        label: (a.cc || '') + ' · ' + (a.ip || ''),
-        tilt: (i % 2 === 0 ? -8 : 7) + (i % 3)
+        emoji: flag(cc),
+        label: cc + ' · ' + (a.city || a.ip || ''),
+        placeKey: 'a' + i, marker: 'a' + i,
+        tilt: STICKER_TILTS[i % STICKER_TILTS.length]
       });
     });
   } else {
@@ -835,13 +852,14 @@ function makeOverlayEl(d) {
   wrap.className = 'globe-overlay globe-overlay--' + (d.kind || 'x');
   wrap.title = d.label || d.title || d.ip || '';
   if (d.kind === 'sticker') {
+    // Emoji glyph, not an <img>: no asset to ship, and the flag comes straight
+    // from the actor's country code.
     var box = document.createElement('div');
     box.className = 'globe-sticker';
     box.style.transform = 'rotate(' + (d.tilt || 0) + 'deg)';
-    var img = document.createElement('img');
-    img.src = '/stickers/' + d.sticker;
-    img.alt = d.label || 'sticker';
-    box.appendChild(img);
+    box.textContent = d.emoji || '';
+    box.setAttribute('role', 'img');
+    box.setAttribute('aria-label', d.label || 'origin');
     wrap.appendChild(box);
   } else if (d.kind === 'sat') {
     var satBox = document.createElement('div');
@@ -883,6 +901,11 @@ function applyGlobeOverlays() {
     }
     var el = makeOverlayEl(d);
     el.setAttribute('data-place', id);
+    // data-marker opts this element into CSS anchor positioning against the
+    // matching Cobe marker (`--cobe-<id>`), which is pixel-exact because the
+    // library places the anchor with the same projection it draws with. Only
+    // set it when the id really is a marker id (home / a<i>).
+    if (d.marker) el.setAttribute('data-marker', d.marker);
     if (d.tilt != null) el.style.setProperty('--tilt', d.tilt + 'deg');
     if (d.kind === 'sticker' || d.kind === 'sat') el.setAttribute('data-offset', 'float');
     else if (d.kind === 'live' || d.kind === 'analytics') el.setAttribute('data-offset', 'side');
