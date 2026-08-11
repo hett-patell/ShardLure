@@ -1325,14 +1325,7 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "no actor for that IP"})
 		return
 	}
-	cand := abuseipdb.ReportCandidate{
-		SrcIP:           act.PrimaryIP,
-		Playbook:        act.Playbook,
-		ProbeScore:      act.ProbeScore,
-		EventCount:      act.EventCount,
-		UniqueUsers:     act.UniqueUsers,
-		AttemptsPerHour: act.AttemptsPerHour,
-	}
+	cand := newReportCandidate(act, s.recentRatesCached()[act.ID])
 
 	// Server-side throttle: enforce a minimum gap between /report POSTs
 	// process-wide so a scripted caller can't spam the API. Held only for the
@@ -1432,13 +1425,15 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 	// Build the candidate set from the same ranked suggestions the widget shows
 	// (Vet + dedup happen inside Report, so we don't pre-filter here beyond
 	// resolving each IP to its best reportable actor row).
-	actors, err := s.st.TopActorsByRate(1000)
+	actors, err := s.st.ActorsForReporting(time.Now().Add(-recentRateWindow), 1000)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
 	seen := map[string]bool{}
 	cands := make([]abuseipdb.ReportCandidate, 0, len(actors))
+	// One windowed-rate lookup for the whole batch, not one per candidate.
+	batchRates := s.recentRatesCached()
 	for _, a := range actors {
 		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
 			continue
@@ -1454,14 +1449,7 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		if berr != nil || best == nil {
 			best = &a
 		}
-		cands = append(cands, abuseipdb.ReportCandidate{
-			SrcIP:           best.PrimaryIP,
-			Playbook:        best.Playbook,
-			ProbeScore:      best.ProbeScore,
-			EventCount:      best.EventCount,
-			UniqueUsers:     best.UniqueUsers,
-			AttemptsPerHour: best.AttemptsPerHour,
-		})
+		cands = append(cands, newReportCandidate(best, batchRates[best.ID]))
 	}
 
 	// Guard against concurrent batch runs (a second click, a script loop).
@@ -1533,25 +1521,19 @@ func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Reque
 	// Pull the most-aggressive actors and let Suggest's Vet gate + scoring do
 	// the selection. 1000 is a generous ceiling; the vast majority never pass
 	// Vet, so the scored set is small.
-	actors, err := s.st.TopActorsByRate(1000)
+	actors, err := s.st.ActorsForReporting(time.Now().Add(-recentRateWindow), 1000)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	suggestRates := s.recentRatesCached()
 	inputs := make([]abuseipdb.SuggestInput, 0, len(actors))
 	for _, a := range actors {
 		if a.PrimaryIP == "" {
 			continue
 		}
 		inputs = append(inputs, abuseipdb.SuggestInput{
-			Cand: abuseipdb.ReportCandidate{
-				SrcIP:           a.PrimaryIP,
-				Playbook:        a.Playbook,
-				ProbeScore:      a.ProbeScore,
-				EventCount:      a.EventCount,
-				UniqueUsers:     a.UniqueUsers,
-				AttemptsPerHour: a.AttemptsPerHour,
-			},
+			Cand:     newReportCandidate(&a, suggestRates[a.ID]),
 			LastSeen: a.LastSeen,
 		})
 	}

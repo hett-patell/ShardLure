@@ -145,14 +145,19 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 		resp.Threat = tb
 	}
 	resp.TopCountries = append(resp.TopCountries, s.topCountriesCached()...)
-	// Brute-Force Radar: the most aggressive actors by attempts/hour across ALL
-	// actors (was derived client-side from the recent-80 actor slice, so it
-	// showed ~171/h when the true peak was 3000+/h).
-	if rad, err := s.st.TopActorsByRate(8); err == nil {
-		for _, a := range rad {
+	// Brute-Force Radar: the most aggressive actors across ALL actors (was derived
+	// client-side from the recent-80 actor slice, so it showed ~171/h when the
+	// true peak was 3000+/h).
+	//
+	// Ranked and displayed by the WINDOWED rate. It used to order by the stored
+	// attempts_per_hour, which is a lifetime average, so a widget captioned
+	// "most aggressive" put an actor mid-escalation below one that was briefly
+	// loud a month ago, and printed a figure 2-3x below the real current rate.
+	if rad, err := s.st.TopActorsByRecentRate(time.Now().Add(-recentRateWindow), 8); err == nil {
+		for _, r := range rad {
 			resp.Radar = append(resp.Radar, radarRow{
-				IP:       a.PrimaryIP,
-				RateHour: a.AttemptsPerHour,
+				IP:       r.Actor.PrimaryIP,
+				RateHour: r.PerHour,
 			})
 		}
 	}
@@ -331,14 +336,8 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	// endpoint enforces, so the button only shows when a report would succeed.
 	reportEligible := false
 	if s.abuseEnabledLive() && s.abuseKeyLive() != "" {
-		ok, _ := abuseipdb.Vet(abuseipdb.ReportCandidate{
-			SrcIP:           a.PrimaryIP,
-			Playbook:        a.Playbook,
-			ProbeScore:      a.ProbeScore,
-			EventCount:      a.EventCount,
-			UniqueUsers:     a.UniqueUsers,
-			AttemptsPerHour: a.AttemptsPerHour,
-		}, s.abuseAdmin, s.abuseMinProbeLive())
+		ok, _ := abuseipdb.Vet(newReportCandidate(a, s.recentRatesCached()[a.ID]),
+			s.abuseAdmin, s.abuseMinProbeLive())
 		if ok {
 			// Also hide the button if we already reported within the window,
 			// so the operator isn't offered a no-op.

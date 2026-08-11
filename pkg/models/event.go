@@ -58,16 +58,21 @@ type Event struct {
 }
 
 type Actor struct {
-	ID              string
-	Source          Source
-	PrimaryIP       string
-	Playbook        string
-	Intent          string
-	Confidence      int
-	FirstSeen       time.Time
-	LastSeen        time.Time
-	EventCount      int
-	UniqueUsers     int
+	ID          string
+	Source      Source
+	PrimaryIP   string
+	Playbook    string
+	Intent      string
+	Confidence  int
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	EventCount  int
+	UniqueUsers int
+	// AttemptsPerHour is a LIFETIME average: EventCount over the whole
+	// FirstSeen..LastSeen span. It is NOT a current rate, and it understates an
+	// actor mid-escalation by 2-3x because the burst is averaged against however
+	// long the actor sat idle. Anything describing how hard an actor is hitting
+	// NOW must use store.RecentRatesByActor / TopActorsByRecentRate instead.
 	AttemptsPerHour float64
 	HASSH           string
 	SSHClient       string

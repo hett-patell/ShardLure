@@ -154,6 +154,11 @@ type Server struct {
 	threatMu     sync.Mutex
 	threatCached *threatBlock
 	threatAt     time.Time
+
+	// Windowed per-actor attack rates; see report_candidate.go.
+	ratesMu     sync.Mutex
+	ratesCached map[string]float64
+	ratesAt     time.Time
 }
 
 // threatBlockCached returns the memoized windowed threat score.

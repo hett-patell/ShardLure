@@ -189,7 +189,17 @@ func (a *abuseReportRecorderAdapter) RecordAbuseIPDBReport(ip, status string, sc
 // gate's job — this just surfaces actors above the probe floor with a primary
 // IP, ordered by aggression so --limit reports the worst offenders first.
 func collectReportCandidates(st *store.Store, minProbe int) ([]abuseipdb.ReportCandidate, error) {
-	actors, err := st.TopActorsByRate(1000)
+	since := time.Now().Add(-store.RecentRateWindow)
+	actors, err := st.ActorsForReporting(since, 1000)
+	if err != nil {
+		return nil, err
+	}
+	// Windowed rates, one query for the whole pool. Actor.AttemptsPerHour is a
+	// LIFETIME average and understates an actively escalating attacker by 2-3x,
+	// which is the wrong figure to weight a report about current behaviour by.
+	// Absent from the map means no activity in the window: 0 is the honest value
+	// and only lowers priority, since Vet does not gate on the rate.
+	rates, err := st.RecentRatesByActor(since)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +214,7 @@ func collectReportCandidates(st *store.Store, minProbe int) ([]abuseipdb.ReportC
 			ProbeScore:      a.ProbeScore,
 			EventCount:      a.EventCount,
 			UniqueUsers:     a.UniqueUsers,
-			AttemptsPerHour: a.AttemptsPerHour,
+			AttemptsPerHour: rates[a.ID],
 		})
 	}
 	return out, nil

@@ -52,6 +52,12 @@ import (
 // reads calmer would be moving the goalposts to make the number look better.
 const threatWindow = 24 * time.Hour
 
+// recentRateWindow is the window for per-actor attack rates. Same length as the
+// threat window so the dashboard never shows two different notions of "recent",
+// and long enough to span a diurnal cycle: a one-hour window would rank whoever
+// happens to be mid-burst this minute above a sustained campaign.
+const recentRateWindow = store.RecentRateWindow
+
 // threatFactor is one 0-25 component: a log-scaled rate between a floor (below
 // which it contributes nothing) and a ceiling (at which it maxes out).
 type threatFactor struct {
