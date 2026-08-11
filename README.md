@@ -23,11 +23,14 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - [Setup Guide](#setup-guide)
 - [Local Development](#local-development)
 - [Commands](#commands)
+- [CI](#ci)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
 - [Persona And Bait](#persona-and-bait)
 - [IP Reputation Enrichment](#ip-reputation-enrichment)
 - [Threat Intel Sharing (MalwareBazaar)](#threat-intel-sharing-malwarebazaar)
+- [URLhaus URL Submission](#urlhaus-url-submission)
+- [VirusTotal Payload Lookup](#virustotal-payload-lookup)
 - [AbuseIPDB Reporting](#abuseipdb-reporting)
 - [Architecture](#architecture)
 - [Security Notes](#security-notes)
@@ -60,6 +63,9 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - **Runtime keystore:** API keys and appearance settings live in SQLite, editable from the settings panel. DB wins over env vars; env vars win over config file. No restart needed.
 - **Tunnel tracking:** captures and aggregates `direct-tcpip` forwarding attempts (attacker proxy pivots) — powers the "Proxy Targets" widget and tunnel IOC export.
 - **Persistent geo cache:** IP geolocation results are stored in SQLite and survive restarts. No more "resolving..." on every page load.
+- **Local geolocation (recommended):** point `geoip.mmdb` at a MaxMind GeoLite2/GeoIP2 City database and geo resolves **locally** — tier 1, before any HTTP. It fixes three things at once: coverage (the HTTP tier is capped per poll and only resolves IPs currently on screen, so most attacker IPs were never resolved at all), privacy (the free ip-api tier is plain HTTP, so every attacker IP you looked up was visible on the wire), and air-gap (works with outbound geo turned off entirely). A missing or corrupt database is fail-open — it degrades to the HTTP tier and says so in Settings.
+- **URLhaus URL submission:** MalwareBazaar gets the payload *files*; [URLhaus](https://urlhaus.abuse.ch/) gets the **URLs they were served from**. Because ShardLure fetches attacker URLs itself, a successful fetch is first-hand proof the URL was live and serving — exactly URLhaus's bar. Blue Team panel shows the vetting gate's decision per candidate, including *why* anything was held back. One abuse.ch Auth-Key covers both services.
+- **VirusTotal payload verdicts:** check captured payload hashes against VirusTotal without ever uploading a file — only the sha256 leaves the host. The payload library shows a `virustotal` column: cached verdicts render as an engine ratio, hashes VT has never seen render as **novel** (a genuinely interesting signal for a honeypot), and everything else gets an opt-in `check` button. The list view never spends quota; the free tier allows ~4 lookups/minute, so live lookups are always deliberate.
 
 ## Setup Guide
 
@@ -226,6 +232,16 @@ make build
 ./shardlure live :8080 --cowrie=/path/cowrie.json --tailscale
 ```
 
+Tests:
+
+```bash
+make test                     # go test ./...
+go test ./internal/store/ -run TestName    # single package / single test
+make fuzz                     # fuzz the 3 attacker-input parsers (FUZZTIME=5m to extend)
+```
+
+`make fuzz` exercises the parsers that consume attacker-controlled bytes: the sshd journal line parser, the Cowrie jsonlog reader, and the Cowrie TTY binary decoder (a packed `<iLiiLL` C struct — the sharpest edge, since its own length arithmetic could over-read). CI does **not** fuzz, but `go test ./...` runs each target's seed corpus, so known-bad inputs stay covered. Note that Go writes *failing* fuzz inputs to `testdata/fuzz/` as binary files — don't commit those (`check-utf8.sh` rejects them); pin the finding as a readable unit test instead.
+
 The binary can also launch the VPS wrapper:
 
 ```bash
@@ -267,10 +283,16 @@ sudo ./shardlure run
 
 GitHub Actions runs on push and pull request:
 
+- `scripts/check-utf8.sh` — fails on any tracked text file with a UTF-16 BOM or NUL bytes (see Troubleshooting for why this exists)
+- `python3 -m unittest scripts/test_release_contracts.py` and `scripts/test_shardlure.py`
+- `scripts/check-cowrie-patches.sh` — anti-fingerprint patches still apply to the pinned Cowrie
+- `gofmt -l` on all tracked Go files (formatting is enforced)
 - `go mod verify`
 - `go vet ./...`
 - `go test -coverprofile=coverage.out ./...`
-- `go build -o shardlure ./cmd/shardlure`
+- `go build -o shardlure ./cmd/shardlure` + `shardlure version` smoke
+- `scripts/ci-web-smoke.sh` — boots the web server and checks it serves
+- a cross-build job for the release targets
 
 ## Configuration
 
@@ -310,17 +332,38 @@ capture:
   max_bytes: 52428800
   timeout_sec: 45
 
+# How long events, enrichment cache entries, artifacts and TTY transcripts are
+# kept before pruning. 0 disables purging (not recommended in production).
+retention_days: 90
+
+geoip:
+  # Local GeoLite2/GeoIP2 City database. STRONGLY recommended: it is tier 1
+  # (tried before any HTTP), resolves every attacker IP, and sends nothing to
+  # a third party. With this set you can turn the two flags below OFF for
+  # zero geo egress. Overridable with SHARDLURE_GEO_MMDB.
+  # mmdb: /var/lib/shardlure/GeoLite2-City.mmdb
+  enabled: true          # ip-api.com HTTP tier (fallback only when mmdb is set)
+  insecure_http: true    # plaintext http://ip-api.com — see Security Notes
+
 intel:
   bazaar:
     api_key: ""
     tags: ["shardlure", "honeypot"]
     max_bytes: 33554432
     freshness_days: 10
+  urlhaus:
+    # abuse.ch issues ONE Auth-Key per account covering MalwareBazaar AND
+    # URLhaus, so leaving this empty reuses intel.bazaar.api_key above.
+    api_key: ""
+    tags: ["shardlure", "honeypot"]
+    active_days: 3       # only submit URLs confirmed serving within N days (1..3)
+    anonymous: false     # hide your abuse.ch handle on the public record
   abuseipdb:
     report_enabled: false
     categories: [18, 22]
     min_probe_score: 60
     rewindow_hours: 24
+    comment: ""           # appended to the generated report; carries no host/session id
 ```
 
 Use `-config /path/shardlure.yaml` or `SHARDLURE_CONFIG` to override the path. API keys can also be set from the dashboard settings panel (stored in SQLite, takes precedence over env/config).
@@ -575,12 +618,13 @@ The same gate runs for both the CLI and the dashboard's "Report All" button. The
 
 - **Loopback default:** The dashboard binds to `127.0.0.1:8080` by default. Wildcard or public addresses require an explicit `SHARDLURE_DASH_TOKEN` — the server refuses to start with an unauthenticated listener on a non-loopback address.
 - **Cookie auth:** The `?token=` query parameter is bootstrap-only — it sets an `HttpOnly`, `SameSite=Strict` session cookie and redirects to a clean URL. Tokens never persist in browser history, referrer headers, or server access logs.
-- **Security headers:** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a restrictive `Content-Security-Policy` (self-hosted assets only, frame-ancestors none).
+- **Security headers:** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a restrictive `Content-Security-Policy` — `script-src` and `connect-src` are `'self'` only (every script, including the WebGL globe engine, is vendored and embedded in the binary, so no CDN sits in the supply chain of an authenticated page and the dashboard works air-gapped), `frame-ancestors none`. Web fonts are the one external reference; they degrade to system fonts when unreachable.
+- **Profiling endpoints are not part of "open mode":** `/debug/pprof/*` and `/debug/runtime` require a dashboard token, and when no token is set they additionally require a **loopback** connection — so heap/goroutine/cmdline dumps are never reachable from the tailnet or LAN just because `/api/*` is open. Use an SSH port-forward (`ssh -L 8080:127.0.0.1:8080 host`) to profile a token-less deployment.
 - **Token rotation:** Rotating the dashboard token via Settings automatically updates the session cookie so the operator's session survives.
 - Verify `ssh -p 2222 user@host` in a second terminal **before** closing your original session. "I'll fix it in the morning" SSH stories never end well.
 - Keep the dashboard on Tailscale or another private network. Exposing the dashboard to the internet is what we call self-doxxing.
 - Set `SHARDLURE_DASH_TOKEN` for dashboard defense in depth (constant-time compared, sent as `Authorization: Bearer …` or `X-ShardLure-Token`).
-- External geolocation is opt-in (`SHARDLURE_GEO_HTTP=1`). Use `SHARDLURE_IPAPI_KEY` for HTTPS lookups via ip-api Pro (recommended). Plaintext `http://ip-api.com` only if you also set `SHARDLURE_GEO_INSECURE_HTTP=1` (leaks attacker IPs to the network path).
+- **Geolocation, in order of preference:** (1) set `geoip.mmdb` to a local GeoLite2/GeoIP2 database — zero egress, full coverage, and you can then leave the HTTP tier off entirely; (2) `SHARDLURE_IPAPI_KEY` for HTTPS lookups via ip-api Pro; (3) plaintext `http://ip-api.com`, which needs both `SHARDLURE_GEO_HTTP=1` and `SHARDLURE_GEO_INSECURE_HTTP=1` and **discloses every attacker IP you look up to the network path in cleartext**. External geolocation is opt-in in all cases.
 - Cowrie SSH host keys are regenerated during install so you don't share a fingerprint with every other lazy honeypot on Shodan.
 - Keep bait credentials fake. Yes really. Do not get clever and put "almost real" creds in there.
 - The SQLite database is chmod'd to `0600` automatically — it can contain attacker-supplied passwords, which sometimes overlap with their *actually reused* real ones. Treat the file like a loaded gun.
