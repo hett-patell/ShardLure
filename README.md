@@ -242,6 +242,30 @@ make fuzz                     # fuzz the 3 attacker-input parsers (FUZZTIME=5m t
 
 `make fuzz` exercises the parsers that consume attacker-controlled bytes: the sshd journal line parser, the Cowrie jsonlog reader, and the Cowrie TTY binary decoder (a packed `<iLiiLL` C struct — the sharpest edge, since its own length arithmetic could over-read). CI does **not** fuzz, but `go test ./...` runs each target's seed corpus, so known-bad inputs stay covered. Note that Go writes *failing* fuzz inputs to `testdata/fuzz/` as binary files — don't commit those (`check-utf8.sh` rejects them); pin the finding as a readable unit test instead.
 
+### Verifying the dashboard numbers
+
+```bash
+# on the honeypot host, where both the DB and the API are reachable
+curl -s localhost:8080/api/dashboard -o /tmp/d.json
+curl -s localhost:8080/api/intel     -o /tmp/i.json
+sudo python3 scripts/verify-widgets.py
+```
+
+`verify-widgets.py` recomputes **every** widget's numbers straight from `events`
+and `actors`, using queries written independently of the application's own, and
+prints a per-check pass/fail table (36 checks, including a per-bucket comparison
+of all heatmap cells and sparkline buckets). Live ingest means the API snapshot
+and the SQL query cannot be simultaneous, so monotonic counters allow a small
+drift and the delta is always printed — drift can never be mistaken for
+agreement.
+
+It exists because the sharpest class of bug here is invisible to `go vet`,
+`staticcheck`, the race detector and the test suite: **correct code computing the
+wrong quantity**. All four were clean while the threat gauge sat frozen at 52 for
+months and the Brute-Force Radar listed eight attackers that had been silent for
+weeks. The only thing that catches that is recomputing the number a different
+way, so if you change a widget's data source, run this.
+
 The binary can also launch the VPS wrapper:
 
 ```bash
@@ -788,6 +812,8 @@ sudo userdel -r cowrie
 - [x] MalwareBazaar payload sharing (CLI + one-click dashboard upload)
 - [x] Signal theme — full SOC dashboard redesign with sidebar nav and light/dark toggle
 - [x] Dashboard widgets: threat gauge, geography, credentials, brute-force radar, live timeline
+- [x] Windowed threat scoring — the gauge and every rate column describe the last 24h, not all-time totals
+- [x] Widget verification harness (`scripts/verify-widgets.py`) — every dashboard number recomputed from SQL
 - [x] Persistent geo cache (SQLite-backed, survives restarts)
 - [x] MalwareBazaar dashboard widget (stats + upload history + family classification)
 - [x] Incremental cowrie actor rebuild (per-tick cost is O(touched), not O(all history))
