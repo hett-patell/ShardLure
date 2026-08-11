@@ -1,9 +1,6 @@
 package web
 
-import (
-	"embed"
-	"io/fs"
-)
+import _ "embed"
 
 //go:embed index.html
 var indexHTML string
@@ -43,22 +40,3 @@ var faviconICO []byte
 
 //go:embed logo-180.png
 var logo180PNG []byte
-
-//go:embed stickers/*.svg
-var stickerFS embed.FS
-
-// stickerNames is the allowlist of files served under /stickers/.
-//
-// Sprite's globe stickers used to be hand-drawn SVGs (skull/bolt/bug/…). They
-// were decorative invention that told you nothing about the attacker, so they
-// were replaced by country-flag EMOJI derived from the actor's real `cc` — text
-// glyphs, so there is no asset to ship or allowlist. sat.svg is the only
-// remaining sticker: Meridian's satellite marks, which are iconography rather
-// than data. pulse.svg was already dead (zero references) and went with them.
-var stickerNames = map[string]bool{
-	"sat.svg": true,
-}
-
-func readSticker(name string) ([]byte, error) {
-	return fs.ReadFile(stickerFS, "stickers/"+name)
-}

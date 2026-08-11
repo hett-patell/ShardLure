@@ -763,7 +763,6 @@ func (s *Server) RunContext(ctx context.Context) error {
 		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write(cobeBootJS)
 	})
-	mux.HandleFunc("/stickers/", s.handleSticker)
 	mux.HandleFunc("/api/ioc/list", s.guard(s.handleIOCList))
 	mux.HandleFunc("/api/ioc/csv", s.guard(s.handleIOCCSV))
 	mux.HandleFunc("/api/ioc/stix", s.guard(s.handleIOCSTIX))

@@ -277,7 +277,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=7" />
+<link rel="stylesheet" href="/themes.css?v=8" />
 </head>
 <body>
 
@@ -294,7 +294,7 @@
        stay legible against the pale globe without needing a border or a box. -->
   <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
     <defs>
-      <filter id="sprite-sticker-outline">
+      <filter id="globe-sticker-outline">
         <feMorphology in="SourceAlpha" result="dilated" operator="dilate" radius="2" />
         <feFlood flood-color="#fffdf7" result="edge" />
         <feComposite in="edge" in2="dilated" operator="in" result="outline" />
@@ -937,13 +937,18 @@ function makeOverlayEl(d) {
     box.setAttribute('aria-label', d.label || 'origin');
     wrap.appendChild(box);
   } else if (d.kind === 'sat') {
+    // Satellite glyph, not a shipped SVG: the emoji is an actual satellite
+    // rather than an approximation of one, needs no asset, and picks up the
+    // same die-cut outline treatment the globe stickers use. The pulse ring is
+    // a CSS ::after on this box, so the box keeps explicit dimensions and the
+    // glyph is centred inside it — ring geometry stays independent of font
+    // metrics.
     var satBox = document.createElement('div');
     satBox.className = 'globe-sat' + (d.hub ? ' globe-sat--hub' : '');
     if (d.ringDelay != null) satBox.style.setProperty('--ring-delay', d.ringDelay + 's');
-    var satImg = document.createElement('img');
-    satImg.src = '/stickers/sat.svg';
-    satImg.alt = d.label || 'satellite';
-    satBox.appendChild(satImg);
+    satBox.textContent = '\uD83D\uDEF0\uFE0F';   // U+1F6F0 satellite
+    satBox.setAttribute('role', 'img');
+    satBox.setAttribute('aria-label', d.label || 'satellite');
     wrap.appendChild(satBox);
   } else if (d.kind === 'live') {
     var live = document.createElement('div');

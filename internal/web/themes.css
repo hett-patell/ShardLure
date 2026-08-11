@@ -305,7 +305,7 @@ html[data-theme="sprite"] .theme-card .tname {
   font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
     "Twemoji Mozilla", sans-serif;
   white-space: nowrap;
-  filter: url(#sprite-sticker-outline) drop-shadow(0 2px 2px rgba(36, 25, 16, 0.35));
+  filter: url(#globe-sticker-outline) drop-shadow(0 2px 2px rgba(36, 25, 16, 0.35));
   /* Declutter fades the GLYPH; the wrapper's opacity is Cobe's front/back
      signal. Two separate properties multiply, so neither has to know about the
      other, and a sticker losing a collision eases out instead of blinking. */
@@ -313,15 +313,25 @@ html[data-theme="sprite"] .theme-card .tname {
 }
 /* No outline filter available (non-Chromium SVG filter quirks): fall back to a
    plain shadow so the glyph still separates from the globe. */
-@supports not (filter: url(#sprite-sticker-outline)) {
+@supports not (filter: url(#globe-sticker-outline)) {
   .globe-sticker { filter: drop-shadow(0 1px 2px rgba(36, 25, 16, 0.5)); }
 }
+/* Satellite marks are the U+1F6F0 emoji, not a shipped SVG. The box keeps
+   explicit dimensions because the ::after pulse ring insets against it — sizing
+   it by font metrics instead would make the ring drift between platforms. The
+   glyph is centred and set smaller than the box so the ring has room. */
 .globe-sat {
   position: relative;
-  width: 28px; height: 28px; display: block;
-  filter: drop-shadow(1px 1px 0 rgba(26, 35, 50, 0.25));
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; line-height: 1;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
+    "Twemoji Mozilla", sans-serif;
+  filter: url(#globe-sticker-outline) drop-shadow(0 1px 2px rgba(26, 35, 50, 0.4));
 }
-.globe-sat img { width: 100%; height: 100%; display: block; }
+@supports not (filter: url(#globe-sticker-outline)) {
+  .globe-sat { filter: drop-shadow(0 1px 2px rgba(26, 35, 50, 0.55)); }
+}
 .globe-sat::after {
   content: "";
   position: absolute;
@@ -334,6 +344,7 @@ html[data-theme="sprite"] .theme-card .tname {
 }
 .globe-sat--hub {
   width: 34px; height: 34px;
+  font-size: 25px;
 }
 .globe-sat--hub::after {
   inset: -9px;
