@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -129,6 +130,20 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 	if u.Host == "" {
 		return false, "URL has no host"
 	}
+	// Credentials must never reach a public dataset. A userinfo section also
+	// obscures the real host from a casual reader ("http://google.com@evil.tld"),
+	// so it is disqualifying regardless of whether the secret is real.
+	if u.User != nil {
+		return false, "URL contains credentials"
+	}
+	// A malformed port means the URL was never fetched as written; submitting
+	// it would put an unusable IOC in the dataset.
+	if p := u.Port(); p != "" {
+		n, perr := strconv.Atoi(p)
+		if perr != nil || n < 1 || n > 65535 {
+			return false, "invalid port"
+		}
+	}
 
 	// 2. Provenance: we must have fetched it ourselves.
 	if !fetchedOrigins[c.Origin] {
@@ -154,19 +169,36 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 	// 5. Private / reserved / special-purpose addresses. Explicitly required
 	//    by the submission policy for automated submitters (RFC1597/RFC6890),
 	//    and also stops us publishing a link to a host inside our own network.
-	host := u.Hostname()
-	if ip := net.ParseIP(host); ip != nil {
+	// Normalise before classifying. A trailing dot is the FQDN root form:
+	// "127.0.0.1." is loopback to every resolver, but net.ParseIP rejects it,
+	// so without the trim it slipped past the IP check into the hostname rule
+	// and was accepted.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	switch {
+	case net.ParseIP(host) != nil:
 		// netmatch.IsPublicIP is the ONE conservative definition of "public"
 		// shared with the capture fetcher and the AbuseIPDB gate. Do not
 		// hand-roll this: it covers RFC6890 special-use blocks a naive check
 		// misses (AS112, NAT64, 6to4, IETF protocol assignments, benchmarking,
 		// documentation), which is exactly what URLhaus's automated-submission
 		// policy forbids.
-		if !netmatch.IsPublicIP(ip) {
+		if !netmatch.IsPublicIP(net.ParseIP(host)) {
 			return false, "private or special-purpose IP address"
 		}
-	} else if !isSubmittableHostname(host) {
+	case isNumericHost(host):
+		// An all-numeric host is an IP in some alternate encoding that Go's
+		// strict parser rejects but libc/browsers happily resolve — "127.1",
+		// "2130706433", "0x7f.0.0.1". We deliberately do NOT resolve attacker
+		// URLs here (that would be a DNS side channel and a TOCTOU), so the
+		// only safe answer for an address we cannot classify is no.
+		return false, "ambiguous numeric host (possible IP shorthand)"
+	case !isSubmittableHostname(host):
 		return false, "non-public hostname"
+	}
+	// Absurdly long hosts are never real payload servers and would be rejected
+	// upstream anyway; 253 is the DNS maximum.
+	if len(host) > 253 {
+		return false, "hostname exceeds the 253-byte DNS limit"
 	}
 
 	// 6. Pure redirectors host no payload.
@@ -198,6 +230,38 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 		return false, "payload shape unrecognised — cannot confirm it is malware"
 	}
 	return true, ""
+}
+
+// isNumericHost reports whether every dot-separated label is numeric (decimal
+// or 0x-hex). Such a host is always an IP literal in some encoding — no real
+// DNS name looks like this — and resolvers accept forms Go's net.ParseIP does
+// not ("127.1" → 127.0.0.1, "2130706433" → 127.0.0.1). Treating them as
+// unclassifiable is what stops a loopback/RFC1918 address reaching a public
+// blocklist through an alternate spelling.
+func isNumericHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" {
+			return false
+		}
+		s := label
+		if strings.HasPrefix(s, "0x") {
+			s = s[2:]
+			if s == "" {
+				return false
+			}
+		}
+		for _, r := range s {
+			isDec := r >= '0' && r <= '9'
+			isHex := strings.HasPrefix(label, "0x") && ((r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F'))
+			if !isDec && !isHex {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // isSubmittableHostname rejects names that can't be a public payload host:
