@@ -28,6 +28,9 @@ type intelResponse struct {
 	Heatmap        []heatmapCell   `json:"heatmap"`
 	Actors         []intelActorRow `json:"actors"`
 	RecentCommands []commandRow    `json:"recentCommands"`
+	// Threat is scored server-side over a bounded window; see threat.go for why
+	// the old client-side scoring over cumulative totals could not move.
+	Threat *threatBlock `json:"threat,omitempty"`
 }
 
 type labelCountRow struct {
@@ -136,6 +139,11 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// IP outside that slice — e.g. 64k hits from Brazil — vanished from the
 	// chart). Authoritative SQL aggregation joined to the geo cache, cached and
 	// shared with /api/dashboard so it isn't run twice per page load.
+	// Threat gauge. A failure here must not fail the whole intel page: the field
+	// is omitempty and the client keeps its previous reading.
+	if tb, err := s.threatBlockCached(); err == nil && tb != nil {
+		resp.Threat = tb
+	}
 	resp.TopCountries = append(resp.TopCountries, s.topCountriesCached()...)
 	// Brute-Force Radar: the most aggressive actors by attempts/hour across ALL
 	// actors (was derived client-side from the recent-80 actor slice, so it

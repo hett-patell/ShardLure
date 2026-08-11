@@ -147,6 +147,34 @@ type Server struct {
 	dashExtraMu     sync.Mutex
 	dashExtraCached *dashExtra
 	dashExtraAt     time.Time
+
+	// Threat-gauge window aggregate. Same reasoning as the caches above: one
+	// indexed pass over the 24h window (~16ms cold on 670k rows), memoized so a
+	// 5s poll from several open tabs does not repeat it.
+	threatMu     sync.Mutex
+	threatCached *threatBlock
+	threatAt     time.Time
+}
+
+// threatBlockCached returns the memoized windowed threat score.
+//
+// On error it returns the previous value rather than a zero block: a transient
+// query failure should leave the gauge showing its last reading, not drop it to
+// 0/LOW, which would read as "the attack stopped".
+func (s *Server) threatBlockCached() (*threatBlock, error) {
+	s.threatMu.Lock()
+	defer s.threatMu.Unlock()
+	if s.threatCached != nil && time.Since(s.threatAt) < statsTTL {
+		return s.threatCached, nil
+	}
+	act, err := s.st.WindowActivitySince(time.Now().Add(-threatWindow))
+	if err != nil {
+		return s.threatCached, err
+	}
+	b := buildThreatBlock(act, threatWindow)
+	s.threatCached = &b
+	s.threatAt = time.Now()
+	return s.threatCached, nil
 }
 
 type dashExtra struct {
