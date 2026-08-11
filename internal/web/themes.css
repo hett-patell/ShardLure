@@ -306,6 +306,10 @@ html[data-theme="sprite"] .theme-card .tname {
     "Twemoji Mozilla", sans-serif;
   white-space: nowrap;
   filter: url(#sprite-sticker-outline) drop-shadow(0 2px 2px rgba(36, 25, 16, 0.35));
+  /* Declutter fades the GLYPH; the wrapper's opacity is Cobe's front/back
+     signal. Two separate properties multiply, so neither has to know about the
+     other, and a sticker losing a collision eases out instead of blinking. */
+  transition: opacity 0.22s ease;
 }
 /* No outline filter available (non-Chromium SVG filter quirks): fall back to a
    plain shadow so the glyph still separates from the globe. */

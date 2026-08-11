@@ -347,39 +347,63 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   // Priority is DOM order, which callers emit in volume order, so the busiest
   // country always wins a contested spot. Throttled because it reads layout;
   // the globe itself only paints at 12-30fps when idle.
+  // Hysteresis, not a single threshold. A lone threshold re-decided every pass
+  // makes stickers near the collision boundary flip on/off as the globe turns
+  // (reported as flags blinking). Two guards stop that:
+  //   - asymmetric margins: an already-shown sticker only yields when it really
+  //     overlaps, while a hidden one must clear by a wider gap before returning,
+  //     so the decision cannot chatter around one boundary;
+  //   - a dwell time, so no sticker can change state twice in quick succession.
+  // The fade itself is applied to the INNER glyph, because the outer element's
+  // opacity belongs to Cobe's --cobe-visible-<id>; multiplying the two lets the
+  // declutter fade be smooth without fighting the front/back signal.
+  const PAD_HIDE = 2; // must genuinely overlap by this much to be dropped
+  const PAD_SHOW = 14; // must be this clear before coming back
+  const DWELL_MS = 420;
   let lastDeclutter = 0;
+
+  const setDeclutter = (el, shown, now) => {
+    if (el._dcShown === shown) return;
+    if (el._dcAt && now - el._dcAt < DWELL_MS) return; // too soon; let it settle
+    el._dcShown = shown;
+    el._dcAt = now;
+    const glyph = el.querySelector(".globe-sticker") || el;
+    glyph.style.opacity = shown ? "1" : "0";
+  };
+
   const declutterAnchored = () => {
     const now = performance.now();
     if (now - lastDeclutter < 120) return;
     lastDeclutter = now;
     const kept = [];
-    const PAD = 3; // px of breathing room between two stickers
     for (const el of labelEls) {
       if (!el._cobeAnchored) continue;
-      // Cobe drives opacity via --cobe-visible-<id>; a back-facing sticker is
-      // already invisible and must not block a front-facing one.
-      if (parseFloat(getComputedStyle(el).opacity || "0") < 0.5) {
-        el.style.visibility = "hidden";
-        continue;
-      }
+      // Cobe drives the outer opacity via --cobe-visible-<id>; a back-facing
+      // sticker is already invisible and must not reserve space. Rotating out of
+      // view bypasses the dwell timer: it is not a contested decision, and
+      // holding it would leave a ghost over the wrong hemisphere.
       const r = el.getBoundingClientRect();
-      if (!r.width || !r.height) {
-        el.style.visibility = "hidden";
+      if (parseFloat(getComputedStyle(el).opacity || "0") < 0.5 || !r.width) {
+        el._dcShown = false;
+        el._dcAt = now;
+        const glyph = el.querySelector(".globe-sticker") || el;
+        glyph.style.opacity = "0";
         continue;
       }
+      const wasShown = el._dcShown !== false;
+      const pad = wasShown ? PAD_HIDE : PAD_SHOW;
       const hit = kept.some(
         (k) =>
-          r.left < k.right + PAD &&
-          r.right > k.left - PAD &&
-          r.top < k.bottom + PAD &&
-          r.bottom > k.top - PAD
+          r.left < k.right + pad &&
+          r.right > k.left - pad &&
+          r.top < k.bottom + pad &&
+          r.bottom > k.top - pad
       );
-      if (hit) {
-        el.style.visibility = "hidden";
-      } else {
-        el.style.visibility = "visible";
-        kept.push(r);
-      }
+      setDeclutter(el, !hit, now);
+      // Reserve space whenever it is currently drawn, including during a
+      // dwell-held state, so a lower-priority sticker cannot slide underneath
+      // one that is still fading out.
+      if (el._dcShown !== false) kept.push(r);
     }
   };
 
@@ -641,7 +665,12 @@ export function cobeThemeConfig(theme, mode) {
       arcHeight: 0.34,
       // Density caps. The globe is 415px; 80 arcs there is a scribble, not a
       // visualisation. The top talkers carry the signal.
-      maxArcs: 12,
+      //
+      // These MUST match. Markers and arcs are both taken from the head of the
+      // same ranked list, so maxArcs < maxMarkers leaves the difference as dots
+      // with no line running home — which reads as arcs failing to render, not
+      // as a deliberate cap (reported exactly that way at 12 vs 24).
+      maxArcs: 24,
       maxMarkers: 24,
       markerSize: { base: 0.02, cap: 0.024, div: 900 },
       colors: {
@@ -732,8 +761,11 @@ function dedupeActorsByLocation(actors) {
  * Caps match globe.gl (80) so Meridian/Sprite show the same attack fan-in.
  */
 export function buildCobeEntities(home, actors, colors, opts = {}) {
-  const maxArcs = opts.maxArcs ?? COBE_MAX_ARCS;
   const maxMarkers = opts.maxMarkers ?? COBE_MAX_MARKERS;
+  // Never draw more arcs than there are markers: the extra arcs would run to
+  // points with no dot at either end. Capping here means a theme can only ever
+  // under-draw arcs on purpose, never by accident.
+  const maxArcs = Math.min(opts.maxArcs ?? COBE_MAX_ARCS, maxMarkers);
   // Per-theme marker scale. Defaults reproduce the original curve exactly, so
   // themes that don't override it are untouched.
   const ms = opts.markerSize || {};

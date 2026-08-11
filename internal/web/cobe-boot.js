@@ -246,7 +246,21 @@ const ShardCobe = {
   theme: () => _theme,
   // Marker-id ordering, so overlay builders can anchor to `--cobe-a<i>` and be
   // certain index i is the same actor the marker represents.
-  actorOrder: (actors) => globeActorOrder(actors),
+  //
+  // Takes NO argument on purpose. It previously accepted a list, and callers
+  // passed a different one to what markers were built from: the dashboard feeds
+  // Cobe `mergeActorsForGlobe(actors, topActors)` but kept the unmerged
+  // `actors` for overlays. Both then ran the same geo-dedupe over different
+  // inputs, so index i resolved to a different actor on each side and flags
+  // rendered over the wrong country (Brazil beside India). Reading `_actors` —
+  // the exact list buildCobeEntities consumed — makes that divergence
+  // impossible to reintroduce. Returns null before the first data arrives so
+  // callers can skip rather than guess an ordering.
+  actorOrder: () => {
+    if (!_actors || !_actors.length) return null;
+    const cfg = cobeThemeConfig(_theme, _mode);
+    return globeActorOrder(_actors, cfg.maxMarkers);
+  },
 };
 
 window.ShardCobe = ShardCobe;

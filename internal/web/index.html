@@ -277,7 +277,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=4" />
+<link rel="stylesheet" href="/themes.css?v=7" />
 </head>
 <body>
 
@@ -562,9 +562,11 @@ function syncGlobeEngine(theme) {
   return ensureCobeBoot().then(function (boot) {
     return boot.ensure(theme, currentMode());
   }).then(function () {
-    if (typeof applyGlobeOverlays === 'function') applyGlobeOverlays();
+    // force: ensure() may have torn the engine down and emptied the overlay
+    // container, so the cached signature cannot be trusted here.
+    if (typeof applyGlobeOverlays === 'function') applyGlobeOverlays(true);
     if (typeof _lastHome !== 'undefined' && _lastHome && window.ShardCobe) {
-      window.ShardCobe.updateData(_lastHome, typeof _lastActors !== 'undefined' ? _lastActors : []);
+      window.ShardCobe.updateData(_lastHome, typeof _lastGlobeActors !== 'undefined' ? _lastGlobeActors : []);
     }
   }).catch(function () {});
 }
@@ -581,6 +583,8 @@ const spark = document.getElementById('spark');
 let sparkData = [];
 var _lastHome = { lat: 19.076, lon: 72.8777, city: 'Mumbai', country: 'India', cc: 'IN' };
 var _lastActors = [];
+var _lastGlobeActors = [];
+var _lastTopActors = [];
 
 
 function drawSpark(series) {
@@ -826,9 +830,17 @@ function buildThemeOverlays(theme, home, actors) {
     // whenever two actors share a bucket (Amsterdam/Frankfurt collapse often).
     // Anchoring to the wrong marker is exactly how a flag ends up on the wrong
     // city, so the index has to come from the same source the markers did.
+    // The ordering MUST come from Cobe, because that is what the marker ids were
+    // built from. Deriving it locally from this function's own actor list looks
+    // equivalent but is not: the dashboard hands Cobe a merged actors+topActors
+    // list, so an independently-computed order puts flag i over marker i of a
+    // different actor. If Cobe has no data yet, emit no stickers at all — a
+    // missing flag is recoverable on the next poll, a flag on the wrong country
+    // is a lie.
     var ordered = (window.ShardCobe && window.ShardCobe.actorOrder)
-      ? window.ShardCobe.actorOrder(geoActors)
-      : geoActors;
+      ? window.ShardCobe.actorOrder()
+      : null;
+    if (!ordered) return out;
     // Pick stickers that will actually be readable, in volume order:
     //   - one per COUNTRY, because several cities in one country stack up on
     //     screen and "which countries" is what a flag answers anyway;
@@ -949,10 +961,29 @@ function makeOverlayEl(d) {
   return wrap;
 }
 
-function applyGlobeOverlays() {
+var _overlayKey = '';
+
+/** Signature of the rendered overlay set, so an unchanged poll is a no-op. */
+function overlaySignature(theme, data) {
+  return theme + '#' + data.map(function (d) {
+    return [d.kind, d.marker || '', d.placeKey || '', d.emoji || d.sticker || '',
+      d.title || '', d.value || '', d.sub || '',
+      Number(d.lat).toFixed(2), Number(d.lng).toFixed(2)].join(',');
+  }).join('|');
+}
+
+function applyGlobeOverlays(force) {
   var theme = currentThemeId();
   var data = buildThemeOverlays(theme, _lastHome, _lastActors);
   if (!window.ShardCobe || !window.ShardCobe.isActive()) return;
+  // setOverlayPlaces tears down and recreates every overlay element. The
+  // dashboard polls every 5s, so doing that unconditionally destroyed and
+  // rebuilt each sticker on every poll - which reset its declutter state and
+  // showed up as flags blinking roughly every 5 seconds (measured 4.1
+  // visibility flips/sec). Skip when the rendered set is byte-identical.
+  var key = overlaySignature(theme, data);
+  if (!force && key === _overlayKey) return;
+  _overlayKey = key;
   var places = [];
   var nodes = [];
   var seenPlaces = {};
@@ -990,6 +1021,12 @@ async function refresh() {
   const home = d.home || { lat: 19.076, lon: 72.8777, city: 'Mumbai', country: 'India', cc: 'IN' };
   _lastHome = home;
   _lastActors = actors;
+  _lastTopActors = d.topActors || [];
+  // Cobe is fed a merged actors+topActors list (see the updateData call below).
+  // Remember exactly that list so the theme-switch path re-sends the SAME one:
+  // sending the unmerged list there rebuilt markers from a different set, so the
+  // marker ids meant different actors depending on which path ran last.
+  _lastGlobeActors = mergeActorsForGlobe(actors, _lastTopActors);
 
   document.getElementById('s-events').textContent = fmt(summary.eventCount);
   document.getElementById('s-actors').textContent = fmt(summary.actorCount);
@@ -1053,7 +1090,7 @@ async function refresh() {
   }
 
   if (window.ShardCobe) {
-    window.ShardCobe.updateData(home, mergeActorsForGlobe(actors, d.topActors || []));
+    window.ShardCobe.updateData(home, _lastGlobeActors);
   }
   applyGlobeOverlays();
 }
