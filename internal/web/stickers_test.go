@@ -47,14 +47,11 @@ func TestCobeGlobeJSServed(t *testing.T) {
 
 func TestHandleStickerAllowlist(t *testing.T) {
 	s := &Server{}
-	// sat.svg is the only remaining sticker asset: Sprite's globe stickers are
-	// now country-flag emoji (text glyphs, nothing to serve), leaving Meridian's
-	// satellite mark as the sole shipped file.
 	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/stickers/sat.svg", nil)
+	r := httptest.NewRequest(http.MethodGet, "/stickers/skull.svg", nil)
 	s.handleSticker(rec, r)
 	if rec.Code != 200 {
-		t.Fatalf("sat: %d", rec.Code)
+		t.Fatalf("skull: %d", rec.Code)
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "svg") {
 		t.Fatalf("content-type %q", ct)
@@ -75,16 +72,5 @@ func TestHandleStickerAllowlist(t *testing.T) {
 	s.handleSticker(rec, r)
 	if rec.Code != 404 {
 		t.Fatalf("unknown: want 404 got %d", rec.Code)
-	}
-
-	// Removed decorative assets must be gone from the allowlist, not merely
-	// deleted from disk — a stale entry would serve an embed error as a 200.
-	for _, gone := range []string{"skull.svg", "bolt.svg", "bug.svg", "controller.svg", "shield.svg", "pulse.svg"} {
-		rec = httptest.NewRecorder()
-		r = httptest.NewRequest(http.MethodGet, "/stickers/"+gone, nil)
-		s.handleSticker(rec, r)
-		if rec.Code != 404 {
-			t.Errorf("%s: want 404 got %d", gone, rec.Code)
-		}
 	}
 }
