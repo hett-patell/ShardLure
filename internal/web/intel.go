@@ -203,6 +203,10 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// dedupes in-flight lookups, so overlapping polls are safe.
 	go s.geo.prefetch(geoIPs, 5*time.Second)
 
+	// Windowed attack rates for the whole listed set, from the shared 10s cache:
+	// one indexed GROUP BY, not one per actor.
+	rates := s.recentRatesCached()
+
 	// One window-function query for all actors' top users instead of one
 	// point query per actor (was ~80 queries per poll).
 	usersByActor, err := s.st.ActorUsersForActors(actorIDs, 8)
@@ -225,13 +229,17 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 			Intent:      a.Intent,
 			Events:      a.EventCount,
 			UniqueUsers: a.UniqueUsers,
-			RateHour:    a.AttemptsPerHour,
-			ProbeScore:  a.ProbeScore,
-			Confidence:  a.Confidence,
-			HASSH:       a.HASSH,
-			SSHClient:   a.SSHClient,
-			FirstSeen:   a.FirstSeen.UTC().Format(time.RFC3339),
-			LastSeen:    a.LastSeen.UTC().Format(time.RFC3339),
+			// Windowed, not the stored lifetime average: the UI renders this as
+			// "rate/h" meaning current intensity, and a lifetime mean understates
+			// an escalating attacker 2-3x. Absent from the map = no recent
+			// activity, which displays honestly as 0.
+			RateHour:   rates[a.ID],
+			ProbeScore: a.ProbeScore,
+			Confidence: a.Confidence,
+			HASSH:      a.HASSH,
+			SSHClient:  a.SSHClient,
+			FirstSeen:  a.FirstSeen.UTC().Format(time.RFC3339),
+			LastSeen:   a.LastSeen.UTC().Format(time.RFC3339),
 		}
 		if !isPrivateIP(a.PrimaryIP) {
 			g := s.geo.cached(a.PrimaryIP)
@@ -285,7 +293,7 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 		Intent:      a.Intent,
 		Events:      a.EventCount,
 		UniqueUsers: a.UniqueUsers,
-		RateHour:    a.AttemptsPerHour,
+		RateHour:    s.recentRatesCached()[a.ID],
 		ProbeScore:  a.ProbeScore,
 		Confidence:  a.Confidence,
 		HASSH:       a.HASSH,

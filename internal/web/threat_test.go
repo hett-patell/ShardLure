@@ -1,6 +1,7 @@
 package web
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -229,5 +230,36 @@ func TestBothDashboardsServeTheSameThreatBlock(t *testing.T) {
 	intel := readSource(t, "intel.go")
 	if !strings.Contains(intel, "s.threatBlockCached()") {
 		t.Error("/api/intel must reuse the same cached block")
+	}
+}
+
+// TestNoRateDisplayUsesTheLifetimeAverage pins every place that renders a "/h"
+// figure to the WINDOWED rate. Actor.AttemptsPerHour is a lifetime mean; the
+// Brute-Force Radar was ranking and printing it, which showed eight attackers
+// that had been silent for 8 to 39 days as the "most aggressive".
+//
+// Asserted on the source because the wiring is what regresses: a new panel that
+// copies `a.AttemptsPerHour` into a rate field reintroduces the bug silently.
+func TestNoRateDisplayUsesTheLifetimeAverage(t *testing.T) {
+	// Whitespace-insensitive: gofmt re-aligns struct fields whenever a
+	// neighbouring field name changes length, so a literal-substring check
+	// silently stops matching. A mutation test caught exactly that - the
+	// mutation was a no-op and the assertion looked like it had failed to fire.
+	banned := regexp.MustCompile(
+		`(RateHour|AttemptsPerHour)\s*:\s*\w+\.AttemptsPerHour`)
+	for _, name := range []string{"intel.go", "server.go", "api_intel.go"} {
+		src := readSource(t, name)
+		if m := banned.FindString(src); m != "" {
+			t.Errorf("%s contains %q: a rate shown to the operator, or used to weight a "+
+				"report, must come from store.RecentRatesByActor and not the lifetime average",
+				name, m)
+		}
+	}
+	// And the radar must use the windowed ranking query.
+	if !strings.Contains(readSource(t, "intel.go"), "TopActorsByRecentRate") {
+		t.Error("radar no longer ranks by TopActorsByRecentRate")
+	}
+	if strings.Contains(readSource(t, "intel.go"), "TopActorsByRate(") {
+		t.Error("radar reverted to TopActorsByRate, which orders by the lifetime average")
 	}
 }

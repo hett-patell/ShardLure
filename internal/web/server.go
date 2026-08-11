@@ -1277,13 +1277,16 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// dedupes in-flight lookups so overlapping polls are safe.
 	go s.geo.prefetch(geoIPs, 5*time.Second)
 
+	// Windowed rates for the globe cards: the Meridian/Signal chips print this as
+	// "N/h", so it has to mean current intensity rather than a lifetime mean.
+	cardRates := s.recentRatesCached()
 	for _, a := range actors {
 		card := actorCard{
 			ID:       a.ID,
 			IP:       a.PrimaryIP,
 			Playbook: a.Playbook,
 			Events:   a.EventCount,
-			RateHour: a.AttemptsPerHour,
+			RateHour: cardRates[a.ID],
 			LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
 			Conf:     a.Confidence,
 		}
@@ -1310,7 +1313,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 				IP:       a.PrimaryIP,
 				Playbook: a.Playbook,
 				Events:   a.EventCount,
-				RateHour: a.AttemptsPerHour,
+				RateHour: cardRates[a.ID],
 				LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
 				Conf:     a.Confidence,
 			}
