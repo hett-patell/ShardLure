@@ -73,12 +73,14 @@ func (r *Resolver) Cached(sha string) (Verdict, bool) {
 	if err := json.Unmarshal([]byte(payload), &v); err != nil {
 		return Verdict{}, false
 	}
-	// Self-heal a stale cache FORMAT. A row written by an older field naming
-	// still decodes cleanly (encoding/json ignores unknown keys) but yields an
-	// empty Verdict — which would render as a blank badge forever, since the
-	// TTL is 30 days. Treating that as a miss re-fetches once and rewrites the
-	// row in the current format, so no migration is needed.
-	if v.Verdict == "" {
+	// Self-heal a stale cache FORMAT. A row written with an older field layout
+	// still decodes cleanly (encoding/json ignores unknown keys) but silently
+	// zeroes every renamed field — and with a 30-day TTL it would serve those
+	// blanks for a month. Only the explicit version stamp catches this:
+	// sniffing content does not, because single-word tags like "verdict" and
+	// "malicious" survive a rename untouched (a stale row once rendered as
+	// "22/0 engines" with no threat label past exactly such a check).
+	if v.CacheVersion != currentCacheVersion {
 		return Verdict{}, false
 	}
 	if v.FetchedAt.IsZero() {

@@ -254,8 +254,12 @@ func TestResolverCachesAndAvoidsSecondCall(t *testing.T) {
 // and must not be written to the cache.
 func TestResolverFallsBackToStaleOnError(t *testing.T) {
 	cache := newMemCache()
-	// Seed a stale verdict.
-	stale := Verdict{SHA256: goodSHA, Found: true, Verdict: "malicious",
+	// Seed a verdict that is EXPIRED but at the current layout version, i.e.
+	// trustworthy-but-old. (A version-MISMATCHED row is deliberately not a
+	// fallback candidate: its renamed fields decode to zero, so serving it
+	// would show wrong numbers rather than stale ones.)
+	stale := Verdict{CacheVersion: currentCacheVersion, SHA256: goodSHA, Found: true,
+		Verdict: "malicious", Malicious: 22, TotalEngine: 59,
 		FetchedAt: time.Now().Add(-100 * 24 * time.Hour)}
 	raw, _ := json.Marshal(stale)
 	_ = cache.PutPayloadIntel(goodSHA, Source, string(raw))
@@ -385,29 +389,35 @@ func TestVerdictOmitsAbsentTimestamps(t *testing.T) {
 	}
 }
 
-// A cache row written in an older field naming still decodes cleanly
-// (encoding/json ignores unknown keys) but yields an empty Verdict. With a
-// 30-day TTL that would render a blank badge for a month, so Cached() must
-// treat it as a miss and let the next lookup rewrite it.
+// A cache row written with an older field layout still decodes cleanly
+// (encoding/json ignores unknown keys) but silently zeroes every RENAMED
+// field. The realistic case is the dangerous one: single-word tags like
+// "verdict" and "malicious" survive a camelCase migration untouched, so the
+// row looks populated while totalEngines/threatLabel/fetchedAt are blank —
+// live, this rendered as "22/0 engines" with no label. Only the version stamp
+// catches it.
 func TestResolverSelfHealsStaleCacheFormat(t *testing.T) {
 	cache := newMemCache()
-	// Legacy snake_case payload — none of these keys map to current fields.
-	legacy := `{"sha256":"` + goodSHA + `","found":true,"verdict":"","total_engines":61,` +
-		`"threat_label":"trojan.mirai/gafgyt","fetched_at":"2026-01-01T00:00:00Z"}`
+	// Legacy snake_case payload, exactly as v0 wrote it: note that verdict and
+	// malicious ARE populated, which is why content-sniffing was insufficient.
+	legacy := `{"sha256":"` + goodSHA + `","found":true,"verdict":"malicious",` +
+		`"malicious":22,"total_engines":59,"threat_label":"trojan.sagnt/abtrojan",` +
+		`"type_description":"Shell script","fetched_at":"2026-01-01T00:00:00Z"}`
 	if err := cache.PutPayloadIntel(goodSHA, Source, legacy); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	r := NewResolver(cache, mapKeys{KeyEnvVar: "k"}, "")
-	if _, ok := r.Cached(goodSHA); ok {
-		t.Fatal("a stale-format row must be reported as a cache MISS, not rendered blank")
+	if v, ok := r.Cached(goodSHA); ok {
+		t.Fatalf("stale-format row must be a cache MISS, got hit: %+v", v)
 	}
 
-	// And a live lookup rewrites it in the current format.
+	// A live lookup rewrites it in the current layout.
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		calls++
-		_, _ = w.Write([]byte(`{"data":{"attributes":{"last_analysis_stats":{"malicious":9,"undetected":50}}}}`))
+		_, _ = w.Write([]byte(`{"data":{"attributes":{"last_analysis_stats":{"malicious":9,"undetected":50},` +
+			`"popular_threat_classification":{"suggested_threat_label":"trojan.x/y"}}}}`))
 	}))
 	defer srv.Close()
 	r.Client = NewClient(srv.URL)
@@ -417,15 +427,67 @@ func TestResolverSelfHealsStaleCacheFormat(t *testing.T) {
 		t.Fatalf("lookup: %v", err)
 	}
 	if v.Verdict != "malicious" || calls != 1 {
-		t.Errorf("expected one re-fetch producing a real verdict, got %+v calls=%d", v, calls)
+		t.Fatalf("expected one re-fetch with a real verdict, got %+v calls=%d", v, calls)
 	}
-	// Now it round-trips from cache.
+	// The rewritten row must now hit AND carry the previously-zeroed fields.
 	got, ok := r.Cached(goodSHA)
-	if !ok || got.Verdict != "malicious" {
-		t.Errorf("rewritten row should hit: ok=%v %+v", ok, got)
+	if !ok {
+		t.Fatal("rewritten row should hit the cache")
+	}
+	if got.TotalEngine == 0 || got.ThreatLabel == "" || got.FetchedAt.IsZero() {
+		t.Errorf("renamed fields still blank after refresh: %+v", got)
+	}
+	if got.CacheVersion != currentCacheVersion {
+		t.Errorf("cacheVersion = %d, want %d", got.CacheVersion, currentCacheVersion)
 	}
 	raw, _, _, _ := cache.GetPayloadIntel(goodSHA, Source)
-	if !strings.Contains(raw, "totalEngines") {
-		t.Errorf("row not rewritten in current camelCase format: %s", raw)
+	if !strings.Contains(raw, "totalEngines") || !strings.Contains(raw, "cacheVersion") {
+		t.Errorf("row not rewritten in current format: %s", raw)
+	}
+}
+
+// A row at the CURRENT version must still be served from cache (the version
+// guard must not turn every lookup into a fetch).
+func TestResolverServesCurrentVersionFromCache(t *testing.T) {
+	cache := newMemCache()
+	v := Verdict{CacheVersion: currentCacheVersion, SHA256: goodSHA, Found: true,
+		Verdict: "malicious", Malicious: 9, TotalEngine: 59, FetchedAt: time.Now().UTC()}
+	raw, _ := json.Marshal(v)
+	if err := cache.PutPayloadIntel(goodSHA, Source, string(raw)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("current-version row must not trigger a fetch")
+	}))
+	defer srv.Close()
+
+	r := NewResolver(cache, mapKeys{KeyEnvVar: "k"}, srv.URL)
+	got, err := r.Lookup(context.Background(), goodSHA)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if !got.Cached || got.TotalEngine != 59 {
+		t.Errorf("expected a cache hit with intact fields, got %+v", got)
+	}
+}
+
+// A version-mismatched row must NOT be used as the error fallback: its renamed
+// fields decode to zero, so serving it would present wrong numbers (0 engines,
+// no label) as if they were real. Surfacing the error is the honest outcome.
+func TestResolverDoesNotFallBackToVersionMismatchedRow(t *testing.T) {
+	cache := newMemCache()
+	legacy := `{"sha256":"` + goodSHA + `","found":true,"verdict":"malicious",` +
+		`"malicious":22,"total_engines":59,"threat_label":"trojan.sagnt/abtrojan"}`
+	if err := cache.PutPayloadIntel(goodSHA, Source, legacy); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	r := NewResolver(cache, mapKeys{KeyEnvVar: "k"}, srv.URL)
+	if _, err := r.Lookup(context.Background(), goodSHA); !errors.Is(err, ErrRateLimited) {
+		t.Errorf("err = %v, want ErrRateLimited (no fallback to an untrustworthy row)", err)
 	}
 }

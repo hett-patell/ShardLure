@@ -45,6 +45,13 @@ const (
 	NotFoundTTL = 7 * 24 * time.Hour
 )
 
+// currentCacheVersion is the Verdict field layout written to payload_intel.
+// Bump it whenever a json tag changes or a field's meaning shifts; rows at any
+// other version are treated as a cache miss and refreshed on next lookup.
+//
+//	1 — camelCase field names (aligned with the rest of the dashboard API)
+const currentCacheVersion = 1
+
 // Verdict is the parsed, UI-shaped result of one hash lookup.
 //
 // Field names are camelCase to match the rest of the dashboard API (this
@@ -52,12 +59,20 @@ const (
 // foreign body). Note the deliberate contrast with vtFileResp below, which
 // keeps VirusTotal's own snake_case because that IS the upstream wire format.
 //
-// These names are also the on-disk format of the payload_intel cache, so add
-// fields rather than renaming them; a rename silently zeroes cached rows.
-// Resolver.Cached defends against that by treating a decoded-but-empty verdict
-// as a miss, so a format change self-heals on the next lookup instead of
-// rendering blanks.
+// These names are also the on-disk format of the payload_intel cache. Renaming
+// a field silently zeroes it in every cached row (encoding/json just ignores
+// the unknown old key), so ANY rename must bump CacheVersion — that is the
+// only reliable staleness signal. Content-sniffing does not work: the first
+// attempt at this checked whether Verdict was empty, but single-word fields
+// like "verdict" and "malicious" survive a camelCase migration unchanged, so a
+// stale row sailed through the guard and rendered as "22/0 engines" with no
+// threat label.
 type Verdict struct {
+	// CacheVersion identifies the field layout this row was written with.
+	// Resolver.Cached rejects anything that isn't currentCacheVersion, so a
+	// layout change re-fetches once and rewrites the row — no migration.
+	CacheVersion int `json:"cacheVersion"`
+
 	SHA256 string `json:"sha256"`
 	// Found is false when VirusTotal has never seen this hash (HTTP 404).
 	Found bool `json:"found"`
@@ -195,11 +210,12 @@ func (c *Client) Lookup(ctx context.Context, apiKey, sha string) (*Verdict, erro
 	case http.StatusNotFound:
 		// Genuinely useful signal for a honeypot: a sample nobody has seen.
 		return &Verdict{
-			SHA256:    sha,
-			Found:     false,
-			Verdict:   "unknown",
-			Permalink: permalink(sha),
-			FetchedAt: time.Now().UTC(),
+			CacheVersion: currentCacheVersion,
+			SHA256:       sha,
+			Found:        false,
+			Verdict:      "unknown",
+			Permalink:    permalink(sha),
+			FetchedAt:    time.Now().UTC(),
 		}, nil
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil, ErrUnauthorized
@@ -231,6 +247,7 @@ func ParseFileReport(raw []byte, sha string) (*Verdict, error) {
 	total := st.Harmless + st.Malicious + st.Suspicious + st.Undetected
 
 	v := &Verdict{
+		CacheVersion:    currentCacheVersion,
 		SHA256:          sha,
 		Found:           true,
 		Malicious:       st.Malicious,
