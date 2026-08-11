@@ -566,25 +566,45 @@ export function cobeThemeConfig(theme, mode) {
     };
   }
   if (theme === "sprite") {
+    // Sprite's globe was the noisiest of the three: 80 coral arcs fanning out of
+    // one point over ~30 saturated green/amber dots, inside a BLUE rim glow that
+    // did not exist anywhere else in this warm cream palette. Retuned for calm:
+    // warm glow, flush markers, far fewer and thinner arcs, muted marker ink.
     return {
       dark: 0,
-      diffuse: 1.45,
-      mapSamples: 6000,
-      mapBrightness: 5.4,
-      mapBaseBrightness: 0.12,
-      baseColor: [0.99, 0.95, 0.88],
+      diffuse: 1.5,
+      mapSamples: 9000,
+      mapBrightness: 5.0,
+      // mapBaseBrightness is what makes the dot map VISIBLE on a light globe (it
+      // floors the map value so ocean is stippled too). Setting it to 0 renders
+      // a blank sphere at this size — verified by sweeping the parameter.
+      mapBaseBrightness: 0.1,
+      baseColor: [1, 0.975, 0.93],
       markerColor: [0.91, 0.36, 0.3],
-      glowColor: [0.5, 0.76, 0.9],
-      markerElevation: 0.03,
-      arcColor: [0.91, 0.36, 0.3],
-      arcWidth: 0.55,
-      arcHeight: 0.3,
+      glowColor: [0.97, 0.91, 0.79],
+      // Flush with the surface. Elevated markers read as clutter floating above
+      // the globe, and the reference globes all sit them on it.
+      markerElevation: 0,
+      arcColor: [0.89, 0.48, 0.36],
+      arcWidth: 0.3,
+      // Kept close to the surface. Higher values (0.44 was tried) loop the arc
+      // well outside the globe silhouette, which reads as a rendering glitch
+      // rather than as an arc once the globe rotates.
+      arcHeight: 0.34,
+      // Density caps. The globe is 415px; 80 arcs there is a scribble, not a
+      // visualisation. The top talkers carry the signal.
+      maxArcs: 12,
+      maxMarkers: 24,
+      markerSize: { base: 0.02, cap: 0.024, div: 900 },
       colors: {
         home: [0.91, 0.36, 0.3],
-        hot: [0.94, 0.7, 0.16],
-        cool: [0.24, 0.6, 0.42],
-        arc: [0.91, 0.36, 0.3],
+        // One muted ink for attacker markers: the hot/cool split added colour
+        // noise without encoding anything the size did not already show.
+        hot: [0.58, 0.44, 0.32],
+        cool: [0.58, 0.44, 0.32],
+        arc: [0.89, 0.48, 0.36],
       },
+      stickers: { max: 5, minSeparationDeg: 22 },
     };
   }
   // meridian (default light)
@@ -666,6 +686,12 @@ function dedupeActorsByLocation(actors) {
 export function buildCobeEntities(home, actors, colors, opts = {}) {
   const maxArcs = opts.maxArcs ?? COBE_MAX_ARCS;
   const maxMarkers = opts.maxMarkers ?? COBE_MAX_MARKERS;
+  // Per-theme marker scale. Defaults reproduce the original curve exactly, so
+  // themes that don't override it are untouched.
+  const ms = opts.markerSize || {};
+  const szBase = ms.base ?? 0.028;
+  const szCap = ms.cap ?? 0.05;
+  const szDiv = ms.div ?? 350;
   const {
     home: homeC = [0.05, 0.36, 0.39],
     hot = [0.65, 0.48, 0.18],
@@ -688,7 +714,7 @@ export function buildCobeEntities(home, actors, colors, opts = {}) {
   ];
   spread.slice(0, maxMarkers).forEach((a, i) => {
     const n = a.events || 0;
-    const size = 0.028 + Math.min(0.05, Math.sqrt(n) / 350);
+    const size = szBase + Math.min(szCap, Math.sqrt(n) / szDiv);
     markers.push({
       id: "a" + i,
       location: [a.lat, a.lon],

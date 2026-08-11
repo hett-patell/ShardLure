@@ -277,7 +277,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=2" />
+<link rel="stylesheet" href="/themes.css?v=3" />
 </head>
 <body>
 
@@ -290,6 +290,21 @@
 </nav>
 
 <div id="cobe-stage" hidden>
+  <!-- White dilate-outline for globe stickers: emoji get a die-cut edge so they
+       stay legible against the pale globe without needing a border or a box. -->
+  <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+    <defs>
+      <filter id="sprite-sticker-outline">
+        <feMorphology in="SourceAlpha" result="dilated" operator="dilate" radius="2" />
+        <feFlood flood-color="#fffdf7" result="edge" />
+        <feComposite in="edge" in2="dilated" operator="in" result="outline" />
+        <feMerge>
+          <feMergeNode in="outline" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+    </defs>
+  </svg>
   <div id="cobe-wrap">
     <canvas id="cobe" width="1000" height="1000" role="img" aria-label="Interactive 3D globe showing attacker geolocation"></canvas>
     <div id="cobe-overlays"></div>
@@ -715,6 +730,15 @@ function renderGauge(summary, intentCounts, kindCounts) {
    A cycle of decorative glyphs told you nothing about the attacker. */
 var STICKER_TILTS = [-8, 6, -4, 10];
 
+/** Great-circle separation in degrees, for spreading globe stickers apart. */
+function greatCircleDeg(p, q) {
+  var r = Math.PI / 180;
+  var dLat = (q.lat - p.lat) * r, dLon = (q.lon - p.lon) * r;
+  var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(p.lat * r) * Math.cos(q.lat * r) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return 2 * Math.asin(Math.min(1, Math.sqrt(h))) / r;
+}
+
 /* Compact duration: 3d 15h / 2h 14m / 47s. Used by the Honeypot panel. */
 function dur(sec) {
   sec = Math.max(0, Math.floor(Number(sec) || 0));
@@ -753,10 +777,13 @@ function mergeActorsForGlobe(actors, topActors) {
 
 function buildThemeOverlays(theme, home, actors) {
   if (theme !== 'sprite' && theme !== 'meridian' && theme !== 'signal') return [];
-  var ranked = (actors || [])
+  var geoActors = (actors || [])
     .filter(function (a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); })
-    .sort(function (a, b) { return (b.events || 0) - (a.events || 0); })
-    .slice(0, 6);
+    .sort(function (a, b) { return (b.events || 0) - (a.events || 0); });
+  // Meridian/Signal place a fixed handful of sats+chips, so they keep the top-6
+  // slice. Sprite selects stickers by country and angular spread, which needs a
+  // wider candidate pool — filtering 6 candidates left only two survivors.
+  var ranked = geoActors.slice(0, 6);
   var out = [];
   if (theme === 'signal') {
     var pkHomeS = 'home';
@@ -800,17 +827,49 @@ function buildThemeOverlays(theme, home, actors) {
     // Anchoring to the wrong marker is exactly how a flag ends up on the wrong
     // city, so the index has to come from the same source the markers did.
     var ordered = (window.ShardCobe && window.ShardCobe.actorOrder)
-      ? window.ShardCobe.actorOrder(ranked)
-      : ranked;
+      ? window.ShardCobe.actorOrder(geoActors)
+      : geoActors;
+    // Pick stickers that will actually be readable, in volume order:
+    //   - one per COUNTRY, because several cities in one country stack up on
+    //     screen and "which countries" is what a flag answers anyway;
+    //   - at least MIN_SEP degrees of great-circle from every sticker already
+    //     chosen, because distinct countries can still overlap (Amsterdam /
+    //     Frankfurt / London sit on top of each other at this globe size);
+    //   - capped, because past a handful they stop being legible.
+    // 4 stickers at >=32 deg. Great-circle separation is only a proxy for
+    // SCREEN separation — two points 22 deg apart foreshorten to ~12px when they
+    // sit near the limb, and the globe auto-rotates, so no static rule can
+    // guarantee no overlap. Fewer, further-apart stickers is the robust answer;
+    // past a handful they stop being readable anyway.
+    var MAX_STICKERS = 4, MIN_SEP = 32;
+    // Seed with HOME so the rules apply against it too: otherwise an attacker
+    // in the operator's own country renders a second identical flag right next
+    // to the home one (observed: two India flags 13px apart).
+    var picked = [];
+    var seenCC = {};
+    if (home && home.cc) seenCC[home.cc] = true;
+    var homePt = { lat: home.lat, lon: home.lon };
     ordered.forEach(function (a, i) {
+      if (picked.length >= MAX_STICKERS) return;
       var cc = a.cc || '';
       if (!cc || cc === '??') return;   // no flag without a country; skip rather than invent one
+      if (seenCC[cc]) return;
+      if (greatCircleDeg(homePt, a) < MIN_SEP) return;
+      for (var k = 0; k < picked.length; k++) {
+        if (greatCircleDeg(picked[k].a, a) < MIN_SEP) return;
+      }
+      seenCC[cc] = true;
+      picked.push({ a: a, i: i, cc: cc });
+    });
+    picked.forEach(function (p, n) {
       out.push({
-        lat: a.lat, lng: a.lon, kind: 'sticker', alt: 0.03 + (i % 3) * 0.01,
-        emoji: flag(cc),
-        label: cc + ' · ' + (a.city || a.ip || ''),
-        placeKey: 'a' + i, marker: 'a' + i,
-        tilt: STICKER_TILTS[i % STICKER_TILTS.length]
+        lat: p.a.lat, lng: p.a.lon, kind: 'sticker', alt: 0.03,
+        emoji: flag(p.cc),
+        label: p.cc + ' · ' + (p.a.city || p.a.ip || ''),
+        // marker index must be the one from the MARKER ordering, not this
+        // sticker's own index, or the flag anchors to a different actor.
+        placeKey: 'a' + p.i, marker: 'a' + p.i,
+        tilt: STICKER_TILTS[n % STICKER_TILTS.length]
       });
     });
   } else {

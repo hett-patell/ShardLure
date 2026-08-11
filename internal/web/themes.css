@@ -291,23 +291,26 @@ html[data-theme="sprite"] .theme-card .tname {
   user-select: none;
   transition: opacity 200ms ease;
 }
-/* Sprite stickers are flag EMOJI (a text glyph), not a bitmap. The sticker
-   framing is kept — it is what makes them read as stickers on the Sprite
-   theme — but sized to the glyph and centred, with the drop shadow doing the
-   lifting-off-the-globe work. */
+/* Sprite stickers are flag EMOJI treated as die-cut decals: the glyph itself is
+   the sticker. The previous version boxed an 18px flag inside a hard-bordered
+   34x26 frame, which at globe scale read as clutter rather than as a sticker.
+   The white dilate-outline (SVG filter) plus a soft drop shadow does the
+   lifting-off-the-globe work instead — no border, no background. */
 .globe-sticker {
-  min-width: 34px; height: 26px; padding: 2px 4px; margin: 0;
-  border: 3px solid #241910;
-  box-shadow: 3px 3px 0 #241910;
-  background: #fffdf7;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 18px; line-height: 1;
+  margin: 0; padding: 0;
+  display: block;
+  font-size: 28px; line-height: 1;
   /* Colour emoji ignore `color`; keep the system emoji font so flags render as
      flags rather than falling back to two letter glyphs. */
   font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
     "Twemoji Mozilla", sans-serif;
-  text-rendering: optimizeLegibility;
   white-space: nowrap;
+  filter: url(#sprite-sticker-outline) drop-shadow(0 2px 2px rgba(36, 25, 16, 0.35));
+}
+/* No outline filter available (non-Chromium SVG filter quirks): fall back to a
+   plain shadow so the glyph still separates from the globe. */
+@supports not (filter: url(#sprite-sticker-outline)) {
+  .globe-sticker { filter: drop-shadow(0 1px 2px rgba(36, 25, 16, 0.5)); }
 }
 .globe-sat {
   position: relative;

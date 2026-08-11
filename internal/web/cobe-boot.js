@@ -132,7 +132,7 @@ async function ensure(theme, mode) {
     markerElevation: cfg.markerElevation,
   });
   const size = () => Math.min(w.clientWidth || 480, w.clientHeight || 480) * 2;
-  const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors);
+  const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors, entityOpts(cfg));
   _globe = createGlobe(c, {
     devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1.5),
     width: size(),
@@ -174,7 +174,7 @@ function updateData(home, actors) {
   _dataTimer = setTimeout(() => {
     if (!_globe || !_theme) return;
     const cfg = cobeThemeConfig(_theme, _mode);
-    const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors);
+    const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors, entityOpts(cfg));
     const key = cobeEntitiesKey(_home, markers, arcs);
     if (key === _dataKey) return;
     _dataKey = key;
@@ -215,6 +215,15 @@ function keepOverlaysLastInCobeWrapper() {
   if (!cobeWrapper || !ov) return;
   if (cobeWrapper.lastElementChild === ov) return;
   cobeWrapper.appendChild(ov);
+}
+
+/** Density + marker-scale knobs a theme may override (see cobeThemeConfig). */
+function entityOpts(cfg) {
+  return {
+    maxArcs: cfg.maxArcs,
+    maxMarkers: cfg.maxMarkers,
+    markerSize: cfg.markerSize,
+  };
 }
 
 function setOverlayPlaces(places, htmlNodes) {
