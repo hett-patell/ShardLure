@@ -291,16 +291,23 @@ html[data-theme="sprite"] .theme-card .tname {
   user-select: none;
   transition: opacity 200ms ease;
 }
+/* Sprite stickers are flag EMOJI (a text glyph), not a bitmap. The sticker
+   framing is kept — it is what makes them read as stickers on the Sprite
+   theme — but sized to the glyph and centred, with the drop shadow doing the
+   lifting-off-the-globe work. */
 .globe-sticker {
-  width: 36px; height: 36px; padding: 0; margin: 0;
+  min-width: 34px; height: 26px; padding: 2px 4px; margin: 0;
   border: 3px solid #241910;
   box-shadow: 3px 3px 0 #241910;
   background: #fffdf7;
-  display: block;
-  image-rendering: pixelated;
-}
-.globe-sticker img {
-  width: 100%; height: 100%; display: block; image-rendering: pixelated;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; line-height: 1;
+  /* Colour emoji ignore `color`; keep the system emoji font so flags render as
+     flags rather than falling back to two letter glyphs. */
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
+    "Twemoji Mozilla", sans-serif;
+  text-rendering: optimizeLegibility;
+  white-space: nowrap;
 }
 .globe-sat {
   position: relative;
@@ -651,8 +658,16 @@ html[data-theme="signal"]:not([data-mode="light"]) #cobe-stage {
   }
 }
 
+/* Deliberately NOT positioned. CSS anchor positioning requires the anchor
+   element to be a descendant of the anchored element's containing block; Cobe
+   puts its `anchor-name: --cobe-<id>` divs in the wrapper it inserts around the
+   canvas. If this container were `position: absolute` it would become the
+   containing block itself, leaving those anchors as mere SIBLINGS — anchor()
+   then silently fails and every sticker collapses onto one spot. Static keeps
+   the containing block at Cobe's wrapper, which does contain the anchors.
+   Children are absolutely positioned, so this box contributes no layout. */
 #cobe-overlays {
-  position: absolute; inset: 0;
+  position: static;
   pointer-events: none;
   z-index: 3;
 }

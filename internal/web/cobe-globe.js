@@ -54,9 +54,33 @@ function shortestAngleDelta(from, to) {
   return d;
 }
 
+/**
+ * True when the browser can position elements against Cobe's published anchors.
+ * Cobe 2.x emits a 1px anchor div per marker/arc carrying
+ * `anchor-name: --cobe-<id>` (and `--cobe-visible-<id>` for front/back), placed
+ * with its own projection. Using them means zero projection math on our side
+ * and exact alignment by construction. Chromium-only today, hence the fallback.
+ */
+export const supportsCobeAnchors = () =>
+  typeof CSS !== "undefined" &&
+  typeof CSS.supports === "function" &&
+  CSS.supports("position-anchor", "--x") &&
+  CSS.supports("anchor-name", "--x");
+
+/** Cobe's anchor-name for a marker id, or "" when the element isn't anchorable. */
+function anchorNameFor(el) {
+  const marker = el.getAttribute("data-marker");
+  return marker ? `--cobe-${marker}` : "";
+}
+
 export function bindGlobeInteraction(canvas, state, opts = {}) {
   const wrap = opts.wrap || canvas.parentElement;
   const places = opts.places || [];
+  // Theme markerElevation, so the fallback projection lands on the same sphere
+  // as the WebGL markers.
+  const markerElevation = Number.isFinite(opts.markerElevation)
+    ? opts.markerElevation
+    : 0.03;
   const onFocus = opts.onFocus || (() => {});
   const surface = wrap || canvas;
 
@@ -207,6 +231,12 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   let labelEls = [];
   let placeById = {};
 
+  /** Just the decorative rotation, for elements positioned by CSS anchors. */
+  const tiltOnly = (el) => {
+    const tilt = getComputedStyle(el).getPropertyValue("--tilt").trim();
+    return tilt && tilt !== "0deg" ? `rotate(${tilt})` : "none";
+  };
+
   const overlayTransform = (el) => {
     const mode =
       el.getAttribute("data-offset") ||
@@ -255,11 +285,43 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
           ? "4"
           : "3";
       el.style.margin = "0";
-      el.style.positionAnchor = "auto";
       el.style.translate = "none";
       el.style.transform = overlayTransform(el);
       el.style.transition = "opacity .2s ease";
       el.style.opacity = "0";
+
+      // Preferred path: hand positioning to Cobe's own anchors. `left/top` are
+      // cleared so the anchor's inset rules win, and opacity is driven by
+      // --cobe-visible-<id>. That variable is deliberately a NON-numeric token
+      // ("N"), so when the marker is front-facing `opacity: N` is invalid at
+      // computed-value time and opacity falls back to its initial 1; when the
+      // marker rotates out of view Cobe deletes the variable and the var()
+      // fallback of 0 hides the element. Odd, but it is Cobe's own contract.
+      const anchor = anchorNameFor(el);
+      el._cobeAnchored = false;
+      if (anchor && supportsCobeAnchors()) {
+        el._cobeAnchored = true;
+        el.style.positionAnchor = anchor;
+        el.style.left = "anchor(center)";
+        el.style.top = "auto";
+        el.style.bottom = "anchor(top)";
+        // anchor(center) aligns the element's LEFT EDGE with the marker centre,
+        // so it must be pulled back half its own width or every sticker sits
+        // consistently right of its marker (measured: exactly 18.5px for a
+        // 37px sticker). Using the `translate` property keeps `transform`
+        // free for the decorative tilt.
+        el.style.translate = "-50% 0";
+        // The anchor insets already sit the element directly above the marker,
+        // so the translate half of overlayTransform must NOT also apply — that
+        // double-counted the lift and pushed stickers 54px off (100% of height
+        // plus the 28px float gap). Keep only the decorative tilt.
+        el.style.transform = tiltOnly(el);
+        el.style.opacity = `var(--cobe-visible-${el.getAttribute("data-marker")}, 0)`;
+        el.style.pointerEvents = "none";
+      } else {
+        el.style.positionAnchor = "auto";
+        el.style.bottom = "auto";
+      }
       if (!el._cobeBound) {
         el._cobeBound = true;
         el.addEventListener("click", (e) => {
@@ -283,15 +345,18 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
         el.style.pointerEvents = "none";
         continue;
       }
+      // Elements anchored to a Cobe marker are positioned by the LIBRARY's own
+      // projection (see anchorNameFor), so skip our JS projection entirely —
+      // that is what makes them pixel-exact instead of ~2-6px adrift.
+      if (el._cobeAnchored) continue;
       const offset = el.getAttribute("data-offset");
-      const elev =
-        offset === "float" ||
-        el.classList.contains("sat") ||
-        el.classList.contains("globe-sat") ||
-        el.classList.contains("globe-node") ||
-        el.querySelector(".globe-sat")
-          ? 0.06
-          : 0.02;
+      // Elevation MUST match the theme's markerElevation, otherwise the overlay
+      // is projected onto a different sphere than the marker it annotates and
+      // drifts outward toward the limb (measured up to ~2px at 0.02-vs-0.03,
+      // ~6px for the old float value). Float lift is a CSS translate, not an
+      // elevation bump — doing both double-counted it.
+      const elev = markerElevation;
+      void offset;
       const p = projectLatLon(place.lat, place.lon, phi, theta, elev);
       el.style.left = `${(p.x * 100).toFixed(2)}%`;
       el.style.top = `${(p.y * 100).toFixed(2)}%`;
@@ -565,6 +630,22 @@ export function cobeEntitiesKey(home, markers, arcs) {
     )
     .join("|");
   return `${h}#${mk}#${ar}`;
+}
+
+/**
+ * The actor list in the exact order buildCobeEntities assigns marker ids
+ * (`a0`, `a1`, …). DOM overlays anchored to `--cobe-a<i>` MUST derive their
+ * index from this list, not from the raw actor array: markers come from the
+ * deduped+capped set, so raw index i and marker `a<i>` are different actors
+ * whenever two actors share a geo bucket — which is common (Amsterdam and
+ * Frankfurt collapse constantly). Exported so index.html can build overlays
+ * against the same ordering instead of duplicating the rule.
+ */
+export function globeActorOrder(actors, maxMarkers = COBE_MAX_MARKERS) {
+  const ranked = (actors || [])
+    .filter((a) => Number.isFinite(a.lat) && Number.isFinite(a.lon))
+    .sort((a, b) => (b.events || 0) - (a.events || 0));
+  return dedupeActorsByLocation(ranked).slice(0, maxMarkers);
 }
 
 /** Drop lower-volume actors that share the same ~1° geo bucket so arcs spread globally. */

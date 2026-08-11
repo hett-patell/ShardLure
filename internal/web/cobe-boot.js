@@ -8,6 +8,7 @@ import {
   startGlobeLoop,
   cobeThemeConfig,
   buildCobeEntities,
+  globeActorOrder,
   locationToAngles,
 } from "/cobe-globe.js?v=5";
 
@@ -122,7 +123,14 @@ async function ensure(theme, mode) {
     interacting: false,
   };
   const places = [{ id: "home", label: "Home", lat: _home.lat, lon: _home.lon }];
-  _ix = bindGlobeInteraction(c, _state, { wrap: w, places });
+  // markerElevation is passed through so the fallback projection (browsers
+  // without CSS anchor positioning) puts overlays on the same sphere as the
+  // WebGL markers rather than a hardcoded radius.
+  _ix = bindGlobeInteraction(c, _state, {
+    wrap: w,
+    places,
+    markerElevation: cfg.markerElevation,
+  });
   const size = () => Math.min(w.clientWidth || 480, w.clientHeight || 480) * 2;
   const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors);
   _globe = createGlobe(c, {
@@ -172,13 +180,47 @@ function updateData(home, actors) {
     _dataKey = key;
     try {
       _globe.update({ markers, arcs });
+      // A marker id Cobe has not seen before gets a fresh anchor div appended
+      // to the wrapper, which would land AFTER the overlay container and break
+      // tree order for every anchor created this tick. Re-assert the ordering.
+      keepOverlaysLastInCobeWrapper();
     } catch (_) {}
   }, 200);
+}
+
+/**
+ * Keep the overlay container as the LAST child of Cobe's own wrapper.
+ *
+ * Two separate CSS-anchor-positioning requirements force this, and missing
+ * either one makes every anchored sticker silently collapse onto one spot
+ * instead of tracking its marker:
+ *
+ *  1. The anchor must be a descendant of the anchored element's containing
+ *     block. Cobe appends its `anchor-name: --cobe-<id>` divs into the wrapper
+ *     it inserts around the canvas, so the container has to live in there too
+ *     (and must not be positioned itself — see #cobe-overlays in themes.css).
+ *  2. The anchor must PRECEDE the anchored element in tree order. Cobe creates
+ *     an anchor div the first time it sees a marker id and appends it to the
+ *     wrapper, so anchors keep arriving after the container. Observed exactly
+ *     this: `home` (anchor created first) resolved while `a0..a4` did not.
+ *
+ * appendChild on an existing child moves it to the end, so calling this after
+ * each marker update re-establishes the ordering. Data refreshes are ~30s
+ * apart, so the DOM move is nowhere near a hot path.
+ */
+function keepOverlaysLastInCobeWrapper() {
+  const c = canvas();
+  const ov = overlays();
+  const cobeWrapper = c && c.parentElement;
+  if (!cobeWrapper || !ov) return;
+  if (cobeWrapper.lastElementChild === ov) return;
+  cobeWrapper.appendChild(ov);
 }
 
 function setOverlayPlaces(places, htmlNodes) {
   const ov = overlays();
   if (!ov) return;
+  keepOverlaysLastInCobeWrapper();
   ov.innerHTML = "";
   (htmlNodes || []).forEach((el) => ov.appendChild(el));
   if (_ix && typeof _ix.setPlaces === "function") {
@@ -193,6 +235,9 @@ const ShardCobe = {
   setOverlayPlaces,
   isActive: () => !!_globe,
   theme: () => _theme,
+  // Marker-id ordering, so overlay builders can anchor to `--cobe-a<i>` and be
+  // certain index i is the same actor the marker represents.
+  actorOrder: (actors) => globeActorOrder(actors),
 };
 
 window.ShardCobe = ShardCobe;

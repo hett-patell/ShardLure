@@ -48,10 +48,15 @@ var logo180PNG []byte
 var stickerFS embed.FS
 
 // stickerNames is the allowlist of files served under /stickers/.
+//
+// Sprite's globe stickers used to be hand-drawn SVGs (skull/bolt/bug/…). They
+// were decorative invention that told you nothing about the attacker, so they
+// were replaced by country-flag EMOJI derived from the actor's real `cc` — text
+// glyphs, so there is no asset to ship or allowlist. sat.svg is the only
+// remaining sticker: Meridian's satellite marks, which are iconography rather
+// than data. pulse.svg was already dead (zero references) and went with them.
 var stickerNames = map[string]bool{
-	"skull.svg": true, "bolt.svg": true, "bug.svg": true,
-	"shield.svg": true, "controller.svg": true,
-	"sat.svg": true, "pulse.svg": true,
+	"sat.svg": true,
 }
 
 func readSticker(name string) ([]byte, error) {
