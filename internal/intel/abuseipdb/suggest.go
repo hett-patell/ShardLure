@@ -77,9 +77,17 @@ const (
 // (so a suggestion is always actionable), drops anything already reported
 // within the window via alreadyReported, and returns at most `limit` rows.
 //
+// The second return value is how many candidates PASSED the gate before the
+// limit truncated the list. It exists because the caller cannot recover it
+// otherwise — the filtering is the work, so there is no cheap second query the
+// way store.CountTunnelTargetsSince can re-count a table. The dashboard read
+// len() of the truncated slice as its total, which meant a run with more vetted
+// candidates than `limit` reported the limit as the population and gave the
+// operator no hint that higher-priority targets existed off the end.
+//
 // alreadyReported may be nil (nothing filtered). admin may be nil. now is
 // injected for testability.
-func Suggest(inputs []SuggestInput, admin *netmatch.Set, minProbe int, limit int, now time.Time, alreadyReported func(ip string) bool) []Suggestion {
+func Suggest(inputs []SuggestInput, admin *netmatch.Set, minProbe int, limit int, now time.Time, alreadyReported func(ip string) bool) ([]Suggestion, int) {
 	out := make([]Suggestion, 0, len(inputs))
 	for _, in := range inputs {
 		// Normalise before vetting: a caller using the deprecated wrapper field
@@ -118,10 +126,12 @@ func Suggest(inputs []SuggestInput, admin *netmatch.Set, minProbe int, limit int
 		}
 		return out[i].SrcIP < out[j].SrcIP
 	})
+	// Captured BEFORE the truncation below — that ordering is the whole point.
+	vetted := len(out)
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
-	return out
+	return out, vetted
 }
 
 // scoreOne computes the 0-100 composite and the reasons that dominated it.

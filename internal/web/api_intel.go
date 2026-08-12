@@ -171,12 +171,27 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	sessions, err := s.st.ListSessions(since, limit)
+	// minCommands filters to sessions that actually ran commands, server-side.
+	// The replay generator needs this: it can only build a script from a session
+	// with commands, and on live data ~99.5% of sessions are bare connects. The
+	// dropdown used to filter client-side AFTER this handler's LIMIT, so it saw 8
+	// replayable sessions out of 1,876 and mislabelled the shortfall as "none in
+	// window". Clamped to a sane ceiling; anything else is treated as unset.
+	var opts []store.SessionListOptions
+	if n, err := strconv.Atoi(r.URL.Query().Get("minCommands")); err == nil && n > 0 {
+		if n > 1000 {
+			n = 1000
+		}
+		opts = append(opts, store.SessionListOptions{MinCommands: n})
+	}
+	sessions, err := s.st.ListSessions(since, limit, opts...)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
-	total, terr := s.st.CountSessionsSince(since)
+	// Same opts, so the total describes the same population as the rows: a count
+	// of all sessions beside a command-filtered page would read as truncation.
+	total, terr := s.st.CountSessionsSince(since, opts...)
 	if terr != nil {
 		total = len(sessions)
 	}
@@ -435,10 +450,14 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 // ==== /api/intel/tunnels ==========================================
 
 type tunnelsResponse struct {
-	GeneratedAt string               `json:"generatedAt"`
-	WindowHours int                  `json:"windowHours"`
-	Total       int                  `json:"total"`
-	Targets     []store.TunnelTarget `json:"targets"`
+	GeneratedAt string `json:"generatedAt"`
+	WindowHours int    `json:"windowHours"`
+	// Total is the distinct-destination count for the whole window; Returned is
+	// how many of them this page carries. They differ once the LIMIT bites, and
+	// the widget says "top N of M" when it does.
+	Total    int                  `json:"total"`
+	Returned int                  `json:"returned"`
+	Targets  []store.TunnelTarget `json:"targets"`
 }
 
 // handleIntelTunnels serves the proxy/pivot destinations attackers forwarded
@@ -461,10 +480,19 @@ func (s *Server) handleIntelTunnels(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	// Total = true distinct-destination count for the window (not len(targets),
+	// which is the LIMIT-capped page size). Same disclosure discipline as
+	// handleIntelPayloads; fall back to the page size rather than failing the
+	// panel, since an under-reported total still renders useful rows.
+	total, err := s.st.CountTunnelTargetsSince(since)
+	if err != nil {
+		total = len(targets)
+	}
 	_ = json.NewEncoder(w).Encode(tunnelsResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
-		Total:       len(targets),
+		Total:       total,
+		Returned:    len(targets),
 		Targets:     targets,
 	})
 }
@@ -1548,9 +1576,12 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 // ==== /api/intel/abuseipdb/suggestions ============================
 
 type suggestionsResponse struct {
-	GeneratedAt string                 `json:"generatedAt"`
-	Enabled     bool                   `json:"enabled"` // reporting armed (report_enabled + key)
+	GeneratedAt string `json:"generatedAt"`
+	Enabled     bool   `json:"enabled"` // reporting armed (report_enabled + key)
+	// Total is how many candidates passed the Vet gate; Returned is how many of
+	// them this page carries. They differ once `limit` truncates the ranked list.
 	Total       int                    `json:"total"`
+	Returned    int                    `json:"returned"`
 	Suggestions []abuseipdb.Suggestion `json:"suggestions"`
 }
 
@@ -1598,11 +1629,15 @@ func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Reque
 		ok, _ := s.st.AbuseIPDBReported(ip, rewindow)
 		return ok
 	}
-	sugg := abuseipdb.Suggest(inputs, s.abuseAdmin, s.abuseMinProbeLive(), limit, time.Now(), alreadyReported)
+	// vetted = candidates that passed the gate, counted before `limit` truncated
+	// the list. Total used to be len(sugg), i.e. the page size, so a run with more
+	// vetted targets than the limit claimed the limit was the whole population.
+	sugg, vetted := abuseipdb.Suggest(inputs, s.abuseAdmin, s.abuseMinProbeLive(), limit, time.Now(), alreadyReported)
 	_ = json.NewEncoder(w).Encode(suggestionsResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Enabled:     s.abuseEnabledLive() && s.abuseKeyLive() != "",
-		Total:       len(sugg),
+		Total:       vetted,
+		Returned:    len(sugg),
 		Suggestions: sugg,
 	})
 }

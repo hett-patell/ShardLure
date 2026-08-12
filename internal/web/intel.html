@@ -3407,7 +3407,13 @@ function renderAbuseSuggest(data) {
   const meta = document.getElementById('abuse-suggest-meta');
   const note = document.getElementById('abuse-suggest-note');
   const list = data.suggestions || [];
-  meta.textContent = (data.total || 0) + ' candidates · ranked by report priority';
+  const sugTotal = data.total || 0;
+  const sugShown = (data.returned != null) ? data.returned : list.length;
+  // "top N of M" when the ranked list was truncated: total used to be the page
+  // length, so a capped list presented the cap as the whole candidate pool.
+  meta.textContent = ((sugShown < sugTotal)
+    ? ('top ' + sugShown + ' of ' + fmt(sugTotal) + ' candidates')
+    : (fmt(sugTotal) + ' candidates')) + ' · ranked by report priority';
   // The "Report All" button appears only when reporting is armed AND there is
   // at least one candidate to report.
   const allBtn = document.getElementById('abuse-report-all-btn');
@@ -3976,7 +3982,14 @@ if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); }
 function renderTunnels(data) {
   const tb = document.querySelector('#tunnels-table tbody');
   const meta = document.getElementById('tunnels-meta');
-  meta.textContent = (data.total || 0) + ' destinations · ' + data.windowHours + 'h window';
+  const tunTotal = data.total || 0;
+  const tunShown = (data.returned != null) ? data.returned : (data.targets || []).length;
+  // Say "top N of M" when the page is capped: the total used to be len(targets),
+  // so a capped page silently claimed the cap was the whole population.
+  const tunLabel = (tunShown < tunTotal)
+    ? ('top ' + tunShown + ' of ' + fmt(tunTotal) + ' destinations')
+    : (fmt(tunTotal) + ' destinations');
+  meta.textContent = tunLabel + ' · ' + data.windowHours + 'h window';
   if (!data.targets || data.targets.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no proxy/pivot attempts in window</div></td></tr>';
     return;
@@ -4633,18 +4646,30 @@ setInterval(function() {
 if (readTabFromHash() === 'red') setTimeout(refreshGraph, 100);
 
 // ==== Slice J: replay script generator ============================
+// The panel meta starts with the static safety label and gets the session count
+// appended, so re-rendering the count can't erase "sandbox-only".
+const REPLAY_META_BASE = 'bash · sandbox-only';
+
 async function loadReplaySessions() {
   const sel = document.getElementById('replay-session');
+  const meta = document.getElementById('replay-meta');
   try {
+    // minCommands filters SERVER-side. This used to fetch the newest 200 sessions
+    // and drop the command-less ones here, which meant the 200-row cap applied to
+    // all sessions rather than to replayable ones — on live data that surfaced 8
+    // of 1,876, and an unlucky batch of 200 bare connects made the panel claim
+    // there were none in the window at all.
     const r = await fetch('/api/intel/sessions?window=' +
                          encodeURIComponent(Filters.window || '7d') +
+                         '&minCommands=1&limit=200' +
                          '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
     const data = await r.json();
-    const items = (data.sessions || []).filter(function(s) { return (s.commands || 0) > 0; });
+    const items = data.sessions || [];
     if (items.length === 0) {
       sel.innerHTML = '<option value="">no sessions with commands in window</option>';
       document.getElementById('replay-pre').innerHTML = '<div class="empty">no sessions with commands in window</div>';
+      if (meta) meta.textContent = REPLAY_META_BASE;
       return;
     }
     sel.innerHTML = items.map(function(s) {
@@ -4652,6 +4677,16 @@ async function loadReplaySessions() {
       const label = s.id + ' · ' + (s.ip || '?') + ' · ' + cmds + ' cmds';
       return '<option value="' + escAttr(s.id) + '">' + escHtml(label) + '</option>';
     }).join('');
+    // The 200-row cap can still bite, but now it caps replayable sessions — say
+    // so rather than presenting the page as the whole set.
+    if (meta) {
+      const shown = (data.returned != null) ? data.returned : items.length;
+      const total = (data.total != null) ? data.total : shown;
+      const count = (total > shown)
+        ? ('newest ' + shown + ' of ' + fmt(total) + ' with commands')
+        : (fmt(total) + ' session' + (total === 1 ? '' : 's') + ' with commands');
+      meta.textContent = REPLAY_META_BASE + ' · ' + count;
+    }
     refreshReplay();
   } catch (_) {}
 }

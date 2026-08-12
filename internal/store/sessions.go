@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"strconv"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -29,6 +30,46 @@ type SessionSummary struct {
 	Arch       string
 }
 
+// SessionListOptions narrows WHICH sessions ListSessions and
+// CountSessionsSince consider. Variadic and zero-valued by default, so existing
+// callers keep the unfiltered behaviour (mirrors abuseipdb.VetOptions).
+//
+// It exists because the replay generator needs *replayable* sessions, and
+// filtering after the LIMIT is not the same thing as filtering before it. The
+// replay dropdown used to fetch the newest 200 sessions and discard the
+// command-less ones in JavaScript. On the reference deployment ~99.5% of
+// sessions are bare connects, so 200 rows yielded 8 selectable sessions out of
+// 1,876 that actually had commands — and when a batch of 200 happened to contain
+// none, the panel said "no sessions with commands in window", which is a
+// different and false claim from "none in the newest 200".
+type SessionListOptions struct {
+	// MinCommands requires the session to carry at least this many command
+	// events. 0 (or negative) means no requirement.
+	MinCommands int
+}
+
+// having renders the aggregate filter shared by the list and count queries, so
+// the count always describes the same population as the page it labels.
+//
+// It has to be HAVING rather than WHERE: "sessions with commands" is a property
+// of the whole session group, not of an individual row — filtering rows by
+// command != '' would drop the login/connect events and corrupt every other
+// aggregate on the summary (event counts, start time, username).
+func (o SessionListOptions) having() string {
+	if o.MinCommands <= 0 {
+		return ""
+	}
+	return "\nHAVING SUM(CASE WHEN command != '' THEN 1 ELSE 0 END) >= " +
+		strconv.Itoa(o.MinCommands)
+}
+
+func firstSessionOpts(opts []SessionListOptions) SessionListOptions {
+	if len(opts) > 0 {
+		return opts[0]
+	}
+	return SessionListOptions{}
+}
+
 // ListSessions returns cowrie sessions whose latest event falls within
 // the given window, ordered most-recent first. limit caps the result so
 // the dashboard list stays bounded.
@@ -40,7 +81,23 @@ type SessionSummary struct {
 // window. ListSessions caps at the newest `limit`, so the rendered row count
 // (always == limit on a busy box) is not the population; the dashboard now
 // shows "newest N of <this> sessions".
-func (s *Store) CountSessionsSince(since time.Time) (int, error) {
+//
+// opts must match whatever ListSessions was given, or the total describes a
+// different population than the rows.
+func (s *Store) CountSessionsSince(since time.Time, opts ...SessionListOptions) (int, error) {
+	o := firstSessionOpts(opts)
+	if h := o.having(); h != "" {
+		// Grouped subquery: the filter is an aggregate over each session, so the
+		// groups have to be formed before they can be counted.
+		var n int
+		err := s.db.QueryRow(`
+SELECT COUNT(*) FROM (
+  SELECT session_id FROM events
+  WHERE source='cowrie' AND session_id != '' AND ts >= ?
+  GROUP BY session_id`+h+`
+)`, since.UTC().Format(time.RFC3339Nano)).Scan(&n)
+		return n, err
+	}
 	var n int
 	err := s.db.QueryRow(`
 SELECT COUNT(DISTINCT session_id) FROM events
@@ -49,10 +106,13 @@ WHERE source='cowrie' AND session_id != '' AND ts >= ?`,
 	return n, err
 }
 
-func (s *Store) ListSessions(since time.Time, limit int) ([]SessionSummary, error) {
+func (s *Store) ListSessions(since time.Time, limit int, opts ...SessionListOptions) ([]SessionSummary, error) {
 	if limit <= 0 {
 		limit = 200
 	}
+	// The HAVING clause is interpolated, not bound: it is built from an int by
+	// having() (strconv.Itoa), never from caller text. Placeholders can't appear
+	// in a HAVING that has to be part of the statement text here anyway.
 	rows, err := s.db.Query(`
 SELECT
   session_id,
@@ -73,7 +133,7 @@ SELECT
   COALESCE(MAX(actor_id), '')                       AS actor_id
 FROM events
 WHERE source='cowrie' AND session_id != '' AND ts >= ?
-GROUP BY session_id
+GROUP BY session_id`+firstSessionOpts(opts).having()+`
 ORDER BY end_ts DESC
 LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {

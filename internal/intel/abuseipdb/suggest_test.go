@@ -39,7 +39,7 @@ func TestSuggestRanksAndFilters(t *testing.T) {
 		{Cand: brute("203.0.113.10", 95, 5000, 60, 800), LastSeen: now},
 	}
 
-	got := Suggest(inputs, admin, 60, 10, now, nil)
+	got, _ := Suggest(inputs, admin, 60, 10, now, nil)
 	if len(got) != 3 {
 		t.Fatalf("expected 3 vetted suggestions, got %d: %+v", len(got), ips(got))
 	}
@@ -80,7 +80,7 @@ func TestSuggestExcludesAlreadyReported(t *testing.T) {
 		{Cand: brute("1.1.1.1", 95, 5000, 60, 800), LastSeen: now},
 	}
 	reported := map[string]bool{"8.8.8.8": true}
-	got := Suggest(inputs, nil, 60, 10, now, func(ip string) bool { return reported[ip] })
+	got, _ := Suggest(inputs, nil, 60, 10, now, func(ip string) bool { return reported[ip] })
 	if len(got) != 1 || got[0].SrcIP != "1.1.1.1" {
 		t.Fatalf("expected only the unreported IP, got %+v", ips(got))
 	}
@@ -108,7 +108,7 @@ func TestSuggestDropsDormantCandidates(t *testing.T) {
 		inputs = append(inputs, SuggestInput{Cand: c})
 	}
 
-	got := Suggest(inputs, nil, 60, 10, now, nil)
+	got, _ := Suggest(inputs, nil, 60, 10, now, nil)
 	if len(got) != 1 {
 		t.Fatalf("expected only the live attacker, got %d: %+v", len(got), ips(got))
 	}
@@ -123,7 +123,7 @@ func TestSuggestDropsDormantCandidates(t *testing.T) {
 // observation. An undateable candidate must be dropped, not promoted.
 func TestSuggestRejectsUndateableCandidate(t *testing.T) {
 	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
-	got := Suggest([]SuggestInput{{Cand: brute("8.8.8.8", 95, 5000, 60, 800)}}, nil, 60, 10, now, nil)
+	got, _ := Suggest([]SuggestInput{{Cand: brute("8.8.8.8", 95, 5000, 60, 800)}}, nil, 60, 10, now, nil)
 	if len(got) != 0 {
 		t.Fatalf("candidate with no LastSeen on either field was suggested: %+v", ips(got))
 	}
@@ -137,7 +137,7 @@ func TestSuggestCandLastSeenWinsOverWrapper(t *testing.T) {
 	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 	c := brute("8.8.8.8", 95, 5000, 60, 800)
 	c.LastSeen = now.Add(-40 * 24 * time.Hour) // dormant: authoritative
-	got := Suggest([]SuggestInput{{Cand: c, LastSeen: now}}, nil, 60, 10, now, nil)
+	got, _ := Suggest([]SuggestInput{{Cand: c, LastSeen: now}}, nil, 60, 10, now, nil)
 	if len(got) != 0 {
 		t.Fatalf("a fresh deprecated LastSeen overrode a dormant Cand.LastSeen: %+v", ips(got))
 	}
@@ -145,7 +145,7 @@ func TestSuggestCandLastSeenWinsOverWrapper(t *testing.T) {
 	// And the fallback still works in the direction it was kept for: wrapper-only
 	// callers keep functioning, so this must NOT be an empty result.
 	fresh := brute("8.8.8.8", 95, 5000, 60, 800)
-	if got := Suggest([]SuggestInput{{Cand: fresh, LastSeen: now.Add(-time.Hour)}}, nil, 60, 10, now, nil); len(got) != 1 {
+	if got, _ := Suggest([]SuggestInput{{Cand: fresh, LastSeen: now.Add(-time.Hour)}}, nil, 60, 10, now, nil); len(got) != 1 {
 		t.Fatalf("wrapper-only caller stopped working: got %d suggestions, want 1", len(got))
 	}
 }
@@ -158,7 +158,7 @@ func TestSuggestReasonsNeverClaimRecentWhenStale(t *testing.T) {
 	for _, ageHours := range []int{0, 12, 40, 80, 100, 140, 167} {
 		c := brute("8.8.8.8", 95, 5000, 60, 800)
 		c.LastSeen = now.Add(-time.Duration(ageHours) * time.Hour)
-		got := Suggest([]SuggestInput{{Cand: c}}, nil, 60, 10, now, nil)
+		got, _ := Suggest([]SuggestInput{{Cand: c}}, nil, 60, 10, now, nil)
 		if len(got) != 1 {
 			t.Fatalf("age %dh: expected 1 suggestion, got %d", ageHours, len(got))
 		}
@@ -175,16 +175,84 @@ func TestSuggestReasonsNeverClaimRecentWhenStale(t *testing.T) {
 	}
 }
 
-// TestSuggestLimit caps the result set.
+// TestSuggestLimit caps the result set, and the returned vetted count still
+// describes the pool rather than the page.
+//
+// That second half is the regression: the dashboard read len(suggestions) as its
+// total, so a limit smaller than the vetted pool made the widget say "2
+// candidates" when 4 had passed the gate — hiding higher-priority targets behind
+// a number that looked like a complete answer.
 func TestSuggestLimit(t *testing.T) {
 	now := time.Now()
 	var inputs []SuggestInput
 	for _, ip := range []string{"8.8.8.8", "1.1.1.1", "9.9.9.9", "8.8.4.4"} {
 		inputs = append(inputs, SuggestInput{Cand: brute(ip, 90, 1000, 20, 200), LastSeen: now})
 	}
-	got := Suggest(inputs, nil, 60, 2, now, nil)
+	got, vetted := Suggest(inputs, nil, 60, 2, now, nil)
 	if len(got) != 2 {
 		t.Fatalf("limit=2 should cap at 2, got %d", len(got))
+	}
+	if vetted != 4 {
+		t.Fatalf("vetted = %d, want 4: the count must be taken before the limit "+
+			"truncates, or it just restates the page size", vetted)
+	}
+
+	// Unlimited: the two figures converge, so a caller can't tell them apart by
+	// accident on the happy path — which is why the capped case above matters.
+	all, vettedAll := Suggest(inputs, nil, 60, 0, now, nil)
+	if len(all) != 4 || vettedAll != 4 {
+		t.Fatalf("limit=0: got %d rows / vetted %d, want 4/4", len(all), vettedAll)
+	}
+}
+
+// TestSuggestVettedCountExcludesRejected pins that the count describes VETTED
+// candidates, not inputs. A total that counted everything handed to Suggest
+// would overstate the actionable pool — the operator would see "8 candidates"
+// backed by one clickable row and read the gate as broken.
+func TestSuggestVettedCountExcludesRejected(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	inputs := []SuggestInput{
+		// Passes.
+		{Cand: func() ReportCandidate {
+			c := brute("8.8.8.8", 95, 5000, 60, 800)
+			c.LastSeen = now.Add(-time.Hour)
+			return c
+		}()},
+		// Rejected: dormant.
+		{Cand: func() ReportCandidate {
+			c := brute("1.1.1.1", 95, 5000, 60, 800)
+			c.LastSeen = now.Add(-40 * 24 * time.Hour)
+			return c
+		}()},
+		// Rejected: below probe floor.
+		{Cand: func() ReportCandidate {
+			c := brute("9.9.9.9", 10, 5000, 60, 800)
+			c.LastSeen = now.Add(-time.Hour)
+			return c
+		}()},
+		// Rejected: not a brute playbook.
+		{Cand: func() ReportCandidate {
+			c := brute("8.8.4.4", 95, 5000, 60, 800)
+			c.Playbook = "crypto_target"
+			c.LastSeen = now.Add(-time.Hour)
+			return c
+		}()},
+	}
+	// Rejected by the dedup callback, which sits after Vet — an already-reported
+	// IP is not an actionable candidate either.
+	inputs = append(inputs, SuggestInput{Cand: func() ReportCandidate {
+		c := brute("1.0.0.1", 95, 5000, 60, 800)
+		c.LastSeen = now.Add(-time.Hour)
+		return c
+	}()})
+
+	got, vetted := Suggest(inputs, nil, 60, 10, now, func(ip string) bool { return ip == "1.0.0.1" })
+	if len(got) != 1 || got[0].SrcIP != "8.8.8.8" {
+		t.Fatalf("suggestions = %+v, want only 8.8.8.8", ips(got))
+	}
+	if vetted != 1 {
+		t.Fatalf("vetted = %d, want 1: the count must exclude gate- and dedup-rejected "+
+			"candidates, not restate len(inputs)=%d", vetted, len(inputs))
 	}
 }
 
