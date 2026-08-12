@@ -52,9 +52,13 @@ type SessionListOptions struct {
 // the count always describes the same population as the page it labels.
 //
 // It has to be HAVING rather than WHERE: "sessions with commands" is a property
-// of the whole session group, not of an individual row — filtering rows by
-// command != '' would drop the login/connect events and corrupt every other
-// aggregate on the summary (event counts, start time, username).
+// of the whole session group, not of an individual row — restricting rows to
+// those with a non-empty command would drop the login/connect events and corrupt
+// every other aggregate on the summary (event counts, start time, username).
+//
+// (Described in prose rather than as SQL on purpose: a doc comment containing a
+// pair of single quotes around nothing gets rewritten to a curly quote by
+// gofmt's doc-comment pass, which then fails CI's gofmt gate.)
 func (o SessionListOptions) having() string {
 	if o.MinCommands <= 0 {
 		return ""

@@ -292,7 +292,7 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 // botnets); the UI is more useful when the operator sees one row per
 // unique payload with delivery breadth surfaced as counters.
 type ArtifactAggregate struct {
-	SHA256 string
+	SHA256    string
 	SizeBytes int64
 	// Origin is the LAST-SEEN origin. Origins DO mix per sha (67 hashes on the
 	// reference deployment): the same payload is often recorded once by the
