@@ -11,6 +11,14 @@ import (
 // different recent behaviour: `escalating` has been observed for weeks and is
 // attacking now; `stale` was loud once, long ago, and has stopped. Their lifetime
 // averages are similar, which is exactly why that metric cannot separate them.
+//
+// It also seeds `paused` (returned via pausedActorID, not the tuple, to leave the
+// three existing callers untouched): a high lifetime-rate actor last seen 2 days
+// ago, i.e. outside the 24h window but INSIDE ReportPoolMaxAge. It separates the
+// two reasons an actor can be absent from the window — briefly quiet versus long
+// dormant — which a fixture holding only `stale` (30 days) cannot do.
+const pausedActorID = "journal:4.4.4.4"
+
 func seedRateFixture(t *testing.T, st *Store) (escalating, moderate, stale string) {
 	t.Helper()
 	now := time.Now().UTC()
@@ -40,6 +48,14 @@ func seedRateFixture(t *testing.T, st *Store) (escalating, moderate, stale strin
 			Source: models.SourceJournal, Kind: "failed_password", SrcIP: "2.2.2.2", ActorID: stale,
 		})
 	}
+	// paused: loud, but last seen 2 days ago — outside the 24h window, well
+	// inside ReportPoolMaxAge. Still a legitimate report target.
+	for i := 0; i < 60; i++ {
+		evs = append(evs, &models.Event{
+			TS:     now.Add(-48 * time.Hour).Add(-time.Duration(i) * 20 * time.Minute),
+			Source: models.SourceJournal, Kind: "failed_password", SrcIP: "4.4.4.4", ActorID: pausedActorID,
+		})
+	}
 	for _, e := range evs {
 		if err := st.InsertEvent(e); err != nil {
 			t.Fatalf("insert: %v", err)
@@ -55,6 +71,11 @@ func seedRateFixture(t *testing.T, st *Store) (escalating, moderate, stale strin
 		{ID: stale, Source: models.SourceJournal, PrimaryIP: "2.2.2.2", EventCount: 60,
 			UniqueUsers: 5, AttemptsPerHour: 900.0, ProbeScore: 70, Playbook: "fast_dictionary_spray",
 			FirstSeen: now.Add(-30 * 24 * time.Hour), LastSeen: now.Add(-30 * 24 * time.Hour)},
+		// Highest lifetime rate of all, so it heads the lifetime-ranked half and
+		// its exclusion (or retention) is unambiguous.
+		{ID: pausedActorID, Source: models.SourceJournal, PrimaryIP: "4.4.4.4", EventCount: 60,
+			UniqueUsers: 5, AttemptsPerHour: 950.0, ProbeScore: 70, Playbook: "fast_dictionary_spray",
+			FirstSeen: now.Add(-10 * 24 * time.Hour), LastSeen: now.Add(-48 * time.Hour)},
 	} {
 		if err := st.UpsertActor(a); err != nil {
 			t.Fatalf("upsert actor: %v", err)
@@ -135,7 +156,7 @@ func TestTopActorsByRecentRateRanksByWindow(t *testing.T) {
 // reportable. A low lifetime average must not hide an actor attacking right now.
 func TestActorsForReportingIncludesActiveActors(t *testing.T) {
 	st := newTestStore(t, "pool.db")
-	esc, _, stale := seedRateFixture(t, st)
+	esc, _, _ := seedRateFixture(t, st)
 
 	// limit=1 makes the lifetime half of the union as narrow as possible: only
 	// the stale actor (900/h average) qualifies that way. The active actor can
@@ -144,21 +165,70 @@ func TestActorsForReportingIncludesActiveActors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActorsForReporting: %v", err)
 	}
-	var haveEsc, haveStale bool
+	var haveEsc, havePaused bool
 	for _, a := range pool {
-		if a.ID == esc {
+		switch a.ID {
+		case esc:
 			haveEsc = true
-		}
-		if a.ID == stale {
-			haveStale = true
+		case pausedActorID:
+			havePaused = true
 		}
 	}
 	if !haveEsc {
 		t.Error("actor attacking inside the window is missing from the reporting pool; " +
 			"its low lifetime average must not hide it (this is the 229-of-245 bug)")
 	}
-	if !haveStale {
-		t.Error("high lifetime-rate actor dropped out of the pool: the union is meant to " +
-			"widen the old selection, not replace it")
+	// The lifetime half must still widen the window half — but only over actors
+	// that could still be reported. `paused` (2d, and the top lifetime rate, so
+	// it is the one actor limit=1 can admit that way) distinguishes "the union
+	// still works" from "the union collapsed into the 24h window".
+	if !havePaused {
+		t.Error("high lifetime-rate actor last seen 2 days ago dropped out of the pool: " +
+			"ReportPoolMaxAge is meant to exclude DORMANT actors, not to collapse the " +
+			"union into the 24h window (that would restore the 229-of-245 bug for " +
+			"anyone reporting on a weekly cadence)")
+	}
+	// `stale` is deliberately NOT asserted here: at limit=1 the lifetime half can
+	// only admit one row and `paused` outranks it, so it would be absent with or
+	// without the age bound. See TestActorsForReportingExcludesDormantActors.
+}
+
+// TestActorsForReportingExcludesDormantActors pins the other half of the pool
+// contract. The lifetime-ranked branch ignores `since` by design, which left it
+// unbounded: measured on the reference deployment, 868 of the top 1000 by
+// lifetime rate had been silent over a week, and every one of the 6 IPs the
+// suggestions widget offered was 31-50 days stale — all already reported the day
+// before — while the actor attacking at that moment had never been reported.
+//
+// The limit here is deliberately wide. At limit=1 the assertion is vacuous (only
+// the single highest lifetime rate gets in either way); the bound is only
+// observable once the lifetime half is broad enough to reach a dormant row.
+func TestActorsForReportingExcludesDormantActors(t *testing.T) {
+	st := newTestStore(t, "pool_dormant.db")
+	_, _, stale := seedRateFixture(t, st)
+
+	pool, err := st.ActorsForReporting(time.Now().Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("ActorsForReporting: %v", err)
+	}
+	var haveStale, havePaused bool
+	for _, a := range pool {
+		switch a.ID {
+		case stale:
+			haveStale = true
+		case pausedActorID:
+			havePaused = true
+		}
+	}
+	if haveStale {
+		t.Error("actor dormant for 30 days is in the reporting pool: without an age " +
+			"bound the lifetime-ranked half re-admits attackers that stopped months " +
+			"ago, and they outrank live ones because the ranking is a lifetime average")
+	}
+	// Same widened limit must still admit the 2-day-old actor, so a failure above
+	// means "the bound is wrong", not "the bound is missing".
+	if !havePaused {
+		t.Error("the age bound also excluded an actor last seen 2 days ago; " +
+			"ReportPoolMaxAge is a week precisely so a paused campaign stays reportable")
 	}
 }

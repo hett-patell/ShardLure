@@ -32,6 +32,14 @@ type Options struct {
 	RateLimit  time.Duration // delay between POSTs (default 2s)
 	Admin      *netmatch.Set // admin IPs to hard-reject; may be nil
 	OnProgress func(c ReportCandidate, result *Result, err error)
+
+	// MaxAgeDays tightens Vet's staleness gate (1..6; 0 or 7 = default 7).
+	// May only make the gate stricter — see VetOptions.
+	MaxAgeDays int
+
+	// Now overrides the clock for the staleness gate. Zero = time.Now().
+	// Injected for tests; production leaves it unset.
+	Now time.Time
 }
 
 var (
@@ -68,6 +76,13 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		opts.RateLimit = 2 * time.Second
 	}
 
+	// One clock for the whole batch: a long paced run must not let a candidate
+	// vetted as fresh at the start be judged against a later "now".
+	vetNow := opts.Now
+	if vetNow.IsZero() {
+		vetNow = time.Now()
+	}
+
 	c := NewClient(opts.Endpoint)
 	for i, cand := range candidates {
 		if ctx.Err() != nil {
@@ -76,7 +91,7 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 
 		// Vet first — cheap, pure, and the safety gate. A rejected candidate
 		// never touches the dedup table or the network.
-		if ok, reason := Vet(cand, opts.Admin, opts.MinProbe); !ok {
+		if ok, reason := Vet(cand, opts.Admin, opts.MinProbe, vetNow, VetOptions{MaxAgeDays: opts.MaxAgeDays}); !ok {
 			skipped++
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, &Result{}, errors.New("skip: "+reason))
@@ -93,6 +108,14 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		}
 		if already {
 			skipped++
+			// Report the reason, like every other skip. This branch used to be
+			// silent, so a run that skipped 25 candidates printed 14 reasons and
+			// left the operator to guess at the other 11 — and "my worst attacker
+			// isn't in the list" looks identical to a broken vet gate when the
+			// actual answer is "already reported an hour ago".
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, &Result{}, errors.New("skip: already reported within the re-report window"))
+			}
 			continue
 		}
 

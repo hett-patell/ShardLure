@@ -86,6 +86,95 @@ func TestSuggestExcludesAlreadyReported(t *testing.T) {
 	}
 }
 
+// TestSuggestDropsDormantCandidates is the regression test for the bug this gate
+// exists to close. On the reference deployment the widget offered six IPs, all
+// last seen 31-50 days earlier and every one already reported the day before,
+// while the actor attacking at that moment (probe 100, ~302k events, 1895
+// usernames — the profile `live` below models) was nowhere in the list. The pool
+// query hands Suggest actors from well outside the window, so Suggest — not just
+// the caller — has to refuse them.
+func TestSuggestDropsDormantCandidates(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+
+	live := brute("1.1.1.1", 100, 302872, 1895, 373)
+	live.LastSeen = now.Add(-5 * time.Minute)
+
+	inputs := []SuggestInput{{Cand: live}}
+	// Six dormant IPs with the same maximal signals, differing only in age. Under
+	// the old behaviour their volume and probe score carried them straight through.
+	for i, ageDays := range []int{31, 34, 38, 42, 47, 50} {
+		c := brute("8.8.8."+itoa(i+1), 100, 302872, 1895, 373)
+		c.LastSeen = now.Add(-time.Duration(ageDays) * 24 * time.Hour)
+		inputs = append(inputs, SuggestInput{Cand: c})
+	}
+
+	got := Suggest(inputs, nil, 60, 10, now, nil)
+	if len(got) != 1 {
+		t.Fatalf("expected only the live attacker, got %d: %+v", len(got), ips(got))
+	}
+	if got[0].SrcIP != live.SrcIP {
+		t.Fatalf("suggested %s, want the currently-attacking %s", got[0].SrcIP, live.SrcIP)
+	}
+}
+
+// TestSuggestRejectsUndateableCandidate pins the zero-value behaviour. It used to
+// be scored as full recency weight — "unknown" read as "right now" — which is the
+// most dangerous possible default for a gate whose whole job is dating the
+// observation. An undateable candidate must be dropped, not promoted.
+func TestSuggestRejectsUndateableCandidate(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	got := Suggest([]SuggestInput{{Cand: brute("8.8.8.8", 95, 5000, 60, 800)}}, nil, 60, 10, now, nil)
+	if len(got) != 0 {
+		t.Fatalf("candidate with no LastSeen on either field was suggested: %+v", ips(got))
+	}
+}
+
+// TestSuggestCandLastSeenWinsOverWrapper pins the precedence between the new
+// field and the deprecated wrapper. It matters because the wrapper is the LOOSER
+// path: were it to win, a caller could set a fresh wrapper value beside a dormant
+// Cand.LastSeen and walk a stale IP past the gate.
+func TestSuggestCandLastSeenWinsOverWrapper(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	c := brute("8.8.8.8", 95, 5000, 60, 800)
+	c.LastSeen = now.Add(-40 * 24 * time.Hour) // dormant: authoritative
+	got := Suggest([]SuggestInput{{Cand: c, LastSeen: now}}, nil, 60, 10, now, nil)
+	if len(got) != 0 {
+		t.Fatalf("a fresh deprecated LastSeen overrode a dormant Cand.LastSeen: %+v", ips(got))
+	}
+
+	// And the fallback still works in the direction it was kept for: wrapper-only
+	// callers keep functioning, so this must NOT be an empty result.
+	fresh := brute("8.8.8.8", 95, 5000, 60, 800)
+	if got := Suggest([]SuggestInput{{Cand: fresh, LastSeen: now.Add(-time.Hour)}}, nil, 60, 10, now, nil); len(got) != 1 {
+		t.Fatalf("wrapper-only caller stopped working: got %d suggestions, want 1", len(got))
+	}
+}
+
+// TestSuggestReasonsNeverClaimRecentWhenStale guards the reason strings. A
+// suggestion is only actionable if its explanation is true — an operator reading
+// "recent activity" beside a 5-day-old IP would file a report they can't defend.
+func TestSuggestReasonsNeverClaimRecentWhenStale(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	for _, ageHours := range []int{0, 12, 40, 80, 100, 140, 167} {
+		c := brute("8.8.8.8", 95, 5000, 60, 800)
+		c.LastSeen = now.Add(-time.Duration(ageHours) * time.Hour)
+		got := Suggest([]SuggestInput{{Cand: c}}, nil, 60, 10, now, nil)
+		if len(got) != 1 {
+			t.Fatalf("age %dh: expected 1 suggestion, got %d", ageHours, len(got))
+		}
+		for _, r := range got[0].Reasons {
+			switch {
+			case ageHours >= 24 && contains(r, "active today"):
+				t.Errorf("age %dh labelled %q", ageHours, r)
+			case ageHours >= 1 && contains(r, "active now"):
+				t.Errorf("age %dh labelled %q", ageHours, r)
+			case ageHours >= 72 && contains(r, "last 3 days"):
+				t.Errorf("age %dh labelled %q", ageHours, r)
+			}
+		}
+	}
+}
+
 // TestSuggestLimit caps the result set.
 func TestSuggestLimit(t *testing.T) {
 	now := time.Now()

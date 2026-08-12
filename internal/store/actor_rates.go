@@ -37,6 +37,18 @@ import (
 // collector's eviction/rehydration path.
 const RecentRateWindow = 24 * time.Hour
 
+// ReportPoolMaxAge bounds how far past the window ActorsForReporting's
+// lifetime-ranked half may reach. That half ignores `since` by design (so an
+// actor that was loud once stays offerable), which left it unbounded: it
+// re-admitted actors dormant for months into the abuse-report pool.
+//
+// Deliberately wider than RecentRateWindow — a weekly cron must still be able to
+// report last weekend's campaign, and an actor pausing a day mid-campaign is
+// still current. It only excludes what no longer describes present activity.
+// abuseipdb.Vet applies the authoritative staleness gate; this just keeps the
+// query from hauling in rows that would be rejected downstream anyway.
+const ReportPoolMaxAge = 7 * 24 * time.Hour
+
 // ActorRate pairs an actor with its rate over a bounded window. It is a distinct
 // type rather than an Actor with AttemptsPerHour overwritten, so a caller can
 // never mistake the windowed figure for the stored lifetime one.
@@ -154,12 +166,32 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 //
 // The union deliberately keeps the old lifetime-ordered set as a floor, so an
 // actor that was offered before is still offered: this widens the pool, it does
-// not trade one blind spot for another. An actor that last attacked outside the
-// window is still reachable through the lifetime half of the union.
+// not trade one blind spot for another. An actor that last attacked just outside
+// the window is still reachable through the lifetime half of the union.
+//
+// That lifetime half is bounded by ReportPoolMaxAge, and must be. It ignores
+// `since` by design, so unbounded it re-admitted actors dormant for MONTHS:
+// measured on the reference deployment, 868 of the top 1000 by lifetime rate had
+// been silent for over a week (79 with this bound applied — all 7-8 days old,
+// left for abuseipdb.Vet to refuse, since the bound is relative to `since` and so
+// necessarily one window wider than the gate), and all 6 IPs the suggestions
+// widget offered were 31-50 days stale — every one already reported the day
+// before — while the actor attacking at that moment was nowhere in the list.
+//
+// The bound is generous relative to `since` (a week against 24h) precisely so it
+// still does its original job of surfacing a big attacker that paused; it only
+// excludes the month-old rows that no longer describe current activity.
+// abuseipdb.Vet enforces its own staleness gate on top of this — the pool is a
+// query optimisation, not the policy — so tightening here cannot loosen there.
 func (s *Store) ActorsForReporting(since time.Time, limit int) ([]models.Actor, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
+	// Bound the lifetime half relative to `since` rather than the wall clock, so
+	// a caller passing an older window widens both halves consistently and the
+	// query stays a pure function of its arguments (testable without freezing
+	// time).
+	poolFloor := since.Add(-ReportPoolMaxAge)
 	return s.queryActors(`SELECT `+actorColumns+`
 FROM actors a
 WHERE a.id IN (
@@ -167,9 +199,10 @@ WHERE a.id IN (
         WHERE ts >= ? AND actor_id IS NOT NULL AND actor_id <> ''
       )
    OR a.id IN (
-        SELECT id FROM actors WHERE attempts_per_hour > 0
+        SELECT id FROM actors WHERE attempts_per_hour > 0 AND last_seen >= ?
         ORDER BY attempts_per_hour DESC LIMIT ?
       )
 ORDER BY a.attempts_per_hour DESC`,
-		since.UTC().Format(time.RFC3339Nano), limit)
+		since.UTC().Format(time.RFC3339Nano),
+		poolFloor.UTC().Format(time.RFC3339Nano), limit)
 }

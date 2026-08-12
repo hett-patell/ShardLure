@@ -24,12 +24,28 @@ type Suggestion struct {
 	Reasons         []string `json:"reasons"`
 }
 
-// SuggestInput is one actor's scoring inputs. Kept separate from
-// ReportCandidate because scoring needs LastSeen (recency) which the report
-// payload deliberately omits.
+// SuggestInput is one actor's scoring inputs.
+//
+// LastSeen now lives on ReportCandidate, because Vet needs it to reject dormant
+// IPs and the gate must see everything it gates on. This wrapper stays: it is
+// the seam where per-actor scoring context would attach, and collapsing it into
+// a bare []ReportCandidate would churn every caller for no gain.
 type SuggestInput struct {
-	Cand     ReportCandidate
+	Cand ReportCandidate
+	// LastSeen is deprecated: set Cand.LastSeen instead. When Cand.LastSeen is
+	// zero this is copied into it, so existing callers keep working — but Vet
+	// reads only Cand.LastSeen, so a value here alone no longer bypasses the
+	// staleness gate.
 	LastSeen time.Time
+}
+
+// lastSeen resolves the effective observation time, preferring the candidate's
+// own field over the deprecated wrapper copy.
+func (in SuggestInput) lastSeen() time.Time {
+	if !in.Cand.LastSeen.IsZero() {
+		return in.Cand.LastSeen
+	}
+	return in.LastSeen
 }
 
 // Priority weights. They sum to 100 so the composite reads as a percentage of
@@ -66,21 +82,28 @@ const (
 func Suggest(inputs []SuggestInput, admin *netmatch.Set, minProbe int, limit int, now time.Time, alreadyReported func(ip string) bool) []Suggestion {
 	out := make([]Suggestion, 0, len(inputs))
 	for _, in := range inputs {
-		if ok, _ := Vet(in.Cand, admin, minProbe); !ok {
+		// Normalise before vetting: a caller using the deprecated wrapper field
+		// must still be gated on staleness, not waved through on a zero value.
+		cand := in.Cand
+		cand.LastSeen = in.lastSeen()
+		// Same gate, same arguments as the report path — a suggestion the
+		// operator can click must be one Report would actually accept, or the
+		// button lies. This is what excludes dormant IPs from the widget.
+		if ok, _ := Vet(cand, admin, minProbe, now); !ok {
 			continue
 		}
-		if alreadyReported != nil && alreadyReported(in.Cand.SrcIP) {
+		if alreadyReported != nil && alreadyReported(cand.SrcIP) {
 			continue
 		}
-		pr, reasons := scoreOne(in, now)
+		pr, reasons := scoreOne(SuggestInput{Cand: cand}, now)
 		out = append(out, Suggestion{
-			SrcIP:           in.Cand.SrcIP,
-			Playbook:        in.Cand.Playbook,
-			ProbeScore:      in.Cand.ProbeScore,
-			EventCount:      in.Cand.EventCount,
-			UniqueUsers:     in.Cand.UniqueUsers,
-			AttemptsPerHour: in.Cand.AttemptsPerHour,
-			LastSeen:        in.LastSeen.UTC().Format(time.RFC3339),
+			SrcIP:           cand.SrcIP,
+			Playbook:        cand.Playbook,
+			ProbeScore:      cand.ProbeScore,
+			EventCount:      cand.EventCount,
+			UniqueUsers:     cand.UniqueUsers,
+			AttemptsPerHour: cand.AttemptsPerHour,
+			LastSeen:        cand.LastSeen.UTC().Format(time.RFC3339),
 			Priority:        pr,
 			Reasons:         reasons,
 		})
@@ -109,8 +132,9 @@ func scoreOne(in SuggestInput, now time.Time) (int, []string) {
 
 	// Recency: exponential half-life decay. Future/zero last-seen clamps to
 	// "now" (full weight) rather than producing a weird >1 factor.
-	age := now.Sub(in.LastSeen)
-	if age < 0 || in.LastSeen.IsZero() {
+	seen := in.lastSeen()
+	age := now.Sub(seen)
+	if age < 0 || seen.IsZero() {
 		age = 0
 	}
 	recency := math.Pow(0.5, age.Hours()/recencyHalfLife.Hours())
@@ -168,6 +192,13 @@ func logSaturate(x, sat float64) float64 {
 	return v
 }
 
+// recencyLabel describes the age in the operator's terms. The final branch says
+// how stale rather than "recent activity", which was the previous wording: with
+// the staleness gate capping age at 7 days it could only ever describe something
+// 3-7 days old, so claiming "recent" understated it. In practice the label is
+// dropped before it renders past ~93h (its weighted contribution falls under
+// scoreOne's 2.0 negligible-contributor floor), but a reason string must not
+// depend on being filtered out to be truthful.
 func recencyLabel(age time.Duration) string {
 	switch {
 	case age < time.Hour:
@@ -177,7 +208,7 @@ func recencyLabel(age time.Duration) string {
 	case age < 72*time.Hour:
 		return "seen in last 3 days"
 	default:
-		return "recent activity"
+		return "last seen " + itoa(int(age.Hours()/24)) + "d ago"
 	}
 }
 

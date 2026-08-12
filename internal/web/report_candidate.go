@@ -16,8 +16,14 @@ import (
 //
 // recentPerHour is the windowed rate, 0 when the actor has no activity in the
 // window. Zero is the honest answer there and is safe: Vet does not gate on the
-// rate at all (so a dormant actor cannot become unreportable because of this),
-// it only lowers suggest priority, which is the desired outcome for a stale IP.
+// rate (a quiet hour must not make a live attacker unreportable), it only lowers
+// suggest priority. Staleness is gated on LastSeen instead, which is a direct
+// observation rather than a rate that a short lull can zero out.
+//
+// LastSeen is passed through for exactly that gate. Setting it HERE, in the one
+// shared constructor, is deliberate: a call site that forgot it would build a
+// zero-valued candidate, which Vet hard-rejects — so the failure mode of
+// omission is a refused report, never a wrongful one.
 func newReportCandidate(a *models.Actor, recentPerHour float64) abuseipdb.ReportCandidate {
 	return abuseipdb.ReportCandidate{
 		SrcIP:           a.PrimaryIP,
@@ -26,6 +32,7 @@ func newReportCandidate(a *models.Actor, recentPerHour float64) abuseipdb.Report
 		EventCount:      a.EventCount,
 		UniqueUsers:     a.UniqueUsers,
 		AttemptsPerHour: recentPerHour,
+		LastSeen:        a.LastSeen,
 	}
 }
 

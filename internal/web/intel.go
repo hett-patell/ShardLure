@@ -345,7 +345,7 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	reportEligible := false
 	if s.abuseEnabledLive() && s.abuseKeyLive() != "" {
 		ok, _ := abuseipdb.Vet(newReportCandidate(a, s.recentRatesCached()[a.ID]),
-			s.abuseAdmin, s.abuseMinProbeLive())
+			s.abuseAdmin, s.abuseMinProbeLive(), time.Now())
 		if ok {
 			// Also hide the button if we already reported within the window,
 			// so the operator isn't offered a no-op.

@@ -215,6 +215,10 @@ func collectReportCandidates(st *store.Store, minProbe int) ([]abuseipdb.ReportC
 			EventCount:      a.EventCount,
 			UniqueUsers:     a.UniqueUsers,
 			AttemptsPerHour: rates[a.ID],
+			// Required by Vet's staleness gate: the pool reaches past the window
+			// (ActorsForReporting unions in top actors by lifetime rate), so
+			// without this the CLI would offer month-dormant IPs.
+			LastSeen: a.LastSeen,
 		})
 	}
 	return out, nil

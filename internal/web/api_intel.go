@@ -1582,9 +1582,12 @@ func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Reque
 		if a.PrimaryIP == "" {
 			continue
 		}
+		// LastSeen rides on the candidate (newReportCandidate sets it), not on
+		// SuggestInput's deprecated field: Vet reads only Cand.LastSeen, so keeping
+		// a second copy here would let this call site keep working if the
+		// passthrough were ever dropped — silently un-gating staleness.
 		inputs = append(inputs, abuseipdb.SuggestInput{
-			Cand:     newReportCandidate(&a, suggestRates[a.ID]),
-			LastSeen: a.LastSeen,
+			Cand: newReportCandidate(&a, suggestRates[a.ID]),
 		})
 	}
 	// Exclude IPs already reported within the re-report window so the list is
