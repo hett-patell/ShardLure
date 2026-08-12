@@ -822,6 +822,13 @@ type payloadRow struct {
 	ActorCount   int    `json:"actorCount"`        // distinct actors
 	SessionCount int    `json:"sessionCount"`      // distinct sessions
 	HasLocal     bool   `json:"hasLocal"`
+	// Shareable is the server's verdict on whether this payload can reach the
+	// MalwareBazaar path at all, computed over ALL rows for the sha against the
+	// same policy the CLI uses. The client must not re-derive this from Origin:
+	// Origin is the newest row only, and a payload seen by both the cowrie hook
+	// and our quarantine fetch would lose its share button on the coin-flip of
+	// which sighting landed last. Vet still has the final say at upload time.
+	Shareable bool `json:"shareable"`
 }
 
 func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
@@ -840,7 +847,15 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	arts, err := s.st.ListArtifactsAggregatedSince(since, limit)
+	// Shareability is computed server-side against the SAME policy the CLI's
+	// candidate query uses, so the dashboard's share button and `share bazaar`
+	// can't disagree about which payloads exist (they did: two droppers the CLI
+	// selected had no button, because the client re-derived eligibility from the
+	// newest row's origin).
+	arts, err := s.st.ListArtifactsAggregatedSince(since, limit, store.SharePolicy{
+		MinBytes: bazaar.MinSampleBytes,
+		Origins:  bazaar.ShareableOrigins(),
+	})
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -864,6 +879,7 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 			ActorCount:   a.ActorCount,
 			SessionCount: a.SessionCount,
 			HasLocal:     a.HasLocal,
+			Shareable:    a.Shareable,
 		})
 	}
 	// Total = true distinct-payload count for the window (not len(arts), which
@@ -897,6 +913,10 @@ type payloadDetailResponse struct {
 	// cowrie SFTP race). DiskSizeBytes is the actual on-disk size in that case.
 	SizeMismatch  bool  `json:"sizeMismatch,omitempty"`
 	DiskSizeBytes int64 `json:"diskSizeBytes,omitempty"`
+	// Shareable mirrors payloadRow.Shareable: the server's group-level verdict,
+	// computed over every row for this sha. Origin above is the newest row only,
+	// so the modal must not re-derive eligibility from it either.
+	Shareable bool `json:"shareable"`
 }
 
 func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
@@ -944,6 +964,19 @@ func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
 	if insp.Error == "" && a.SizeBytes > 0 && insp.SizeBytes != a.SizeBytes {
 		resp.SizeMismatch = true
 		resp.DiskSizeBytes = insp.SizeBytes
+	}
+	// Group-level, not from `a` above: a is the newest row for the sha, and the
+	// same payload is routinely recorded by both the cowrie hook and our own
+	// quarantine fetch. A share-button gate reading a.Origin is a coin flip on
+	// which sighting landed last. A lookup failure degrades to "not shareable"
+	// (no button) rather than failing the whole modal.
+	if ok, serr := s.st.PayloadShareable(a.SHA256, store.SharePolicy{
+		MinBytes: bazaar.MinSampleBytes,
+		Origins:  bazaar.ShareableOrigins(),
+	}); serr != nil {
+		log.Printf("payload detail: shareable lookup for %s: %v", a.SHA256, serr)
+	} else {
+		resp.Shareable = ok
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }

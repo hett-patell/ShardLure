@@ -4151,13 +4151,18 @@ function renderPayloads(data) {
     } else if (isUploadEligible(p)) {
       shareBtn = '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">▲ share</button>';
     } else {
-      // Not MB-eligible (tiny/junk, tty transcript, non-download origin, or no
-      // local file). Show why instead of a share button the server would only
-      // reject — this is what fixed the "share on all 92" anomaly.
+      // Not MB-eligible. Show why instead of a share button the server would
+      // only reject — this is what fixed the "share on all 92" anomaly.
+      //
+      // The reason is a best-effort LABEL for a verdict the server already made
+      // (p.shareable); it is not the gate. These tests are ordered to match how
+      // the server narrows, but if none of them explains the rejection we say
+      // "ineligible" rather than inventing a cause — a label that disagreed with
+      // the gate is how the origin drift stayed invisible for so long.
       var why = (sha === '—' || !p.hasLocal) ? 'no file'
-        : ((p.origin || '').indexOf('download') === -1) ? 'not a download'
-        : ((p.sizeBytes || 0) <= 1024) ? 'too small'
-        : ((p.status || '') !== 'fetched') ? p.status
+        : ((p.status || '') !== 'fetched') ? (p.status || 'not fetched')
+        : ((p.sizeBytes || 0) < 64) ? 'too small'
+        : ((p.origin || '') === 'cowrie_tty') ? 'tty transcript'
         : 'ineligible';
       shareBtn = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar: ' + escHtml(why) + '">— ' + escHtml(why) + '</span>';
     }
@@ -4190,21 +4195,27 @@ function renderPayloads(data) {
 }
 
 // isUploadEligible reports whether a payload row COULD be shipped to
-// MalwareBazaar at all — mirroring the server's share filter
-// (store.ArtifactsForShare) and the Vet gate's cheap structural checks:
-// a local file, fetched status, >1 KiB, and a download-ish origin. A TTY
-// transcript, sub-1 KiB junk/pubkey, or non-download artifact will always be
-// skipped server-side, so the library must NOT offer a share button for it
-// (that button was the 92-vs-2 anomaly: it appeared on all hasLocal rows,
-// including 60 tiny files and 22 tty transcripts that can never upload).
+// MalwareBazaar at all, so the library doesn't offer a share button for a TTY
+// transcript or sub-floor junk that will always be skipped server-side (that
+// button was the 92-vs-2 anomaly: it appeared on every hasLocal row, including
+// 60 tiny files and 22 tty transcripts that can never upload).
+//
+// It reads the server's `shareable` verdict rather than re-deriving one. This
+// function used to mirror the share filter in JS — status/size/origin — and the
+// mirror drifted: it tested `origin.indexOf('download')`, which does not match
+// "quarantine_fetch" (the capture runner's own fetch, which Vet accepts), and it
+// read `origin` from the aggregated row, i.e. the NEWEST sighting only. A payload
+// recorded by both the cowrie hook and our fetch therefore won or lost its button
+// on which sighting landed last — two family-identified droppers (Traffmonetizer,
+// Komari) lost it while `share bazaar` was selecting them.
+//
+// Shareable is computed over ALL rows for the sha against bazaar's own policy, so
+// there is one answer. Still only "may be considered": Vet decides at upload.
 // Deliberately does NOT consider already-shared state — callers layer that on.
 function isUploadEligible(p) {
   var sha = p.sha256 || '';
-  if (!sha || sha === '—' || !p.hasLocal) return false;
-  if ((p.status || '') !== 'fetched') return false;       // server: status='fetched'
-  if ((p.sizeBytes || 0) <= 1024) return false;            // server: size_bytes > 1024
-  if ((p.origin || '').indexOf('download') === -1) return false; // server: origin LIKE '%download%'
-  return true;
+  if (!sha || sha === '—') return false;
+  return !!p.shareable;
 }
 
 // isPending is isUploadEligible AND not-yet-uploaded, scoped to the selected
@@ -4349,20 +4360,21 @@ function renderPayloadDetail(d) {
     (insp.truncated ? '<span class="pm-k">scan</span><span class="pm-v">truncated at 64KB</span>' : '') +
     '</div>';
 
-  // Only offer Share when the payload is actually MB-eligible (same gate as
-  // the library table + server Vet). The detail modal only opens for artifacts
-  // with a local file, so hasLocal is implied true here. Ineligible payloads
-  // (tty transcript, sub-1KiB, non-download origin) show the reason instead of
-  // a Share button the server would only skip.
+  // Only offer Share when the payload is actually MB-eligible. Same gate as the
+  // library table: the server's own group-level `shareable` verdict, NOT a JS
+  // re-derivation from d.origin — the detail response carries the newest row's
+  // origin, and this modal is exactly where the Traffmonetizer/Komari droppers
+  // showed "not a download" while the CLI was selecting them. Vet still decides
+  // at upload; the reason string below is a label, not the gate.
   var bzInner;
   if (!d.sha256) {
     bzInner = '';
   } else if (_bazaarSharedSet[d.sha256]) {
     bzInner = '<span class="bz-btn ok">✓ shared to MalwareBazaar</span>';
-  } else if (isUploadEligible({sha256: d.sha256, hasLocal: true, status: d.status, sizeBytes: d.sizeBytes, origin: d.origin})) {
+  } else if (isUploadEligible({sha256: d.sha256, shareable: d.shareable})) {
     bzInner = '<button class="bz-btn" onclick="uploadToBazaar(\''+escHtml(d.sha256)+'\',this)">▲ Share to MalwareBazaar</button>';
   } else {
-    var w = ((d.origin||'').indexOf('download')===-1) ? 'not a download' : ((d.sizeBytes||0)<=1024) ? 'too small' : ((d.status||'')!=='fetched') ? (d.status||'not fetched') : 'ineligible';
+    var w = ((d.status||'')!=='fetched') ? (d.status||'not fetched') : ((d.sizeBytes||0)<64) ? 'too small' : ((d.origin||'')==='cowrie_tty') ? 'tty transcript' : 'ineligible';
     bzInner = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar">not eligible for MalwareBazaar: '+escHtml(w)+'</span>';
   }
   var bzBtn = bzInner ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">'+bzInner+'</div>' : '';
@@ -5106,11 +5118,10 @@ var _uploadAllRunning = false;
 async function uploadAllToBazaar(masterBtn) {
   // Drive the sha list from the canonical payload data through isPending —
   // NOT a DOM scrape of data-has-local rows. data-has-local is set on every
-  // local row (incl. sub-1KiB junk, pubkeys, tty transcripts, non-download
-  // origins) the server always rejects; scraping it here re-created the exact
-  // 92-vs-2 anomaly the per-row button was fixed for. isPending mirrors the
-  // server's ArtifactsForShare + Vet eligibility. (Same approach as
-  // uploadAllPending.)
+  // local row (incl. junk below the size floor, pubkeys, tty transcripts) the
+  // server always rejects; scraping it here re-created the exact 92-vs-2 anomaly
+  // the per-row button was fixed for. isPending reads the server's own
+  // `shareable` verdict, so it cannot drift from it. (Same as uploadAllPending.)
   var data = _lastPayloadData;
   var shas = (data && data.rows ? data.rows : []).filter(isPending).map(function(p){ return p.sha256; });
   if (!shas.length) { masterBtn.className = 'bz-btn ok'; masterBtn.textContent = '✓ nothing eligible to share'; return; }

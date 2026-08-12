@@ -292,9 +292,14 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 // botnets); the UI is more useful when the operator sees one row per
 // unique payload with delivery breadth surfaced as counters.
 type ArtifactAggregate struct {
-	SHA256       string
-	SizeBytes    int64
-	Origin       string // last-seen origin (kinds rarely mix per sha)
+	SHA256 string
+	SizeBytes int64
+	// Origin is the LAST-SEEN origin. Origins DO mix per sha (67 hashes on the
+	// reference deployment): the same payload is often recorded once by the
+	// cowrie download hook and again by our own quarantine fetch. So this field
+	// describes one row, not the payload — never derive shareability from it,
+	// use Shareable.
+	Origin       string
 	Status       string // last-seen status
 	FirstTS      time.Time
 	LastTS       time.Time
@@ -308,6 +313,14 @@ type ArtifactAggregate struct {
 	LastActor    string // most-recent actor_id
 	LastSession  string // most-recent session_id
 	HasLocal     bool   // at least one row has a local_path
+	// Shareable reports whether ANY row in this group could reach the share
+	// path — a group-level property, evaluated against the same SharePolicy
+	// ArtifactsForShare uses. It exists because the dashboard used to re-derive
+	// eligibility in JavaScript from Origin above, and a payload whose newest
+	// row was a quarantine_fetch therefore lost its share button even though
+	// the CLI would ship it. Two family-identified droppers (Traffmonetizer,
+	// Komari) were hidden that way. Still only "may be considered": Vet decides.
+	Shareable bool
 }
 
 // ListArtifactsAggregatedSince returns at most `limit` unique payloads
@@ -333,13 +346,37 @@ WHERE COALESCE(ts, created_at) >= ?
 	return n, err
 }
 
-func (s *Store) ListArtifactsAggregatedSince(since time.Time, limit int) ([]ArtifactAggregate, error) {
+// pol narrows which rows count toward the group's Shareable flag. Pass the
+// same policy the share path uses (bazaar.MinSampleBytes / ShareableOrigins),
+// or the zero value to mark nothing shareable.
+func (s *Store) ListArtifactsAggregatedSince(since time.Time, limit int, pol SharePolicy) ([]ArtifactAggregate, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
+	// shareable is computed per GROUP, not from the newest row: "can this
+	// payload be shared" is a property of the payload, and the same sha is
+	// commonly recorded by both the cowrie hook and our quarantine fetch.
+	// Deriving it from the newest row (as the dashboard's JS used to) drops a
+	// payload whose latest sighting happened to be the other origin.
+	shareable := "0"
+	args := []interface{}{since.UTC().Format(time.RFC3339Nano)}
+	if len(pol.Origins) > 0 {
+		ph := make([]string, len(pol.Origins))
+		for i, o := range pol.Origins {
+			ph[i] = "?"
+			args = append(args, o)
+		}
+		args = append(args, pol.MinBytes)
+		shareable = `MAX(CASE WHEN status='fetched'
+                          AND origin IN (` + strings.Join(ph, ",") + `)
+                          AND size_bytes >= ?
+                          AND COALESCE(local_path,'') != ''
+                     THEN 1 ELSE 0 END)`
+	}
+	args = append(args, limit)
 	rows, err := s.db.Query(`
 WITH win AS (
   SELECT id, ts, src_ip, session_id, actor_id, url, local_path,
@@ -359,7 +396,8 @@ grp AS (
     COUNT(DISTINCT NULLIF(src_ip, '')) AS ip_count,
     COUNT(DISTINCT NULLIF(actor_id, '')) AS actor_count,
     COUNT(DISTINCT NULLIF(session_id, '')) AS session_count,
-    MAX(CASE WHEN COALESCE(local_path, '') != '' THEN 1 ELSE 0 END) AS has_local
+    MAX(CASE WHEN COALESCE(local_path, '') != '' THEN 1 ELSE 0 END) AS has_local,
+    `+shareable+` AS shareable
   FROM win
   GROUP BY sha256
 ),
@@ -373,11 +411,11 @@ SELECT
   r.origin, r.status, r.url, r.src_ip, r.actor_id, r.session_id,
   g.first_ts, g.last_ts, g.occurrences,
   g.url_count, g.ip_count, g.actor_count, g.session_count,
-  g.has_local
+  g.has_local, g.shareable
 FROM grp g
 JOIN ranked r ON r.sha256 = g.sha256 AND r.rn = 1
 ORDER BY g.last_ts DESC
-LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -386,15 +424,16 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 	for rows.Next() {
 		var a ArtifactAggregate
 		var firstTS, lastTS string
-		var hasLocal int
+		var hasLocal, shareableRow int
 		var lastOrigin, lastStatus, lastURL, lastSrcIP, lastActor, lastSession sql.NullString
 		if err := rows.Scan(&a.SHA256, &a.SizeBytes,
 			&lastOrigin, &lastStatus, &lastURL, &lastSrcIP, &lastActor, &lastSession,
 			&firstTS, &lastTS, &a.Occurrences,
 			&a.URLCount, &a.IPCount, &a.ActorCount, &a.SessionCount,
-			&hasLocal); err != nil {
+			&hasLocal, &shareableRow); err != nil {
 			return nil, err
 		}
+		a.Shareable = shareableRow == 1
 		a.Origin = lastOrigin.String
 		a.Status = lastStatus.String
 		a.LastURL = lastURL.String
@@ -409,36 +448,73 @@ LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 	return out, rows.Err()
 }
 
+// SharePolicy is the candidate-selection narrowing for ArtifactsForShare.
+// The values come from the destination's own gate (bazaar.MinSampleBytes,
+// bazaar.ShareableOrigins) rather than being restated here, so this query can
+// never be stricter than the policy that ultimately judges the sample.
+//
+// It is a parameter and not a constant because store must not import
+// intel/bazaar — the interfaces in the intel packages exist to keep that
+// dependency pointing one way (see the UploadRecorder comment).
+type SharePolicy struct {
+	// MinBytes is inclusive: a sample of exactly MinBytes is selected.
+	MinBytes int64
+	// Origins is the allowlist of provenances. Empty means "no origin
+	// restriction", which is never what the share path wants — the caller
+	// passes bazaar.ShareableOrigins().
+	Origins []string
+}
+
 // ArtifactsForShare returns artifacts eligible for outbound sharing
 // (currently to abuse.ch MalwareBazaar). Eligibility is intentionally
 // strict — sharing leaks data publicly so we don't want to be loose:
 //
 //   - status='fetched'           (we actually have the bytes on disk)
-//   - size_bytes > 1024          (skip empty + 1-byte SFTP sentinel
+//   - size_bytes >= pol.MinBytes (skip empty + 1-byte SFTP sentinel
 //     files that cowrie produces for some failed transfers)
 //   - sha256 IS NOT NULL/empty   (needed for downstream dedup against
 //     the bazaar_uploads table)
-//   - origin LIKE '%download%'   (exclude cowrie-tty transcripts and
-//     quarantine_fetch URLs that didn't resolve to a binary)
+//   - origin IN pol.Origins      (excludes cowrie-tty transcripts)
 //   - created_at >= since        (abuse.ch fair-use: fresh samples only)
 //
-// Returns newest-first. The caller (share subcommand) bounds the
-// result with --limit if needed. Duplicate sha256 across multiple URL
-// rows is fine — the bazaar uploader dedupes on sha256 itself.
-func (s *Store) ArtifactsForShare(since time.Time) ([]Artifact, error) {
+// This is candidate SELECTION, not policy. It exists to keep the row count
+// and the disk IO down; bazaar.Vet is what actually decides, and it re-checks
+// size, origin, freshness and content on every candidate. So the rule here is
+// that this query may never be TIGHTER than Vet — a sample rejected before Vet
+// sees it is rejected by an invisible second policy with no stated reason.
+//
+// It was tighter, twice, and both hid real samples on the reference
+// deployment: `size_bytes > 1024` against Vet's 64 B floor (13 payloads), and
+// `origin LIKE '%download%'`, which silently excludes "quarantine_fetch" —
+// the capture runner's own fetches (10 payloads, 18.6 MB, all unshared).
+//
+// Returns newest-first. Duplicate sha256 across multiple URL rows is fine —
+// the bazaar uploader dedupes on sha256 itself.
+func (s *Store) ArtifactsForShare(since time.Time, pol SharePolicy) ([]Artifact, error) {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
 	cutoff := since.UTC().Format(time.RFC3339Nano)
+	args := []interface{}{pol.MinBytes}
+	// Origins is interpolated as bound placeholders, never as literal text.
+	originClause := ""
+	if len(pol.Origins) > 0 {
+		ph := make([]string, len(pol.Origins))
+		for i, o := range pol.Origins {
+			ph[i] = "?"
+			args = append(args, o)
+		}
+		originClause = "\n  AND origin IN (" + strings.Join(ph, ",") + ")"
+	}
+	args = append(args, cutoff)
 	rows, err := s.db.Query(`
 SELECT `+artifactColumns+`
 FROM artifacts
 WHERE status='fetched'
-  AND size_bytes > 1024
-  AND sha256 IS NOT NULL AND sha256 != ''
-  AND origin LIKE '%download%'
+  AND size_bytes >= ?
+  AND sha256 IS NOT NULL AND sha256 != ''`+originClause+`
   AND COALESCE(created_at, ts) >= ?
-ORDER BY COALESCE(created_at, ts) DESC`, cutoff)
+ORDER BY COALESCE(created_at, ts) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -460,6 +536,39 @@ ORDER BY COALESCE(created_at, ts) DESC`, cutoff)
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// PayloadShareable reports whether ANY artifact row for this sha256 satisfies
+// the share policy — the same group-level question ListArtifactsAggregatedSince
+// answers per page, for callers that hold a single hash (the payload detail
+// modal, which resolves its row via GetArtifactBySHA and would otherwise judge
+// shareability from the newest sighting alone).
+//
+// Unwindowed on purpose: this asks "could this payload be shared at all", and
+// bazaar.Vet applies the freshness ceiling. A zero-value policy (no Origins)
+// answers false rather than "everything", matching the aggregate.
+func (s *Store) PayloadShareable(sha256 string, pol SharePolicy) (bool, error) {
+	if sha256 == "" || len(pol.Origins) == 0 {
+		return false, nil
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return false, err
+	}
+	args := []interface{}{sha256, pol.MinBytes}
+	ph := make([]string, len(pol.Origins))
+	for i, o := range pol.Origins {
+		ph[i] = "?"
+		args = append(args, o)
+	}
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(*) FROM artifacts
+WHERE sha256=?
+  AND status='fetched'
+  AND size_bytes >= ?
+  AND COALESCE(local_path,'') != ''
+  AND origin IN (`+strings.Join(ph, ",")+`)`, args...).Scan(&n)
+	return n > 0, err
 }
 
 // GetArtifactBySHA returns the most recent artifact matching the SHA-256.

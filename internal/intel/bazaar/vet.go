@@ -2,6 +2,7 @@ package bazaar
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -22,10 +23,16 @@ import (
 // metadata, but is not proof of malware by itself.
 
 const (
-	// minSampleBytes floors sample size. Below this it's control-plane noise
+	// MinSampleBytes floors sample size. Below this it's control-plane noise
 	// (empty markers, 1-byte scp probes, truncated fetches), never a real
 	// sample. The archive holds literal 1- and 2-byte "downloads".
-	minSampleBytes = 64
+	//
+	// Exported so the candidate-selection query can use THIS number instead of
+	// inventing its own. store.ArtifactsForShare used `size_bytes > 1024`,
+	// which pre-rejected 13 samples in 64..1024 B that Vet was willing to
+	// judge — a dropper script is routinely a few hundred bytes. A pre-filter
+	// stricter than the policy gate is a second, invisible policy.
+	MinSampleBytes = 64
 	// defaultFreshnessDays is MB's hard 10-day rule, measured from first observation.
 	defaultFreshnessDays = 10
 )
@@ -46,6 +53,31 @@ var fetchedOrigins = map[string]bool{
 	"quarantine_fetch":     true,
 	"cowrie_download":      true,
 	"cowrie_file_download": true,
+}
+
+// ShareableOrigins returns the provenances that can ever reach MalwareBazaar,
+// so a candidate-selection query narrows to exactly what Vet accepts rather
+// than guessing. Sorted for a stable SQL string.
+//
+// This exists because store.ArtifactsForShare and the dashboard's
+// isUploadEligible both filtered `origin LIKE '%download%'`, which does not
+// match "quarantine_fetch" — the capture runner's OWN fetches, i.e. precisely
+// the novel-threat path the provenance signal above was written for. On the
+// reference deployment that silently hid 10 unshared payloads (18.6 MB) from
+// the CLI, and hid two family-identified droppers (Traffmonetizer, Komari)
+// from the dashboard, because the aggregated payload row reports the NEWEST
+// row's origin and theirs was quarantine_fetch.
+//
+// Note the asymmetry: an origin in this set is *permitted to be considered*,
+// not accepted. Vet still decides, and for a non-family sample it requires a
+// fetched origin anyway. cowrie_tty is absent here and hard-rejected by Vet.
+func ShareableOrigins() []string {
+	out := make([]string, 0, len(fetchedOrigins))
+	for o := range fetchedOrigins {
+		out = append(out, o)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // benignKinds are Classify FileKinds that are NOT malware and must never be
@@ -75,7 +107,7 @@ func Vet(c Candidate, cls Classification, now time.Time, opts ...VetOptions) (bo
 	if c.Origin == "cowrie_tty" {
 		return false, "tty transcript, not a malware sample"
 	}
-	if c.SizeBytes < minSampleBytes {
+	if c.SizeBytes < MinSampleBytes {
 		return false, "too small to be a real sample"
 	}
 	if benignKinds[cls.FileKind] {

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,7 +75,11 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	}
 	fs := flag.NewFlagSet("share bazaar", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would upload without contacting MalwareBazaar")
-	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded)")
+	// Bounds UPLOADS, enforced inside bazaar.Share after Vet — not a truncation
+	// of the candidate list. Truncating first meant the budget was consumed by
+	// already-shared hashes at the top of the newest-first list, so the default
+	// shipped nothing while vettable samples sat just below the cut.
+	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded); counts submissions, not candidates examined")
 	sha := fs.String("sha", "", "select only the sample with this sha256 (still subject to dedup and Vet)")
 	since := fs.Duration("since", time.Duration(freshDays)*24*time.Hour, "local candidate-selection window; does not change the 10-day upload ceiling")
 	anonymous := fs.Bool("anonymous", false, "submit without attribution to your account")
@@ -102,12 +107,6 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 		return
 	}
 
-	// Apply the limit AFTER candidate collection so the SQL stays
-	// simple. With limit=0 we keep them all.
-	if *limit > 0 && len(cands) > *limit {
-		cands = cands[:*limit]
-	}
-
 	maxBytes := cfg.Intel.Bazaar.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = 32 << 20
@@ -118,7 +117,11 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 		ep = *endpoint
 	}
 
-	fmt.Printf("candidates: %d  dry-run=%v  endpoint=%s\n", len(cands), *dryRun, ep)
+	limitLabel := "unbounded"
+	if *limit > 0 {
+		limitLabel = strconv.Itoa(*limit)
+	}
+	fmt.Printf("candidates: %d  upload-limit=%s  dry-run=%v  endpoint=%s\n", len(cands), limitLabel, *dryRun, ep)
 	if *dryRun {
 		fmt.Println("(dry-run: no upload)")
 	}
@@ -134,9 +137,15 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 		Comment:       *comment,
 		// 2 s rate limit lives inside Share's default. Hardcoded
 		// here only to make it obvious in --dry-run output.
-		RateLimit: 2 * time.Second,
+		RateLimit:  2 * time.Second,
+		MaxUploads: *limit,
 		OnProgress: func(c bazaar.Candidate, cls bazaar.Classification, r *bazaar.Result, err error) {
 			printBazaarProgress(c, cls, r, err)
+		},
+		OnLimitReached: func(unexamined int) {
+			// Never let a bounded run read as an exhausted one.
+			fmt.Printf("\n  (upload limit %d reached — %d candidate(s) not examined; raise --limit or pass --limit=0)\n",
+				*limit, unexamined)
 		},
 	}
 
@@ -170,19 +179,21 @@ func (a *bazaarRecorderAdapter) RecordBazaarUpload(sha, status, mbURL string, at
 	})
 }
 
-// collectShareCandidates pulls every artifact eligible for upload.
-// Eligibility (matched by the WHERE clause):
+// collectShareCandidates pulls every artifact that could be considered for
+// upload. Narrowing (see store.ArtifactsForShare):
 //
-//   - status = 'fetched'    — we actually have the bytes on disk
-//   - size_bytes > 1024     — skip empty + tiny redir sentinels
-//   - sha256 IS NOT NULL    — needed for dedup
-//   - origin LIKE '%download%'  — exclude TTY transcripts (those
-//     are operator artifacts, not malware samples)
-//   - created_at >= now - since  — local candidate selection only
+//   - status = 'fetched'            — we actually have the bytes on disk
+//   - size_bytes >= MinSampleBytes  — bazaar's own floor, not a second one
+//   - sha256 IS NOT NULL            — needed for dedup
+//   - origin IN ShareableOrigins()  — bazaar's own allowlist (excludes TTY
+//     transcripts, includes quarantine_fetch, which `LIKE '%download%'` didn't)
+//   - created_at >= now - since     — local candidate selection only
 //
 // If singleSHA is non-empty, it overrides the WHERE clause completely. Both
 // paths still enter bazaar.Share, which applies dedup and the non-bypassable
-// Vet freshness policy before any network call.
+// Vet freshness policy before any network call. This returns ALL candidates:
+// --limit bounds submissions inside Share, so the budget is spent on samples
+// that actually clear the gate.
 func collectShareCandidates(st *store.Store, singleSHA string, since time.Duration) ([]bazaar.Candidate, error) {
 	if singleSHA != "" {
 		row, err := st.GetArtifactBySHA(singleSHA)
@@ -192,7 +203,13 @@ func collectShareCandidates(st *store.Store, singleSHA string, since time.Durati
 		return []bazaar.Candidate{artifactToCandidate(*row)}, nil
 	}
 	cutoff := time.Now().Add(-since).UTC()
-	rows, err := st.ArtifactsForShare(cutoff)
+	// Selection narrowing comes FROM the bazaar gate, so this query can't be
+	// stricter than the policy that judges the samples (it was, on both size
+	// and origin, and each drift hid real payloads — see ArtifactsForShare).
+	rows, err := st.ArtifactsForShare(cutoff, store.SharePolicy{
+		MinBytes: bazaar.MinSampleBytes,
+		Origins:  bazaar.ShareableOrigins(),
+	})
 	if err != nil {
 		return nil, err
 	}

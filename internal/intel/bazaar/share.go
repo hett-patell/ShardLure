@@ -61,6 +61,23 @@ type Options struct {
 	Comment       string // operator-supplied comment appended to per-sample context
 	RateLimit     time.Duration
 	OnProgress    func(c Candidate, classification Classification, result *Result, err error)
+	// MaxUploads bounds how many samples this run may SUBMIT (0 = unbounded).
+	// It counts samples that cleared Vet — i.e. the ones about to leave the box,
+	// whether via a real POST or a --dry-run preview.
+	//
+	// The bound belongs HERE, after the gate, not in the caller's candidate
+	// slice. `share bazaar --limit` used to truncate the candidate list before
+	// Share saw it, and since candidates arrive newest-first and most of them are
+	// already in the dedup ledger, the default --limit=10 spent its whole budget
+	// on ten already-shared hashes and uploaded nothing — on the reference
+	// deployment, `--limit=10` reported "skipped=10" and printed no samples at
+	// all, while `--limit=0` found 16 vettable ones behind them. A limit meant to
+	// cap API calls was instead capping how far down the list we looked.
+	MaxUploads int
+	// OnLimitReached fires at most once, when MaxUploads stopped the run early,
+	// with the number of candidates never examined. Callers report it so a
+	// bounded run never looks like an exhausted one.
+	OnLimitReached func(unexamined int)
 }
 
 // Errors surfaced to callers. Kept as sentinels so the CLI can map
@@ -77,8 +94,15 @@ var (
 //  2. Skip if BazaarUploadRecorded returns true (already shipped).
 //  3. Classify on disk → tag set + optional family.
 //  4. Apply the local MalwareBazaar submission-policy gate.
-//  5. POST to MalwareBazaar with combined (ExtraTags + classification).
+//  5. POST to MalwareBazaar with combined (ExtraTags + classification),
+//     stopping once Options.MaxUploads submissions have been made.
 //  6. On accepted response, RecordBazaarUpload so the next run skips it.
+//
+// Every local skip reports through OnProgress. That is a contract, not a
+// nicety: a skip the caller can't see becomes an unexplained number in the
+// summary line, and two branches here used to be silent (empty sha, already in
+// the ledger), which is why a default run could print "skipped=10" and not one
+// sample.
 //
 // Returns (uploaded, skipped, error). uploaded counts both inserted
 // and file_already_known responses (both mean "MB has it"); skipped
@@ -100,15 +124,34 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 	}
 
 	c := NewClient(opts.Endpoint)
+	// submitted counts samples that cleared Vet and were therefore sent (or, in
+	// dry-run, previewed). MaxUploads bounds THIS, not the candidates examined.
+	submitted := 0
 	for i, cand := range candidates {
 		if ctx.Err() != nil {
 			return uploaded, skipped, ctx.Err()
+		}
+		if opts.MaxUploads > 0 && submitted >= opts.MaxUploads {
+			// Budget spent. Everything from i onward is unexamined, which is a
+			// different thing from "nothing left to share" — say so.
+			if opts.OnLimitReached != nil {
+				opts.OnLimitReached(len(candidates) - i)
+			}
+			break
 		}
 
 		// Pre-flight filters. These do NOT consult Classify because
 		// the classify call costs disk IO; cheap rejects come first.
 		if cand.SHA256 == "" {
 			skipped++
+			// Report it: an unexplained bump in the skipped total is unreadable to
+			// the operator, and this loop's two silent branches (here and the
+			// dedup one below) accounted for every one of the 10 skips a default
+			// run showed with no per-sample output at all.
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, Classification{}, &Result{Status: "skipped"},
+					errors.New("skip: artifact has no sha256, cannot dedup"))
+			}
 			continue
 		}
 		if cand.SizeBytes <= 0 || cand.SizeBytes > opts.MaxBytes {
@@ -128,6 +171,14 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		}
 		if alreadyUploaded {
 			skipped++
+			// Silent before: on a deployment with a populated ledger this is the
+			// most common skip by far (43 of 43 hashes on the reference box), so
+			// staying quiet made "skipped=10" look like a policy rejection or a
+			// bug rather than "MalwareBazaar already has these".
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, Classification{}, &Result{Status: "already_shared"},
+					errors.New("skip: already recorded in bazaar_uploads"))
+			}
 			continue
 		}
 
@@ -185,6 +236,9 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		}
 
 		if opts.DryRun {
+			// Counts against MaxUploads so --dry-run --limit N previews exactly
+			// the N samples the real run would send.
+			submitted++
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, cls, &Result{Status: "dry-run"}, nil)
 			}
@@ -202,6 +256,9 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		}
 		res, uerr := c.Upload(ctx, opts.APIKey, f, cand.SHA256, sub)
 		_ = f.Close()
+		// Counted on attempt, not on acceptance: MaxUploads bounds what we send
+		// to abuse.ch, and a rejected POST was still a call we made.
+		submitted++
 
 		if uerr != nil {
 			if opts.OnProgress != nil {
@@ -242,7 +299,11 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		// violations of fair use lead to a ban. 2 s between calls
 		// is conservative and still ships our 26-sample backlog in
 		// under a minute.
-		if i+1 < len(candidates) {
+		// Skip the wait when the budget is already spent — the next iteration
+		// would only break, and pacing exists to space out API calls, not to
+		// delay the summary line.
+		budgetSpent := opts.MaxUploads > 0 && submitted >= opts.MaxUploads
+		if i+1 < len(candidates) && !budgetSpent {
 			t := time.NewTimer(opts.RateLimit)
 			select {
 			case <-ctx.Done():
