@@ -263,3 +263,57 @@ func TestNoRateDisplayUsesTheLifetimeAverage(t *testing.T) {
 		t.Error("radar reverted to TopActorsByRate, which orders by the lifetime average")
 	}
 }
+
+// TestWindowedPanelsDiscloseSampling pins the fix for silently sampled panels.
+// The windowed-analytics fetch is capped, so on a busy deployment these panels
+// describe a SAMPLE. The server already set an advisory header, but no panel
+// reads response headers, so the numbers rendered as window totals — measured at
+// 200,000 of 533,647 events with half the long tail missing.
+func TestWindowedPanelsDiscloseSampling(t *testing.T) {
+	src := readSource(t, "api_intel.go")
+	// Every handler that caps its analysis must also report it in the BODY.
+	for _, resp := range []string{"mitreResponse", "ttpResponse", "deobfResponse", "iocListResponse"} {
+		i := strings.Index(src, "type "+resp+" struct {")
+		if i < 0 {
+			t.Errorf("%s not found", resp)
+			continue
+		}
+		if !strings.Contains(src[i:i+strings.Index(src[i:], "}")], "Sampled") {
+			t.Errorf("%s has no Sampled field: a capped analysis would render as a "+
+				"window total with nothing said about it", resp)
+		}
+	}
+	if n := strings.Count(src, "sampledWindow(len(events)"); n < 4 {
+		t.Errorf("only %d handlers populate Sampled, want >= 4", n)
+	}
+	// And the dashboard must actually render it.
+	if !strings.Contains(intelHTML, "function sampledNote(") {
+		t.Fatal("no sampledNote renderer in the dashboard")
+	}
+	if n := strings.Count(intelHTML, "sampledNote(data)"); n < 4 {
+		t.Errorf("sampledNote used in %d panels, want >= 4 (MITRE, TTP, IOC, deobf)", n)
+	}
+}
+
+// TestWordlistCountsInSQL pins the wordlist fix: it must aggregate in the
+// database, not fold a capped window of events in memory. Folding made it
+// understate every count by ~60% and drop 47% of the distinct usernames.
+func TestWordlistCountsInSQL(t *testing.T) {
+	src := readSource(t, "api_intel.go")
+	i := strings.Index(src, "func (s *Server) handleIntelWordlist(")
+	if i < 0 {
+		t.Fatal("wordlist handler not found")
+	}
+	body := src[i : i+3000]
+	for _, banned := range []string{"wordlist.CollectUsernames(", "wordlist.CollectPasswords(", "wordlist.CollectCombos("} {
+		if strings.Contains(body, banned) {
+			t.Errorf("wordlist still folds events in memory via %s; that path is capped "+
+				"and silently samples the window", banned)
+		}
+	}
+	for _, want := range []string{"TopUsernamesSince", "TopPasswordsSince", "TopCombosSince"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("wordlist does not use %s", want)
+		}
+	}
+}

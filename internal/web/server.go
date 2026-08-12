@@ -417,6 +417,27 @@ func discloseWindowTruncation(w http.ResponseWriter, returned, total int) {
 	}
 }
 
+// windowSample is the SAME disclosure carried in the response body.
+//
+// The header alone was not enough: no panel reads response headers, so a
+// truncated analysis rendered as though it described the whole window. Measured
+// on a 30-day window of 533,647 events, the analysis ran over 200,000 of them
+// and said nothing about it. The header stays for API consumers; this is what
+// the dashboard can actually show.
+type windowSample struct {
+	Analyzed int `json:"analyzed"`
+	Total    int `json:"total"`
+}
+
+// sampledWindow returns nil when the whole window fit under the cap, so the
+// field is omitted entirely rather than claiming a full analysis is a sample.
+func sampledWindow(returned, total int) *windowSample {
+	if total <= returned {
+		return nil
+	}
+	return &windowSample{Analyzed: returned, Total: total}
+}
+
 // topCountriesCached returns the hits-by-country aggregation, recomputing at
 // most once per countriesTTL. Shared by the dashboard and intel handlers.
 const countriesTTL = 10 * time.Second

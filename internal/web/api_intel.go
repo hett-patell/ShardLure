@@ -38,8 +38,10 @@ var (
 // ==== /api/intel/mitre ============================================
 
 type mitreResponse struct {
-	GeneratedAt string             `json:"generatedAt"`
-	WindowHours int                `json:"windowHours"`
+	GeneratedAt string `json:"generatedAt"`
+	WindowHours int    `json:"windowHours"`
+	// Present only when the windowed analysis was capped; see windowSample.
+	Sampled     *windowSample      `json:"sampled,omitempty"`
 	TotalEvents int                `json:"totalEvents"`
 	Hits        []mitreHit         `json:"hits"`
 	Grid        []mitre.GridTactic `json:"grid"`
@@ -88,6 +90,9 @@ func (s *Server) handleIntelMitre(w http.ResponseWriter, r *http.Request) {
 	resp := mitreResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
+		// Disclosed in the BODY as well as the header: no panel reads response
+		// headers, so a capped analysis rendered as if it covered the window.
+		Sampled:     sampledWindow(len(events), total),
 		TotalEvents: total, // true window total, even when the analysis was capped
 		Grid:        mitre.CoverageGrid(hits),
 	}
@@ -389,10 +394,12 @@ func windowHoursFromQuery(v string, fallback int) int {
 // ==== /api/intel/ttp ==============================================
 
 type ttpResponse struct {
-	GeneratedAt string    `json:"generatedAt"`
-	WindowHours int       `json:"windowHours"`
-	Total       int       `json:"total"`
-	Rows        []ttp.Row `json:"rows"`
+	GeneratedAt string `json:"generatedAt"`
+	WindowHours int    `json:"windowHours"`
+	// Present only when the windowed analysis was capped; see windowSample.
+	Sampled *windowSample `json:"sampled,omitempty"`
+	Total   int           `json:"total"`
+	Rows    []ttp.Row     `json:"rows"`
 }
 
 func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
@@ -419,6 +426,7 @@ func (s *Server) handleIntelTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(ttpResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
+		Sampled:     sampledWindow(len(events), evTotal),
 		Total:       total,
 		Rows:        rows,
 	})
@@ -474,11 +482,13 @@ type deobfRow struct {
 }
 
 type deobfResponse struct {
-	GeneratedAt string     `json:"generatedAt"`
-	WindowHours int        `json:"windowHours"`
-	Scanned     int        `json:"scanned"`
-	Matched     int        `json:"matched"`
-	Rows        []deobfRow `json:"rows"`
+	GeneratedAt string `json:"generatedAt"`
+	WindowHours int    `json:"windowHours"`
+	// Present only when the windowed analysis was capped; see windowSample.
+	Sampled *windowSample `json:"sampled,omitempty"`
+	Scanned int           `json:"scanned"`
+	Matched int           `json:"matched"`
+	Rows    []deobfRow    `json:"rows"`
 }
 
 func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
@@ -505,6 +515,7 @@ func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
 	resp := deobfResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
+		Sampled:     sampledWindow(len(events), total),
 	}
 	limit := 200
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 2000 {
@@ -653,24 +664,37 @@ func (s *Server) handleIntelWordlist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	windowHours := windowHoursFromQuery(r.URL.Query().Get("window"), 720) // 30d default
-	events, total, err := s.eventsForWindowCached(windowHours)
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+
+	// Counted in SQL, NOT by folding the window's events in memory. That fetch is
+	// capped at defaultWindowEventCap, so on a busy deployment this panel used to
+	// describe a sample while presenting itself as the window total: measured at
+	// 200k of 533,647 events, every count ~60% low and 47% of distinct usernames
+	// missing entirely. Coverage is the whole point of a wordlist.
+	var (
+		counts []store.CredentialCount
+		err    error
+	)
+	switch kind {
+	case "users", "usernames":
+		counts, err = s.st.TopUsernamesSince(since, 0)
+	case "passwords":
+		counts, err = s.st.TopPasswordsSince(since, 0)
+	case "combos":
+		counts, err = s.st.TopCombosSince(since, 0)
+	default:
+		http.Error(w, "invalid kind (users|passwords|combos)", http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
-	discloseWindowTruncation(w, len(events), total)
-
-	var entries []wordlist.Entry
-	switch kind {
-	case "users", "usernames":
-		entries = wordlist.CollectUsernames(events)
-	case "passwords":
-		entries = wordlist.CollectPasswords(events)
-	case "combos":
-		entries = wordlist.CollectCombos(events)
-	default:
-		http.Error(w, "invalid kind (users|passwords|combos)", http.StatusBadRequest)
-		return
+	entries := make([]wordlist.Entry, 0, len(counts))
+	for _, c := range counts {
+		entries = append(entries, wordlist.Entry{
+			Username: c.Username, Password: c.Password, Count: c.Count,
+		})
 	}
 
 	// Optional limit for JSON preview; TXT downloads always send the
@@ -921,11 +945,13 @@ func (s *Server) handleIntelEnrich(w http.ResponseWriter, r *http.Request) {
 // ==== /api/ioc/list and /api/ioc/{csv,stix} =======================
 
 type iocListResponse struct {
-	GeneratedAt string          `json:"generatedAt"`
-	WindowHours int             `json:"windowHours"`
-	Kind        string          `json:"kind"`
-	Total       int             `json:"total"`
-	Indicators  []ioc.Indicator `json:"indicators"`
+	GeneratedAt string `json:"generatedAt"`
+	WindowHours int    `json:"windowHours"`
+	// Present only when the windowed analysis was capped; see windowSample.
+	Sampled    *windowSample   `json:"sampled,omitempty"`
+	Kind       string          `json:"kind"`
+	Total      int             `json:"total"`
+	Indicators []ioc.Indicator `json:"indicators"`
 }
 
 // handleIOCList returns a JSON preview of the IOC set. Optionally
@@ -960,6 +986,7 @@ func (s *Server) handleIOCList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(iocListResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
+		Sampled:     sampledWindow(len(events), evTotal),
 		Kind:        kind,
 		Total:       total,
 		Indicators:  indicators,

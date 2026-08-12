@@ -1152,7 +1152,7 @@
   #sh-ingest.stale { color: var(--warn); }
 </style>
 <script src="/vendor/vis-network.min.js"></script>
-<link rel="stylesheet" href="/themes.css?v=14" />
+<link rel="stylesheet" href="/themes.css?v=15" />
 </head>
 <body>
 <div class="shell">
@@ -3146,7 +3146,7 @@ function renderMitre(data) {
 
   const hits = (data && data.hits) || [];
   meta.textContent = (data && data.totalEvents)
-    ? fmt(nHit) + '/' + fmt(nTechs) + ' techniques · ' + fmt(data.totalEvents) + ' events · ' + data.windowHours + 'h window'
+    ? fmt(nHit) + '/' + fmt(nTechs) + ' techniques · ' + fmt(data.totalEvents) + ' events · ' + data.windowHours + 'h window' + sampledNote(data)
     : 'no events in window';
   tops.innerHTML = hits.slice(0, 10).map(function(h) {
     return '<span class="mt-pill" title="' + esc(h.name) + '">' +
@@ -3744,7 +3744,7 @@ function renderIOC(data) {
   // sessions/payload/graph widgets.)
   var iocShown = (data.indicators || []).length, iocTotal = data.total || 0;
   meta.textContent = (iocShown < iocTotal ? ('top ' + fmt(iocShown) + ' of ' + fmt(iocTotal)) : fmt(iocTotal)) +
-    ' indicators · ' + IOC.kind + ' · ' + iwin + ' window';
+    ' indicators · ' + IOC.kind + ' · ' + iwin + ' window' + sampledNote(data);
 
   if (!data.indicators || data.indicators.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no indicators in window</div></td></tr>';
@@ -3904,7 +3904,7 @@ function highlightTemplate(tmpl) {
 function renderTTP(data) {
   const tb = document.querySelector('#ttp-table tbody');
   const meta = document.getElementById('ttp-meta');
-  meta.textContent = data.total + ' templates · ' + data.windowHours + 'h window';
+  meta.textContent = data.total + ' templates · ' + data.windowHours + 'h window' + sampledNote(data);
 
   if (!data.rows || data.rows.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no commands captured in window</div></td></tr>';
@@ -4698,6 +4698,21 @@ setActiveView = function(name) {
 onWindowChange('view-red', loadReplaySessions);
 if (readTabFromHash() === 'red') loadReplaySessions();
 
+/* A windowed analysis is capped server-side (defaultWindowEventCap) so a poll
+ * path cannot materialise hundreds of MB. When that cap bites, the panel is
+ * describing a SAMPLE of the window, and saying nothing about it makes the
+ * numbers look like window totals — measured at 200,000 of 533,647 events, with
+ * every count understated and half the long tail absent. The server now reports
+ * `sampled` in the body (the header it already sent is invisible to a panel), and
+ * this renders it. Returns '' when the whole window fit, so nothing is claimed. */
+function sampledNote(data) {
+  var sp = data && data.sampled;
+  if (!sp || !sp.total || sp.total <= sp.analyzed) return '';
+  var pct = Math.round(100 * sp.analyzed / sp.total);
+  return ' · \u26a0 sampled ' + fmt(sp.analyzed) + '/' + fmt(sp.total) +
+         ' events (' + pct + '% of window)';
+}
+
 function escAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 
 // ==== Slice K: deobfuscation ======================================
@@ -4732,7 +4747,7 @@ async function refreshDeobf() {
     }
     const data = await r.json();
     metaEl.textContent = data.matched + ' / ' + data.scanned + ' commands · ' +
-                         data.windowHours + 'h window';
+                         data.windowHours + 'h window' + sampledNote(data);
     if (!data.rows || data.rows.length === 0) {
       rowsEl.innerHTML = '<div class="empty">no obfuscated commands in window</div>';
       return;
