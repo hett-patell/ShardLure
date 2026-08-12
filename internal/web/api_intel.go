@@ -569,6 +569,15 @@ func (s *Server) handleIntelReplay(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
+	// An unknown session is a 404, matching /api/intel/session. It used to render
+	// a script anyway: a typo'd or purged id produced a 200 and a download named
+	// after a session that does not exist, containing nothing. A session that
+	// really has no commands still renders - that is a true empty replay, and the
+	// header says which session it is for.
+	if len(events) == 0 {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
 	opts := replay.Options{
 		IncludeSleeps: r.URL.Query().Get("sleeps") != "0",
 		DryRun:        r.URL.Query().Get("dryrun") == "1",

@@ -741,36 +741,36 @@ func (s *Server) RunContext(ctx context.Context) error {
 	// their own inner requireDashboardAuth calls harmlessly (it's
 	// idempotent), but the guard is what enforces.
 	mux.HandleFunc("/intel", s.handleIntelPage) // page route: token-in-query allowed, see requirePageAuth
-	mux.HandleFunc("/api/intel", s.guard(s.handleIntel))
-	mux.HandleFunc("/api/intel/mitre", s.guard(s.handleIntelMitre))
-	mux.HandleFunc("/api/intel/sessions", s.guard(s.handleIntelSessions))
-	mux.HandleFunc("/api/intel/session", s.guard(s.handleIntelSession))
-	mux.HandleFunc("/api/intel/enrich", s.guard(s.handleIntelEnrich))
-	mux.HandleFunc("/api/intel/ttp", s.guard(s.handleIntelTTP))
-	mux.HandleFunc("/api/intel/payloads", s.guard(s.handleIntelPayloads))
-	mux.HandleFunc("/api/intel/payload", s.guard(s.handleIntelPayload))
-	mux.HandleFunc("/api/intel/wordlist", s.guard(s.handleIntelWordlist))
-	mux.HandleFunc("/api/intel/graph", s.guard(s.handleIntelGraph))
-	mux.HandleFunc("/api/intel/replay", s.guard(s.handleIntelReplay))
-	mux.HandleFunc("/api/intel/deobf", s.guard(s.handleIntelDeobf))
-	mux.HandleFunc("/api/intel/bazaar", s.guard(s.handleIntelBazaar))
+	mux.HandleFunc("/api/intel", s.guardRead(s.handleIntel))
+	mux.HandleFunc("/api/intel/mitre", s.guardRead(s.handleIntelMitre))
+	mux.HandleFunc("/api/intel/sessions", s.guardRead(s.handleIntelSessions))
+	mux.HandleFunc("/api/intel/session", s.guardRead(s.handleIntelSession))
+	mux.HandleFunc("/api/intel/enrich", s.guardRead(s.handleIntelEnrich))
+	mux.HandleFunc("/api/intel/ttp", s.guardRead(s.handleIntelTTP))
+	mux.HandleFunc("/api/intel/payloads", s.guardRead(s.handleIntelPayloads))
+	mux.HandleFunc("/api/intel/payload", s.guardRead(s.handleIntelPayload))
+	mux.HandleFunc("/api/intel/wordlist", s.guardRead(s.handleIntelWordlist))
+	mux.HandleFunc("/api/intel/graph", s.guardRead(s.handleIntelGraph))
+	mux.HandleFunc("/api/intel/replay", s.guardRead(s.handleIntelReplay))
+	mux.HandleFunc("/api/intel/deobf", s.guardRead(s.handleIntelDeobf))
+	mux.HandleFunc("/api/intel/bazaar", s.guardRead(s.handleIntelBazaar))
 	mux.HandleFunc("/api/intel/bazaar/upload", s.guard(s.handleBazaarUpload))
 	// VirusTotal payload-hash lookups. /vt is ON DEMAND (one hash, spends
 	// quota); /vt/cached is a cache-only bulk decorator safe to call from a
 	// list render. See api_vt.go for why the split exists.
 	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.handleIntelPayloadVT))
-	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guard(s.handleIntelPayloadsVTCached))
-	mux.HandleFunc("/api/intel/urlhaus", s.guard(s.handleIntelURLhaus))
+	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guardRead(s.handleIntelPayloadsVTCached))
+	mux.HandleFunc("/api/intel/urlhaus", s.guardRead(s.handleIntelURLhaus))
 	mux.HandleFunc("/api/intel/urlhaus/submit", s.guard(s.handleURLhausSubmit))
 	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
 	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
-	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guard(s.handleAbuseIPDBSuggestions))
-	mux.HandleFunc("/api/intel/tunnels", s.guard(s.handleIntelTunnels))
-	mux.HandleFunc("/api/intel/timeline", s.guard(s.handleIntelTimeline))
+	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guardRead(s.handleAbuseIPDBSuggestions))
+	mux.HandleFunc("/api/intel/tunnels", s.guardRead(s.handleIntelTunnels))
+	mux.HandleFunc("/api/intel/timeline", s.guardRead(s.handleIntelTimeline))
 	// Settings panel: read masked snapshot, save/clear one setting, test a
 	// provider key, rotate the dashboard token. Guarded like every other /api.
-	mux.HandleFunc("/api/settings", s.guard(s.handleSettings))
-	mux.HandleFunc("/api/settings/status", s.guard(s.handleSettingsStatus))
+	mux.HandleFunc("/api/settings", s.guardRead(s.handleSettings))
+	mux.HandleFunc("/api/settings/status", s.guardRead(s.handleSettingsStatus))
 	mux.HandleFunc("/api/settings/save", s.guard(s.handleSettingsSave))
 	mux.HandleFunc("/api/settings/test", s.guard(s.handleSettingsTest))
 	mux.HandleFunc("/api/settings/token/rotate", s.guard(s.handleTokenRotate))
@@ -817,16 +817,16 @@ func (s *Server) RunContext(ctx context.Context) error {
 		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write(cobeBootJS)
 	})
-	mux.HandleFunc("/api/ioc/list", s.guard(s.handleIOCList))
-	mux.HandleFunc("/api/ioc/csv", s.guard(s.handleIOCCSV))
-	mux.HandleFunc("/api/ioc/stix", s.guard(s.handleIOCSTIX))
-	mux.HandleFunc("/api/actor", s.guard(s.handleActorDetail))
+	mux.HandleFunc("/api/ioc/list", s.guardRead(s.handleIOCList))
+	mux.HandleFunc("/api/ioc/csv", s.guardRead(s.handleIOCCSV))
+	mux.HandleFunc("/api/ioc/stix", s.guardRead(s.handleIOCSTIX))
+	mux.HandleFunc("/api/actor", s.guardRead(s.handleActorDetail))
 	// Unmatched /api/* — guarded like every other API route so a 404 can only
 	// be observed by an authorised caller (no route enumeration).
-	mux.HandleFunc("/api/", s.guard(s.handleAPINotFound))
+	mux.HandleFunc("/api/", s.guardRead(s.handleAPINotFound))
 	mux.HandleFunc("/", s.handleIndex) // page route (also the 404 catch-all)
-	mux.HandleFunc("/api/dashboard", s.guard(s.handleDashboard))
-	mux.HandleFunc("/api/capture", s.guard(s.handleCapture))
+	mux.HandleFunc("/api/dashboard", s.guardRead(s.handleDashboard))
+	mux.HandleFunc("/api/capture", s.guardRead(s.handleCapture))
 
 	// Diagnostic endpoints: net/http/pprof + a small RSS/cache
 	// stats handler. All gated behind the same dashboard token used
@@ -1478,6 +1478,25 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // for diagnostic endpoints (pprof, runtime stats) so they share the
 // exact same token check as /api/* without each handler having to
 // re-implement the auth boilerplate.
+// guardRead is guard for endpoints that only ever read. It rejects anything but
+// GET/HEAD.
+//
+// Not a CSRF fix - requireDashboardAuth reads the token from headers only, never
+// a cookie or query param, so a cross-site POST cannot authenticate in the first
+// place. It is method hygiene: a read endpoint answering POST 200 invites a
+// caller to believe the verb carries meaning, and every write endpoint here
+// already rejects the wrong verb, so the two halves of the API should agree.
+func (s *Server) guardRead(h http.HandlerFunc) http.HandlerFunc {
+	return s.guard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h(w, r)
+	})
+}
+
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireDashboardAuth(w, r) {

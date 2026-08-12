@@ -46,7 +46,13 @@ eq("MITRE","hit ids appear in grid",sorted({h["id"] for h in m["hits"]}-gridids)
 # ── TTP harvesting ───────────────────────────────────────────────────────
 t=J("intel_ttp"); w=t["windowHours"]
 eq("TTP","total==len(rows)",t["total"],len(t["rows"]))
-eq("TTP","sorted desc",[r["count"] for r in t["rows"]],sorted((r["count"] for r in t["rows"]),reverse=True))
+# TTP ranks by ACTOR COUNT first - a command used by many distinct actors is the
+# stronger signal - then by count. Asserting a plain count-ordering reports a
+# false failure, which is how this check first "found" a bug that did not exist.
+_bad=[(a["actorCount"],b["actorCount"]) for a,b in zip(t["rows"],t["rows"][1:])
+      if a["actorCount"]<b["actorCount"]
+      or (a["actorCount"]==b["actorCount"] and a["count"]<b["count"])]
+eq("TTP","ranked by (actorCount, count) desc",_bad[:2],[])
 eq("TTP","actorCount<=count",all(r["actorCount"]<=r["count"] for r in t["rows"]),True)
 eq("TTP","firstSeen<=lastSeen",all(r["firstSeen"]<=r["lastSeen"] for r in t["rows"]),True)
 eq("TTP","all in window",all(r["lastSeen"]>=since(w)[:10] for r in t["rows"]),True)
@@ -106,7 +112,11 @@ eq("Sessions","durMs>=0",all(x["durMs"]>=0 for x in s["sessions"]),True)
 tl=J("intel_timeline")
 ts=[e["ts"] for e in tl["events"]]
 eq("Timeline","newest first",ts,sorted(ts,reverse=True))
-bad=[e for e in tl["events"][:20] if not q1("SELECT 1 FROM events WHERE ts=? AND kind=? LIMIT 1",e["ts"],e["kind"])]
+# The API renders timestamps to SECOND precision while events store RFC3339Nano,
+# so an exact string match can never succeed. Compare the prefix.
+bad=[e for e in tl["events"][:20]
+     if not q1("SELECT 1 FROM events WHERE substr(ts,1,19)=? AND kind=? AND src_ip=? LIMIT 1",
+               e["ts"][:19], e["kind"], e["srcIp"])]
 eq("Timeline","rows exist in events",[(e['ts'],e['kind']) for e in bad][:2],[])
 
 # ── Payload library / capture ────────────────────────────────────────────
@@ -174,9 +184,25 @@ eq("URLhaus","ineligible have a reason",all(c["eligible"] or c["reason"] for c i
 st=J("settings_status")
 near("Settings status","events",st["events"],q1("SELECT COUNT(*) FROM events"),200)
 near("Settings status","actors",st["actors"],q1("SELECT COUNT(*) FROM actors"),5)
-eq("Settings status","lastEvent matches",st["lastEvent"][:16],(q1("SELECT MAX(ts) FROM events") or "")[:16])
-eq("Settings status","no raw keys leaked",
-   [p["label"] for p in st["providers"] if len(str(p.get("key",""))) > 12],[])
+# lastEvent can only be OLDER than the DB's current max, never newer: ingest
+# continues between the snapshot and this query. Assert that direction plus a
+# sane bound, rather than equality, which fails purely on timing.
+_api_last=st["lastEvent"][:19]
+_db_last=(q1("SELECT MAX(ts) FROM events") or "")[:19]
+_skew=None
+try:
+    _skew=(datetime.datetime.fromisoformat(_db_last)-datetime.datetime.fromisoformat(_api_last)).total_seconds()
+except Exception:
+    pass
+rec(_skew is not None and 0<=_skew<=600,"Settings status","lastEvent not ahead of DB",
+    _api_last,_db_last,f"skew {_skew:.0f}s" if _skew is not None else "unparseable")
+# `key` carries the env var NAME (SHARDLURE_ABUSEIPDB_KEY), never the secret, so
+# length proves nothing. Look for material that actually resembles a credential.
+import re as _re
+_leaky=[p["label"] for p in st["providers"]
+        if _re.fullmatch(r"[0-9a-fA-F]{16,}", str(p.get("key","")))
+        or str(p.get("key","")).startswith(("sk-","ghp_"))]
+eq("Settings status","no secret material in payload",_leaky,[])
 
 # ── report ───────────────────────────────────────────────────────────────
 P=[r for r in R if r[0]]; F=[r for r in R if not r[0]]

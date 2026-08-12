@@ -122,7 +122,16 @@ func CoverageGrid(hits []Hit) []GridTactic {
 		// Include every tactic, even ones with no catalogued techniques.
 		// Keeps grid columns aligned and signals 'we can't see this'
 		// rather than 'this tactic does not exist'.
-		out = append(out, GridTactic{Tactic: tac, Techniques: byTactic[tac]})
+		//
+		// Techniques is normalised to an empty slice, never nil: a nil slice
+		// marshals to JSON `null`, so a tactic with no techniques forced every
+		// consumer to guard before iterating. The dashboard did; anything else
+		// reading this API would have had to learn the hard way.
+		techs := byTactic[tac]
+		if techs == nil {
+			techs = []GridTechnique{}
+		}
+		out = append(out, GridTactic{Tactic: tac, Techniques: techs})
 	}
 	return out
 }
