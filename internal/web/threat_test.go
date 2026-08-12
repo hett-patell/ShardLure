@@ -269,9 +269,31 @@ func TestNoRateDisplayUsesTheLifetimeAverage(t *testing.T) {
 // describe a SAMPLE. The server already set an advisory header, but no panel
 // reads response headers, so the numbers rendered as window totals — measured at
 // 200,000 of 533,647 events with half the long tail missing.
+// The list of capped handlers is DERIVED, not hardcoded. The previous version
+// of this test enumerated four response types and asserted `>= 4`, so it passed
+// at exactly four while SEVEN handlers capped their window — the graph endpoint
+// and both IOC file exports disclosed nothing in their bodies for months. A
+// count threshold cannot detect the handler you forgot to add to it; counting
+// the actual eventsForWindowCached call sites can.
 func TestWindowedPanelsDiscloseSampling(t *testing.T) {
 	src := readSource(t, "api_intel.go")
-	// Every handler that caps its analysis must also report it in the BODY.
+
+	// Every handler that caps its analysis must disclose it in-band: JSON
+	// endpoints via a Sampled body field, file exports via ioc.Coverage (a
+	// downloaded file cannot carry the advisory response header).
+	capped := countOccurrences(src, "s.eventsForWindowCached(")
+	disclosed := countOccurrences(src, "sampledWindow(len(events)") +
+		countOccurrences(src, "ioc.Coverage{")
+	if disclosed < capped {
+		t.Errorf("%d handlers cap the window but only %d disclose it in-band; "+
+			"a capped analysis renders as a window total with nothing said about it",
+			capped, disclosed)
+	}
+	// Header disclosure must keep pace too — it is what a non-browser client sees.
+	if n := countOccurrences(src, "discloseWindowTruncation(w,"); n < capped {
+		t.Errorf("%d handlers cap the window but only %d set the advisory header", capped, n)
+	}
+
 	for _, resp := range []string{"mitreResponse", "ttpResponse", "deobfResponse", "iocListResponse"} {
 		i := strings.Index(src, "type "+resp+" struct {")
 		if i < 0 {
@@ -283,16 +305,28 @@ func TestWindowedPanelsDiscloseSampling(t *testing.T) {
 				"window total with nothing said about it", resp)
 		}
 	}
-	if n := strings.Count(src, "sampledWindow(len(events)"); n < 4 {
-		t.Errorf("only %d handlers populate Sampled, want >= 4", n)
-	}
-	// And the dashboard must actually render it.
+
+	// And the dashboard must actually render it, in every windowed panel.
 	if !strings.Contains(intelHTML, "function sampledNote(") {
 		t.Fatal("no sampledNote renderer in the dashboard")
 	}
-	if n := strings.Count(intelHTML, "sampledNote(data)"); n < 4 {
-		t.Errorf("sampledNote used in %d panels, want >= 4 (MITRE, TTP, IOC, deobf)", n)
+	if n := strings.Count(intelHTML, "sampledNote(data)"); n < 5 {
+		t.Errorf("sampledNote used in %d panels, want >= 5 (MITRE, TTP, IOC, deobf, graph)", n)
 	}
+}
+
+// countOccurrences counts non-overlapping instances of sub outside comment
+// lines, so a rationale comment naming a helper cannot inflate the tally.
+func countOccurrences(src, sub string) int {
+	n := 0
+	for _, line := range strings.Split(src, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "//") {
+			continue
+		}
+		n += strings.Count(line, sub)
+	}
+	return n
 }
 
 // TestWordlistCountsInSQL pins the wordlist fix: it must aggregate in the

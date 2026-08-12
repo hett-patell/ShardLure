@@ -86,6 +86,30 @@ type externalRef struct {
 // itself is also deterministic - it hashes the sorted indicator IDs
 // rather than the wall clock.
 func WriteSTIX(w io.Writer, indicators []Indicator) error {
+	return WriteSTIXWithCoverage(w, indicators, Coverage{})
+}
+
+// WriteSTIXWithCoverage is WriteSTIX plus an in-band sampling disclosure.
+//
+// When cov reports a sampled window, the note is appended to the identity SDO's
+// `description`, because a downloaded bundle cannot carry the advisory HTTP
+// header the API sets (see Coverage). The identity object is the right carrier:
+// it is already the bundle's provenance statement, `description` is a spec
+// field so no validator is upset and no custom property is invented, and every
+// TIP that ingests the bundle keeps it.
+//
+// Byte-stability is preserved: the note is a pure function of the coverage
+// numbers (no wall clock), so a re-export of the same window with the same
+// coverage is still byte-identical. The identity ID is deliberately NOT
+// re-derived from the description — it is a stable hard-coded reference that
+// indicator objects point at via created_by_ref.
+//
+// An unsampled (zero) Coverage produces exactly the previous output.
+func WriteSTIXWithCoverage(w io.Writer, indicators []Indicator, cov Coverage) error {
+	desc := "ShardLure honeypot intelligence platform"
+	if note := cov.Note(); note != "" {
+		desc += " — " + note
+	}
 	objects := []stixObject{
 		{
 			Type:          "identity",
@@ -94,7 +118,7 @@ func WriteSTIX(w io.Writer, indicators []Indicator) error {
 			Created:       stixIdentityCreated,
 			Modified:      stixIdentityCreated,
 			Name:          stixIdentityName,
-			Description:   "ShardLure honeypot intelligence platform",
+			Description:   desc,
 			IdentityClass: "organization",
 		},
 	}

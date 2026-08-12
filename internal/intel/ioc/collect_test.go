@@ -259,3 +259,161 @@ func TestWriteCSVNeutralizesFormulaInjection(t *testing.T) {
 		t.Errorf("csvSafe wrong: %q %q", csvSafe("root"), csvSafe("=evil"))
 	}
 }
+
+// TestCoverageNoteOnlyWhenSampled pins the predicate. A note on a COMPLETE
+// export would be a false claim of incompleteness, and it would also break the
+// byte-stability contract for every ordinary export.
+func TestCoverageNoteOnlyWhenSampled(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cov  Coverage
+		want bool
+	}{
+		{"zero value", Coverage{}, false},
+		{"complete window", Coverage{Analyzed: 500, Total: 500, WindowHours: 24}, false},
+		{"analyzed exceeds total", Coverage{Analyzed: 600, Total: 500}, false},
+		{"total unknown", Coverage{Analyzed: 500, Total: 0}, false},
+		{"sampled", Coverage{Analyzed: 200000, Total: 533697, WindowHours: 720}, true},
+	} {
+		if got := c.cov.Sampled(); got != c.want {
+			t.Errorf("%s: Sampled()=%v want %v", c.name, got, c.want)
+		}
+		if note := c.cov.Note(); (note != "") != c.want {
+			t.Errorf("%s: Note()=%q, want empty=%v", c.name, note, !c.want)
+		}
+	}
+	// The note must carry both numbers and the window, or it does not tell the
+	// analyst how much of the picture is missing.
+	note := Coverage{Analyzed: 200000, Total: 533697, WindowHours: 720}.Note()
+	for _, want := range []string{"200000", "533697", "37.5%", "720h", "SAMPLED"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note missing %q: %s", want, note)
+		}
+	}
+}
+
+// TestCompleteExportsStayByteIdentical is the regression guard for adding the
+// disclosure at all. WriteCSV/WriteSTIX are documented as stable-schema and
+// byte-stable; the coverage variants must be a no-op when nothing was sampled,
+// or every existing consumer and the STIX dedupe contract break.
+func TestCompleteExportsStayByteIdentical(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	inds := []Indicator{
+		{Kind: KindIP, Value: "1.2.3.4", FirstSeen: t0, LastSeen: t0.Add(time.Hour), Count: 3, Sources: []string{"cowrie"}},
+		{Kind: KindUser, Value: "root", FirstSeen: t0, LastSeen: t0.Add(2 * time.Hour), Count: 5, Sources: []string{"cowrie"}},
+	}
+	complete := Coverage{Analyzed: 2, Total: 2, WindowHours: 24}
+	for _, c := range []struct {
+		name string
+		cov  Coverage
+	}{{"zero", Coverage{}}, {"complete", complete}} {
+		var plain, withCov bytes.Buffer
+		if err := WriteCSV(&plain, inds); err != nil {
+			t.Fatalf("WriteCSV: %v", err)
+		}
+		if err := WriteCSVWithCoverage(&withCov, inds, c.cov); err != nil {
+			t.Fatalf("WriteCSVWithCoverage: %v", err)
+		}
+		if !bytes.Equal(plain.Bytes(), withCov.Bytes()) {
+			t.Errorf("CSV %s coverage changed the bytes:\n--- plain ---\n%s\n--- cov ---\n%s",
+				c.name, plain.String(), withCov.String())
+		}
+		plain.Reset()
+		withCov.Reset()
+		if err := WriteSTIX(&plain, inds); err != nil {
+			t.Fatalf("WriteSTIX: %v", err)
+		}
+		if err := WriteSTIXWithCoverage(&withCov, inds, c.cov); err != nil {
+			t.Fatalf("WriteSTIXWithCoverage: %v", err)
+		}
+		if !bytes.Equal(plain.Bytes(), withCov.Bytes()) {
+			t.Errorf("STIX %s coverage changed the bytes", c.name)
+		}
+	}
+}
+
+// TestSampledCSVCarriesDisclosure pins the actual fix for the download path: the
+// advisory HTTP header is gone once the browser writes the file, so the note has
+// to be IN the file. It must also be a comment line, not a data row - the column
+// schema is documented as stable and consumers parse by index.
+func TestSampledCSVCarriesDisclosure(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	inds := []Indicator{
+		{Kind: KindIP, Value: "1.2.3.4", FirstSeen: t0, LastSeen: t0, Count: 3, Sources: []string{"cowrie"}},
+	}
+	var buf bytes.Buffer
+	cov := Coverage{Analyzed: 200000, Total: 533697, WindowHours: 720}
+	if err := WriteCSVWithCoverage(&buf, inds, cov); err != nil {
+		t.Fatalf("WriteCSVWithCoverage: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want comment+header+1 row, got %d lines:\n%s", len(lines), buf.String())
+	}
+	if !strings.HasPrefix(lines[0], "# ") {
+		t.Errorf("disclosure is not a comment line: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "200000") || !strings.Contains(lines[0], "533697") {
+		t.Errorf("comment does not state the coverage: %q", lines[0])
+	}
+	// The schema must be untouched: header still line 2, still 8 columns.
+	if lines[1] != "kind,value,first_seen,last_seen,count,sources,actors,sample_command" {
+		t.Errorf("header row changed: %q", lines[1])
+	}
+	if !strings.HasPrefix(lines[2], "ip,1.2.3.4,") {
+		t.Errorf("data row not where a parser expects it: %q", lines[2])
+	}
+}
+
+// TestSampledSTIXCarriesDisclosureAndStaysDeterministic is the sharpest edge of
+// the whole change. The note has to reach a TIP, but STIX byte-stability is a
+// contract (downstream dedupe hashes SDO content), so the note must be a pure
+// function of the coverage numbers - never a wall-clock reading.
+func TestSampledSTIXCarriesDisclosureAndStaysDeterministic(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	inds := []Indicator{
+		{Kind: KindIP, Value: "1.2.3.4", FirstSeen: t0, LastSeen: t0.Add(time.Hour), Count: 3, Sources: []string{"cowrie"}},
+	}
+	cov := Coverage{Analyzed: 200000, Total: 533697, WindowHours: 720}
+
+	var a, b bytes.Buffer
+	if err := WriteSTIXWithCoverage(&a, inds, cov); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond) // cross a second boundary, as the sibling test does
+	if err := WriteSTIXWithCoverage(&b, inds, cov); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	if !bytes.Equal(a.Bytes(), b.Bytes()) {
+		t.Errorf("sampled STIX export is not byte-stable; downstream dedupe would break")
+	}
+
+	var bundle struct {
+		Objects []struct {
+			Type        string `json:"type"`
+			ID          string `json:"id"`
+			Description string `json:"description"`
+		} `json:"objects"`
+	}
+	if err := json.Unmarshal(a.Bytes(), &bundle); err != nil {
+		t.Fatalf("bundle is not valid JSON: %v", err)
+	}
+	var identity int
+	for _, o := range bundle.Objects {
+		if o.Type != "identity" {
+			continue
+		}
+		identity++
+		if !strings.Contains(o.Description, "SAMPLED") || !strings.Contains(o.Description, "533697") {
+			t.Errorf("identity description carries no coverage note: %q", o.Description)
+		}
+		// The ID must NOT be re-derived from the description: indicator
+		// objects point at it via created_by_ref.
+		if o.ID != stixIdentity {
+			t.Errorf("identity ID changed to %q; created_by_ref references would dangle", o.ID)
+		}
+	}
+	if identity != 1 {
+		t.Fatalf("want exactly 1 identity SDO, got %d", identity)
+	}
+}

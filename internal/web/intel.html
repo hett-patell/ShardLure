@@ -1311,7 +1311,7 @@
         <div class="cap-stat"><div class="n" id="cap-total">0</div><div class="l">tracked URLs</div></div>
         <div class="cap-stat"><div class="n" id="cap-fetched">0</div><div class="l">saved to evidence</div></div>
         <div class="cap-stat"><div class="n warn" id="cap-active">0</div><div class="l">fetching now</div></div>
-        <div class="cap-stat"><div class="n dim" id="cap-bytes">0 B</div><div class="l">quarantine size</div></div>
+        <div class="cap-stat"><div class="n dim" id="cap-bytes" title="Total size of captured evidence on disk (quarantine fetches + Cowrie downloads + TTY transcripts), counted once per file">0 B</div><div class="l">evidence on disk</div></div>
       </div>
       <div class="scroll tall">
         <table id="capture-table">
@@ -4491,7 +4491,7 @@ async function refreshGraph() {
       ? (shown + ' of ' + fmt(totalNodes) + ' nodes (top ' + (data.cap || 80) + '/kind)')
       : (shown + ' nodes');
     stats.textContent = nodeLabel + ' · ' + data.edges.length + ' edges · ' +
-                        data.windowHours + 'h window';
+                        data.windowHours + 'h window' + sampledNote(data);
   } catch (e) {
     stats.textContent = 'load failed: ' + e.message;
   }

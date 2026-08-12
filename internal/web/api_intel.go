@@ -516,6 +516,10 @@ func (s *Server) handleIntelDeobf(w http.ResponseWriter, r *http.Request) {
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
 		Sampled:     sampledWindow(len(events), total),
+		// Non-nil so a zero-match window serialises "rows":[] rather than
+		// "rows":null. The dashboard guards it, but any other consumer would
+		// have to as well — same API hygiene as the MITRE technique lists.
+		Rows: []deobfRow{},
 	}
 	limit := 200
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 2000 {
@@ -633,6 +637,7 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(struct {
 		GeneratedAt string                 `json:"generatedAt"`
 		WindowHours int                    `json:"windowHours"`
+		Sampled     *windowSample          `json:"sampled,omitempty"`
 		Nodes       []graph.Node           `json:"nodes"`
 		Edges       []graph.Edge           `json:"edges"`
 		Totals      map[graph.NodeKind]int `json:"totals"`     // true distinct per kind, pre-cap
@@ -641,11 +646,15 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 	}{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		WindowHours: windowHours,
-		Nodes:       g.Nodes,
-		Edges:       g.Edges,
-		Totals:      g.Totals,
-		TotalNodes:  totalNodes,
-		Cap:         g.Cap,
+		// Node-capping ("N of M nodes") was already disclosed, which made the
+		// panel LOOK fully transparent while the event window underneath it was
+		// silently sampled — two different truncations, only one admitted.
+		Sampled:    sampledWindow(len(events), total),
+		Nodes:      g.Nodes,
+		Edges:      g.Edges,
+		Totals:     g.Totals,
+		TotalNodes: totalNodes,
+		Cap:        g.Cap,
 	})
 }
 
@@ -1022,6 +1031,9 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 		kinds = []ioc.Kind{ioc.Kind(kind)}
 	}
 	indicators := ioc.Collect(events, kinds)
+	// The header above is lost the moment the browser saves the file, so the
+	// same disclosure has to travel inside it.
+	cov := ioc.Coverage{Analyzed: len(events), Total: total, WindowHours: windowHours}
 
 	fname := "shardlure-ioc"
 	if kind != "" && kind != "all" {
@@ -1031,7 +1043,7 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
-	if err := ioc.WriteCSV(w, indicators); err != nil {
+	if err := ioc.WriteCSVWithCoverage(w, indicators, cov); err != nil {
 		// Best-effort: header already written, so nothing can be surfaced
 		// to the browser — log for the operator instead.
 		log.Printf("api_intel: ioc csv write: %v", err)
@@ -1054,11 +1066,13 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 	}
 	discloseWindowTruncation(w, len(events), total)
 	indicators := ioc.Collect(events, nil)
+	// As with the CSV: a saved bundle cannot carry the response header.
+	cov := ioc.Coverage{Analyzed: len(events), Total: total, WindowHours: windowHours}
 
 	fname := "shardlure-stix-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
 	w.Header().Set("Content-Type", "application/vnd.oasis.stix+json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
-	if err := ioc.WriteSTIX(w, indicators); err != nil {
+	if err := ioc.WriteSTIXWithCoverage(w, indicators, cov); err != nil {
 		// Header already written; log-only, same as the CSV handler.
 		log.Printf("api_intel: ioc stix write: %v", err)
 	}

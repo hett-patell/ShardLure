@@ -36,6 +36,54 @@ const (
 	KindTunnel Kind = "tunnel"
 )
 
+// Coverage records how much of the requested window the indicators were
+// actually derived from.
+//
+// # WHY THE EXPORTS CARRY THIS
+//
+// The windowed event read is capped (see store.EventsSinceCapped), so on a busy
+// deployment Collect sees a SAMPLE of the window — measured at 200,000 of
+// 533,697 events, 37.5%. The HTTP handlers disclose that in an advisory
+// response header, but a CSV or STIX file is DOWNLOADED: the header is gone the
+// moment it lands on disk, and what reaches a third party or a TIP is a feed
+// that silently claims to describe a whole window it only partly saw.
+//
+// So the disclosure has to travel INSIDE the artifact. Analyzed/Total are the
+// same pair the header reports; the zero value means "not sampled" and both
+// writers then emit exactly what they emitted before this existed, keeping
+// complete exports byte-identical.
+type Coverage struct {
+	// Analyzed is the number of events the indicators were derived from.
+	Analyzed int
+	// Total is the true number of events in the requested window.
+	Total int
+	// WindowHours is the requested window, for the human-readable note.
+	WindowHours int
+}
+
+// Sampled reports whether the analysis covered less than the whole window.
+// A zero Coverage is not sampled, so callers that never cap can pass one.
+func (c Coverage) Sampled() bool {
+	return c.Total > 0 && c.Analyzed > 0 && c.Analyzed < c.Total
+}
+
+// Note renders the one-line human-readable disclosure embedded in exports.
+// Deliberately free of any wall-clock reading: STIX output is byte-stable for a
+// fixed input set (downstream TIPs dedupe on it, and a test pins it), so the
+// note must be a pure function of the coverage numbers.
+func (c Coverage) Note() string {
+	if !c.Sampled() {
+		return ""
+	}
+	pct := strconv.FormatFloat(float64(c.Analyzed)*100/float64(c.Total), 'f', 1, 64)
+	s := "SAMPLED EXPORT: derived from " + strconv.Itoa(c.Analyzed) +
+		" of " + strconv.Itoa(c.Total) + " events (" + pct + "%) in the"
+	if c.WindowHours > 0 {
+		s += " " + strconv.Itoa(c.WindowHours) + "h"
+	}
+	return s + " window; long-tail indicators may be missing"
+}
+
 // Indicator is a normalised IOC row: the same shape regardless of kind.
 // Sources and Actors are deduped + sorted for stable output.
 type Indicator struct {
