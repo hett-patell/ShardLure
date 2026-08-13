@@ -12,6 +12,12 @@ PATCHES = (
     "bashparse-subshell-pipe.py",
     "grep-case-insensitive.py",
     "honeypot-capture-redirect.py",
+    # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
+    # live log analysis so bots proceed to payload delivery. See
+    # docs/superpowers/specs/2026-08-13-cowrie-stealth-hardening-design.md.
+    "command-type-builtins.py",
+    "passwd-stdin.py",
+    "exec-emulation.py",
 )
 
 

@@ -19,6 +19,14 @@ Files rewritten (all under COWRIE_HOME):
   share/cowrie/txtcmds/usr/bin/who
   share/cowrie/txtcmds/usr/bin/last
   honeyfs/proc/uptime
+  honeyfs/etc/motd
+
+motd is the sharpest clock tell: it is the FIRST thing an attacker sees, before
+typing anything, and it embeds an absolute "System information as of <date>" +
+"Last login" line. Frozen at deploy it read 86 days stale on the reference box
+while `date` tracked the real clock. It is regenerated here from the same
+UPTIME / LOAD / SESSIONS constants so load, uptime, and the last-login line all
+agree with who/w/last/uptime.
 
 Usage: gen-time-persona.py COWRIE_HOME
 """
@@ -112,12 +120,37 @@ def build(now: datetime) -> dict[str, str]:
     idle_secs = up_secs * NCPU * 0.96
     proc_uptime_txt = f"{up_secs:.2f} {idle_secs:.2f}\n"
 
+    # --- /etc/motd ---
+    # The Ubuntu login banner. "System information as of <now>" tracks the live
+    # clock; the embedded load/uptime reuse the persona constants so the banner
+    # agrees with uptime/w/last (load's first field, the "42 days" uptime). The
+    # "Last login" line is the newest COMPLETED admin session, i.e. the one
+    # before the current still-logged-in one (SESSIONS[1]), which is what a real
+    # motd shows the operator on this login.
+    load1 = LOAD.split(",")[0].strip()
+    prev_login = now - SESSIONS[1][0]
+    motd_txt = (
+        f"\n"
+        f"  System information as of {now:%a %b %e %H:%M:%S} UTC {now:%Y}\n"
+        f"\n"
+        f"  System load:    {load1}                Processes:           287\n"
+        f"  Usage of /:     61.2% of 96.73GB    Users logged in:     0\n"
+        f"  Memory usage:   22%                 IPv4 address for ens3: 10.0.0.14\n"
+        f"  Swap usage:     0%                  Uptime:              {days} days\n"
+        f"\n"
+        f"  23 updates can be applied immediately.\n"
+        f"  To see these additional updates run: apt list --upgradable\n"
+        f"\n"
+        f"Last login: {prev_login:%a %b %e %H:%M:%S %Y} from {SESSIONS[1][3]}\n"
+    )
+
     return {
         "share/cowrie/txtcmds/usr/bin/uptime": uptime_txt,
         "share/cowrie/txtcmds/usr/bin/w": w_txt,
         "share/cowrie/txtcmds/usr/bin/who": who_txt,
         "share/cowrie/txtcmds/usr/bin/last": last_txt,
         "honeyfs/proc/uptime": proc_uptime_txt,
+        "honeyfs/etc/motd": motd_txt,
     }
 
 
