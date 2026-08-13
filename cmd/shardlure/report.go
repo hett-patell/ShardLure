@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,7 +100,12 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 	}
 	fs := flag.NewFlagSet("report abuseipdb", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would be reported without contacting AbuseIPDB")
-	limit := fs.Int("limit", 25, "max actors to report in this run (0 = unbounded)")
+	// Bounds REPORTS, enforced inside abuseipdb.Report after Vet and dedup —
+	// not a truncation of the candidate list. Truncating first meant the budget
+	// was consumed by IPs already inside the re-report window at the top of the
+	// worst-offender-first list, so a run could report nothing while reportable
+	// brute-forcers sat just below the cut (the same bug fixed in share bazaar).
+	limit := fs.Int("limit", 25, "max actors to report in this run (0 = unbounded); counts reports sent, not candidates examined")
 	minProbe := fs.Int("min-probe", minProbeDefault, "minimum actor ProbeScore to report (0-100)")
 	rewindowHours := fs.Int("rewindow", rewindowDefault, "hours before a reported IP may be reported again")
 	statusOnly := fs.Bool("status", false, "list past reports from abuseipdb_reports instead of reporting")
@@ -130,9 +136,6 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 		fmt.Println("no candidates: no confirmed brute-force actors at or above the probe floor")
 		return
 	}
-	if *limit > 0 && len(cands) > *limit {
-		cands = cands[:*limit]
-	}
 
 	ep := cfg.Intel.AbuseIPDB.Endpoint
 	if *endpoint != "" {
@@ -140,7 +143,12 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 	}
 	cats := set.Categories
 
-	fmt.Printf("candidates: %d  dry-run=%v  min-probe=%d  endpoint=%s\n", len(cands), *dryRun, *minProbe, ep)
+	limitLabel := "unbounded"
+	if *limit > 0 {
+		limitLabel = strconv.Itoa(*limit)
+	}
+	fmt.Printf("candidates: %d  report-limit=%s  dry-run=%v  min-probe=%d  endpoint=%s\n",
+		len(cands), limitLabel, *dryRun, *minProbe, ep)
 	if *dryRun {
 		fmt.Println("(dry-run: no report sent)")
 	}
@@ -155,8 +163,14 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 		Rewindow:   time.Duration(*rewindowHours) * time.Hour,
 		RateLimit:  2 * time.Second,
 		Admin:      netmatch.New(cfg.AdminIPs),
+		MaxReports: *limit,
 		OnProgress: func(c abuseipdb.ReportCandidate, res *abuseipdb.Result, err error) {
 			printAbuseReportProgress(c, res, err)
+		},
+		OnLimitReached: func(unexamined int) {
+			// Never let a bounded run read as an exhausted one.
+			fmt.Printf("\n  (report limit %d reached — %d candidate(s) not examined; raise --limit or pass --limit=0)\n",
+				*limit, unexamined)
 		},
 	}
 

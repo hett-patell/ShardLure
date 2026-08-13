@@ -37,6 +37,21 @@ type Options struct {
 	// May only make the gate stricter — see VetOptions.
 	MaxAgeDays int
 
+	// MaxReports bounds how many candidates this run may SUBMIT (0 = unbounded).
+	// It counts reports actually sent (or, in dry-run, previewed) — NOT
+	// candidates examined. The CLI used to truncate the slice before calling
+	// Report, which is a different and much weaker guarantee: candidates arrive
+	// worst-offender-first, and on any deployment with history the worst
+	// offenders are exactly the ones already sitting in the re-report window, so
+	// the budget was spent on dedup hits and the run reported nothing while
+	// fresh brute-forcers waited below the cut. Same defect, and same fix, as
+	// bazaar.Options.MaxUploads.
+	MaxReports int
+	// OnLimitReached fires at most once, when MaxReports stopped the run early,
+	// with the number of candidates never examined. A bounded run must never
+	// read as an exhausted one.
+	OnLimitReached func(unexamined int)
+
 	// Now overrides the clock for the staleness gate. Zero = time.Now().
 	// Injected for tests; production leaves it unset.
 	Now time.Time
@@ -84,9 +99,21 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 	}
 
 	c := NewClient(opts.Endpoint)
+	// submitted counts candidates that cleared Vet and dedup and were therefore
+	// sent (or, in dry-run, previewed). MaxReports bounds THIS, not the
+	// candidates examined — a skip costs no API call, so it must not cost budget.
+	submitted := 0
 	for i, cand := range candidates {
 		if ctx.Err() != nil {
 			return reported, skipped, ctx.Err()
+		}
+		if opts.MaxReports > 0 && submitted >= opts.MaxReports {
+			// Budget spent. Everything from i onward is unexamined, which is a
+			// different thing from "no one left to report" — say so.
+			if opts.OnLimitReached != nil {
+				opts.OnLimitReached(len(candidates) - i)
+			}
+			break
 		}
 
 		// Vet first — cheap, pure, and the safety gate. A rejected candidate
@@ -120,6 +147,9 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		}
 
 		if opts.DryRun {
+			// Counts against MaxReports so --dry-run --limit N previews exactly
+			// the N candidates the real run would report.
+			submitted++
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, &Result{}, nil)
 			}
@@ -132,6 +162,9 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 			Comment:    buildComment(cand, opts.Comment),
 			Timestamp:  time.Now().UTC(),
 		})
+		// Counted on attempt, not on acceptance: MaxReports bounds what we send
+		// to AbuseIPDB, and a rejected POST was still a call we made.
+		submitted++
 		if rerr != nil {
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, nil, rerr)
@@ -156,8 +189,11 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		}
 		reported++
 
-		// Be polite to the endpoint between POSTs.
-		if i+1 < len(candidates) {
+		// Be polite to the endpoint between POSTs. Skip the wait when the budget
+		// is already spent — the next iteration would only break, and pacing
+		// exists to space out API calls, not to delay the summary line.
+		budgetSpent := opts.MaxReports > 0 && submitted >= opts.MaxReports
+		if i+1 < len(candidates) && !budgetSpent {
 			t := time.NewTimer(opts.RateLimit)
 			select {
 			case <-ctx.Done():
