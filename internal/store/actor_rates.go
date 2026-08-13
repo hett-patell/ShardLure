@@ -153,6 +153,50 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 	return out, nil
 }
 
+// PrimaryIPLastSeen returns actor_id → the last time the actor's PRIMARY IP was
+// seen, for every actor, in one indexed join.
+//
+// This is NOT actors.last_seen. A HASSH-clustered actor's last_seen is the max
+// across every IP in the cluster, but an AbuseIPDB report names ONE address:
+// primary_ip. Feeding the cluster max into the staleness gate let a fresh
+// cluster-mate vouch for a dormant address — measured live, a 22-IP actor whose
+// newest member was 4 days old kept offering a primary IP silent for 17.7 days,
+// which is exactly the wrongful-report class the gate exists to stop. The gate
+// (abuseipdb.Vet) is correct; this supplies the observation that actually
+// describes the IP being reported.
+//
+// Source is actor_ips.last_seen rather than MAX(events.ts) deliberately: it is
+// maintained in the same transaction as the actor row on every ingest path, it
+// is a primary-key lookup instead of an events scan, and it survives retention
+// purges that age the underlying events out (an IP whose events were purged is
+// old, and this still says so honestly instead of losing the answer).
+//
+// An actor absent from the map has no actor_ips row for its primary IP. Callers
+// must treat that as time.Time{}, which Vet hard-rejects — the failure mode of
+// missing data is a refused report, never a wrongful one.
+func (s *Store) PrimaryIPLastSeen() (map[string]time.Time, error) {
+	rows, err := s.db.Query(`
+		SELECT a.id, ai.last_seen
+		FROM actors a
+		JOIN actor_ips ai ON ai.actor_id = a.id AND ai.ip = a.primary_ip
+		WHERE a.primary_ip <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var id, ts string
+		if err := rows.Scan(&id, &ts); err != nil {
+			return nil, err
+		}
+		if t, perr := time.Parse(time.RFC3339Nano, ts); perr == nil {
+			out[id] = t
+		}
+	}
+	return out, rows.Err()
+}
+
 // ActorsForReporting returns the candidate pool for abuse reporting and
 // suggestions: every actor with activity in the window, UNIONED with the highest
 // lifetime-rate actors.

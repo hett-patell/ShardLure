@@ -38,13 +38,16 @@ func TestAbuseIPDBReportAllFirstRateLimitIsNotSuccess(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	if err := st.UpsertActor(&models.Actor{
+	// UpsertJournalActorAtomic, not UpsertActor: the staleness gate reads the
+	// PRIMARY IP's own last-seen from actor_ips, and an actor without that row
+	// is (correctly) refused as undateable before any POST is attempted.
+	if err := st.UpsertJournalActorAtomic(&models.Actor{
 		ID: "journal:8.8.8.8", Source: models.SourceJournal, PrimaryIP: "8.8.8.8",
 		Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400,
 		UniqueUsers: 30, AttemptsPerHour: 500,
 		FirstSeen: now.Add(-time.Hour), LastSeen: now,
-	}); err != nil {
-		t.Fatalf("UpsertActor: %v", err)
+	}, "8.8.8.8", now.Add(-time.Hour), now, 400, "root", 300); err != nil {
+		t.Fatalf("UpsertJournalActorAtomic: %v", err)
 	}
 
 	s := New(st, keys, "127.0.0.1:0", Options{

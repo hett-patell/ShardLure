@@ -217,6 +217,15 @@ func collectReportCandidates(st *store.Store, minProbe int) ([]abuseipdb.ReportC
 	if err != nil {
 		return nil, err
 	}
+	// Per-primary-IP last-seen, NOT actor.LastSeen: the actor figure is the max
+	// across a HASSH cluster, and the report names one address. The cluster max
+	// let a fresh cluster-mate carry a 17.7-day-dormant primary IP through the
+	// staleness gate. Absent from the map means no observation for that IP —
+	// the zero time, which Vet hard-rejects.
+	ipSeen, err := st.PrimaryIPLastSeen()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]abuseipdb.ReportCandidate, 0, len(actors))
 	for _, a := range actors {
 		if a.PrimaryIP == "" || a.ProbeScore < minProbe {
@@ -232,7 +241,7 @@ func collectReportCandidates(st *store.Store, minProbe int) ([]abuseipdb.ReportC
 			// Required by Vet's staleness gate: the pool reaches past the window
 			// (ActorsForReporting unions in top actors by lifetime rate), so
 			// without this the CLI would offer month-dormant IPs.
-			LastSeen: a.LastSeen,
+			LastSeen: ipSeen[a.ID],
 		})
 	}
 	return out, nil

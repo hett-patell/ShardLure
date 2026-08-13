@@ -1156,7 +1156,13 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	stats, err := s.st.BazaarUploadStats()
+	// Pending is counted under the SAME policy + window the CLI's candidate
+	// selection uses, so the tile can never again claim a different backlog
+	// than `share bazaar` would offer (it said 148 while the pool was 30).
+	stats, err := s.st.BazaarUploadStats(
+		time.Now().Add(-time.Duration(s.bazaarFreshnessDaysLive())*24*time.Hour),
+		store.SharePolicy{MinBytes: bazaar.MinSampleBytes, Origins: bazaar.ShareableOrigins()},
+	)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -1436,7 +1442,7 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "no actor for that IP"})
 		return
 	}
-	cand := newReportCandidate(act, s.recentRatesCached()[act.ID])
+	cand := newReportCandidate(act, s.recentRatesCached()[act.ID], s.primaryIPSeenCached()[act.ID])
 
 	// Server-side throttle: enforce a minimum gap between /report POSTs
 	// process-wide so a scripted caller can't spam the API. Held only for the
@@ -1545,6 +1551,7 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 	cands := make([]abuseipdb.ReportCandidate, 0, len(actors))
 	// One windowed-rate lookup for the whole batch, not one per candidate.
 	batchRates := s.recentRatesCached()
+	batchIPSeen := s.primaryIPSeenCached()
 	for _, a := range actors {
 		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
 			continue
@@ -1560,7 +1567,7 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		if berr != nil || best == nil {
 			best = &a
 		}
-		cands = append(cands, newReportCandidate(best, batchRates[best.ID]))
+		cands = append(cands, newReportCandidate(best, batchRates[best.ID], batchIPSeen[best.ID]))
 	}
 
 	// Guard against concurrent batch runs (a second click, a script loop).
@@ -1641,6 +1648,7 @@ func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	suggestRates := s.recentRatesCached()
+	suggestIPSeen := s.primaryIPSeenCached()
 	inputs := make([]abuseipdb.SuggestInput, 0, len(actors))
 	for _, a := range actors {
 		if a.PrimaryIP == "" {
@@ -1651,7 +1659,7 @@ func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Reque
 		// a second copy here would let this call site keep working if the
 		// passthrough were ever dropped — silently un-gating staleness.
 		inputs = append(inputs, abuseipdb.SuggestInput{
-			Cand: newReportCandidate(&a, suggestRates[a.ID]),
+			Cand: newReportCandidate(&a, suggestRates[a.ID], suggestIPSeen[a.ID]),
 		})
 	}
 	// Exclude IPs already reported within the re-report window so the list is

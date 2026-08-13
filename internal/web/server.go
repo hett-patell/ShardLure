@@ -159,6 +159,12 @@ type Server struct {
 	ratesMu     sync.Mutex
 	ratesCached map[string]float64
 	ratesAt     time.Time
+
+	// Per-actor primary-IP last-seen for the report staleness gate; see
+	// report_candidate.go for why this is not actors.last_seen.
+	ipSeenMu     sync.Mutex
+	ipSeenCached map[string]time.Time
+	ipSeenAt     time.Time
 }
 
 // threatBlockCached returns the memoized windowed threat score.

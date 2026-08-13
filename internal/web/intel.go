@@ -344,7 +344,7 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	// endpoint enforces, so the button only shows when a report would succeed.
 	reportEligible := false
 	if s.abuseEnabledLive() && s.abuseKeyLive() != "" {
-		ok, _ := abuseipdb.Vet(newReportCandidate(a, s.recentRatesCached()[a.ID]),
+		ok, _ := abuseipdb.Vet(newReportCandidate(a, s.recentRatesCached()[a.ID], s.primaryIPSeenCached()[a.ID]),
 			s.abuseAdmin, s.abuseMinProbeLive(), time.Now())
 		if ok {
 			// Also hide the button if we already reported within the window,
