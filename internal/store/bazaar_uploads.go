@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -88,9 +89,23 @@ type BazaarStats struct {
 	LastUploadAt  time.Time
 }
 
-// BazaarUploadStats returns aggregate sharing metrics.
-func (s *Store) BazaarUploadStats() (BazaarStats, error) {
+// BazaarUploadStats returns aggregate sharing metrics. Pending counts distinct
+// unshared hashes under the SAME SharePolicy and freshness window the candidate
+// selection uses (ArtifactsForShare), so the tile and the CLI describe one
+// population.
+//
+// It used to keep its own private filter — `size_bytes > 1024 AND origin LIKE
+// '%download%'`, no window — the exact drift shape the v2.3.0 selection fix
+// removed, surviving here because the stats query wasn't part of that audit.
+// Measured live it said "148 pending" while the CLI's actual pool was 30: it
+// excluded the quarantine_fetch droppers Vet accepts AND counted samples stale
+// past any window Vet would take. A zero-value policy marks nothing pending,
+// matching ArtifactsForShare's fail-closed contract.
+func (s *Store) BazaarUploadStats(since time.Time, pol SharePolicy) (BazaarStats, error) {
 	if err := s.ensureBazaarUploadsTable(); err != nil {
+		return BazaarStats{}, err
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
 		return BazaarStats{}, err
 	}
 	var st BazaarStats
@@ -108,14 +123,27 @@ FROM bazaar_uploads`).Scan(&st.TotalUploaded, &st.Duplicates, &lastTS)
 			st.LastUploadAt = t
 		}
 	}
+	if len(pol.Origins) == 0 {
+		// Fail closed, exactly like ArtifactsForShare: a forgotten policy reads
+		// as nothing pending, never as everything pending.
+		return st, nil
+	}
+	ph := make([]string, len(pol.Origins))
+	args := []interface{}{pol.MinBytes}
+	for i, o := range pol.Origins {
+		ph[i] = "?"
+		args = append(args, o)
+	}
+	args = append(args, since.UTC().Format(time.RFC3339Nano))
 	if err := s.db.QueryRow(`
 SELECT COUNT(DISTINCT a.sha256)
 FROM artifacts a
 WHERE a.status='fetched'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
-  AND a.size_bytes > 1024
-  AND a.origin LIKE '%download%'
-  AND a.sha256 NOT IN (SELECT sha256 FROM bazaar_uploads)`).Scan(&st.Pending); err != nil {
+  AND a.size_bytes >= ?
+  AND a.origin IN (`+strings.Join(ph, ",")+`)
+  AND COALESCE(a.created_at, a.ts) >= ?
+  AND a.sha256 NOT IN (SELECT sha256 FROM bazaar_uploads)`, args...).Scan(&st.Pending); err != nil {
 		log.Printf("bazaar pending count: %v (defaulting to 0)", err)
 	}
 	return st, nil
