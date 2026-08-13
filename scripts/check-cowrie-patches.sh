@@ -264,16 +264,22 @@ if ! git -C "$cowrie" diff --quiet --; then
 fi
 
 # Apply, verify every expected target changed, then prove check mode and normal
-# reapplication leave the complete patch set byte-for-byte unchanged.
+# reapplication leave the complete patch set byte-for-byte unchanged. The list is
+# git-diff --name-only order (alphabetical by path); keep it sorted. The stealth
+# patches (2026-08-13) added base.py/which.py/script.py to the original three —
+# see docs/superpowers/specs/2026-08-13-cowrie-stealth-hardening-design.md.
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
+  "src/cowrie/commands/base.py"
   "src/cowrie/commands/fs.py"
+  "src/cowrie/commands/which.py"
   "src/cowrie/shell/bashparse.py"
   "src/cowrie/shell/honeypot.py"
+  "src/cowrie/shell/script.py"
 )
 mapfile -t actual_changed < <(git -C "$cowrie" diff --name-only --)
 if [[ "${actual_changed[*]}" != "${expected_changed[*]}" ]]; then
-  echo "[cowrie-patches] patched files differ from the expected three targets" >&2
+  echo "[cowrie-patches] patched files differ from the expected targets" >&2
   printf '  expected: %s\n' "${expected_changed[*]}" >&2
   printf '  actual:   %s\n' "${actual_changed[*]}" >&2
   exit 1

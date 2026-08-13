@@ -42,6 +42,14 @@ type Options struct {
 	// early, with the number of candidates never examined. A bounded run must
 	// never read as an exhausted one.
 	OnLimitReached func(unexamined int)
+
+	// Now overrides the clock the active-days freshness gate vets against. Zero
+	// = time.Now(). Injected for tests so a fixture's FetchedAt cannot silently
+	// age past the window as wall-clock time passes (that is exactly how the
+	// original share_test fixtures became a time-bomb: FetchedAt was pinned to a
+	// fixed date while Share vetted against the real clock). Production leaves it
+	// unset. Mirrors abuseipdb.Options.Now.
+	Now time.Time
 }
 
 // defaultBatchSize keeps each POST small. URLhaus accepts a list, but batching
@@ -83,7 +91,10 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 		opts.RateLimit = 2 * time.Second
 	}
 
-	now := time.Now()
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 	tags := sanitiseTags(opts.ExtraTags)
 
 	// Vet + dedup first, so a dry run reports exactly what a real run would do.

@@ -17,7 +17,10 @@ func freshCandidate(i int) Candidate {
 		SizeBytes: 45000,
 		Origin:    "quarantine_fetch",
 		Status:    "fetched",
-		FetchedAt: time.Now().Add(-1 * time.Hour),
+		// Pinned to vetNow (not time.Now()) so the fixture cannot age past the
+		// active-days window as wall-clock time passes — the time-bomb that hit
+		// the original share_test. Every Share call below passes Now: vetNow.
+		FetchedAt: vetNow.Add(-1 * time.Hour),
 		FileKind:  "ELF",
 	}
 }
@@ -46,7 +49,7 @@ func TestShareLimitBoundsSubmissionsNotCandidates(t *testing.T) {
 	var limitHit int
 	submitted, skipped, err := Share(context.Background(), rec, cands, Options{
 		APIKey: "k", Endpoint: srv.URL, RateLimit: time.Millisecond,
-		MaxSubmissions: 2,
+		MaxSubmissions: 2, Now: vetNow,
 		OnLimitReached: func(unexamined int) { limitHit = unexamined },
 	})
 	if err != nil {
@@ -77,7 +80,7 @@ func TestShareZeroLimitIsUnbounded(t *testing.T) {
 	limitFired := false
 	submitted, _, err := Share(context.Background(), rec, cands, Options{
 		APIKey: "k", Endpoint: srv.URL, RateLimit: time.Millisecond,
-		MaxSubmissions: 0,
+		MaxSubmissions: 0, Now: vetNow,
 		OnLimitReached: func(int) { limitFired = true },
 	})
 	if err != nil {
@@ -100,7 +103,7 @@ func TestShareLimitCountsDryRunPreviews(t *testing.T) {
 	}
 	previews := 0
 	_, _, err := Share(context.Background(), rec, cands, Options{
-		DryRun: true, RateLimit: time.Millisecond, MaxSubmissions: 2,
+		DryRun: true, RateLimit: time.Millisecond, MaxSubmissions: 2, Now: vetNow,
 		OnProgress: func(_ Candidate, submitted bool, _ string) {
 			if submitted {
 				previews++

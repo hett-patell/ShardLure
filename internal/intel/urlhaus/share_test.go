@@ -95,7 +95,7 @@ func TestShareSubmitsOnlyVettedURLs(t *testing.T) {
 
 	submitted, skipped, err := Share(context.Background(), rec,
 		[]Candidate{good, privateIP, pseudoKey, failedFetch},
-		Options{APIKey: "k", Endpoint: cs.URL, ExtraTags: []string{"shardlure"}, RateLimit: time.Millisecond})
+		Options{APIKey: "k", Endpoint: cs.URL, ExtraTags: []string{"shardlure"}, RateLimit: time.Millisecond, Now: vetNow})
 	if err != nil {
 		t.Fatalf("Share: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestShareBodyLeaksNoHoneypotIdentifiers(t *testing.T) {
 	cs := newCaptureServer(t)
 	rec := newFakeRecorder()
 	_, _, err := Share(context.Background(), rec, []Candidate{goodCandidate()},
-		Options{APIKey: "k", Endpoint: cs.URL, RateLimit: time.Millisecond})
+		Options{APIKey: "k", Endpoint: cs.URL, RateLimit: time.Millisecond, Now: vetNow})
 	if err != nil {
 		t.Fatalf("Share: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestShareSkipsAlreadySubmitted(t *testing.T) {
 	rec.submitted[c.URL] = "ok" // pretend a previous run shipped it
 
 	submitted, skipped, err := Share(context.Background(), rec, []Candidate{c},
-		Options{APIKey: "k", Endpoint: cs.URL, RateLimit: time.Millisecond})
+		Options{APIKey: "k", Endpoint: cs.URL, RateLimit: time.Millisecond, Now: vetNow})
 	if err != nil {
 		t.Fatalf("Share: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestShareDryRunNeverPosts(t *testing.T) {
 	cs := newCaptureServer(t)
 	rec := newFakeRecorder()
 	submitted, _, err := Share(context.Background(), rec, []Candidate{goodCandidate()},
-		Options{Endpoint: cs.URL, DryRun: true, RateLimit: time.Millisecond})
+		Options{Endpoint: cs.URL, DryRun: true, RateLimit: time.Millisecond, Now: vetNow})
 	if err != nil {
 		t.Fatalf("Share: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestShareStopsOnUnauthorized(t *testing.T) {
 		cands = append(cands, c)
 	}
 	submitted, _, err := Share(context.Background(), rec, cands,
-		Options{APIKey: "bad", Endpoint: cs.URL, RateLimit: time.Millisecond})
+		Options{APIKey: "bad", Endpoint: cs.URL, RateLimit: time.Millisecond, Now: vetNow})
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrUnauthorized", err)
 	}
@@ -235,7 +235,7 @@ func TestShareBatchesLargeSets(t *testing.T) {
 		cands = append(cands, c)
 	}
 	submitted, _, err := Share(context.Background(), rec, cands,
-		Options{APIKey: "k", Endpoint: cs.URL, BatchSize: 25, RateLimit: time.Millisecond})
+		Options{APIKey: "k", Endpoint: cs.URL, BatchSize: 25, RateLimit: time.Millisecond, Now: vetNow})
 	if err != nil {
 		t.Fatalf("Share: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestShareCollapsesDuplicateURLs(t *testing.T) {
 	rec := newFakeRecorder()
 	c := goodCandidate()
 	submitted, skipped, err := Share(context.Background(), rec, []Candidate{c, c, c},
-		Options{APIKey: "k", Endpoint: cs.URL, RateLimit: time.Millisecond})
+		Options{APIKey: "k", Endpoint: cs.URL, RateLimit: time.Millisecond, Now: vetNow})
 	if err != nil {
 		t.Fatalf("Share: %v", err)
 	}
