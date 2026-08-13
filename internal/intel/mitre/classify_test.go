@@ -1,6 +1,8 @@
 package mitre
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -90,5 +92,38 @@ func TestCoverageGrid_Order(t *testing.T) {
 		// (e.g. PrivEsc, LateralMovement aren't observable via SSH
 		// honeypot today). The grid still surfaces them so analysts
 		// know the coverage gap.
+	}
+}
+
+// TestCoverageGridEmptyTacticsMarshalAsEmptyList pins the []-not-null contract
+// at the JSON layer, where it actually matters: a nil Techniques slice marshals
+// to `null`, forcing every API consumer to guard before iterating. The v2.2.0
+// release claimed this fix, but until now the only assertion lived in a live
+// deployment harness CI never runs — reverting `techs = []GridTechnique{}` to
+// `techs := byTactic[tac]` alone left `go test ./...` green.
+func TestCoverageGridEmptyTacticsMarshalAsEmptyList(t *testing.T) {
+	grid := CoverageGrid(Classify(nil))
+	sawEmpty := false
+	for _, gt := range grid {
+		if len(gt.Techniques) > 0 {
+			continue
+		}
+		sawEmpty = true
+		if gt.Techniques == nil {
+			t.Errorf("tactic %s has nil Techniques — marshals to JSON null, not []", gt.Tactic)
+		}
+		b, err := json.Marshal(gt)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", gt.Tactic, err)
+		}
+		if strings.Contains(string(b), `"techniques":null`) {
+			t.Errorf("tactic %s serialises techniques as null: %s", gt.Tactic, b)
+		}
+	}
+	if !sawEmpty {
+		// The guard exists FOR tactics with no catalogued techniques (PrivEsc,
+		// LateralMovement today). If the catalogue ever covers every tactic,
+		// this test stops testing anything and must be reworked, not deleted.
+		t.Fatal("no empty tactic in the grid — this test no longer exercises the nil-guard")
 	}
 }

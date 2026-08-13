@@ -1,6 +1,7 @@
 package web
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -276,24 +277,48 @@ func TestNoRateDisplayUsesTheLifetimeAverage(t *testing.T) {
 // count threshold cannot detect the handler you forgot to add to it; counting
 // the actual eventsForWindowCached call sites can.
 func TestWindowedPanelsDiscloseSampling(t *testing.T) {
-	src := readSource(t, "api_intel.go")
-
-	// Every handler that caps its analysis must disclose it in-band: JSON
-	// endpoints via a Sampled body field, file exports via ioc.Coverage (a
-	// downloaded file cannot carry the advisory response header).
-	capped := countOccurrences(src, "s.eventsForWindowCached(")
-	disclosed := countOccurrences(src, "sampledWindow(len(events)") +
-		countOccurrences(src, "ioc.Coverage{")
+	// Scan EVERY .go file in the package, not just api_intel.go: the
+	// derivation exists because a hardcoded panel count missed the handler
+	// nobody added to it, and a per-file scope is the same defect one level
+	// up — a new handler in intel.go or a future api_*.go would be invisible.
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capped, disclosed, headers int
+	var srcAll strings.Builder
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src := readSource(t, name)
+		srcAll.WriteString(src)
+		// Every handler that caps its analysis must disclose it in-band: JSON
+		// endpoints via a Sampled body field, file exports via ioc.Coverage (a
+		// downloaded file cannot carry the advisory response header). The
+		// definition site in server.go doesn't count itself: countOccurrences
+		// matches the call spelling `s.eventsForWindowCached(`, and the method
+		// is declared `func (s *Server) eventsForWindowCached(`.
+		capped += countOccurrences(src, "s.eventsForWindowCached(")
+		disclosed += countOccurrences(src, "sampledWindow(len(events)") +
+			countOccurrences(src, "ioc.Coverage{")
+		headers += countOccurrences(src, "discloseWindowTruncation(w,")
+	}
+	if capped == 0 {
+		t.Fatal("no eventsForWindowCached call sites found — the derivation is scanning the wrong thing")
+	}
 	if disclosed < capped {
 		t.Errorf("%d handlers cap the window but only %d disclose it in-band; "+
 			"a capped analysis renders as a window total with nothing said about it",
 			capped, disclosed)
 	}
 	// Header disclosure must keep pace too — it is what a non-browser client sees.
-	if n := countOccurrences(src, "discloseWindowTruncation(w,"); n < capped {
-		t.Errorf("%d handlers cap the window but only %d set the advisory header", capped, n)
+	if headers < capped {
+		t.Errorf("%d handlers cap the window but only %d set the advisory header", capped, headers)
 	}
 
+	src := srcAll.String()
 	for _, resp := range []string{"mitreResponse", "ttpResponse", "deobfResponse", "iocListResponse"} {
 		i := strings.Index(src, "type "+resp+" struct {")
 		if i < 0 {
@@ -307,11 +332,20 @@ func TestWindowedPanelsDiscloseSampling(t *testing.T) {
 	}
 
 	// And the dashboard must actually render it, in every windowed panel.
+	// Count CALL sites only: `+ sampledNote(` is how every panel appends the
+	// note to its meta line. The bare-substring count used here previously
+	// also matched the function DEFINITION, so the effective threshold was one
+	// panel lower than it claimed — one panel could drop its disclosure with
+	// the count still green, the exact defect class this test exists to kill.
 	if !strings.Contains(intelHTML, "function sampledNote(") {
 		t.Fatal("no sampledNote renderer in the dashboard")
 	}
-	if n := strings.Count(intelHTML, "sampledNote(data)"); n < 5 {
-		t.Errorf("sampledNote used in %d panels, want >= 5 (MITRE, TTP, IOC, deobf, graph)", n)
+	if n := strings.Count(intelHTML, "+ sampledNote("); n < 5 {
+		t.Errorf("sampledNote rendered in %d panels, want >= 5 (MITRE, TTP, IOC, deobf, graph)", n)
+	}
+	if strings.Count(intelHTML, "sampledNote(") != strings.Count(intelHTML, "+ sampledNote(")+1 {
+		t.Errorf("sampledNote references that are neither the definition nor a `+ sampledNote(` " +
+			"call site — the call-site census above may be undercounting; align the usage or the test")
 	}
 }
 
@@ -348,6 +382,36 @@ func TestWordlistCountsInSQL(t *testing.T) {
 	for _, want := range []string{"TopUsernamesSince", "TopPasswordsSince", "TopCombosSince"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("wordlist does not use %s", want)
+		}
+	}
+}
+
+// TestBarChartsStateTheirUnit pins the v2.2.0 unit labels. Event kinds and
+// Sources count EVENTS; Playbooks and Intent count ACTORS — six-figure and
+// four-figure bars side by side with only a time scope said nothing about why.
+// The labels shipped with no test at all, so a template edit could drop one
+// silently. Exact-string on the h2 because that is precisely what an operator
+// reads; if the wording changes deliberately, change it here in the same
+// commit.
+func TestBarChartsStateTheirUnit(t *testing.T) {
+	for chart, unit := range map[string]string{
+		"Event kinds": "(events, all-time)",
+		"Sources":     "(events, all-time)",
+		"Playbooks":   "(actors, all-time)",
+		"Intent":      "(actors, all-time)",
+	} {
+		i := strings.Index(intelHTML, "<h2>"+chart+" ")
+		if i < 0 {
+			t.Errorf("chart heading %q not found in intel.html", chart)
+			continue
+		}
+		line := intelHTML[i:]
+		if j := strings.Index(line, "</h2>"); j > 0 {
+			line = line[:j]
+		}
+		if !strings.Contains(line, unit) {
+			t.Errorf("%s heading does not state its unit %q — two different units render "+
+				"side by side with nothing distinguishing them: %q", chart, unit, line)
 		}
 	}
 }

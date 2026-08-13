@@ -240,3 +240,37 @@ func TestReportLimitNotSpentOnVetRejections(t *testing.T) {
 		t.Errorf("recorded %v, want the two vettable attackers", got)
 	}
 }
+
+// TestReportBudgetCountsAttemptsNotAcceptances pins the "counted on attempt"
+// semantics that survived the first mutation pass: moving submitted++ after
+// reported++ (count-on-acceptance) left the whole suite green, and under that
+// mutant a run of transport errors makes --limit unbounded in POST attempts —
+// hammering the API with exactly the calls the budget exists to bound. Five
+// candidates, an upstream that fails every POST, budget 2: exactly 2 POSTs.
+func TestReportBudgetCountsAttemptsNotAcceptances(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`upstream on fire`))
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	var cands []ReportCandidate
+	for i := 0; i < 5; i++ {
+		cands = append(cands, reportableCandidate(freshIP(i), now))
+	}
+	reported, _, _ := Report(context.Background(), newFakeRecorder(), cands, Options{
+		APIKey: "k", Endpoint: srv.URL, RateLimit: time.Millisecond,
+		MaxReports: 2, Now: now,
+	})
+	if got := posts.Load(); got != 2 {
+		t.Fatalf("POSTs = %d, want 2 — a rejected POST was still a call we made, so it must "+
+			"consume budget; counting on acceptance turns --limit into unbounded attempts "+
+			"whenever the upstream is failing", got)
+	}
+	if reported != 0 {
+		t.Errorf("reported = %d, want 0 (every POST failed)", reported)
+	}
+}
