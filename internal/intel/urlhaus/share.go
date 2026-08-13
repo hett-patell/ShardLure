@@ -28,6 +28,20 @@ type Options struct {
 	BatchSize  int  // URLs per POST; 0 = default
 	RateLimit  time.Duration
 	OnProgress func(c Candidate, submitted bool, reason string)
+
+	// MaxSubmissions bounds how many URLs this run may SUBMIT (0 = unbounded).
+	// It counts URLs that cleared Vet and dedup — NOT candidates examined. The
+	// CLI used to pass its --limit into the candidate QUERY (a SQL LIMIT ahead
+	// of the gate), the same defect fixed for bazaar.MaxUploads and
+	// abuseipdb.MaxReports: the query replicates dedup so the worst driver was
+	// already absent here, but Vet's shortener and private-host rejects are not
+	// in SQL, so a page of unvettable URLs could still occupy every slot while
+	// vettable ones sat below the cut.
+	MaxSubmissions int
+	// OnLimitReached fires at most once, when MaxSubmissions stopped the run
+	// early, with the number of candidates never examined. A bounded run must
+	// never read as an exhausted one.
+	OnLimitReached func(unexamined int)
 }
 
 // defaultBatchSize keeps each POST small. URLhaus accepts a list, but batching
@@ -79,9 +93,19 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 	}
 	var queue []pending
 	seenURL := map[string]bool{}
-	for _, cand := range candidates {
+	for i, cand := range candidates {
 		if ctx.Err() != nil {
 			return submitted, skipped, ctx.Err()
+		}
+		// Budget check mirrors bazaar/abuseipdb: it bounds what we SUBMIT, so a
+		// skip (dedup, Vet reject) never costs a slot — only a queued URL does.
+		// Everything from i onward is unexamined, which is a different thing
+		// from "nothing left to submit" — say so.
+		if opts.MaxSubmissions > 0 && len(queue) >= opts.MaxSubmissions {
+			if opts.OnLimitReached != nil {
+				opts.OnLimitReached(len(candidates) - i)
+			}
+			break
 		}
 		// Collapse duplicates inside one batch: the artifacts table is unique
 		// per URL, but a caller could hand us an unfiltered slice.

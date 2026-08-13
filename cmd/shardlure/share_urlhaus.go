@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +36,13 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 
 	fs := flag.NewFlagSet("share urlhaus", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would be submitted without contacting URLhaus")
-	limit := fs.Int("limit", 25, "max URLs to submit in this run (0 = unbounded)")
+	// Bounds SUBMISSIONS, enforced inside urlhaus.Share after Vet and dedup —
+	// not a LIMIT on the candidate query. The SQL already replicates dedup, so
+	// the budget-eaten-by-dedup failure of the bazaar/abuseipdb twins couldn't
+	// recur here in full, but Vet's shortener and private-host rejects are NOT
+	// in SQL: a page of unvettable URLs could still spend every slot while
+	// vettable ones sat below the query's cut.
+	limit := fs.Int("limit", 25, "max URLs to submit in this run (0 = unbounded); counts submissions, not candidates examined")
 	statusOnly := fs.Bool("status", false, "list past submissions from urlhaus_submissions instead of submitting")
 	anonymous := fs.Bool("anonymous", cfg.Intel.URLhaus.Anonymous, "hide your abuse.ch handle on the public record")
 	activeDaysFlag := fs.Int("active-days", activeDays, "only submit URLs confirmed serving within this many days (may only tighten)")
@@ -59,7 +66,9 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 		fatal(fmt.Errorf("no abuse.ch Auth-Key found — save one in the dashboard Settings panel (MalwareBazaar), set intel.urlhaus.api_key / intel.bazaar.api_key in %s, or export SHARDLURE_URLHAUS_KEY; get one free at https://auth.abuse.ch/", config.DefaultConfigPath()))
 	}
 
-	rows, err := st.URLhausCandidates(*activeDaysFlag, *limit)
+	// 0 = no SQL LIMIT: the whole vettable pool is examined, and the budget is
+	// applied by Share after the gate.
+	rows, err := st.URLhausCandidates(*activeDaysFlag, 0)
 	if err != nil {
 		fatal(fmt.Errorf("collect candidates: %w", err))
 	}
@@ -95,21 +104,31 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 		ep = *endpoint
 	}
 
-	fmt.Printf("candidates: %d  dry-run=%v  active-days=%d  endpoint=%s\n",
-		len(cands), *dryRun, *activeDaysFlag, ep)
+	limitLabel := "unbounded"
+	if *limit > 0 {
+		limitLabel = strconv.Itoa(*limit)
+	}
+	fmt.Printf("candidates: %d  submit-limit=%s  dry-run=%v  active-days=%d  endpoint=%s\n",
+		len(cands), limitLabel, *dryRun, *activeDaysFlag, ep)
 	if *dryRun {
 		fmt.Println("(dry-run: no submission)")
 	}
 
 	opts := urlhaus.Options{
-		APIKey:     apiKey,
-		Endpoint:   ep,
-		ExtraTags:  cfg.Intel.URLhaus.Tags,
-		ActiveDays: *activeDaysFlag,
-		DryRun:     *dryRun,
-		Anonymous:  *anonymous,
-		RateLimit:  2 * time.Second,
-		OnProgress: printURLhausProgress,
+		APIKey:         apiKey,
+		Endpoint:       ep,
+		ExtraTags:      cfg.Intel.URLhaus.Tags,
+		ActiveDays:     *activeDaysFlag,
+		DryRun:         *dryRun,
+		Anonymous:      *anonymous,
+		RateLimit:      2 * time.Second,
+		MaxSubmissions: *limit,
+		OnProgress:     printURLhausProgress,
+		OnLimitReached: func(unexamined int) {
+			// Never let a bounded run read as an exhausted one.
+			fmt.Printf("\n  (submit limit %d reached — %d candidate(s) not examined; raise --limit or pass --limit=0)\n",
+				*limit, unexamined)
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
