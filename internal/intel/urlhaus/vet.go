@@ -2,13 +2,12 @@ package urlhaus
 
 import (
 	"fmt"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/networkshard/shardlure/internal/netmatch"
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 )
 
 // URLhaus submission policy (https://urlhaus.abuse.ch/api/, "Submission
@@ -46,16 +45,6 @@ const (
 	// confirmed serving more than this long ago is treated as unproven.
 	defaultActiveDays = 3
 )
-
-// shortenerHosts are pure redirection services. URLhaus rejects these outright
-// because they don't host the payload themselves. Not exhaustive by design —
-// it catches the common ones an attacker one-liner actually uses.
-var shortenerHosts = map[string]bool{
-	"bit.ly": true, "tinyurl.com": true, "goo.gl": true, "t.co": true,
-	"ow.ly": true, "is.gd": true, "buff.ly": true, "cutt.ly": true,
-	"rb.gy": true, "shorturl.at": true, "rebrand.ly": true, "t.ly": true,
-	"tiny.cc": true, "s.id": true, "shorte.st": true, "adf.ly": true,
-}
 
 // benignKinds must never be submitted: they are honeypot artefacts or attacker
 // key material, not a distributed payload.
@@ -166,44 +155,16 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 		return false, "benign content (" + c.FileKind + ")"
 	}
 
-	// 5. Private / reserved / special-purpose addresses. Explicitly required
-	//    by the submission policy for automated submitters (RFC1597/RFC6890),
-	//    and also stops us publishing a link to a host inside our own network.
-	// Normalise before classifying. A trailing dot is the FQDN root form:
-	// "127.0.0.1." is loopback to every resolver, but net.ParseIP rejects it,
-	// so without the trim it slipped past the IP check into the hostname rule
-	// and was accepted.
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	switch {
-	case net.ParseIP(host) != nil:
-		// netmatch.IsPublicIP is the ONE conservative definition of "public"
-		// shared with the capture fetcher and the AbuseIPDB gate. Do not
-		// hand-roll this: it covers RFC6890 special-use blocks a naive check
-		// misses (AS112, NAT64, 6to4, IETF protocol assignments, benchmarking,
-		// documentation), which is exactly what URLhaus's automated-submission
-		// policy forbids.
-		if !netmatch.IsPublicIP(net.ParseIP(host)) {
-			return false, "private or special-purpose IP address"
-		}
-	case isNumericHost(host):
-		// An all-numeric host is an IP in some alternate encoding that Go's
-		// strict parser rejects but libc/browsers happily resolve — "127.1",
-		// "2130706433", "0x7f.0.0.1". We deliberately do NOT resolve attacker
-		// URLs here (that would be a DNS side channel and a TOCTOU), so the
-		// only safe answer for an address we cannot classify is no.
-		return false, "ambiguous numeric host (possible IP shorthand)"
-	case !isSubmittableHostname(host):
-		return false, "non-public hostname"
-	}
-	// Absurdly long hosts are never real payload servers and would be rejected
-	// upstream anyway; 253 is the DNS maximum.
-	if len(host) > 253 {
-		return false, "hostname exceeds the 253-byte DNS limit"
-	}
-
-	// 6. Pure redirectors host no payload.
-	if shortenerHosts[strings.ToLower(strings.TrimPrefix(host, "www."))] {
-		return false, "URL shortener / redirector, not a payload host"
+	// 5. Private / reserved / special-purpose addresses (RFC1597/RFC6890),
+	//    URL shorteners, numeric-shorthand hosts, and non-public hostnames.
+	//    Host classification is shared with the threatfox gate (intelutil): the
+	//    two MUST answer "is this a public payload host" identically, so the
+	//    private-IP, numeric-shorthand, hostname and shortener rules live in one
+	//    place. HostNormalise strips the FQDN root dot ("127.0.0.1." is loopback
+	//    to every resolver but net.ParseIP rejects it). See PublicHostKind.
+	host := intelutil.HostNormalise(u.Hostname())
+	if _, reason := intelutil.PublicHostKind(host); reason != "" {
+		return false, reason
 	}
 
 	// 7. Still active. URLhaus does not want dead URLs.
@@ -230,55 +191,4 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 		return false, "payload shape unrecognised — cannot confirm it is malware"
 	}
 	return true, ""
-}
-
-// isNumericHost reports whether every dot-separated label is numeric (decimal
-// or 0x-hex). Such a host is always an IP literal in some encoding — no real
-// DNS name looks like this — and resolvers accept forms Go's net.ParseIP does
-// not ("127.1" → 127.0.0.1, "2130706433" → 127.0.0.1). Treating them as
-// unclassifiable is what stops a loopback/RFC1918 address reaching a public
-// blocklist through an alternate spelling.
-func isNumericHost(host string) bool {
-	if host == "" {
-		return false
-	}
-	for _, label := range strings.Split(host, ".") {
-		if label == "" {
-			return false
-		}
-		s := label
-		if strings.HasPrefix(s, "0x") {
-			s = s[2:]
-			if s == "" {
-				return false
-			}
-		}
-		for _, r := range s {
-			isDec := r >= '0' && r <= '9'
-			isHex := strings.HasPrefix(label, "0x") && ((r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F'))
-			if !isDec && !isHex {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// isSubmittableHostname rejects names that can't be a public payload host:
-// bare hostnames with no dot (intranet names), localhost, and .local/.internal
-// style private suffixes.
-func isSubmittableHostname(host string) bool {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	if h == "" || h == "localhost" {
-		return false
-	}
-	if !strings.Contains(h, ".") {
-		return false
-	}
-	for _, suffix := range []string{".local", ".internal", ".localdomain", ".lan", ".home", ".corp", ".test", ".invalid", ".example", ".onion"} {
-		if strings.HasSuffix(h, suffix) {
-			return false
-		}
-	}
-	return true
 }
