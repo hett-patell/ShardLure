@@ -40,6 +40,7 @@ type Store struct {
 	onceSessMeta     sync.Once
 	onceAbuseReport  sync.Once
 	onceURLhaus      sync.Once
+	onceThreatFox    sync.Once
 	oncePayloadIntel sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
 	errArtifacts    error
@@ -50,6 +51,7 @@ type Store struct {
 	errSessMeta     error
 	errAbuseReport  error
 	errURLhaus      error
+	errThreatFox    error
 	errPayloadIntel error
 }
 
