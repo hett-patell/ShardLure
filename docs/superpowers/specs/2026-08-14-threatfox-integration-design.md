@@ -1,7 +1,7 @@
 # ThreatFox integration — research & design
 
 **Date:** 2026-08-14
-**Status:** research complete + live-API-verified; decisions settled; implementing
+**Status:** IMPLEMENTED — package + CLI + web panel + tests all shipped, full CI green. One bug found in adversarial review (IPv6 ip:port needed bracketing via net.JoinHostPort) fixed with a regression test.
 **Goal:** add ThreatFox as a fourth abuse.ch give-back channel, sharing the malware-hosting IOCs ShardLure captures — completing the file (MalwareBazaar) → URL (URLhaus) → **IOC (ThreatFox)** triad on the one shared Auth-Key.
 
 ---

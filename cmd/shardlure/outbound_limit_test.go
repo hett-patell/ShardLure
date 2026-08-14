@@ -13,9 +13,10 @@ import (
 // pin: the budget is enforced INSIDE the intel package, after Vet and dedup —
 // never by shrinking the candidate list in the CLI.
 var outboundCLIFiles = map[string]string{
-	"report.go":        "MaxReports",
-	"share.go":         "MaxUploads",
-	"share_urlhaus.go": "MaxSubmissions",
+	"report.go":          "MaxReports",
+	"share.go":           "MaxUploads",
+	"share_urlhaus.go":   "MaxSubmissions",
+	"share_threatfox.go": "MaxSubmissions",
 }
 
 // TestCLIDoesNotTruncateCandidatesBeforeTheGate is a source-level invariant on
@@ -24,7 +25,8 @@ var outboundCLIFiles = map[string]string{
 // Why a source test rather than a behavioural one: this exact defect has now
 // shipped three times — `share bazaar`, `report abuseipdb`, and (as a SQL
 // LIMIT) `share urlhaus` — and each time it was one expression in the CLI,
-// ahead of the gate. Candidates arrive best-first, which is also
+// ahead of the gate. `share threatfox` is guarded here from the start for the
+// same reason. Candidates arrive best-first, which is also
 // dedup-hit-first on any deployment with history, so the budget was spent
 // re-examining things already shared or reported and the run shipped nothing.
 // The package-level tests pin Share/Report correctly, but none of them can see

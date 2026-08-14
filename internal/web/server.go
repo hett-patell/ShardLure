@@ -104,6 +104,8 @@ type Server struct {
 	// double-clicked "Submit All" could race the dedup ledger and publish the
 	// same URL twice to a public dataset.
 	urlhausBatchMu sync.Mutex
+	// threatfoxBatchMu serializes ThreatFox submit batches — same reason.
+	threatfoxBatchMu sync.Mutex
 	// URLhaus startup defaults (config), overridden live by the keystore.
 	urlhausEndpointDefault   string
 	urlhausTagsDefault       []string
@@ -768,6 +770,8 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guardRead(s.handleIntelPayloadsVTCached))
 	mux.HandleFunc("/api/intel/urlhaus", s.guardRead(s.handleIntelURLhaus))
 	mux.HandleFunc("/api/intel/urlhaus/submit", s.guard(s.handleURLhausSubmit))
+	mux.HandleFunc("/api/intel/threatfox", s.guardRead(s.handleIntelThreatFox))
+	mux.HandleFunc("/api/intel/threatfox/submit", s.guard(s.handleThreatFoxSubmit))
 	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
 	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
 	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guardRead(s.handleAbuseIPDBSuggestions))

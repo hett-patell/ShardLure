@@ -22,17 +22,20 @@ import (
 // as additional cases here.
 func cmdShare(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
 	if len(args) < 1 {
-		fatal(fmt.Errorf("usage: shardlure share <bazaar|urlhaus> [flags]\n" +
-			"  bazaar  [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]\n" +
-			"  urlhaus [--dry-run] [--limit N] [--active-days N] [--anonymous] [--status]"))
+		fatal(fmt.Errorf("usage: shardlure share <bazaar|urlhaus|threatfox> [flags]\n" +
+			"  bazaar    [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]\n" +
+			"  urlhaus   [--dry-run] [--limit N] [--active-days N] [--anonymous] [--status]\n" +
+			"  threatfox [--dry-run] [--limit N] [--active-days N] [--status]"))
 	}
 	switch args[0] {
 	case "bazaar":
 		cmdShareBazaar(st, cfg, keys, args[1:])
 	case "urlhaus":
 		cmdShareURLhaus(st, cfg, keys, args[1:])
+	case "threatfox":
+		cmdShareThreatFox(st, cfg, keys, args[1:])
 	default:
-		fatal(fmt.Errorf("unknown share destination: %q (supported: bazaar, urlhaus)", args[0]))
+		fatal(fmt.Errorf("unknown share destination: %q (supported: bazaar, urlhaus, threatfox)", args[0]))
 	}
 }
 

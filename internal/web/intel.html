@@ -1479,6 +1479,45 @@
         </div>
       </section>
 
+      <section class="panel full" id="panel-threatfox">
+        <div class="panel-head">
+          <h2>ThreatFox IOC sharing</h2>
+          <span class="meta" id="threatfox-meta">abuse.ch IOC exchange</span>
+          <button class="bz-btn" id="threatfox-submit-all-btn" onclick="submitAllThreatFox(this)" style="margin-left:auto;display:none">▲ Submit All to ThreatFox</button>
+        </div>
+        <div class="panel-body">
+        <div class="stats" id="threatfox-stats" style="grid-template-columns: repeat(4,1fr); margin-bottom: 12px;">
+          <div class="stat"><div class="num accent" id="tf-submitted">0</div><div class="label">IOCs submitted</div></div>
+          <div class="stat"><div class="num" style="color:var(--accent-2)" id="tf-eligible">0</div><div class="label">eligible now</div></div>
+          <div class="stat"><div class="num" style="color:var(--purple)" id="tf-pending">0</div><div class="label">candidates</div></div>
+          <div class="stat"><div class="num" style="color:var(--dim)" id="tf-last">—</div><div class="label">last submitted</div></div>
+        </div>
+        <div id="threatfox-note" class="abuse-note" style="display:none"></div>
+        <table class="dense" id="threatfox-table">
+          <thead>
+            <tr>
+              <th>payload url</th>
+              <th style="width:110px" title="malware family resolved to a Malpedia label">family</th>
+              <th class="num" style="width:56px" title="IOCs this candidate would submit: url, host, hash">IOCs</th>
+              <th style="width:96px" title="when our fetch last confirmed this host was serving a payload">confirmed</th>
+              <th title="vetting-gate decision — the same policy the CLI applies">gate</th>
+              <th style="width:92px">action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        <div id="threatfox-log-wrap" style="margin-top:14px;display:none">
+          <div class="meta" style="margin-bottom:6px">recent submissions</div>
+          <table class="dense" id="threatfox-log">
+            <thead><tr><th>ioc</th><th style="width:96px">type</th><th style="width:120px">malware</th><th style="width:150px">submitted</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        </div>
+      </section>
+
       <section class="panel full" id="panel-enrich">
         <div class="panel-head">
           <h2>Threat intel enrichment</h2>
@@ -3552,17 +3591,21 @@ setActiveView = function(name) {
     if (note) note.dataset.sticky = '';
     const uhNote = document.getElementById('urlhaus-note');
     if (uhNote) uhNote.dataset.sticky = '';
+    const tfNote = document.getElementById('threatfox-note');
+    if (tfNote) tfNote.dataset.sticky = '';
     refreshAbuseSuggest();
     refreshURLhaus();
+    refreshThreatFox();
   }
 };
 setInterval(function() {
   if (document.getElementById('view-blue').classList.contains('active')) {
     refreshAbuseSuggest();
     refreshURLhaus();
+    refreshThreatFox();
   }
 }, 30000);
-if (readTabFromHash() === 'blue') { refreshAbuseSuggest(); refreshURLhaus(); }
+if (readTabFromHash() === 'blue') { refreshAbuseSuggest(); refreshURLhaus(); refreshThreatFox(); }
 
 // ==== URLhaus URL sharing =========================================
 // Companion to the MalwareBazaar panel on the Red tab: bazaar ships the payload
@@ -3726,6 +3769,164 @@ async function submitAllURLhaus(btn) {
     }
   } catch (e) {
     showURLhausBanner('\u2717 request failed', 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ==== ThreatFox IOC sharing =======================================
+// The third abuse.ch give-back channel: bazaar ships payload FILES, urlhaus the
+// distribution URLs, ThreatFox the INDICATORS (url + host + hash) tied to a
+// malware family. The server runs the real threatfox.Vet gate — which requires
+// a resolvable Malpedia family label — and returns a per-candidate reason, so
+// this view renders the gate's decision, never re-implements policy.
+
+function showThreatFoxBanner(msg, kind) {
+  const note = document.getElementById('threatfox-note');
+  if (!note) return;
+  const colors = { ok: 'var(--accent)', warn: 'var(--accent-2)', bad: 'var(--red-team)', pending: 'var(--dim)' };
+  note.style.display = 'block';
+  note.style.borderLeftColor = colors[kind] || 'var(--dim)';
+  note.style.color = kind === 'pending' ? 'var(--dim)' : '';
+  note.textContent = msg;
+  note.dataset.sticky = kind === 'pending' ? '' : '1';
+}
+
+function renderThreatFox(d) {
+  const tb = document.querySelector('#threatfox-table tbody');
+  const meta = document.getElementById('threatfox-meta');
+  const note = document.getElementById('threatfox-note');
+  const cands = d.candidates || [];
+  const eligible = cands.filter(function(c) { return c.eligible; });
+
+  document.getElementById('tf-submitted').textContent = d.totalSubmitted || 0;
+  document.getElementById('tf-eligible').textContent = eligible.length;
+  document.getElementById('tf-pending').textContent = cands.length;
+  document.getElementById('tf-last').textContent = d.lastSubmittedAt ? fmtShortTime(d.lastSubmittedAt) : '—';
+  meta.textContent = 'abuse.ch IOC exchange · active window ' + (d.activeDays || 3) + 'd';
+
+  const allBtn = document.getElementById('threatfox-submit-all-btn');
+  if (allBtn) allBtn.style.display = (d.configured && eligible.length) ? '' : 'none';
+
+  if (!d.configured) {
+    note.style.display = 'block';
+    note.dataset.sticky = '';
+    note.style.borderLeftColor = 'var(--blue-team)';
+    note.style.color = 'var(--dim)';
+    note.textContent = 'No abuse.ch Auth-Key configured — this list is advisory. Set the MalwareBazaar key in Settings; abuse.ch issues one key per account and it arms ThreatFox too.';
+  } else if (note.dataset.sticky !== '1') {
+    note.style.display = 'none';
+  }
+
+  if (!cands.length) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">no fetched payloads in the active window (or all already submitted)</div></td></tr>';
+  } else {
+    tb.innerHTML = cands.map(function(c) {
+      const fam = c.eligible && c.malware
+        ? '<span class="why-tag" style="border-color:var(--accent-2);color:var(--accent-2)" title="Malpedia label">' + escHtml(c.malware) + '</span>'
+        : '<span class="range" title="' + escHtml(c.family || '') + '">' + escHtml(c.family || '—') + '</span>';
+      const gate = c.eligible
+        ? '<span class="why-tag" style="border-color:var(--accent);color:var(--accent)">eligible</span>'
+        : '<span class="why-tag" title="' + escHtml(c.reason || '') + '">' + escHtml(c.reason || 'rejected') + '</span>';
+      const btn = (d.configured && c.eligible)
+        ? '<button class="bz-btn sg-btn" data-url="' + escHtml(c.url) + '" onclick="submitOneThreatFox(this)">▲ submit</button>'
+        : '<span class="sg-disabled" title="' + escHtml(c.eligible ? 'set an abuse.ch key to arm' : (c.reason || 'held back by policy')) + '">—</span>';
+      return '<tr data-url="' + escHtml(c.url) + '"' + (c.eligible ? '' : ' style="opacity:.62"') + '>' +
+        '<td class="bz-sha" title="' + escHtml(c.url) + '">' + escHtml(c.url) + '</td>' +
+        '<td>' + fam + '</td>' +
+        '<td class="num">' + (c.eligible ? (c.iocCount || 0) : '—') + '</td>' +
+        '<td class="range">' + (c.fetchedAt ? fmtShortTime(c.fetchedAt) : '—') + '</td>' +
+        '<td class="why">' + gate + '</td>' +
+        '<td>' + btn + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  const rows = d.rows || [];
+  const wrap = document.getElementById('threatfox-log-wrap');
+  const logTb = document.querySelector('#threatfox-log tbody');
+  if (rows.length) {
+    wrap.style.display = '';
+    logTb.innerHTML = rows.map(function(rw) {
+      return '<tr>' +
+        '<td class="bz-sha" title="' + escHtml(rw.ioc) + '">' + escHtml(rw.ioc) + '</td>' +
+        '<td>' + escHtml(rw.iocType || '—') + '</td>' +
+        '<td>' + escHtml(rw.malware || '—') + '</td>' +
+        '<td class="range">' + (rw.submittedAt ? fmtShortTime(rw.submittedAt) : '—') + '</td>' +
+        '</tr>';
+    }).join('');
+  } else {
+    wrap.style.display = 'none';
+    logTb.innerHTML = '';
+  }
+}
+
+async function refreshThreatFox() {
+  try {
+    const r = await fetch('/api/intel/threatfox?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderThreatFox(await r.json());
+  } catch (_) {}
+}
+
+// submitOneThreatFox submits one vetted candidate's IOCs. The server re-runs the
+// gate, so a stale row can't push through something now ineligible.
+async function submitOneThreatFox(btn) {
+  const url = btn.dataset.url;
+  if (!url) return;
+  if (!window.confirm('Submit this payload’s IOCs to ThreatFox now?\n\n' + url +
+      '\n\nThis is a LIVE, public submission to the abuse.ch ThreatFox IOC exchange, consumed by others as indicators.')) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/api/intel/threatfox/submit?url=' + encodeURIComponent(url) + '&_=' + Date.now(),
+      { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function() { return {}; });
+    const row = btn.closest('tr');
+    if ((d.status === 'ok' || d.status === 'partial') && (d.submitted || 0) > 0) {
+      if (row) { row.style.opacity = '0.5'; row.style.textDecoration = 'line-through'; }
+      btn.replaceWith(document.createTextNode('submitted ✓'));
+      setTimeout(refreshThreatFox, 800);
+    } else {
+      btn.disabled = false;
+      btn.textContent = '▲ submit';
+      btn.title = d.error || d.status || 'failed';
+      showThreatFoxBanner('✗ submit failed: ' + (d.error || d.status || 'unknown'), 'bad');
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '▲ submit';
+    btn.title = 'request failed';
+  }
+}
+
+// submitAllThreatFox batch-submits every currently-eligible candidate.
+async function submitAllThreatFox(btn) {
+  const rows = document.querySelectorAll('#threatfox-table tbody tr[data-url] button.sg-btn');
+  const n = rows.length;
+  if (!n) { showThreatFoxBanner('nothing to submit — no candidate currently passes the vetting gate.', 'warn'); return; }
+  if (!window.confirm('Submit IOCs for ' + n + ' payload' + (n === 1 ? '' : 's') + ' to ThreatFox now?\n\n' +
+      'This is a LIVE, public submission to the abuse.ch ThreatFox IOC exchange that others consume as indicators. ' +
+      'Only payloads we fetched first-hand within the active window, with a resolvable malware family, are sent.')) return;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'submitting…';
+  showThreatFoxBanner('submitting IOCs for ' + n + ' payload' + (n === 1 ? '' : 's') + '…', 'pending');
+  try {
+    const r = await fetch('/api/intel/threatfox/submit?_=' + Date.now(), { method: 'POST', cache: 'no-store' });
+    const d = await r.json().catch(function() { return {}; });
+    if (d.status === 'ok' || d.status === 'partial') {
+      showThreatFoxBanner('✓ submitted ' + (d.submitted || 0) + ' · skipped ' + (d.skipped || 0) +
+        (d.status === 'partial' ? ' · some failed — check server logs' : '') +
+        ' · at ' + new Date().toLocaleTimeString(),
+        d.status === 'partial' ? 'warn' : 'ok');
+      setTimeout(refreshThreatFox, 800);
+    } else {
+      showThreatFoxBanner('✗ submit failed: ' + (d.error || d.status || 'unknown'), 'bad');
+    }
+  } catch (e) {
+    showThreatFoxBanner('✗ request failed', 'bad');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
