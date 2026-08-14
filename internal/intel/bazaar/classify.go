@@ -137,13 +137,26 @@ func classifyELF(path string, buf []byte, c *Classification) {
 	if isStaticELF(ef) {
 		c.Tags = append(c.Tags, "static")
 	}
-	// String-scan for family. We deliberately limit to a 256 KiB
-	// head sweep: bigger scans cost real wall-clock time and the
-	// distinctive strings live in the data section near the top of
-	// the binary in practice.
+	// Packing detection (verdict signal + reason to withhold a family guess).
+	// Tagged even when a family still matched, so the upload carries "packed".
+	packed, packedTags := isPackedELF(buf, ef)
+	if packed {
+		c.Tags = append(c.Tags, packedTags...)
+	}
+
+	// Family fingerprinting. The 256 KiB head sweep is deliberate: the
+	// distinctive strings live in the data section near the top, and the XOR
+	// wordlist pass operates on this same buffer. A wrong family bans the shared
+	// abuse.ch account, so this is precision-first (see elf_family.go).
 	if fam, famTags := matchELFFamily(buf); fam != "" {
 		c.Family = fam
 		c.Tags = append(c.Tags, famTags...)
+	} else if packed {
+		// Packed AND no cleartext anchor survived: the family name is compressed
+		// away, so any attribution would be a guess from delivery context. Fail
+		// closed — keep the malicious "packed" verdict, withhold the family.
+		// (Left blank intentionally; documented so nobody "fixes" it later.)
+		_ = packed
 	}
 }
 
@@ -156,35 +169,7 @@ func isStaticELF(ef *elf.File) bool {
 	return true
 }
 
-// matchELFFamily scans the first 256 KiB of an ELF for known family
-// indicators. Returns (signature, extra-tags). The signature is the
-// abuse.ch family slug; the tags are descriptive ones we want on the
-// upload even if the family guess is wrong.
-func matchELFFamily(buf []byte) (string, []string) {
-	low := bytes.ToLower(buf)
-	switch {
-	case bytes.Contains(low, []byte("redtail")):
-		return "RedTail", []string{"miner", "redtail"}
-	case bytes.Contains(low, []byte("xmrig")):
-		return "XMRig", []string{"miner", "xmrig"}
-	case bytes.Contains(low, []byte("c3pool")), bytes.Contains(low, []byte("c3pool_miner")):
-		return "Coinminer", []string{"miner", "c3pool"}
-	case bytes.Contains(low, []byte("traffmonetizer")):
-		return "Traffmonetizer", []string{"proxyware", "traffmonetizer"}
-	case bytes.Contains(low, []byte("komari")):
-		return "Komari", []string{"botnet", "komari"}
-	case bytes.Contains(low, []byte("mirai")):
-		return "Mirai", []string{"botnet", "mirai"}
-	case bytes.Contains(low, []byte("gafgyt")), bytes.Contains(low, []byte("tsunami")):
-		return "Gafgyt", []string{"botnet", "gafgyt"}
-	}
-	// The trademark Mirai busybox-killer string (very specific —
-	// the family probes for and kills /bin/busybox before infecting).
-	if bytes.Contains(low, []byte("/bin/busybox")) && bytes.Contains(low, []byte("kill_proc")) {
-		return "Mirai", []string{"botnet", "mirai"}
-	}
-	return "", nil
-}
+// matchELFFamily lives in elf_family.go — precision-first fingerprinting.
 
 // classifyScript handles shebang-led text files: bash, sh, python,
 // perl, ruby. Falls through to a substring family match because

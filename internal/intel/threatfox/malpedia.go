@@ -37,6 +37,8 @@ var malpediaLabels = map[string]string{
 	"gafgyt":  "elf.bashlite",
 	"redtail": "elf.redtail",
 	"xmrig":   "elf.xmrig",
+	"mozi":    "elf.mozi",    // verified present in the live malware_list (2026-08-14)
+	"tsunami": "elf.tsunami", // verified present; classifier emits "Tsunami"
 }
 
 // MalpediaLabel resolves a ShardLure classifier family to its verified Malpedia

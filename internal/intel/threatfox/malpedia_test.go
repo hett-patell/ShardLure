@@ -13,6 +13,15 @@ func TestMalpediaLabelStrictMapping(t *testing.T) {
 		"gafgyt":  "elf.bashlite", // NOT elf.gafgyt — that label does not exist in Malpedia
 		"redtail": "elf.redtail",
 		"xmrig":   "elf.xmrig",
+		"mozi":    "elf.mozi",
+		"tsunami": "elf.tsunami",
+	}
+	// The classifier emits capitalized slugs (Mozi, Mirai, Gafgyt, XMRig,
+	// Tsunami); MalpediaLabel lowercases, so verify the capitalized forms too.
+	for _, slug := range []string{"Mozi", "Mirai", "Gafgyt", "XMRig", "Tsunami", "RedTail"} {
+		if _, ok := MalpediaLabel(slug); !ok {
+			t.Errorf("classifier slug %q does not resolve to a Malpedia label", slug)
+		}
 	}
 	for fam, label := range want {
 		got, ok := MalpediaLabel(fam)

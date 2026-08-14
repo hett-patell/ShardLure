@@ -1,7 +1,7 @@
 # ELF malware-family classifier — design
 
 **Date:** 2026-08-14
-**Status:** approved, implementing
+**Status:** IMPLEMENTED. Live validation on arm (757 payloads): **4 Mirai ELFs newly attributed** (was 0) via the resilient anchors, **100 samples gained the `packed` tag**, script-dropper families unchanged. NOTE: the earlier "5 Mozi" estimate was a measurement error — a crude case-insensitive `mozi` probe false-matched `Mozilla` (the browser UA Mirai uses for HTTP-flood spoofing). There are NO genuine Mozi samples in the corpus, and the classifier's word-boundary check correctly refuses `Mozilla` — which is exactly the false-positive the precision-first design exists to prevent. mozi/tsunami mappings are kept for when real samples arrive.
 **Goal:** raise family attribution on captured Linux/IoT ELF botnet samples so more payloads get correct MalwareBazaar tags AND become eligible ThreatFox IOCs — WITHOUT ever emitting a wrong family (a false positive bans the shared abuse.ch account).
 
 ## Motivation (measured on the live arm deployment)
