@@ -209,8 +209,12 @@ func TestStripANSIPreservesUTF8(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := string(stripANSI([]byte(tc.in))); got != tc.want {
-				t.Fatalf("stripANSI(%q) = %q, want %q", tc.in, got, tc.want)
+			// Exercise the production path (transcriptStream with StripANSI),
+			// not a test-only wrapper.
+			stream := transcriptStream{stripANSI: true}
+			stream.Write([]byte(tc.in), transcriptInput)
+			if got := stream.out.String(); got != tc.want {
+				t.Fatalf("transcriptStream(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

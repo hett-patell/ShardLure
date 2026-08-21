@@ -294,12 +294,3 @@ func (s *transcriptStream) String() string {
 	}
 	return s.out.String()
 }
-
-// stripANSI removes the most common CSI / OSC / cursor-control escape
-// sequences. This is intentionally conservative: we keep newlines, tabs, and
-// printable characters; we drop escape sequences and other control bytes.
-func stripANSI(in []byte) []byte {
-	stream := transcriptStream{stripANSI: true}
-	stream.Write(in, transcriptInput)
-	return stream.out.Bytes()
-}

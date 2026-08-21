@@ -38,6 +38,29 @@ func TestSafeFetcherStoresSample(t *testing.T) {
 	}
 }
 
+func TestSafeFetcherZeroByteBodyIsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 200 OK, zero-byte body: a parked host / dead drop point, not a payload.
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	f := NewSafeFetcher(dir, 1<<20, 0, nil)
+	f.TestLoopback = true
+	res, err := f.Fetch(context.Background(), srv.URL+"/linux")
+	if err != nil {
+		t.Fatalf("zero-byte fetch must not error: %v", err)
+	}
+	if res.Status != "empty" {
+		t.Fatalf("status = %q, want empty", res.Status)
+	}
+	// No evidence file should be left behind for a hollow response.
+	entries, _ := os.ReadDir(filepath.Join(dir, "quarantine"))
+	if len(entries) != 0 {
+		t.Fatalf("expected no quarantine files, found %d", len(entries))
+	}
+}
+
 // TestSafeDialBlocksRebinding verifies that safeDial - the choke-
 // point that defeats DNS rebinding - rejects a literal blocked IP
 // even when called directly with an apparently safe address. This
