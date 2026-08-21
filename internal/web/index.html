@@ -5,11 +5,14 @@
   try {
     var t = localStorage.getItem('shardlure_theme') || 'signal';
     var m = localStorage.getItem('shardlure_mode') || 'dark';
+    var d = localStorage.getItem('shardlure_density') || 'comfortable';
     document.documentElement.setAttribute('data-theme', t);
+    document.documentElement.setAttribute('data-density', d);
     if (t === 'signal') document.documentElement.setAttribute('data-mode', m);
   } catch (e) {
     document.documentElement.setAttribute('data-theme', 'signal');
     document.documentElement.setAttribute('data-mode', 'dark');
+    document.documentElement.setAttribute('data-density', 'comfortable');
   }
 </script>
 <meta charset="utf-8" />
@@ -37,11 +40,21 @@
     --warn: #c89828;
     --mono: "JetBrains Mono", ui-monospace, monospace;
     --sans: "Chakra Petch", system-ui, sans-serif;
+    /* Density scale. "comfortable" is the default; "compact" restores the
+       original 13px base for operators who preferred the denser layout. */
+    --fs-base: 14px;
+    --fs-table: 12px;
+    --fs-th: 10.5px;
+  }
+  html[data-density="compact"] {
+    --fs-base: 13px;
+    --fs-table: 11.5px;
+    --fs-th: 10px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; overflow: hidden; }
   body {
-    font: 13px/1.5 var(--sans);
+    font: var(--fs-base)/1.5 var(--sans);
     background: var(--bg);
     color: var(--text);
   }
@@ -150,9 +163,20 @@
   .gauge-breakdown .gb-row { display: flex; justify-content: space-between; }
   .gauge-breakdown .gb-val { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 
-  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; table-layout: fixed; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: var(--fs-table); table-layout: fixed; }
   th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  th { color: var(--dim); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; padding-bottom: 7px; }
+  th { color: var(--dim); font-weight: 500; font-size: var(--fs-th); text-transform: uppercase; letter-spacing: 0.05em; padding-bottom: 7px; }
+
+  #density-toggle {
+    position: fixed; right: 14px; bottom: 12px; z-index: 40;
+    font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--dim); background: var(--glass); border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 9px; cursor: pointer;
+  }
+  #density-toggle:hover { color: var(--text); border-color: var(--line-strong); }
+  /* The right rail spans the viewport height; leave room at its bottom edge
+     so the fixed density toggle never sits under the live-feed panel. */
+  .rail.right { padding-bottom: 34px; }
   td.n, th.n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
   td .ip { color: var(--accent-2); }
   #top-ips th:nth-child(1), #top-ips td:nth-child(1) { width: 44%; }
@@ -339,6 +363,24 @@
       <a href="/" class="active">Globe</a>
       <a href="/intel">Intel</a>
     </nav>
+    <button id="density-toggle" type="button" title="Toggle UI density"></button>
+    <script>
+      (function () {
+        var b = document.getElementById('density-toggle');
+        if (!b) return;
+        function label() {
+          b.textContent = document.documentElement.getAttribute('data-density') === 'compact'
+            ? 'density: compact' : 'density: comfortable';
+        }
+        b.addEventListener('click', function () {
+          var next = document.documentElement.getAttribute('data-density') === 'compact' ? 'comfortable' : 'compact';
+          document.documentElement.setAttribute('data-density', next);
+          try { localStorage.setItem('shardlure_density', next); } catch (e) {}
+          label();
+        });
+        label();
+      })();
+    </script>
   </section>
 
   <section class="panel">

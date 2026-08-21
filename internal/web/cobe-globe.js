@@ -638,6 +638,7 @@ export function cobeThemeConfig(theme, mode) {
         colors: {
           home: [0.55, 0.68, 0.0],
           hot: [0.77, 0.12, 0.15],
+          critical: [0.88, 0.05, 0.10],
           cool: [0.12, 0.54, 0.30],
           arc: [0.55, 0.68, 0.0],
         },
@@ -666,6 +667,7 @@ export function cobeThemeConfig(theme, mode) {
       colors: {
         home: [0.82, 0.99, 0.09],
         hot: [0.90, 0.16, 0.19],
+        critical: [1.0, 0.09, 0.13],
         cool: [0.25, 0.85, 0.52],
         arc: [0.82, 0.99, 0.09],
       },
@@ -718,6 +720,7 @@ export function cobeThemeConfig(theme, mode) {
         // One muted ink for attacker markers: the hot/cool split added colour
         // noise without encoding anything the size did not already show.
         hot: [0.58, 0.44, 0.32],
+        critical: [0.78, 0.06, 0.08],
         cool: [0.58, 0.44, 0.32],
         arc: [0.89, 0.48, 0.36],
       },
@@ -741,6 +744,7 @@ export function cobeThemeConfig(theme, mode) {
     colors: {
       home: [0.05, 0.36, 0.39],
       hot: [0.65, 0.48, 0.18],
+      critical: [0.82, 0.10, 0.12],
       cool: [0.18, 0.42, 0.31],
       arc: [0.13, 0.36, 0.39],
     },
@@ -788,10 +792,24 @@ export function globeActorOrder(actors, maxMarkers = COBE_MAX_MARKERS) {
 /** Drop lower-volume actors that share the same ~1° geo bucket so arcs spread globally. */
 function dedupeActorsByLocation(actors) {
   const seen = new Map();
+  // When two actors land in the same geo bucket, prefer the more DANGEROUS one
+  // over the louder one: a low-volume deploy-intent actor must not be hidden
+  // behind a high-volume scanner that shares its datacentre. Threat tier beats
+  // volume, then volume breaks ties.
+  const danger = (a) =>
+    a.intent === "deploy" || a.intent === "mixed" ? 2 : (a.probe || 0) >= 60 ? 1 : 0;
   for (const a of actors) {
     const k = `${a.lat.toFixed(1)},${a.lon.toFixed(1)}`;
     const prev = seen.get(k);
-    if (!prev || (a.events || 0) > (prev.events || 0)) seen.set(k, a);
+    if (!prev) {
+      seen.set(k, a);
+      continue;
+    }
+    const da = danger(a);
+    const dp = danger(prev);
+    if (da > dp || (da === dp && (a.events || 0) > (prev.events || 0))) {
+      seen.set(k, a);
+    }
   }
   return [...seen.values()].sort((x, y) => (y.events || 0) - (x.events || 0));
 }
@@ -817,7 +835,17 @@ export function buildCobeEntities(home, actors, colors, opts = {}) {
     hot = [0.65, 0.48, 0.18],
     cool = [0.18, 0.42, 0.31],
     arc = [0.13, 0.36, 0.39],
+    critical,
   } = colors || {};
+  // Critical arcs flag real post-compromise intent (deploy/mixed) — the
+  // "spicy ones" — falling back to the hot tier colour when a theme doesn't
+  // define a separate critical colour.
+  const criticalC = critical || hot;
+  const isCritical = (a) => a.intent === "deploy" || a.intent === "mixed";
+  // Hot = high threat OR high volume. Threat (deploy/mixed, or an aggressive
+  // brute-forcer) lifts an actor out of the cool tier even when it isn't in the
+  // volume top-N, so the loudest graph can't mask the most dangerous actor.
+  const isHotActor = (a) => isCritical(a) || (a.probe || 0) >= 60;
 
   const ranked = (actors || [])
     .filter((a) => Number.isFinite(a.lat) && Number.isFinite(a.lon))
@@ -842,26 +870,39 @@ export function buildCobeEntities(home, actors, colors, opts = {}) {
   // A theme may override the ratio. Sprite does, because its shipped look was
   // produced by the old absolute count and is deliberately preserved rather than
   // quietly restyled: see hotArcRatio in its config.
-  const hotMarkers = Math.max(2, Math.round(maxMarkers * (opts.hotMarkerRatio ?? 0.15)));
-  const hotArcs = Math.max(3, Math.round(maxArcs * (opts.hotArcRatio ?? 0.2)));
+  // Hot counts scale with what is ACTUALLY shown, not the theme cap. Against a
+  // cap the two are equal (preserving the shipped look); on a quiet box with
+  // fewer actors than the cap, scaling by the real count stops every arc from
+  // being "hot" just because the cap's top-N exceeds the population.
+  const shownMarkers = Math.min(spread.length, maxMarkers);
+  const shownArcs = Math.min(spread.length, maxArcs);
+  const hotMarkers = Math.max(1, Math.round(shownMarkers * (opts.hotMarkerRatio ?? 0.15)));
+  const hotArcs = Math.max(1, Math.round(shownArcs * (opts.hotArcRatio ?? 0.2)));
 
   spread.slice(0, maxMarkers).forEach((a, i) => {
     const n = a.events || 0;
     const size = szBase + Math.min(szCap, Math.sqrt(n) / szDiv);
+    const col = isCritical(a) ? criticalC : isHotActor(a) || i < hotMarkers ? hot : cool;
     markers.push({
       id: "a" + i,
       location: [a.lat, a.lon],
       size,
-      color: i < hotMarkers ? hot : cool,
+      color: col,
     });
   });
 
-  const arcs = spread.slice(0, maxArcs).map((a, i) => ({
-    id: "arc" + i,
-    from: [a.lat, a.lon],
-    to: [home.lat, home.lon],
-    color: i < hotArcs ? hot : arc,
-  }));
+  // Arc color: critical intent (deploy/mixed) → critical; aggressive
+  // brute-forcer or volume-top-N → hot; everything else → cool. Cobe reads
+  // `color` as a raw RGB triple (`...e.color`), so this stays an array.
+  const arcs = spread.slice(0, maxArcs).map((a, i) => {
+    const col = isCritical(a) ? criticalC : isHotActor(a) || i < hotArcs ? hot : arc;
+    return {
+      id: "arc" + i,
+      from: [a.lat, a.lon],
+      to: [home.lat, home.lon],
+      color: col,
+    };
+  });
 
   return { markers, arcs };
 }

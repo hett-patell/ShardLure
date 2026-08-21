@@ -65,7 +65,7 @@ func TestWriteCSV(t *testing.T) {
 			Sources: []string{"cowrie"}, Actors: []string{"abc"}, SampleCommand: "uname -a"},
 	}
 	var buf bytes.Buffer
-	if err := WriteCSV(&buf, indicators); err != nil {
+	if err := WriteCSVWithCoverage(&buf, indicators, Coverage{}); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -87,7 +87,7 @@ func TestWriteSTIX(t *testing.T) {
 		{Kind: KindUser, Value: "root", FirstSeen: t0, LastSeen: t0, Count: 5},
 	}
 	var buf bytes.Buffer
-	if err := WriteSTIX(&buf, indicators); err != nil {
+	if err := WriteSTIXWithCoverage(&buf, indicators, Coverage{}); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -147,7 +147,7 @@ func TestWriteSTIXSpecShape(t *testing.T) {
 		{Kind: KindUser, Value: "root", FirstSeen: t0, LastSeen: t0, Count: 5, Sources: []string{"cowrie"}},
 	}
 	var buf bytes.Buffer
-	if err := WriteSTIX(&buf, indicators); err != nil {
+	if err := WriteSTIXWithCoverage(&buf, indicators, Coverage{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,13 +213,13 @@ func TestWriteSTIXDeterministic(t *testing.T) {
 		{Kind: KindUser, Value: "root", FirstSeen: t0, LastSeen: t0.Add(2 * time.Hour), Count: 5, Sources: []string{"cowrie"}},
 	}
 	var a, b bytes.Buffer
-	if err := WriteSTIX(&a, indicators); err != nil {
+	if err := WriteSTIXWithCoverage(&a, indicators, Coverage{}); err != nil {
 		t.Fatalf("first export: %v", err)
 	}
 	// Sleep across at least one second to prove we're not implicitly
 	// hashing the wall clock.
 	time.Sleep(1100 * time.Millisecond)
-	if err := WriteSTIX(&b, indicators); err != nil {
+	if err := WriteSTIXWithCoverage(&b, indicators, Coverage{}); err != nil {
 		t.Fatalf("second export: %v", err)
 	}
 	if !bytes.Equal(a.Bytes(), b.Bytes()) {
@@ -239,7 +239,7 @@ func TestWriteCSVNeutralizesFormulaInjection(t *testing.T) {
 		{Kind: "ip", Value: "5.6.7.8", FirstSeen: now, LastSeen: now, Count: 1, SampleCommand: "uname -a"},
 	}
 	var buf bytes.Buffer
-	if err := WriteCSV(&buf, inds); err != nil {
+	if err := WriteCSVWithCoverage(&buf, inds, Coverage{}); err != nil {
 		t.Fatalf("WriteCSV: %v", err)
 	}
 	out := buf.String()
@@ -308,7 +308,7 @@ func TestCompleteExportsStayByteIdentical(t *testing.T) {
 		cov  Coverage
 	}{{"zero", Coverage{}}, {"complete", complete}} {
 		var plain, withCov bytes.Buffer
-		if err := WriteCSV(&plain, inds); err != nil {
+		if err := WriteCSVWithCoverage(&plain, inds, Coverage{}); err != nil {
 			t.Fatalf("WriteCSV: %v", err)
 		}
 		if err := WriteCSVWithCoverage(&withCov, inds, c.cov); err != nil {
@@ -320,7 +320,7 @@ func TestCompleteExportsStayByteIdentical(t *testing.T) {
 		}
 		plain.Reset()
 		withCov.Reset()
-		if err := WriteSTIX(&plain, inds); err != nil {
+		if err := WriteSTIXWithCoverage(&plain, inds, Coverage{}); err != nil {
 			t.Fatalf("WriteSTIX: %v", err)
 		}
 		if err := WriteSTIXWithCoverage(&withCov, inds, c.cov); err != nil {

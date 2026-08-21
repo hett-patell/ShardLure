@@ -228,6 +228,12 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, e
 	if n > f.MaxBytes {
 		return &FetchResult{Status: "blocked", Detail: "body too large"}, fmt.Errorf("body exceeds %d bytes", f.MaxBytes)
 	}
+	if n == 0 {
+		// A 200 with an empty body is not a payload (parked host, dead drop
+		// point). Report "empty", not "fetched", so it can never be treated
+		// as a captured sample downstream.
+		return &FetchResult{Status: "empty", Detail: "zero-byte body"}, nil
+	}
 	if err := tmp.Close(); err != nil {
 		return nil, err
 	}

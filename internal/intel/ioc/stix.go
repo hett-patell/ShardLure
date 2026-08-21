@@ -76,7 +76,8 @@ type externalRef struct {
 	ExternalID string `json:"external_id,omitempty"`
 }
 
-// WriteSTIX serialises a STIX 2.1 bundle to w.
+// WriteSTIXWithCoverage serialises a STIX 2.1 bundle to w, plus an optional
+// in-band sampling disclosure.
 //
 // All timestamps in the bundle are derived from indicator data
 // (FirstSeen / LastSeen) or from package-level constants. The output
@@ -85,11 +86,6 @@ type externalRef struct {
 // TIPs dedupe and lets us diff intel feeds in CI. The bundle ID
 // itself is also deterministic - it hashes the sorted indicator IDs
 // rather than the wall clock.
-func WriteSTIX(w io.Writer, indicators []Indicator) error {
-	return WriteSTIXWithCoverage(w, indicators, Coverage{})
-}
-
-// WriteSTIXWithCoverage is WriteSTIX plus an in-band sampling disclosure.
 //
 // When cov reports a sampled window, the note is appended to the identity SDO's
 // `description`, because a downloaded bundle cannot carry the advisory HTTP

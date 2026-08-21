@@ -639,6 +639,25 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+
+	// v18: actors.flags — the event-mix bitmask (models.ActorFlag*). Persisting
+	// it lets ingest fold fresh events into the stored aggregate instead of
+	// re-scanning every event the actor ever produced. Legacy rows keep 0 and
+	// are repaired by a one-shot full re-aggregation on their next touch.
+	if current < 18 {
+		has, err := s.columnExists("actors", "flags")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE actors ADD COLUMN flags INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (18, ?)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -777,19 +796,20 @@ func (s *Store) UpsertActor(a *models.Actor) error {
 
 func upsertActor(db sqlExecer, a *models.Actor) error {
 	_, err := db.Exec(`
-INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   primary_ip=excluded.primary_ip, playbook=excluded.playbook, intent=excluded.intent,
   confidence=excluded.confidence, first_seen=excluded.first_seen, last_seen=excluded.last_seen,
   event_count=excluded.event_count,
   unique_users=excluded.unique_users, attempts_per_hour=excluded.attempts_per_hour,
   hassh=excluded.hassh, ssh_client=excluded.ssh_client, username_hash=excluded.username_hash,
-  campaigns=excluded.campaigns, probe_score=excluded.probe_score, notes=excluded.notes`,
+  campaigns=excluded.campaigns, probe_score=excluded.probe_score, notes=excluded.notes,
+  flags=excluded.flags`,
 		a.ID, a.Source, a.PrimaryIP, a.Playbook, a.Intent, a.Confidence,
 		a.FirstSeen.UTC().Format(time.RFC3339Nano), a.LastSeen.UTC().Format(time.RFC3339Nano),
 		a.EventCount, a.UniqueUsers, a.AttemptsPerHour, a.HASSH, a.SSHClient,
-		a.UsernameHash, a.Campaigns, a.ProbeScore, a.Notes)
+		a.UsernameHash, a.Campaigns, a.ProbeScore, a.Notes, a.Flags)
 	return err
 }
 
@@ -815,7 +835,7 @@ ON CONFLICT(actor_id, username) DO UPDATE SET count=excluded.count`,
 // actorColumns is the canonical SELECT list for an actors row. Kept in
 // one place so ListActors / GetActor / GetActorByPrimaryIP stay in sync
 // with scanActorRow below.
-const actorColumns = `id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes`
+const actorColumns = `id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags`
 
 // rowScan is satisfied by both *sql.Row and *sql.Rows so the same
 // scan code can be used for single-row QueryRow and Query iteration.
@@ -833,7 +853,7 @@ func scanActorRow(r rowScan, a *models.Actor) error {
 	var fs, ls string
 	if err := r.Scan(&a.ID, &a.Source, &a.PrimaryIP, &a.Playbook, &a.Intent, &a.Confidence,
 		&fs, &ls, &a.EventCount, &a.UniqueUsers, &a.AttemptsPerHour, &a.HASSH, &a.SSHClient,
-		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes); err != nil {
+		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes, &a.Flags); err != nil {
 		return err
 	}
 	var err error
@@ -917,6 +937,100 @@ func (s *Store) GetActor(id string) (*models.Actor, error) {
 		return nil, err
 	}
 	return &a, nil
+}
+
+// ActorState is the persisted aggregate for one actor: the actor row plus its
+// full per-username and per-IP roll-ups. This is everything the ingest fold
+// needs to continue an actor's aggregate without re-scanning its events.
+type ActorState struct {
+	Actor *models.Actor
+	Users map[string]int
+	IPs   map[string]models.IPStat
+}
+
+// ActorStatesForIDs loads the persisted aggregates for the given actor IDs in
+// three batched queries (actors, actor_users, actor_ips). It exists so the
+// cowrie ingest fold reads O(usernames + IPs) per touched actor instead of
+// O(events): on the reference deployment the per-tick full event re-scan of a
+// 300k-event actor was 98.5% of lifetime allocations (13.8 TB, ~1.4 GC/sec).
+// Missing IDs are simply absent from the result (brand-new actors).
+func (s *Store) ActorStatesForIDs(ids []string) (map[string]*ActorState, error) {
+	out := make(map[string]*ActorState, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	in := strings.Join(placeholders, ",")
+
+	rows, err := s.db.Query(`SELECT `+actorColumns+` FROM actors WHERE id IN (`+in+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a models.Actor
+		if err := scanActorRow(rows, &a); err != nil {
+			return nil, err
+		}
+		out[a.ID] = &ActorState{Actor: &a, Users: map[string]int{}, IPs: map[string]models.IPStat{}}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+
+	urows, err := s.db.Query(`SELECT actor_id, username, count FROM actor_users WHERE actor_id IN (`+in+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer urows.Close()
+	for urows.Next() {
+		var id, u string
+		var c int
+		if err := urows.Scan(&id, &u, &c); err != nil {
+			return nil, err
+		}
+		if st, ok := out[id]; ok {
+			st.Users[u] = c
+		}
+	}
+	if err := urows.Err(); err != nil {
+		return nil, err
+	}
+
+	iprows, err := s.db.Query(`SELECT actor_id, ip, first_seen, last_seen, count FROM actor_ips WHERE actor_id IN (`+in+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer iprows.Close()
+	for iprows.Next() {
+		var id, ip, fs, ls string
+		var c int
+		if err := iprows.Scan(&id, &ip, &fs, &ls, &c); err != nil {
+			return nil, err
+		}
+		st, ok := out[id]
+		if !ok {
+			continue
+		}
+		first, err := parseTime(fs)
+		if err != nil {
+			return nil, fmt.Errorf("actor_ips %s first_seen: %w", id, err)
+		}
+		last, err := parseTime(ls)
+		if err != nil {
+			return nil, fmt.Errorf("actor_ips %s last_seen: %w", id, err)
+		}
+		st.IPs[ip] = models.IPStat{Count: c, First: first, Last: last}
+	}
+	return out, iprows.Err()
 }
 
 func (s *Store) ActorUsers(id string) ([]models.ActorUser, error) {

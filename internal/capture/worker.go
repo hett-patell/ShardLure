@@ -102,6 +102,15 @@ func (w *ArtifactWorker) tick(ctx context.Context) {
 		}
 		return
 	}
+	// Zero-byte body: the URL answered but serves nothing. That's terminal,
+	// not a failure — record "empty" and don't burn the retry budget on a
+	// parked host.
+	if res != nil && res.Status == "empty" {
+		if err := w.st.CompleteArtifactCapture(url, nextAttempt, "empty", res.Detail, "", "", 0, nil); err != nil {
+			log.Printf("capture-worker: complete %s: %v", url, err)
+		}
+		return
+	}
 
 	// Failure: schedule retry with exponential backoff or mark permanent.
 	detail := ""

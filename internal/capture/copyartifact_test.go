@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,5 +46,25 @@ func TestCopyArtifactSizeCap(t *testing.T) {
 	dst3 := filepath.Join(dir, "out-unlimited")
 	if _, n, err := copyArtifact(big, dst3, 0); err != nil || n != 4096 {
 		t.Fatalf("unlimited copy: err=%v size=%d (want 4096)", err, n)
+	}
+}
+
+// TestCopyArtifactRejectsEmpty guards the zero-byte fix: cowrie leaves empty
+// files behind (touch-style SFTP probes, aborted transfers) and recording
+// them as fetched payloads polluted the archive. copyArtifact must reject a
+// zero-byte source with ErrEmptyArtifact before creating any destination.
+func TestCopyArtifactRejectsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out-empty")
+	_, _, err := copyArtifact(empty, dst, 1024)
+	if !errors.Is(err, ErrEmptyArtifact) {
+		t.Fatalf("expected ErrEmptyArtifact, got %v", err)
+	}
+	if _, serr := os.Stat(dst); !os.IsNotExist(serr) {
+		t.Fatal("empty copy must not leave a dest file")
 	}
 }

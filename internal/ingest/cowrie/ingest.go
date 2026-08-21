@@ -431,16 +431,43 @@ func touchedActorIDs(fresh []*models.Event) []string {
 	return ids
 }
 
-// buildCowrieActorsForIDs streams the persisted events for just the touched
-// actor IDs past the collector, folds in the fresh batch, and returns the
-// aggregated actors for those IDs only.
+// buildCowrieActorsForIDs aggregates the touched actor IDs by FOLDING the
+// fresh batch into each actor's persisted aggregate (actors + actor_users +
+// actor_ips), not by re-scanning the actor's event history. The re-scan it
+// replaces read every event a touched actor had ever produced on every tick —
+// for the reference deployment's 300k-event HASSH actor that was ~98.5% of
+// the daemon's lifetime allocations (13.8 TB, ~1.4 GC/sec). Folding reads
+// O(usernames + IPs) per actor instead.
+//
+// Legacy fallback: rows written before schema v18 have flags=0, which is
+// indistinguishable from a genuinely signal-less aggregate, so their persisted
+// state can't be trusted for a fold. They get ONE last full event re-scan;
+// the resulting upsert writes real flags and every later tick folds.
 func buildCowrieActorsForIDs(st *store.Store, fresh []*models.Event, ids []string, admin *netmatch.Set) ([]*models.AggregatedActor, error) {
-	cc := actor.NewCowrieCollector(admin)
-	if err := st.IterateEventsByActorIDs(ids, func(e *models.Event) error {
-		cc.Add(e)
-		return nil
-	}); err != nil {
+	states, err := st.ActorStatesForIDs(ids)
+	if err != nil {
 		return nil, err
+	}
+	cc := actor.NewCowrieCollector(admin)
+	var legacy []string
+	for _, id := range ids {
+		stt := states[id]
+		if stt == nil || stt.Actor == nil {
+			continue // brand-new actor: fresh events alone define it
+		}
+		if stt.Actor.Flags == 0 && stt.Actor.EventCount > 0 {
+			legacy = append(legacy, id)
+			continue
+		}
+		cc.SeedActorState(stt.Actor, stt.Users, stt.IPs)
+	}
+	if len(legacy) > 0 {
+		if err := st.IterateEventsByActorIDs(legacy, func(e *models.Event) error {
+			cc.Add(e)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
 	}
 	for _, e := range fresh {
 		cc.Add(e)

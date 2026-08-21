@@ -86,7 +86,25 @@ type Actor struct {
 	// actor.journalProbeScore from the event mix and attempt rate.
 	ProbeScore int
 	Notes      string
+	// Flags is the ActorFlag bitmask of the event mix the actor has produced
+	// (probe/tunnel/payload/...). Persisted so the ingest path can fold fresh
+	// events into the stored aggregate without re-scanning the actor's whole
+	// event history (the 13.8TB/lifetime allocation churn measured on the
+	// reference deployment came from exactly that re-scan).
+	Flags int
 }
+
+// ActorFlag bits for Actor.Flags. Persisted as an INTEGER column on actors
+// (schema v18); legacy rows have 0 and are repaired by a one-shot full
+// re-aggregation the next time the actor is touched.
+const (
+	ActorFlagProbe     = 1 << iota // connect or any auth attempt
+	ActorFlagTunnel                // direct-tcpip forwarding attempt
+	ActorFlagPayload               // file up/down or sha256 seen
+	ActorFlagDeployCmd             // fetch-and-stage command observed
+	ActorFlagAuth                  // an actual login attempt (accepted/failed/invalid)
+	ActorFlagCommand               // any command event
+)
 
 type ActorUser struct {
 	ActorID  string

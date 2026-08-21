@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -173,6 +174,17 @@ func (r *Runner) syncCowrieTTY() (int, error) {
 		srcPath := filepath.Join(src, name)
 		dstRaw := filepath.Join(dest, name)
 		sum, size, err := copyArtifact(srcPath, dstRaw, r.cfg.Capture.MaxBytes)
+		if errors.Is(err, ErrEmptyArtifact) {
+			// Zero-byte ttylog: nothing was ever typed. Record as "empty" so the
+			// row dedups permanently instead of being re-copied every tick.
+			_ = r.st.RecordArtifact(store.Artifact{
+				TS:     time.Now().UTC(),
+				URL:    urlKey,
+				Origin: "cowrie_tty",
+				Status: "empty",
+			})
+			continue
+		}
 		if err != nil {
 			// Don't silently skip — an operator needs to know a TTY capture was
 			// dropped (e.g. oversized, or a transient I/O error), since it means
@@ -332,6 +344,17 @@ func (r *Runner) syncCowrieDownloads() (int, error) {
 		}
 		src := filepath.Join(dl, ent.Name())
 		sum, size, err := copyArtifact(src, filepath.Join(dest, ent.Name()), r.cfg.Capture.MaxBytes)
+		if errors.Is(err, ErrEmptyArtifact) {
+			// Zero-byte download stub: record as "empty" (deduped, visible,
+			// never shareable) rather than copying a hollow file as "fetched".
+			_ = r.st.RecordArtifact(store.Artifact{
+				TS:     time.Now().UTC(),
+				URL:    urlKey,
+				Origin: "cowrie_download",
+				Status: "empty",
+			})
+			continue
+		}
 		if err != nil {
 			// Surface skips (e.g. oversized download rejected by the size cap)
 			// instead of silently dropping the artifact.
@@ -399,6 +422,21 @@ func (r *Runner) archiveFileDownloadEvents() (int, error) {
 		}
 		dest := filepath.Join(r.fetch.EvidenceDir, "cowrie", base)
 		sum, size, err := copyArtifact(src, dest, r.cfg.Capture.MaxBytes)
+		if errors.Is(err, ErrEmptyArtifact) {
+			// Zero-byte SFTP upload (touch-style probe / aborted transfer):
+			// record as "empty" so it dedups and shows truthfully, and is never
+			// mistaken for a fetched payload downstream.
+			_ = r.st.RecordArtifact(store.Artifact{
+				TS:        e.TS,
+				SrcIP:     e.SrcIP,
+				SessionID: e.SessionID,
+				ActorID:   e.ActorID,
+				URL:       urlKey,
+				Origin:    "cowrie_file_download",
+				Status:    "empty",
+			})
+			continue
+		}
 		if err != nil {
 			// Surface skips (e.g. oversized file rejected by the size cap)
 			// instead of silently dropping the artifact.
@@ -469,18 +507,29 @@ func (r *Runner) PurgeOldSourceFiles(retentionDays int) int {
 	return removed
 }
 
+// ErrEmptyArtifact is returned by copyArtifact for a zero-byte source. Cowrie
+// leaves plenty of empty files behind (SFTP `touch`-style probes, abandoned
+// transfers); recording them as "fetched" pollutes the archive — measured at
+// 92 zero-byte rows on the reference deployment. Callers record them with
+// status "empty" (deduped, visible, never shareable) instead of copying.
+var ErrEmptyArtifact = fmt.Errorf("zero-byte artifact")
+
 // copyArtifact copies src->dest, hashing as it goes. maxBytes caps the copy so
 // an attacker-controlled cowrie download / TTY log can't exhaust disk; a source
 // exceeding the cap is rejected (not silently truncated, which would corrupt the
-// sha). maxBytes <= 0 means unlimited (caller opted out).
+// sha). maxBytes <= 0 means unlimited (caller opted out). A zero-byte source is
+// rejected with ErrEmptyArtifact before any destination file is created.
 func copyArtifact(src, dest string, maxBytes int64) (sha string, size int64, err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return "", 0, err
 	}
 	defer in.Close()
-	if maxBytes > 0 {
-		if fi, statErr := in.Stat(); statErr == nil && fi.Size() > maxBytes {
+	if fi, statErr := in.Stat(); statErr == nil {
+		if fi.Size() == 0 {
+			return "", 0, ErrEmptyArtifact
+		}
+		if maxBytes > 0 && fi.Size() > maxBytes {
 			return "", 0, fmt.Errorf("artifact %s exceeds max size (%d > %d bytes)", filepath.Base(src), fi.Size(), maxBytes)
 		}
 	}
