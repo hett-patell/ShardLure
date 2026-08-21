@@ -29,16 +29,27 @@ type CowrieStats struct {
 	Client    string
 	// IPs maps src_ip to per-IP roll-up (cowrie actors are keyed by HASSH
 	// and can span multiple source IPs).
-	IPs       map[string]IPStat
-	Count     int
-	Users     map[string]int
-	First     time.Time
-	Last      time.Time
-	Tunnel    bool
-	Payload   bool
-	Probe     bool
-	DeployCmd bool
+	IPs   map[string]IPStat
+	Count int
+	Users map[string]int
+	First time.Time
+	Last  time.Time
+	// Flags is the event-mix bitmask (models.ActorFlag*). It is the single
+	// source of truth for probe/tunnel/payload/deploy/auth/command signals,
+	// persisted on the actors row (schema v18) so ingest can fold fresh events
+	// into the stored aggregate without re-scanning the actor's history.
+	// ActorFlagAuth (a real login attempt) is kept distinct from
+	// ActorFlagProbe (true for a bare connect/handshake) precisely so the
+	// handshake-scanner playbook can tell "touched the port" from "sent
+	// credentials". See ClassifyCowriePlaybook.
+	Flags int
+	// Campaigns is operator-assigned annotation carried through from the
+	// seeded aggregate so a re-aggregation upsert never wipes it.
+	Campaigns string
 }
+
+// has reports whether the given ActorFlag bit is set.
+func (s *CowrieStats) has(flag int) bool { return s.Flags&flag != 0 }
 
 // AggregatedActor and IPStat live in pkg/models so the store package can
 // consume them without importing internal/actor (which would create a cycle:
@@ -323,20 +334,75 @@ func (c *cowrieCollector) add(e *models.Event) {
 	if st.Client == "" {
 		st.Client = e.SSHClient
 	}
+	st.Flags |= flagsForEvent(e)
+	if e.Kind == models.KindCommand && looksLikeDeployCmd(e.Command) {
+		st.Flags |= models.ActorFlagDeployCmd
+	}
+}
+
+// flagsForEvent maps an event kind onto the persisted ActorFlag bitmask.
+// Accepted is a successful login — definitely an auth attempt; the failed and
+// invalid kinds are too. Connect is deliberately NOT auth: it's the handshake.
+func flagsForEvent(e *models.Event) int {
+	var f int
+	switch e.Kind {
+	case models.KindConnect, models.KindInvalidUser, models.KindFailedPass, models.KindFailedKey:
+		f |= models.ActorFlagProbe
+	}
+	switch e.Kind {
+	case models.KindAccepted, models.KindInvalidUser, models.KindFailedPass, models.KindFailedKey:
+		f |= models.ActorFlagAuth
+	}
 	if e.Kind == models.KindTunnel {
-		st.Tunnel = true
+		f |= models.ActorFlagTunnel
 	}
 	if e.Kind == models.KindFileDown || e.Kind == models.KindFileUp || e.SHA256 != "" {
-		st.Payload = true
-	}
-	if e.Kind == models.KindConnect || e.Kind == models.KindInvalidUser || e.Kind == models.KindFailedPass || e.Kind == models.KindFailedKey {
-		st.Probe = true
+		f |= models.ActorFlagPayload
 	}
 	if e.Kind == models.KindCommand {
-		if looksLikeDeployCmd(e.Command) {
-			st.DeployCmd = true
-		}
+		f |= models.ActorFlagCommand
 	}
+	return f
+}
+
+// SeedActorState loads a persisted aggregate into the collector so a fresh
+// batch of events can be folded in without re-reading the actor's event
+// history. The boolean signal fields are reconstructed from the persisted
+// flags bitmask (schema v18). The users/IPs maps are deep-copied so the
+// caller's maps are never aliased into the aggregate handed to the store.
+func (c *cowrieCollector) SeedActorState(a *models.Actor, users map[string]int, ips map[string]IPStat) {
+	if a == nil {
+		return
+	}
+	key := a.HASSH
+	if key == "" {
+		key = a.PrimaryIP
+	}
+	if key == "" {
+		return
+	}
+	if _, ok := c.byKey[key]; ok {
+		return // already seeded / has fresh events
+	}
+	st := &CowrieStats{
+		PrimaryIP: a.PrimaryIP,
+		HASSH:     a.HASSH,
+		Client:    a.SSHClient,
+		IPs:       make(map[string]IPStat, len(ips)),
+		Count:     a.EventCount,
+		Users:     make(map[string]int, len(users)),
+		First:     a.FirstSeen,
+		Last:      a.LastSeen,
+		Flags:     a.Flags,
+		Campaigns: a.Campaigns,
+	}
+	for u, n := range users {
+		st.Users[u] = n
+	}
+	for ip, s := range ips {
+		st.IPs[ip] = s
+	}
+	c.byKey[key] = st
 }
 
 func (c *cowrieCollector) finalize() []*AggregatedActor {
@@ -349,8 +415,16 @@ func (c *cowrieCollector) finalize() []*AggregatedActor {
 		}
 		aph := float64(st.Count) / hours
 		uhash := usernameSetHash(users)
-		intent := ClassifyIntent(st.Tunnel, st.Payload, st.Probe, st.DeployCmd)
-		playbook := ClassifyPlaybook(users, aph)
+		hasTunnel := st.has(models.ActorFlagTunnel)
+		hasPayload := st.has(models.ActorFlagPayload)
+		hasProbe := st.has(models.ActorFlagProbe)
+		hasDeployCmd := st.has(models.ActorFlagDeployCmd)
+		intent := ClassifyIntent(hasTunnel, hasPayload, hasProbe, hasDeployCmd)
+		// Cowrie actors classify with the full event mix so handshake-only
+		// scanners (connect + client_version, no auth) are recovered from
+		// "unknown" into scanner_tool / handshake_scan.
+		playbook := ClassifyCowriePlaybook(users, aph, st.Client,
+			st.has(models.ActorFlagAuth), st.has(models.ActorFlagCommand), hasTunnel, hasPayload)
 
 		a := &models.Actor{
 			ID:              CowrieActorID(st.PrimaryIP, st.HASSH),
@@ -369,8 +443,10 @@ func (c *cowrieCollector) finalize() []*AggregatedActor {
 			UsernameHash:    uhash,
 			ProbeScore:      cowrieProbeScore(st, aph),
 			Notes:           fmt.Sprintf("%d events, %d usernames", st.Count, len(st.Users)),
+			Campaigns:       st.Campaigns,
+			Flags:           st.Flags,
 		}
-		if st.Payload || st.DeployCmd {
+		if hasPayload || hasDeployCmd {
 			a.Confidence = ConfidenceCowriePayload
 		}
 		actors = append(actors, &AggregatedActor{Actor: a, IPs: st.IPs, Users: st.Users})
@@ -497,16 +573,16 @@ func isExecFromCwd(lc string) bool {
 // Actor.ProbeScore which the dashboard and IOC export can sort on.
 func cowrieProbeScore(st *CowrieStats, aph float64) int {
 	score := 0
-	if st.Probe {
+	if st.has(models.ActorFlagProbe) {
 		score += 40
 	}
-	if st.Tunnel {
+	if st.has(models.ActorFlagTunnel) {
 		score += 15
 	}
-	if st.Payload {
+	if st.has(models.ActorFlagPayload) {
 		score += 25
 	}
-	if st.DeployCmd {
+	if st.has(models.ActorFlagDeployCmd) {
 		score += 25
 	}
 	switch {

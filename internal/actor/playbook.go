@@ -20,6 +20,15 @@ var (
 	cryptoUsers = map[string]bool{
 		"sol": true, "solana": true, "ethereum": true, "miner": true,
 	}
+	// reScannerTool matches the SSH client banners of mass-scanning and
+	// internet-survey tooling observed against honeypot port 22. These actors
+	// complete the handshake (so Cowrie records connect + client_version) but
+	// rarely send a username, so the username-corpus classifier can never label
+	// them — measured on the reference deployment as the 74% "unknown" bucket.
+	// The banner is the durable fingerprint: it survives IP churn and is
+	// near-unique to the tool. Substring (not prefix) match because banners are
+	// versioned ("SSH-2.0-libssh_0.9.6", "SSH-2.0-libssh_0.11.1", ...).
+	reScannerTool = regexp.MustCompile(`(?i)libssh|libssh2|nmap|zgrab|zmap|masscan|phpseclib|asyncssh|rawpasswordconnectonly|paramiko|openssh-for-windows|ssh-2\.0-go|recon-ng|hydra|medusa|ncrack`)
 )
 
 // Playbook classification thresholds (attempts per hour). These come from
@@ -96,6 +105,35 @@ func ClassifyPlaybook(usernames []string, attemptsPerHour float64) string {
 		return "dictionary_spray"
 	}
 	return "opportunistic"
+}
+
+// ClassifyCowriePlaybook classifies a Cowrie actor using the full event mix,
+// not just the username corpus. ClassifyPlaybook only ever sees usernames, so
+// a handshake-only actor (connect + client_version, no auth attempt) returns
+// "unknown" — and on a live honeypot those scanners dominate: measured as 74%
+// of all actors (4,110/5,537) because internet-wide scanners complete the SSH
+// handshake to fingerprint the service and never send a login. This function
+// is the cowrie-specific overlay that recovers them.
+//
+// Ordering: real login-driven playbooks win (they have usernames and a higher
+// signal-to-noise). The handshake-scan label is applied only when there is
+// genuinely nothing else — no auth attempt, no command, no payload, no tunnel.
+func ClassifyCowriePlaybook(usernames []string, attemptsPerHour float64, sshClient string, hasAuth, hasCommand, hasTunnel, hasPayload bool) string {
+	// A real auth attempt or any post-login action means the actor is doing
+	// more than scanning — defer to the username-corpus classifier, which has
+	// the richer signal for those.
+	if hasAuth || hasCommand || hasTunnel || hasPayload {
+		return ClassifyPlaybook(usernames, attemptsPerHour)
+	}
+
+	// Handshake-only. The client banner is the durable fingerprint of the
+	// scanner tooling (libssh/Go/ZGrab/Nmap/...), near-unique and IP-stable.
+	if reScannerTool.MatchString(sshClient) {
+		return "scanner_tool"
+	}
+	// Handshake completed, no banner match, no auth attempt: a generic
+	// internet-wide scan / service fingerprint probe.
+	return "handshake_scan"
 }
 
 func isMostlyLowerAlpha(s string) bool {
