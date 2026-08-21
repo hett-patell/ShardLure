@@ -24,6 +24,7 @@ import (
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/internal/web"
+	"github.com/networkshard/shardlure/pkg/models"
 	"github.com/networkshard/shardlure/tui"
 )
 
@@ -87,6 +88,8 @@ func main() {
 		cmdActors(st, args[1:])
 	case "actor":
 		cmdActor(st, args[1:])
+	case "reclassify":
+		cmdReclassify(st, cfg, args[1:])
 	case "dashboard", "dash", "tui":
 		if err := tui.Run(st, cfg.DBPath()); err != nil {
 			fatal(err)
@@ -437,6 +440,105 @@ func findSetupScript() string {
 		}
 	}
 	return ""
+}
+
+// cmdReclassify re-derives each cowrie actor's playbook from its PERSISTED
+// aggregate (username corpus + event-mix flags + client banner) and upserts
+// the row — no event re-scan. This is the offline complement to the ingest
+// fold: the fold reclassifies an actor only when fresh events touch it, so
+// long-idle actors (e.g. the 3.9k handshake-scanner backlog that predated the
+// scanner playbook) never move from "unknown" until they attack again. Run
+// after upgrading past a classifier change to re-label the whole archive:
+//
+//	shardlure reclassify cowrie          # to ShardLure's data store
+//	shardlure reclassify cowrie --dry-run # report what would change
+//
+// Only cowrie actors are eligible: journal actors are keyed by IP with no
+// event-mix bits, so there is nothing to re-derive — the corpus playbook is
+// already what ingest computes.
+func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
+	// Split source (first positional, default cowrie) from flags manually:
+	// flag.FlagSet stops parsing at the first non-flag arg, so `--dry-run`
+	// after `cowrie` would be silently ignored.
+	src := "cowrie"
+	rest := args
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		src = rest[0]
+		rest = rest[1:]
+	}
+	if src != "cowrie" {
+		fatal(fmt.Errorf("only 'cowrie' actors carry event-mix flags to re-derive; 'journal' uses its corpus playbook as-is"))
+	}
+	fs := flag.NewFlagSet("reclassify", flag.ExitOnError)
+	dry := fs.Bool("dry-run", false, "report what would change without writing")
+	if err := fs.Parse(rest); err != nil {
+		fatal(err)
+	}
+
+	actors, err := st.ListActors(0)
+	if err != nil {
+		fatal(err)
+	}
+	var ids []string
+	for _, a := range actors {
+		if a.Source == models.SourceCowrie {
+			ids = append(ids, a.ID)
+		}
+	}
+	if len(ids) == 0 {
+		fmt.Println("no cowrie actors to reclassify")
+		return
+	}
+	states, err := st.ActorStatesForIDs(ids)
+	if err != nil {
+		fatal(err)
+	}
+
+	admin := actor.AdminSet(cfg.AdminIPs)
+	changed, unchanged, missing := 0, 0, 0
+	for i := range actors {
+		a := &actors[i]
+		if a.Source != models.SourceCowrie {
+			continue
+		}
+		stt := states[a.ID]
+		if stt == nil || stt.Actor == nil {
+			missing++
+			continue
+		}
+		cc := actor.NewCowrieCollector(admin)
+		cc.SeedActorState(stt.Actor, stt.Users, stt.IPs)
+		acc := cc.Finalize()
+		if len(acc) != 1 {
+			continue
+		}
+		newPB := acc[0].Actor.Playbook
+		if newPB != a.Playbook {
+			changed++
+			if !*dry {
+				a.Playbook = newPB
+				// Refresh the derived fields the classifier may have moved on
+				// (intent/probe score) without clobbering operator annotation.
+				a.Intent = acc[0].Actor.Intent
+				a.ProbeScore = acc[0].Actor.ProbeScore
+				a.Flags = acc[0].Actor.Flags
+				if err := st.UpsertActor(a); err != nil {
+					fatal(fmt.Errorf("reclassify %s: %w", a.ID, err))
+				}
+				fmt.Printf("%-58s %s -> %s\n", a.ID, a.Playbook, newPB)
+			} else {
+				fmt.Printf("%-58s %s -> %s\n", a.ID, a.Playbook, newPB)
+			}
+		} else {
+			unchanged++
+		}
+	}
+	mode := "applied"
+	if *dry {
+		mode = "dry-run"
+	}
+	fmt.Printf("reclassify %s (%s): %d changed, %d unchanged, %d without state of %d actors\n",
+		src, mode, changed, unchanged, missing, len(ids))
 }
 
 func cmdActors(st *store.Store, args []string) {
