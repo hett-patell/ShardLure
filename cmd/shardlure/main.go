@@ -496,6 +496,8 @@ func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
 
 	admin := actor.AdminSet(cfg.AdminIPs)
 	changed, unchanged, missing := 0, 0, 0
+	cc := actor.NewCowrieCollector(admin)
+	var legacyIDs []string
 	for i := range actors {
 		a := &actors[i]
 		if a.Source != models.SourceCowrie {
@@ -506,28 +508,53 @@ func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
 			missing++
 			continue
 		}
-		cc := actor.NewCowrieCollector(admin)
-		cc.SeedActorState(stt.Actor, stt.Users, stt.IPs)
-		acc := cc.Finalize()
-		if len(acc) != 1 {
+		// Legacy rows (flags==0, written before schema v18) have unreliable
+		// event-mix bits — seeding from them loses hasAuth/hasCommand/hasPayload
+		// and wrongly downgrades real attackers into the scanner bucket (caught
+		// by dry-run). Re-scan their events once, like ingest's legacy fallback.
+		if stt.Actor.Flags == 0 && stt.Actor.EventCount > 0 {
+			legacyIDs = append(legacyIDs, a.ID)
 			continue
 		}
-		newPB := acc[0].Actor.Playbook
+		cc.SeedActorState(stt.Actor, stt.Users, stt.IPs)
+	}
+	if len(legacyIDs) > 0 {
+		if err := st.IterateEventsByActorIDs(legacyIDs, func(e *models.Event) error {
+			cc.Add(e)
+			return nil
+		}); err != nil {
+			fatal(fmt.Errorf("legacy re-scan: %w", err))
+		}
+	}
+	acc := cc.Finalize()
+	byID := make(map[string]*models.AggregatedActor, len(acc))
+	for _, agg := range acc {
+		byID[actor.CowrieActorID(agg.Actor.PrimaryIP, agg.Actor.HASSH)] = agg
+	}
+	for i := range actors {
+		a := &actors[i]
+		if a.Source != models.SourceCowrie {
+			continue
+		}
+		agg := byID[a.ID]
+		if agg == nil {
+			continue
+		}
+		newPB := agg.Actor.Playbook
 		if newPB != a.Playbook {
 			changed++
+			fmt.Printf("%-58s %s -> %s\n", a.ID, a.Playbook, newPB)
 			if !*dry {
+				// Refresh derived fields the classifier may have moved on; operator
+				// annotation (campaigns/notes) survives because upsert only touches
+				// the fields we hand it.
 				a.Playbook = newPB
-				// Refresh the derived fields the classifier may have moved on
-				// (intent/probe score) without clobbering operator annotation.
-				a.Intent = acc[0].Actor.Intent
-				a.ProbeScore = acc[0].Actor.ProbeScore
-				a.Flags = acc[0].Actor.Flags
+				a.Intent = agg.Actor.Intent
+				a.ProbeScore = agg.Actor.ProbeScore
+				a.Flags = agg.Actor.Flags
 				if err := st.UpsertActor(a); err != nil {
 					fatal(fmt.Errorf("reclassify %s: %w", a.ID, err))
 				}
-				fmt.Printf("%-58s %s -> %s\n", a.ID, a.Playbook, newPB)
-			} else {
-				fmt.Printf("%-58s %s -> %s\n", a.ID, a.Playbook, newPB)
 			}
 		} else {
 			unchanged++
