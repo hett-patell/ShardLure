@@ -920,6 +920,12 @@ func (s *Server) RunContext(ctx context.Context) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 		<-errCh
+		// Close the geo mmdb handle on the way out. One long-lived fd is
+		// harmless in practice, but the resolver has a lifecycle method and
+		// shutdown is the one place it belongs.
+		if s.geo != nil {
+			s.geo.mmdb.close()
+		}
 		return nil
 	case err := <-errCh:
 		return err

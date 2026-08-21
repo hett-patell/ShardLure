@@ -73,22 +73,6 @@ func (m *mmdbResolver) close() {
 	}
 }
 
-// status describes the tier for the settings/status surface: "unset",
-// "ready", or "error: ...". Kept string-shaped to match how the settings
-// API already reports provider state.
-func (m *mmdbResolver) status() string {
-	switch {
-	case m == nil:
-		return "unset"
-	case m.err != "":
-		return "error: " + m.err
-	case m.db != nil:
-		return "ready"
-	default:
-		return "unset"
-	}
-}
-
 // lookup resolves one IP locally. The bool is false when the database isn't
 // usable, the IP is unparseable, or the database has no city/location record
 // for it — all of which mean "let the HTTP tier try".

@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// WriteCSV writes indicators to w with a stable schema.
+// WriteCSVWithCoverage writes indicators to w with a stable schema, plus an
+// optional in-band sampling disclosure.
 //
 // Schema:
 //
@@ -16,11 +17,6 @@ import (
 //
 // Time fields are RFC3339 UTC. List fields use a `|` separator so the
 // CSV survives downstream tools that re-quote per-field commas.
-func WriteCSV(w io.Writer, indicators []Indicator) error {
-	return WriteCSVWithCoverage(w, indicators, Coverage{})
-}
-
-// WriteCSVWithCoverage is WriteCSV plus an in-band sampling disclosure.
 //
 // When cov reports a sampled window, a single `#`-prefixed comment line is
 // emitted BEFORE the header row, because a downloaded file cannot carry the

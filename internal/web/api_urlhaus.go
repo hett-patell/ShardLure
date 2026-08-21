@@ -105,11 +105,16 @@ func (s *Server) urlhausCandidates(activeDays int) ([]urlhaus.Candidate, []urlha
 	return cands, view, nil
 }
 
-func urlhausActiveDaysFromQuery(raw string) int {
+// urlhausActiveDaysFromQuery resolves the liveness window: an explicit
+// ?activeDays= query param wins; otherwise the operator-configured Settings
+// value (urlhausActiveDaysLive) applies. Previously this hard-defaulted to 3,
+// which meant the Settings "Active window (days)" knob was silently ignored —
+// an operator tightening it to 1 saw no change in the panel.
+func (s *Server) urlhausActiveDaysFromQuery(raw string) int {
 	if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 3 {
 		return n
 	}
-	return 3
+	return s.urlhausActiveDaysLive()
 }
 
 // handleIntelURLhaus reports URLhaus sharing state: how many malware-
@@ -122,7 +127,7 @@ func (s *Server) handleIntelURLhaus(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	activeDays := urlhausActiveDaysFromQuery(r.URL.Query().Get("activeDays"))
+	activeDays := s.urlhausActiveDaysFromQuery(r.URL.Query().Get("activeDays"))
 	limit := 50
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
 		if n > 500 {
@@ -207,7 +212,7 @@ func (s *Server) handleURLhausSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeDays := urlhausActiveDaysFromQuery(r.URL.Query().Get("activeDays"))
+	activeDays := s.urlhausActiveDaysFromQuery(r.URL.Query().Get("activeDays"))
 	cands, _, err := s.urlhausCandidates(activeDays)
 	if err != nil {
 		httpError(w, "api_urlhaus", err, http.StatusInternalServerError)

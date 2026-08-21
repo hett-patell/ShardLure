@@ -44,9 +44,6 @@ func TestOpenMMDBStates(t *testing.T) {
 	if m := openMMDB(""); m != nil {
 		t.Errorf("blank path should give nil resolver, got %+v", m)
 	}
-	if got := (*mmdbResolver)(nil).status(); got != "unset" {
-		t.Errorf("nil status = %q, want unset", got)
-	}
 	if (*mmdbResolver)(nil).ready() {
 		t.Error("nil resolver must not be ready")
 	}
@@ -56,8 +53,8 @@ func TestOpenMMDBStates(t *testing.T) {
 	if bad == nil || bad.ready() {
 		t.Fatalf("missing file should give a non-nil, not-ready resolver: %+v", bad)
 	}
-	if bad.status() == "unset" || bad.status() == "ready" {
-		t.Errorf("missing file status should be an error, got %q", bad.status())
+	if bad.err == "" {
+		t.Error("missing file should record the open error on the resolver")
 	}
 	if _, ok := bad.lookup("81.2.69.142", time.Now()); ok {
 		t.Error("broken resolver must not return a hit")
@@ -69,9 +66,6 @@ func TestOpenMMDBStates(t *testing.T) {
 		t.Fatalf("fixture should open: %+v", good)
 	}
 	defer good.close()
-	if good.status() != "ready" {
-		t.Errorf("status = %q, want ready", good.status())
-	}
 }
 
 func TestMMDBLookup(t *testing.T) {
