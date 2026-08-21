@@ -1163,6 +1163,8 @@ type actorCard struct {
 	ID       string  `json:"id"`
 	IP       string  `json:"ip"`
 	Playbook string  `json:"playbook"`
+	Intent   string  `json:"intent"`
+	Probe    int     `json:"probe"`
 	Events   int     `json:"events"`
 	RateHour float64 `json:"rateHour"`
 	LastSeen string  `json:"lastSeen"`
@@ -1322,6 +1324,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			ID:       a.ID,
 			IP:       a.PrimaryIP,
 			Playbook: a.Playbook,
+			Intent:   a.Intent,
+			Probe:    a.ProbeScore,
 			Events:   a.EventCount,
 			RateHour: cardRates[a.ID],
 			LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
@@ -1349,6 +1353,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 				ID:       a.ID,
 				IP:       a.PrimaryIP,
 				Playbook: a.Playbook,
+				Intent:   a.Intent,
+				Probe:    a.ProbeScore,
 				Events:   a.EventCount,
 				RateHour: cardRates[a.ID],
 				LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
