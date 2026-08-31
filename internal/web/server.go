@@ -140,6 +140,14 @@ type Server struct {
 	statsCached *summaryStats
 	statsAt     time.Time
 
+	// HASSH coverage gets its OWN, much longer TTL than the rest of
+	// summaryStats. See hasshCoverageCached for why it cannot ride statsTTL.
+	hasshMu            sync.Mutex
+	hasshFingerprinted int
+	hasshTotal         int
+	hasshAt            time.Time
+	hasshOK            bool
+
 	// dashExtraCache memoizes the two remaining full-window scans that
 	// /api/dashboard ran UNCACHED on every 5s poll: the 72h hourly-by-kind
 	// GROUP BY (substr(ts) grouping, whole-window sort) and RecentShellSessions
@@ -236,7 +244,40 @@ type summaryStats struct {
 
 const statsTTL = 10 * time.Second
 
+// hasshCoverageTTL is deliberately far longer than statsTTL. store.HASSHCoverage
+// is a COUNT + SUM over EVERY cowrie event ever ingested with no ts restriction,
+// so it is the one aggregate whose cost grows without bound as the DB does:
+// measured at 1.28s of the 2.0s of SQL behind /api/dashboard on a 1.06M-row
+// production database, and the largest single contributor to the 4.6s that poll
+// cost on each cache expiry (warm: 4ms). Since the landing page polls every 5s
+// and statsTTL is 10s, roughly every second poll paid it.
+//
+// The figure it reports is a LIFETIME ratio — what share of all observed cowrie
+// telemetry carries a client fingerprint. It moves by fractions of a percent
+// per hour, so minutes of staleness are invisible while the saving is not.
+const hasshCoverageTTL = 5 * time.Minute
+
 // summaryStatsCached returns the memoized whole-table aggregates,
+// hasshCoverageCached returns the HASSH coverage pair, recomputing at most once
+// per hasshCoverageTTL rather than per statsTTL. Best-effort like the other
+// non-fatal aggregates: on a query error the last good pair is served (zeroes
+// before the first success), so a transient failure degrades the badge rather
+// than failing the whole stats refresh.
+func (s *Server) hasshCoverageCached() (fingerprinted, total int) {
+	s.hasshMu.Lock()
+	defer s.hasshMu.Unlock()
+	if s.hasshOK && time.Since(s.hasshAt) < hasshCoverageTTL {
+		return s.hasshFingerprinted, s.hasshTotal
+	}
+	f, tot, err := s.st.HASSHCoverage()
+	if err != nil {
+		return s.hasshFingerprinted, s.hasshTotal
+	}
+	s.hasshFingerprinted, s.hasshTotal = f, tot
+	s.hasshAt, s.hasshOK = time.Now(), true
+	return f, tot
+}
+
 // recomputing at most once per statsTTL.
 func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	s.statsMu.Lock()
@@ -290,9 +331,8 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	if err != nil {
 		return s.statsCached, err
 	}
-	// Best-effort, like countries above: a transient error just leaves the
-	// fingerprinted count at 0 rather than failing the whole cache refresh.
-	fingerprinted, fingerprintTotal, _ := s.st.HASSHCoverage()
+	// Memoized on its own long TTL — see hasshCoverageCached.
+	fingerprinted, fingerprintTotal := s.hasshCoverageCached()
 	// Best-effort like the others: 0 on error keeps the panel alive.
 	sessionCount, _ := s.st.CountSessions()
 	// Read-only liveness of the sibling honeypot unit. Best-effort: an unknown
