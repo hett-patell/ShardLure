@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -475,9 +476,67 @@ func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
 		fatal(err)
 	}
 
-	actors, err := st.ListActors(0)
+	plan, err := planReclassify(st, actor.AdminSet(cfg.AdminIPs))
 	if err != nil {
 		fatal(err)
+	}
+	if plan.Total == 0 {
+		fmt.Println("no cowrie actors to reclassify")
+		return
+	}
+
+	for _, c := range plan.Changed {
+		fmt.Printf("%-58s %s -> %s\n", c.Actor.ID, c.Actor.Playbook, c.Agg.Actor.Playbook)
+		if !*dry {
+			// Refresh derived fields the classifier may have moved on; operator
+			// annotation (campaigns/notes) survives because upsert only touches
+			// the fields we hand it.
+			c.Actor.Playbook = c.Agg.Actor.Playbook
+			c.Actor.Intent = c.Agg.Actor.Intent
+			c.Actor.ProbeScore = c.Agg.Actor.ProbeScore
+			c.Actor.Flags = c.Agg.Actor.Flags
+			if err := st.UpsertActor(c.Actor); err != nil {
+				fatal(fmt.Errorf("reclassify %s: %w", c.Actor.ID, err))
+			}
+		}
+	}
+	mode := "applied"
+	if *dry {
+		mode = "dry-run"
+	}
+	fmt.Printf("reclassify %s (%s): %d changed, %d unchanged, %d without state, %d unrebuildable of %d actors\n",
+		src, mode, len(plan.Changed), plan.Unchanged, plan.MissingState, plan.Unrebuildable, plan.Total)
+	if plan.Unrebuildable > 0 {
+		fmt.Printf("  note: %d actor(s) produced no aggregate — nothing left to classify from "+
+			"(their events aged out by retention)\n", plan.Unrebuildable)
+	}
+}
+
+// reclassifyChange pairs a stored actor row with the aggregate the current
+// classifier derives for it, when the two disagree on playbook.
+type reclassifyChange struct {
+	Actor *models.Actor
+	Agg   *models.AggregatedActor
+}
+
+// reclassifyPlan accounts for EVERY cowrie actor examined. The counters must
+// sum to Total: an earlier version had no bucket for actors whose aggregate
+// could not be rebuilt, so it silently dropped them and printed a summary that
+// did not add up (prod: 4 + 4922 + 0 against 5029 actors, 103 unexplained).
+type reclassifyPlan struct {
+	Total         int
+	Changed       []reclassifyChange
+	Unchanged     int
+	MissingState  int
+	Unrebuildable int
+}
+
+// planReclassify re-derives playbooks for every cowrie actor and reports what
+// would change, without writing anything.
+func planReclassify(st *store.Store, admin *netmatch.Set) (*reclassifyPlan, error) {
+	actors, err := st.ListActors(0)
+	if err != nil {
+		return nil, err
 	}
 	var ids []string
 	for _, a := range actors {
@@ -485,17 +544,15 @@ func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
 			ids = append(ids, a.ID)
 		}
 	}
+	plan := &reclassifyPlan{Total: len(ids)}
 	if len(ids) == 0 {
-		fmt.Println("no cowrie actors to reclassify")
-		return
+		return plan, nil
 	}
 	states, err := st.ActorStatesForIDs(ids)
 	if err != nil {
-		fatal(err)
+		return nil, err
 	}
 
-	admin := actor.AdminSet(cfg.AdminIPs)
-	changed, unchanged, missing := 0, 0, 0
 	cc := actor.NewCowrieCollector(admin)
 	var legacyIDs []string
 	for i := range actors {
@@ -505,7 +562,7 @@ func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
 		}
 		stt := states[a.ID]
 		if stt == nil || stt.Actor == nil {
-			missing++
+			plan.MissingState++
 			continue
 		}
 		// Legacy rows (flags==0, written before schema v18) have unreliable
@@ -523,7 +580,7 @@ func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
 			cc.Add(e)
 			return nil
 		}); err != nil {
-			fatal(fmt.Errorf("legacy re-scan: %w", err))
+			return nil, fmt.Errorf("legacy re-scan: %w", err)
 		}
 	}
 	acc := cc.Finalize()
@@ -536,36 +593,24 @@ func cmdReclassify(st *store.Store, cfg config.Config, args []string) {
 		if a.Source != models.SourceCowrie {
 			continue
 		}
+		if states[a.ID] == nil || states[a.ID].Actor == nil {
+			continue // already counted as MissingState
+		}
 		agg := byID[a.ID]
 		if agg == nil {
+			// A legacy row whose events retention has since deleted: the
+			// re-scan found nothing, so there is no aggregate to compare and
+			// no data left to classify from. Counted, never silently dropped.
+			plan.Unrebuildable++
 			continue
 		}
-		newPB := agg.Actor.Playbook
-		if newPB != a.Playbook {
-			changed++
-			fmt.Printf("%-58s %s -> %s\n", a.ID, a.Playbook, newPB)
-			if !*dry {
-				// Refresh derived fields the classifier may have moved on; operator
-				// annotation (campaigns/notes) survives because upsert only touches
-				// the fields we hand it.
-				a.Playbook = newPB
-				a.Intent = agg.Actor.Intent
-				a.ProbeScore = agg.Actor.ProbeScore
-				a.Flags = agg.Actor.Flags
-				if err := st.UpsertActor(a); err != nil {
-					fatal(fmt.Errorf("reclassify %s: %w", a.ID, err))
-				}
-			}
+		if agg.Actor.Playbook != a.Playbook {
+			plan.Changed = append(plan.Changed, reclassifyChange{Actor: a, Agg: agg})
 		} else {
-			unchanged++
+			plan.Unchanged++
 		}
 	}
-	mode := "applied"
-	if *dry {
-		mode = "dry-run"
-	}
-	fmt.Printf("reclassify %s (%s): %d changed, %d unchanged, %d without state of %d actors\n",
-		src, mode, changed, unchanged, missing, len(ids))
+	return plan, nil
 }
 
 func cmdActors(st *store.Store, args []string) {
@@ -631,13 +676,19 @@ func cmdIOC(st *store.Store) {
 	}
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `ShardLure - attacker identity from SSH telemetry
+func usage() { usageTo(os.Stderr) }
+
+// usageTo writes the usage text to w. Split from usage() so a test can assert
+// that every command the dispatcher accepts is actually documented — two
+// shipped commands were missing from this text and were undiscoverable.
+func usageTo(w io.Writer) {
+	fmt.Fprintf(w, `ShardLure - attacker identity from SSH telemetry
 
 Usage:
   shardlure ingest <journal|cowrie> <file> [--replace]
   shardlure actors [--limit=25]
   shardlure actor show <ip>
+  shardlure reclassify cowrie [--dry-run]
   shardlure dashboard
   shardlure web [:8080] [--tailscale]
   shardlure live [:8080] [--cowrie=/path/cowrie.json] [--interval=5s] [--no-journal] [--tailscale]
@@ -646,9 +697,12 @@ Usage:
   shardlure ioc
   shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 240h] [--anonymous] [--status]
   shardlure share urlhaus [--dry-run] [--limit N] [--active-days 3] [--anonymous] [--status]
+  shardlure share threatfox [--dry-run] [--limit N] [--active-days 3] [--status]
   shardlure report abuseipdb [--dry-run] [--limit N] [--min-probe 60] [--status]
 
-Config: ~/.local/share/shardlure/ or -config shardlure.yaml
+Config: -config PATH, or $SHARDLURE_CONFIG, else ~/.local/share/shardlure/shardlure.yaml,
+        falling back to /etc/shardlure/shardlure.yaml or /var/lib/shardlure/shardlure.yaml
+        when the invoking user has no config of their own.
 `)
 }
 

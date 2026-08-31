@@ -151,6 +151,60 @@ type Config struct {
 // the empty string silently joined to "/".
 const fallbackDataDir = "/var/lib/shardlure"
 
+// defaultSystemConfigPaths lists the locations a system-wide install writes its
+// config to, in preference order. Consulted ONLY when the invoking user has no
+// config of their own (see resolveConfigPath).
+func defaultSystemConfigPaths() []string {
+	return []string{
+		"/etc/shardlure/shardlure.yaml",
+		filepath.Join(fallbackDataDir, "shardlure.yaml"),
+	}
+}
+
+// systemConfigPaths is a var, not a const list, so tests can point it at a
+// temp dir instead of depending on whatever is installed on the build machine.
+var systemConfigPaths = defaultSystemConfigPaths()
+
+// resolveConfigPath picks the config file to read when the caller gave no
+// explicit path (no -config flag, no SHARDLURE_CONFIG).
+//
+// The user's own config always wins. Falling back to the system config matters
+// because the systemd unit passes SHARDLURE_CONFIG but an operator shell does
+// not: `sudo shardlure share bazaar` on a deployed box used to resolve to
+// ~/.local/share/shardlure, quietly open an empty database beside the real one
+// in /var/lib/shardlure, and report "no candidates" — indistinguishable from a
+// broken feature. Preferring an installed system config makes the CLI and the
+// daemon agree by default.
+//
+// An unreadable or non-regular candidate is skipped rather than fatal: a
+// non-root user must still get a working CLI when the system config is
+// root-only.
+func resolveConfigPath() string {
+	def := DefaultConfigPath()
+	if isReadableFile(def) {
+		return def
+	}
+	for _, p := range systemConfigPaths {
+		if isReadableFile(p) {
+			return p
+		}
+	}
+	return def
+}
+
+func isReadableFile(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
 func userDataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -213,7 +267,7 @@ func applyEnvOverrides(c *Config) {
 func Load(path string) (Config, error) {
 	c := Default()
 	if path == "" {
-		path = DefaultConfigPath()
+		path = resolveConfigPath()
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
