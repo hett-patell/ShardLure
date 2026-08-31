@@ -1329,6 +1329,56 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		}
 	}
 
+	// Actors are DERIVED from events, so an actor whose every event the sweep
+	// above deleted has no evidence left behind it. Those orphans kept a stale
+	// event_count, a playbook frozen at whatever the classifier said months
+	// ago, and inflated the dashboard's actor total with attackers nothing can
+	// corroborate — and `reclassify` could never re-derive them, because there
+	// is nothing left to re-scan (prod: 103 such rows, 102 of them reading
+	// "unknown", which was the entire residual unknown population).
+	//
+	// Three guards keep this from deleting anything real:
+	//   - last_seen < cutoff, so an actor the ingest tick created moments ago
+	//     (its events not yet visible to this transaction) is never raced away;
+	//   - no surviving events, an index probe on the (actor_id, ts) composite;
+	//   - no operator annotation, which means `campaigns` ONLY. `notes` looks
+	//     like the same kind of field but is machine-generated — actor.builder
+	//     rewrites it on every rebuild ("2 events, 0 usernames") — so every
+	//     actor on a live deployment carries one, and including it here made
+	//     the sweep a silent no-op (prod: 6,716 of 6,716 rows had a generated
+	//     note, so 0 of the 103 real orphans would have been removed).
+	//
+	// Unlike events this is NOT chunked: actors is bounded by the number of
+	// distinct attacker identities (thousands, against a million events), so
+	// one transaction holds writeMu for a fraction of a single event chunk.
+	// The predicate is stable across the three statements because deleting the
+	// child rows cannot change which actors match it.
+	if err := func() error {
+		const orphanPredicate = `
+  last_seen < ?
+  AND COALESCE(campaigns, '') = ''
+  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor_id = actors.id)`
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for _, child := range []string{"actor_ips", "actor_users"} {
+			if _, err := tx.Exec(`DELETE FROM `+child+
+				` WHERE actor_id IN (SELECT id FROM actors WHERE`+orphanPredicate+`)`, cutoff); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`DELETE FROM actors WHERE`+orphanPredicate, cutoff); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}(); err != nil {
+		return err
+	}
+
 	// Reclaim WAL space the chunked deletes accumulated, then refresh the query
 	// planner's stats. A large purge changes table/index cardinality enough to
 	// flip a plan; running optimize here (on the same 24h maintenance cadence)
