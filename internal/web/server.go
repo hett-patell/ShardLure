@@ -112,33 +112,38 @@ type Server struct {
 	urlhausActiveDaysDefault int
 	urlhausAnonymousDefault  bool
 
-	// countriesCache memoizes the (relatively expensive) full-table
-	// hits-by-country aggregation, which both /api/dashboard and /api/intel
-	// render on every poll. The result changes slowly, so a few-second TTL
-	// removes the duplicate per-page full scans without staleness anyone notices.
+	// countriesCache memoizes the full-table hits-by-country aggregation shared
+	// by /api/dashboard and /api/intel. It is a lifetime distribution, so it uses
+	// the same long TTL as the other all-history dashboard values.
 	countriesMu     sync.Mutex
 	countriesCached []topCountryRow
 	countriesAt     time.Time
 
-	// eventsCache memoizes the full windowed event slice that the intel
+	// eventsCache memoizes the capped windowed event slice that the intel
 	// endpoints (mitre/ttp/deobf/graph/wordlist/ioc) each load on every poll.
 	// Materializing a 7–30d window over a multi-million-row table costs a full
 	// scan and a multi-GB allocation; without this, several of those widgets
 	// firing together on one tab open ran that work concurrently, an OOM/IO
 	// storm. Keyed by window-hours; computed under the lock so concurrent
 	// pollers of the same window collapse onto one scan.
-	eventsMu    sync.Mutex
-	eventsCache map[int]windowedEvents
+	eventsMu     sync.Mutex
+	eventsCache  map[int]windowedEvents
+	eventsUseSeq uint64
 
-	// statsCache memoizes the whole-table aggregates both /api/dashboard and
-	// /api/intel recompute on every 5s poll per open tab: COUNT(*) over
-	// events, COUNT(DISTINCT src_ip), and the unbounded kind/source GROUP
-	// BYs. On a multi-million-row DB these were the dominant recurring
-	// load; the data only changes on the 5s ingest tick, so a short TTL is
-	// invisible to the operator.
+	// statsCache contains only cheap or recent operational values that justify
+	// the short dashboard TTL. Whole-table distributions and lifetime values
+	// have separate, longer-lived caches below.
 	statsMu     sync.Mutex
-	statsCached *summaryStats
+	statsCached *liveSummaryStats
 	statsAt     time.Time
+
+	distributionMu     sync.Mutex
+	distributionCached *distributionSummaryStats
+	distributionAt     time.Time
+
+	lifetimeMu     sync.Mutex
+	lifetimeCached *lifetimeSummaryStats
+	lifetimeAt     time.Time
 
 	// HASSH coverage gets its OWN, much longer TTL than the rest of
 	// summaryStats. See hasshCoverageCached for why it cannot ride statsTTL.
@@ -203,6 +208,30 @@ type dashExtra struct {
 	ShellSessions []store.ShellSessionSummary
 }
 
+type liveSummaryStats struct {
+	Events         int
+	Actors         int
+	IntentCounts   []store.LabelCount
+	PlaybookCounts []store.LabelCount
+	HourlyByKind   []store.HourlyKindCell
+	CowrieUptime   time.Duration
+	CowrieUp       bool
+}
+
+type distributionSummaryStats struct {
+	KindCounts   []store.LabelCount
+	SourceCounts []store.LabelCount
+}
+
+type lifetimeSummaryStats struct {
+	UniqueIPs   int
+	Countries   int
+	TopIPs      []store.CountRow
+	TopUsers    []store.CountRow
+	TopCommands []store.CountRow
+	Sessions    int
+}
+
 type summaryStats struct {
 	Events       int
 	Actors       int
@@ -210,9 +239,9 @@ type summaryStats struct {
 	Countries    int
 	KindCounts   []store.LabelCount
 	SourceCounts []store.LabelCount
-	// Top-N whole-table GROUP BYs. These share the stats cache because they
+	// Top-N whole-table GROUP BYs. These share the lifetime cache because they
 	// have the same cadence and cost profile (an O(all-rows) index scan) and
-	// were previously recomputed on every 5s dashboard poll, uncached.
+	// were previously recomputed on every 5s dashboard poll.
 	TopIPs      []store.CountRow
 	TopUsers    []store.CountRow
 	TopCommands []store.CountRow
@@ -226,7 +255,7 @@ type summaryStats struct {
 	// out of all cowrie events. Event-weighted rather than actor-weighted on
 	// purpose — see the HASSHCoverage doc comment for why counting actor rows
 	// inverted the result. Queried uncached on every 5s poll originally; folded
-	// in here so it shares the same statsTTL memoization as the other aggregates.
+	// in here after being read from its own long-lived cache.
 	Fingerprinted    int
 	FingerprintTotal int
 	// CowrieUptime is how long the sibling Cowrie unit has been active, and
@@ -237,12 +266,31 @@ type summaryStats struct {
 	CowrieUp     bool
 	// Sessions is the ALL-TIME distinct cowrie session count, for the Summary
 	// tile. Deliberately not len(RecentShellSessions): that slice is LIMITed to
-	// 30, so the tile would freeze at "30". Cached here rather than queried in
-	// handleDashboard to keep the 5s landing path fully memoized.
+	// 30, so the tile would freeze at "30". It rides the lifetime cache rather
+	// than being queried in handleDashboard on every poll.
 	Sessions int
 }
 
 const statsTTL = 10 * time.Second
+const distributionStatsTTL = time.Minute
+const lifetimeStatsTTL = 5 * time.Minute
+
+// lifetimeStamp is the cache timestamp for a value on a lifetimeStatsTTL memo.
+// A degenerate result — an empty country list, zero countries, a failed
+// session count — is stamped so it expires after statsTTL instead. On a fresh
+// database or a cold start the geo table is filled ASYNCHRONOUSLY by the very
+// handler that reads these values, so caching the empty first read for five
+// minutes froze the intel page's Attack Geography at "resolving…" and the
+// countries tile at 0 while the globe beside it already had markers; ten
+// seconds is what it was before the tiering. Callers pass ok=true for a geo
+// zero on a deployment with geo switched off, otherwise that box would re-run
+// the whole lifetime tier every 10 s forever for a zero that is correct.
+func lifetimeStamp(ok bool) time.Time {
+	if ok {
+		return time.Now()
+	}
+	return time.Now().Add(-(lifetimeStatsTTL - statsTTL))
+}
 
 // hasshCoverageTTL is deliberately far longer than statsTTL. store.HASSHCoverage
 // is a COUNT + SUM over EVERY cowrie event ever ingested with no ts restriction,
@@ -278,8 +326,7 @@ func (s *Server) hasshCoverageCached() (fingerprinted, total int) {
 	return f, tot
 }
 
-// recomputing at most once per statsTTL.
-func (s *Server) summaryStatsCached() (*summaryStats, error) {
+func (s *Server) liveSummaryStatsCached() (*liveSummaryStats, error) {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	if s.statsCached != nil && time.Since(s.statsAt) < statsTTL {
@@ -290,32 +337,6 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 		return s.statsCached, err
 	}
 	ac, err := s.st.ActorCount()
-	if err != nil {
-		return s.statsCached, err
-	}
-	ips, err := s.st.UniqueIPCount()
-	if err != nil {
-		return s.statsCached, err
-	}
-	// Best-effort; 0 on error keeps the panel alive.
-	countries, _ := s.st.DistinctGeoCountryCount()
-	kinds, err := s.st.CountsByKind()
-	if err != nil {
-		return s.statsCached, err
-	}
-	sources, err := s.st.CountsBySource()
-	if err != nil {
-		return s.statsCached, err
-	}
-	topIPs, err := s.st.TopSourceIPs(25)
-	if err != nil {
-		return s.statsCached, err
-	}
-	topUsers, err := s.st.TopUsernames(20)
-	if err != nil {
-		return s.statsCached, err
-	}
-	topCommands, err := s.st.TopCommands(20)
 	if err != nil {
 		return s.statsCached, err
 	}
@@ -331,10 +352,6 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	if err != nil {
 		return s.statsCached, err
 	}
-	// Memoized on its own long TTL — see hasshCoverageCached.
-	fingerprinted, fingerprintTotal := s.hasshCoverageCached()
-	// Best-effort like the others: 0 on error keeps the panel alive.
-	sessionCount, _ := s.st.CountSessions()
 	// Read-only liveness of the sibling honeypot unit. Best-effort: an unknown
 	// value simply hides the readout rather than failing the cache refresh.
 	//
@@ -343,27 +360,103 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 	// the refresh would let one client disconnecting abort the refresh for
 	// everyone. StartedAt applies its own 2s timeout, so nothing can hang.
 	cowrieUptime, cowrieUp := hostsvc.Uptime(context.Background(), s.cowrieUnit, time.Now())
-	s.statsCached = &summaryStats{
-		Events:           ec,
-		Actors:           ac,
-		UniqueIPs:        ips,
-		Countries:        countries,
-		KindCounts:       kinds,
-		SourceCounts:     sources,
-		TopIPs:           topIPs,
-		TopUsers:         topUsers,
-		TopCommands:      topCommands,
-		IntentCounts:     intents,
-		PlaybookCounts:   playbooks,
-		HourlyByKind:     hourlyByKind,
-		Fingerprinted:    fingerprinted,
-		FingerprintTotal: fingerprintTotal,
-		Sessions:         sessionCount,
-		CowrieUptime:     cowrieUptime,
-		CowrieUp:         cowrieUp,
+	s.statsCached = &liveSummaryStats{
+		Events: ec, Actors: ac, IntentCounts: intents, PlaybookCounts: playbooks,
+		HourlyByKind: hourlyByKind, CowrieUptime: cowrieUptime, CowrieUp: cowrieUp,
 	}
 	s.statsAt = time.Now()
 	return s.statsCached, nil
+}
+
+func (s *Server) distributionSummaryStatsCached() (*distributionSummaryStats, error) {
+	s.distributionMu.Lock()
+	defer s.distributionMu.Unlock()
+	if s.distributionCached != nil && time.Since(s.distributionAt) < distributionStatsTTL {
+		return s.distributionCached, nil
+	}
+	kinds, err := s.st.CountsByKind()
+	if err != nil {
+		return s.distributionCached, err
+	}
+	sources, err := s.st.CountsBySource()
+	if err != nil {
+		return s.distributionCached, err
+	}
+	s.distributionCached = &distributionSummaryStats{KindCounts: kinds, SourceCounts: sources}
+	s.distributionAt = time.Now()
+	return s.distributionCached, nil
+}
+
+func (s *Server) lifetimeSummaryStatsCached() (*lifetimeSummaryStats, error) {
+	s.lifetimeMu.Lock()
+	defer s.lifetimeMu.Unlock()
+	if s.lifetimeCached != nil && time.Since(s.lifetimeAt) < lifetimeStatsTTL {
+		return s.lifetimeCached, nil
+	}
+	ips, err := s.st.UniqueIPCount()
+	if err != nil {
+		return s.lifetimeCached, err
+	}
+	// Best-effort; 0 on error keeps the panel alive (and shortens the memo,
+	// see lifetimeStamp).
+	countries, countriesErr := s.st.DistinctGeoCountryCount()
+	topIPs, err := s.st.TopSourceIPs(25)
+	if err != nil {
+		return s.lifetimeCached, err
+	}
+	topUsers, err := s.st.TopUsernames(20)
+	if err != nil {
+		return s.lifetimeCached, err
+	}
+	topCommands, err := s.st.TopCommands(20)
+	if err != nil {
+		return s.lifetimeCached, err
+	}
+	// Best-effort like countries: 0 on error keeps the panel alive.
+	sessionCount, sessionsErr := s.st.CountSessions()
+	s.lifetimeCached = &lifetimeSummaryStats{
+		UniqueIPs: ips, Countries: countries, TopIPs: topIPs, TopUsers: topUsers,
+		TopCommands: topCommands, Sessions: sessionCount,
+	}
+	geoSettled := countriesErr == nil && (countries > 0 || !s.geo.isEnabled())
+	s.lifetimeAt = lifetimeStamp(geoSettled && sessionsErr == nil)
+	return s.lifetimeCached, nil
+}
+
+// summaryStatsCached combines independently cached values according to how
+// quickly they change. The response contract stays unified while expensive
+// all-history scans no longer ride the 10-second operational cache.
+func (s *Server) summaryStatsCached() (*summaryStats, error) {
+	// Each tier hands back its last-good value alongside a refresh error, and
+	// that value is served: a transient failure on the 5-minute tier
+	// (TopCommands is a whole-table GROUP BY, the likeliest to trip on a WAL
+	// checkpoint) must not become a 500 on /api/intel while good 10 s data
+	// and a valid cached lifetime value both exist. Only a tier that has
+	// never succeeded is fatal — the policy hasshCoverageCached and
+	// topCountriesCached already follow.
+	live, err := s.liveSummaryStatsCached()
+	if live == nil {
+		return nil, err
+	}
+	distribution, err := s.distributionSummaryStatsCached()
+	if distribution == nil {
+		return nil, err
+	}
+	lifetime, err := s.lifetimeSummaryStatsCached()
+	if lifetime == nil {
+		return nil, err
+	}
+	fingerprinted, fingerprintTotal := s.hasshCoverageCached()
+	return &summaryStats{
+		Events: live.Events, Actors: live.Actors, UniqueIPs: lifetime.UniqueIPs,
+		Countries: lifetime.Countries, KindCounts: distribution.KindCounts,
+		SourceCounts: distribution.SourceCounts, TopIPs: lifetime.TopIPs,
+		TopUsers: lifetime.TopUsers, TopCommands: lifetime.TopCommands,
+		IntentCounts: live.IntentCounts, PlaybookCounts: live.PlaybookCounts,
+		HourlyByKind: live.HourlyByKind, Fingerprinted: fingerprinted,
+		FingerprintTotal: fingerprintTotal, Sessions: lifetime.Sessions,
+		CowrieUptime: live.CowrieUptime, CowrieUp: live.CowrieUp,
+	}, nil
 }
 
 // dashExtraCachedValues returns the memoized 72h hourly counts and recent shell
@@ -400,6 +493,7 @@ type windowedEvents struct {
 	events []*models.Event
 	total  int // true window size; > len(events) when the cap truncated
 	at     time.Time
+	used   uint64
 }
 
 // eventsWindowTTL bounds staleness of the cached window. Data only changes on
@@ -409,6 +503,10 @@ const eventsWindowTTL = 15 * time.Second
 // maxWindowHours clamps the queried window so a stray ?window=99999d can't pin
 // an enormous slice in cache. Retention caps the data well below this anyway.
 const maxWindowHours = 24 * 366
+
+// maxEventsCacheEntries bounds aggregate retained memory even when an
+// authenticated client requests many distinct exact windows within one TTL.
+const maxEventsCacheEntries = 4
 
 // eventsForWindowCached returns up to defaultWindowEventCap events (newest
 // first) with TS within the last windowHours, plus the TRUE total number of
@@ -430,12 +528,18 @@ func (s *Server) eventsForWindowCached(windowHours int) ([]*models.Event, int, e
 	s.eventsMu.Lock()
 	defer s.eventsMu.Unlock()
 	if e, ok := s.eventsCache[windowHours]; ok && time.Since(e.at) < eventsWindowTTL {
+		s.eventsUseSeq++
+		e.used = s.eventsUseSeq
+		s.eventsCache[windowHours] = e
 		return e.events, e.total, nil
 	}
 	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
 	ev, total, err := s.st.EventsSinceCapped(since, 0)
 	if err != nil {
 		if e, ok := s.eventsCache[windowHours]; ok {
+			s.eventsUseSeq++
+			e.used = s.eventsUseSeq
+			s.eventsCache[windowHours] = e
 			return e.events, e.total, nil // serve last-good on transient error
 		}
 		return nil, 0, err
@@ -450,7 +554,19 @@ func (s *Server) eventsForWindowCached(windowHours int) ([]*models.Event, int, e
 			delete(s.eventsCache, k)
 		}
 	}
-	s.eventsCache[windowHours] = windowedEvents{events: ev, total: total, at: time.Now()}
+	if _, exists := s.eventsCache[windowHours]; !exists && len(s.eventsCache) >= maxEventsCacheEntries {
+		var oldestKey int
+		var oldestUsed uint64
+		first := true
+		for k, e := range s.eventsCache {
+			if first || e.used < oldestUsed {
+				oldestKey, oldestUsed, first = k, e.used, false
+			}
+		}
+		delete(s.eventsCache, oldestKey)
+	}
+	s.eventsUseSeq++
+	s.eventsCache[windowHours] = windowedEvents{events: ev, total: total, at: time.Now(), used: s.eventsUseSeq}
 	return ev, total, nil
 }
 
@@ -488,7 +604,7 @@ func sampledWindow(returned, total int) *windowSample {
 
 // topCountriesCached returns the hits-by-country aggregation, recomputing at
 // most once per countriesTTL. Shared by the dashboard and intel handlers.
-const countriesTTL = 10 * time.Second
+const countriesTTL = lifetimeStatsTTL
 
 func (s *Server) topCountriesCached() []topCountryRow {
 	s.countriesMu.Lock()
@@ -505,7 +621,9 @@ func (s *Server) topCountriesCached() []topCountryRow {
 		rows = append(rows, topCountryRow{CC: c.CC, Country: c.Country, Hits: c.Hits})
 	}
 	s.countriesCached = rows
-	s.countriesAt = time.Now()
+	// An empty list on a geo-enabled box is the cold-start case, not the
+	// answer: keep it on the short TTL (see lifetimeStamp).
+	s.countriesAt = lifetimeStamp(len(rows) > 0 || !s.geo.isEnabled())
 	return rows
 }
 
