@@ -1,6 +1,6 @@
 package web
 
-import _ "embed"
+import "embed"
 
 //go:embed index.html
 var indexHTML string
@@ -40,3 +40,12 @@ var faviconICO []byte
 
 //go:embed logo-180.png
 var logo180PNG []byte
+
+// Self-hosted typography: the latin subsets of the six families themes.css
+// resolves, plus the generated fonts.css that declares them. Vendored for the
+// same reason as cobe.esm.js — the dashboards must render identically on an
+// air-gapped host, and every page load was otherwise a request to two Google
+// hosts that the CSP had to whitelist. Refresh with scripts/fetch-fonts.sh.
+//
+//go:embed fonts/fonts.css fonts/*.woff2
+var fontsFS embed.FS

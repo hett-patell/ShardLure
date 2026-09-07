@@ -655,7 +655,7 @@ func (s *Server) handleIntelGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	discloseWindowTruncation(w, len(events), total)
-	g := graph.Build(events, topN)
+	g := graph.Build(events, topN) // Nodes and Edges are never nil (see Build): an empty window encodes as [].
 	// Sum the per-kind distinct totals so the UI can show "rendered of total".
 	totalNodes := 0
 	for _, n := range g.Totals {

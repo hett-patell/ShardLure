@@ -4,6 +4,10 @@
 <script>
   try {
     var t = localStorage.getItem('shardlure_theme') || 'signal';
+    // Validate before writing the attribute: a stale value from a removed
+    // theme (localStorage outlives releases) matched no theme block and the
+    // page rendered in the pre-theme :root palette.
+    if (t !== 'signal' && t !== 'meridian' && t !== 'sprite') t = 'signal';
     var m = localStorage.getItem('shardlure_mode') || 'dark';
     var d = localStorage.getItem('shardlure_density') || 'comfortable';
     document.documentElement.setAttribute('data-theme', t);
@@ -21,9 +25,9 @@
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/logo-180.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Pixelify+Sans:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<!-- Typography is self-hosted (internal/web/fonts, see its README): no egress,
+     no third-party host in the CSP, identical rendering on an air-gapped box. -->
+<link rel="stylesheet" href="/fonts/fonts.css?v=2">
 
 <style>
   :root {
@@ -39,7 +43,9 @@
     --good: #48b878;
     --warn: #c89828;
     --mono: "JetBrains Mono", ui-monospace, monospace;
-    --sans: "Chakra Petch", system-ui, sans-serif;
+    --sans: "Inter", system-ui, sans-serif; /* vendored; themes.css overrides per theme */
+    /* Pre-theme fallback; themes.css sets --focus-ring per theme. */
+    --focus-ring: var(--accent-2);
     /* Density scale. "comfortable" is the default; "compact" restores the
        original 13px base for operators who preferred the denser layout. */
     --fs-base: 14px;
@@ -183,6 +189,12 @@
   #top-ips th:nth-child(2), #top-ips td:nth-child(2) { width: 36%; }
   #top-ips th:nth-child(3), #top-ips td:nth-child(3) { width: 20%; }
 
+  /* Right-rail panels. Layout lives in classes, never inline styles, so the
+     phone breakpoint below can change it (an inline style beats every media
+     query — the same trap the stats rows fell into). */
+  .rail-topips { flex: 0 1 auto; max-height: 28vh; display: flex; flex-direction: column; }
+  .rail-topips .rail-scroll { overflow: auto; flex: 1; }
+  .rail-feed { flex: 1 1 auto; min-height: 200px; display: flex; flex-direction: column; overflow: hidden; }
   .feed {
     flex: 1; overflow: hidden; position: relative;
     font-family: var(--mono); font-size: 11px;
@@ -226,13 +238,39 @@
     height: 40px;
   }
 
+  /* Tablet: both rails narrow. `.rail.left` has its own width rule above at
+     higher specificity, so it must be repeated here or it keeps 344px and the
+     globe (whose max-width tracks the rails, see themes.css) shrinks to 156px
+     at 900px wide. */
   @media (max-width: 1100px) {
-    .rail { width: 280px; padding: 14px; }
+    .rail, .rail.left { width: 280px; padding: 14px; }
     .sparkline { display: none; }
   }
+  /* Phone: one scrolling column. The desktop layout pins everything with
+     position:fixed under a hidden body overflow, which on a phone clipped the
+     left rail at the viewport edge (its own scroll never engages when its
+     height is auto), hid the right rail — Top source IPs and the live feed —
+     entirely, and computed the globe to max-width:0. Below 760px the page
+     scrolls normally: globe, readouts, feed, sparkline. The globe stage's own
+     phone rules live in themes.css beside its desktop ones. */
   @media (max-width: 760px) {
-    .rail.left { width: 100%; height: auto; bottom: auto; padding: 10px; }
-    .rail.right { display: none; }
+    html, body { overflow: auto; height: auto; min-height: 100%; }
+    #vignette { display: none; }
+    .rail, .rail.left, .rail.right {
+      position: static; width: 100%; height: auto; padding: 10px; gap: 10px;
+      overflow: visible; pointer-events: auto;
+    }
+    .rail.left { left: 0; }
+    .rail.right { display: flex; padding-bottom: 10px; }
+    /* In flow the rail no longer stretches the panels: let Top IPs size to
+       its table and turn the feed from an absolutely-positioned fill into a
+       content-sized box whose inner list scrolls at most 60vh. */
+    .rail-topips { max-height: none; }
+    .rail-feed { min-height: 0; overflow: visible; }
+    .feed { position: static; overflow: visible; }
+    .feed-inner { position: static; max-height: 60vh; overflow-y: auto; }
+    .rail.left > .panel:last-child { flex: none; }
+    .sparkline { display: block; position: static; transform: none; width: auto; margin: 0 10px 56px; }
   }
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 2px; }
@@ -303,6 +341,12 @@
     .sidebar { display: none; }
     .rail.left { left: 0; }
   }
+  /* Screen-reader-only text. */
+  .visually-hidden:where(:not(:focus-within, :active)) {
+    position: absolute !important; clip-path: inset(50%) !important; overflow: hidden !important;
+    width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important;
+    border: 0 !important; white-space: nowrap !important;
+  }
 
 /* Reduced motion: disable CSS transitions and animations when the user
    prefers reduced motion. The JS-side globe animation is also paused
@@ -316,14 +360,14 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=16" />
+<link rel="stylesheet" href="/themes.css?v=18" />
 </head>
 <body>
 
-<nav class="sidebar">
+<nav class="sidebar" aria-label="Primary">
   <div class="sb-brand" title="ShardLure"><svg class="sb-logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><path d="M32 4 L54 19 L48 45 L32 60 L16 45 L10 19 Z" fill="currentColor"/><path d="M32 4 L32 60 L16 45 L10 19 Z" fill="#000" opacity="0.30"/><path d="M32 4 L10 19 L16 45 Z" fill="#000" opacity="0.16"/></svg></div>
-  <a class="sb-item on" href="/" title="Globe"><svg viewBox="0 0 24 24"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg></a>
-  <a class="sb-item" href="/intel" title="Intel Console"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
+  <a class="sb-item on" href="/" title="Globe" aria-label="Globe" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg></a>
+  <a class="sb-item" href="/intel" title="Intel Console" aria-label="Intel Console"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
   <div class="sb-spacer"></div>
   <div class="sb-dot"></div>
 </nav>
@@ -345,7 +389,7 @@
     </defs>
   </svg>
   <div id="cobe-wrap">
-    <canvas id="cobe" width="1000" height="1000" role="img" aria-label="Interactive 3D globe showing attacker geolocation"></canvas>
+    <canvas id="cobe" width="1000" height="1000" role="img" aria-label="Globe of attacker origins; drag with a pointer to rotate. The Top source IPs table lists the same locations as text."></canvas>
     <div id="cobe-overlays"></div>
   </div>
 </div>
@@ -359,8 +403,8 @@
       origin <strong id="home-loc">— </strong><br/>
       updated <strong id="gen-at">— </strong>
     </div>
-    <nav class="nav">
-      <a href="/" class="active">Globe</a>
+    <nav class="nav" aria-label="Pages">
+      <a href="/" class="active" aria-current="page">Globe</a>
       <a href="/intel">Intel</a>
     </nav>
     <button id="density-toggle" type="button" title="Toggle UI density"></button>
@@ -408,7 +452,7 @@
   <section class="panel">
     <h2>Threat Level</h2>
     <div class="gauge-outer" id="threat-gauge">
-      <svg class="gauge-svg" viewBox="0 0 200 110">
+      <svg class="gauge-svg" viewBox="0 0 200 110" role="img" aria-labelledby="gauge-lbl-svg gauge-val">
         <defs>
           <linearGradient id="gg" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stop-color="var(--good)"/>
@@ -416,7 +460,7 @@
             <stop offset="100%" stop-color="var(--accent)"/>
           </linearGradient>
         </defs>
-        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="12" stroke-linecap="round"/>
+        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="currentColor" style="color: color-mix(in srgb, var(--ink, var(--text)) 8%, transparent)" stroke-width="12" stroke-linecap="round"/>
         <path id="gauge-arc" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gg)" stroke-width="12" stroke-linecap="round" stroke-dasharray="0 251"/>
         <text id="gauge-val" x="100" y="88" text-anchor="middle" fill="var(--text)" font-family="var(--mono)" font-size="36" font-weight="700">0</text>
         <text id="gauge-lbl-svg" x="100" y="104" text-anchor="middle" fill="var(--dim)" font-family="var(--mono)" font-size="10" font-weight="600" letter-spacing="0.12em">LOW</text>
@@ -427,9 +471,9 @@
 </aside>
 
 <aside class="rail right">
-  <section class="panel" style="flex: 0 1 auto; max-height: 28vh; display: flex; flex-direction: column;">
+  <section class="panel rail-topips">
     <h2>Top source IPs</h2>
-    <div style="overflow:auto; flex:1;">
+    <div class="rail-scroll">
       <table id="top-ips">
         <thead><tr><th>IP</th><th>Loc</th><th class="n">Hits</th></tr></thead>
         <tbody></tbody>
@@ -437,7 +481,7 @@
     </div>
   </section>
 
-  <section class="panel" style="flex: 1 1 auto; min-height: 200px; display: flex; flex-direction: column; overflow: hidden;">
+  <section class="panel rail-feed">
     <h2>Live feed</h2>
     <div class="feed"><div class="feed-inner" id="feed"></div></div>
   </section>
@@ -445,7 +489,7 @@
 
 <div class="sparkline panel">
   <div class="label"><span>Events / hour</span><span id="spark-max">peak 0</span></div>
-  <canvas id="spark" role="img" aria-label="Sparkline chart of recent event activity"></canvas>
+  <canvas id="spark" role="img" aria-label="Events per hour over the last 72 hours" aria-describedby="spark-max"></canvas>
 </div>
 
 <script>
@@ -1072,92 +1116,114 @@ function applyGlobeOverlays(force) {
   window.ShardCobe.setOverlayPlaces(places, nodes);
 }
 
+// In-flight guard + try/catch: /api/dashboard measured ~5 s cold on the
+// production box, so a 5 s timer could start a second request before the
+// first returned and the two raced to paint; a rejected fetch was an
+// unhandled promise on every tick.
+var _refreshInFlight = false;
+var _lastRefreshAt = 0;
 async function refresh() {
-  const r = await fetch('/api/dashboard?_=' + Date.now(), { cache: 'no-store' });
-  if (!r.ok) return;
-  const d = await r.json();
-  const summary = d.summary || {};
-  const actors = d.actors || [];
-  const recent = d.recent || [];
-  const home = d.home || { lat: 19.076, lon: 72.8777, city: 'Mumbai', country: 'India', cc: 'IN' };
-  _lastHome = home;
-  _lastActors = actors;
-  _lastTopActors = d.topActors || [];
-  // Cobe is fed a merged actors+topActors list (see the updateData call below).
-  // Remember exactly that list so the theme-switch path re-sends the SAME one:
-  // sending the unmerged list there rebuilt markers from a different set, so the
-  // marker ids meant different actors depending on which path ran last.
-  _lastGlobeActors = mergeActorsForGlobe(actors, _lastTopActors);
+  if (_refreshInFlight) return;
+  _refreshInFlight = true;
+  _lastRefreshAt = Date.now();
+  try {
+    const r = await fetch('/api/dashboard?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    const summary = d.summary || {};
+    const actors = d.actors || [];
+    const recent = d.recent || [];
+    const home = d.home || { lat: 19.076, lon: 72.8777, city: 'Mumbai', country: 'India', cc: 'IN' };
+    _lastHome = home;
+    _lastActors = actors;
+    _lastTopActors = d.topActors || [];
+    // Cobe is fed a merged actors+topActors list (see the updateData call below).
+    // Remember exactly that list so the theme-switch path re-sends the SAME one:
+    // sending the unmerged list there rebuilt markers from a different set, so the
+    // marker ids meant different actors depending on which path ran last.
+    _lastGlobeActors = mergeActorsForGlobe(actors, _lastTopActors);
 
-  document.getElementById('s-events').textContent = fmt(summary.eventCount);
-  document.getElementById('s-actors').textContent = fmt(summary.actorCount);
-  document.getElementById('s-ips').textContent = fmt(summary.uniqueIps);
-  document.getElementById('s-countries').textContent = fmt(summary.countries);
-  // Identity-over-IP coverage is EVENT-weighted over cowrie telemetry (see
-  // store.HASSHCoverage). Dividing by actorCount inverted the meaning: clustering
-  // collapses many IPs into one actor row, so the better it worked the worse the
-  // ratio looked (live box read 3% while 93.5% of events carried a fingerprint).
-  var fpN = summary.fingerprinted || 0, fpT = summary.fingerprintTotal || 0;
-  document.getElementById('s-fingerprinted').textContent =
-    fpT > 0 ? (Math.round(fpN / fpT * 1000) / 10) + '%' : '—';
-  // All-time distinct cowrie sessions. Uses summary.sessionCount, NOT
-  // d.sessions.length — that slice is server-capped at 30, so the tile would
-  // read a permanent "30" on any busy honeypot.
-  document.getElementById('s-sessions').textContent = fmt(summary.sessionCount || 0);
+    document.getElementById('s-events').textContent = fmt(summary.eventCount);
+    document.getElementById('s-actors').textContent = fmt(summary.actorCount);
+    document.getElementById('s-ips').textContent = fmt(summary.uniqueIps);
+    document.getElementById('s-countries').textContent = fmt(summary.countries);
+    // Identity-over-IP coverage is EVENT-weighted over cowrie telemetry (see
+    // store.HASSHCoverage). Dividing by actorCount inverted the meaning: clustering
+    // collapses many IPs into one actor row, so the better it worked the worse the
+    // ratio looked (live box read 3% while 93.5% of events carried a fingerprint).
+    var fpN = summary.fingerprinted || 0, fpT = summary.fingerprintTotal || 0;
+    document.getElementById('s-fingerprinted').textContent =
+      fpT > 0 ? (Math.round(fpN / fpT * 1000) / 10) + '%' : '—';
+    // All-time distinct cowrie sessions. Uses summary.sessionCount, NOT
+    // d.sessions.length — that slice is server-capped at 30, so the tile would
+    // read a permanent "30" on any busy honeypot.
+    document.getElementById('s-sessions').textContent = fmt(summary.sessionCount || 0);
 
-  // Honeypot panel. Cowrie runs as a SEPARATE systemd unit from this daemon, so
-  // its uptime is read read-only from systemd (cowrieUptimeSeconds); -1 means
-  // "could not determine" (no systemd, or unit never started) and renders as a
-  // dash rather than a fake zero. "last event" is the independent liveness
-  // signal that matters: a Cowrie that is 'up' but not logging is the real
-  // failure mode, and it comes from the newest ingested event, not the process.
-  var up = Number(summary.cowrieUptimeSeconds);
-  var stEl = document.getElementById('hp-state');
-  var upEl = document.getElementById('hp-uptime');
-  if (Number.isFinite(up) && up >= 0) {
-    stEl.textContent = 'active';
-    stEl.className = 'hp-v up';
-    upEl.textContent = dur(up);
-  } else {
-    stEl.textContent = 'unknown';
-    stEl.className = 'hp-v';
-    upEl.textContent = '—';
+    // Honeypot panel. Cowrie runs as a SEPARATE systemd unit from this daemon, so
+    // its uptime is read read-only from systemd (cowrieUptimeSeconds); -1 means
+    // "could not determine" (no systemd, or unit never started) and renders as a
+    // dash rather than a fake zero. "last event" is the independent liveness
+    // signal that matters: a Cowrie that is 'up' but not logging is the real
+    // failure mode, and it comes from the newest ingested event, not the process.
+    var up = Number(summary.cowrieUptimeSeconds);
+    var stEl = document.getElementById('hp-state');
+    var upEl = document.getElementById('hp-uptime');
+    if (Number.isFinite(up) && up >= 0) {
+      stEl.textContent = 'active';
+      stEl.className = 'hp-v up';
+      upEl.textContent = dur(up);
+    } else {
+      stEl.textContent = 'unknown';
+      stEl.className = 'hp-v';
+      upEl.textContent = '—';
+    }
+    var newest = (d.recent && d.recent.length) ? d.recent[0] : null;
+    var lastEl = document.getElementById('hp-last');
+    if (newest && newest.ts) {
+      var age = Math.max(0, Math.round((Date.now() - new Date(newest.ts).getTime()) / 1000));
+      lastEl.textContent = dur(age) + ' ago';
+      // Cowrie sees traffic constantly; minutes of silence is worth flagging.
+      lastEl.className = 'hp-v ' + (age > 900 ? 'stale' : 'up');
+    } else {
+      lastEl.textContent = '—';
+      lastEl.className = 'hp-v';
+    }
+    document.getElementById('hp-ingest').textContent = fmt(summary.eventCount || 0) + ' ev';
+    document.getElementById('home-loc').textContent = flag(home.cc) + ' ' + [home.city, home.country].filter(Boolean).join(', ');
+    document.getElementById('gen-at').textContent = new Date(d.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    renderGauge(d.threat);
+
+    renderTopIPs(d.topIps);
+    renderFeed(recent);
+
+    sparkData = (d.hourly || []).slice(-72);
+    drawSpark(sparkData);
+
+    const points = actors.filter(function(a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); });
+    if (!points.length && actors.length) {
+      document.getElementById('s-countries').textContent = '…';
+    }
+
+    if (window.ShardCobe) {
+      window.ShardCobe.updateData(home, _lastGlobeActors);
+    }
+    applyGlobeOverlays();
+  } catch (e) {
+    // keep the last good paint; the next tick retries
+  } finally {
+    _refreshInFlight = false;
   }
-  var newest = (d.recent && d.recent.length) ? d.recent[0] : null;
-  var lastEl = document.getElementById('hp-last');
-  if (newest && newest.ts) {
-    var age = Math.max(0, Math.round((Date.now() - new Date(newest.ts).getTime()) / 1000));
-    lastEl.textContent = dur(age) + ' ago';
-    // Cowrie sees traffic constantly; minutes of silence is worth flagging.
-    lastEl.className = 'hp-v ' + (age > 900 ? 'stale' : 'up');
-  } else {
-    lastEl.textContent = '—';
-    lastEl.className = 'hp-v';
-  }
-  document.getElementById('hp-ingest').textContent = fmt(summary.eventCount || 0) + ' ev';
-  document.getElementById('home-loc').textContent = flag(home.cc) + ' ' + [home.city, home.country].filter(Boolean).join(', ');
-  document.getElementById('gen-at').textContent = new Date(d.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  renderGauge(d.threat);
-
-  renderTopIPs(d.topIps);
-  renderFeed(recent);
-
-  sparkData = (d.hourly || []).slice(-72);
-  drawSpark(sparkData);
-
-  const points = actors.filter(function(a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); });
-  if (!points.length && actors.length) {
-    document.getElementById('s-countries').textContent = '…';
-  }
-
-  if (window.ShardCobe) {
-    window.ShardCobe.updateData(home, _lastGlobeActors);
-  }
-  applyGlobeOverlays();
 }
 
 refresh();
-setInterval(refresh, 5000);
+// Skip ticks while the tab is hidden (a background tab polled the slowest
+// endpoint for nobody) and refresh immediately when it becomes visible again.
+setInterval(function () { if (!document.hidden) refresh(); }, 5000);
+// Half a period since the last run, or a rapid hide/show toggle would fire
+// overlapping bursts of the slowest endpoint.
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && Date.now() - _lastRefreshAt > 2500) refresh();
+});
 window.addEventListener('resize', function() { drawSpark(sparkData); });
 </script>
 
