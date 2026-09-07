@@ -957,6 +957,13 @@ func (s *Server) RunContext(ctx context.Context) error {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		_, _ = w.Write(themesCSS)
 	})
+	// Self-hosted fonts (see fontsFS). Unauthenticated like the other static
+	// assets — a stylesheet fetch carries no token and the files hold no
+	// telemetry. fonts.css is short-cached like themes.css so a re-run of
+	// fetch-fonts.sh shows up; the woff2 files carry a sha256 prefix in their
+	// name (fetch-fonts.sh) so `immutable` is true by construction — a
+	// re-fetched face is a new URL, never stale bytes under an old one.
+	mux.HandleFunc("/fonts/", s.handleFont)
 	// Brand assets. Unauthenticated like the other static files: a favicon is
 	// requested by the browser before any token is available, and the mark
 	// carries no telemetry. Long cache — these change only on release.
@@ -1185,14 +1192,18 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		// CSP: all SCRIPTS are embedded (vis-network + the vendored Cobe globe
-		// engine under /vendor/), so script-src and connect-src are 'self' only
-		// — no CDN in the supply chain of an authenticated page, and the globe
-		// works on air-gapped networks. Fonts remain on Google Fonts because
-		// they degrade gracefully (system fallback) when unreachable.
-		// unsafe-inline is required for the inline <script> blocks in
-		// index.html / intel.html and Cobe's dynamic style injection.
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+		// CSP: every asset is embedded — scripts (vis-network + the vendored
+		// Cobe globe engine under /vendor/), styles, AND fonts (/fonts/, see
+		// fontsFS) — so every fetch directive is 'self' only: no third-party
+		// host in the supply chain of an authenticated page, nothing to leak
+		// a Referer to, and both dashboards render identically on an
+		// air-gapped network. Fonts were the last external dependency; they
+		// "degraded gracefully" to system fallbacks offline, which meant an
+		// egress-filtered deployment ran a different typography than the one
+		// that was designed and tested. unsafe-inline is required for the
+		// inline <script>/<style> blocks in index.html / intel.html and
+		// Cobe's dynamic style injection.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1766,4 +1777,39 @@ func (s *Server) handleRuntimeStats(w http.ResponseWriter, r *http.Request) {
 		"geoCacheMax":              geoMax,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleFont serves one file from the embedded fonts directory. The path is
+// reduced to its final segment before the lookup so a crafted request can never
+// reach outside the directory; anything that is not a woff2 face or the
+// generated stylesheet is a 404 rather than a directory listing.
+func (s *Server) handleFont(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/fonts/")
+	if name == "" || strings.ContainsAny(name, "/\\") || strings.HasPrefix(name, ".") {
+		http.NotFound(w, r)
+		return
+	}
+	var ct, cache string
+	switch {
+	case name == "fonts.css":
+		ct, cache = "text/css; charset=utf-8", "public, max-age=3600"
+	case strings.HasSuffix(name, ".woff2"):
+		ct, cache = "font/woff2", "public, max-age=86400, immutable"
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	data, err := fontsFS.ReadFile("fonts/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", cache)
+	_, _ = w.Write(data)
 }

@@ -152,6 +152,9 @@ func Build(events []*models.Event, topN int) Graph {
 	// that the graph is a top-N-per-kind sample, not the whole population.
 	out := Graph{
 		Nodes: nodes,
+		// Never nil: the panel reads data.edges.length, and an empty window
+		// used to encode as null, which read as "load failed" on a fresh install.
+		Edges: []Edge{},
 		Cap:   topN,
 		Totals: map[NodeKind]int{
 			NodeActor: len(actors),

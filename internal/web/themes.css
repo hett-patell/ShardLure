@@ -14,6 +14,14 @@ html[data-theme="signal"] {
   --text: #f7f7f8;
   --ink: #f7f7f8;
   --dim: #898a8b;
+  /* --dim-2 is the "even quieter" tier used for row numbers, timestamps and
+     secondary meta in intel.html. It is defined PER THEME here because the
+     page's own :root value (#604840, a warm brown from the pre-theme palette)
+     was never overridden and measured 2.4:1 on Signal's ground — well under
+     the 4.5:1 WCAG floor for the 10px text it decorates. Every theme's value
+     is pinned by TestDimTokensMeetContrast against its bg AND its lightest
+     panel surface. */
+  --dim-2: #86888b;
   --muted: #565a5e;
   --accent: #d1fe17;
   --accent-2: #40d986;
@@ -23,9 +31,16 @@ html[data-theme="signal"] {
   --ok: #40d986;
   --blue-team: #5a8fd4;
   --red-team: #e72930;
+  /* Keyboard focus ring colour. Chosen per theme for >= 3:1 against the
+     body ground (non-text contrast): the accent where it is legible, the
+     ink where the accent is too pale (Sprite's coral on cream is 3.2:1 but
+     the chunky ink border is the theme's own idiom). */
+  --focus-ring: #d1fe17;
   --mono: "JetBrains Mono", ui-monospace, monospace;
   --sans: "Inter", system-ui, -apple-system, sans-serif;
-  --display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  /* Only Sprite's rules read --display; it is defined here so the token
+     resolves under every theme. */
+  --display: "Inter", system-ui, sans-serif;
   --radius: 12px;
   --chunk: 0px;
   --shadow: none;
@@ -49,7 +64,9 @@ html[data-theme="signal"][data-mode="light"] {
   --text: #14151a;
   --ink: #14151a;
   --dim: #5c5e63;
+  --dim-2: #66686d;
   --muted: #8b8d92;
+  --focus-ring: #1f8a4c;
   --accent: #b6d900;
   --accent-2: #1f8a4c;
   --good: #1f8a4c;
@@ -73,8 +90,10 @@ html[data-theme="meridian"] {
   --line-soft: #d5dbe3;
   --text: #1a2332;
   --ink: #1a2332;
-  --dim: #5c6775;
-  --muted: #5c6775;
+  --dim: #525d6b;
+  --dim-2: #57626f;
+  --muted: #525d6b;
+  --focus-ring: #0d5c63;
   --accent: #0d5c63;
   --accent-2: #a67c2d;
   --good: #2f6b4f;
@@ -109,7 +128,9 @@ html[data-theme="sprite"] {
   --text: #241910;
   --ink: #241910;
   --dim: #5c4a3e;
+  --dim-2: #7a6759;
   --muted: #5c4a3e;
+  --focus-ring: #241910;
   --accent: #e85d4c;
   --accent-2: #f0b429;
   --good: #2f9a62;
@@ -118,7 +139,9 @@ html[data-theme="sprite"] {
   --ok: #2f9a62;
   --blue-team: #3a5a9a;
   --red-team: #e85d4c;
-  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* System stack on purpose (the pixel console wants the OS terminal face);
+     ui-monospace already resolves to SF Mono on Apple platforms. */
+  --mono: ui-monospace, Menlo, Consolas, monospace;
   --sans: "DM Sans", system-ui, sans-serif;
   --display: "Pixelify Sans", ui-rounded, system-ui, sans-serif;
   --radius: 0px;
@@ -130,6 +153,23 @@ html[data-theme="sprite"] {
   --globe-atmosphere: #6ec0e0;
   --globe-point: #e85d4c;
   --bg-pane: var(--glass-2);
+}
+
+/* Keyboard focus. One rule for both dashboards so every interactive control
+   — tabs, chips, sidebar links, buttons, inputs, theme cards, dialog close
+   buttons, the pivot-graph canvas — gets the same visible ring (WCAG 2.4.7).
+   :focus-visible only fires for keyboard/AT focus, so pointer clicks stay
+   clean. The two pages used to suppress the UA outline on their inputs with
+   outline:none and replaced it with nothing; that rule is gone and a test
+   pins that it never comes back. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 2px;
+}
+/* Rows and cells that act as buttons get an inset ring so it is not clipped
+   by the panel's overflow:hidden. */
+tr:focus-visible, td:focus-visible, .sess-row:focus-visible, .mitre-cell:focus-visible {
+  outline-offset: -2px;
 }
 
 /* Shared chrome that keys off theme tokens */
@@ -364,7 +404,7 @@ html[data-theme="signal"] .globe-sat {
 }
 .globe-live {
   display: inline-flex; align-items: center; gap: 5px;
-  font: 600 9px var(--mono);
+  font: 600 10px var(--mono);
   letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--ok); background: var(--sheet);
   border: 1px solid var(--line); padding: 3px 7px 3px 6px;
@@ -386,7 +426,7 @@ html[data-theme="signal"] .globe-sat {
    opacity stays the front/back signal, so the two multiply. */
 .globe-analytics, .globe-sat, .globe-live { transition: opacity 0.22s ease; }
 .globe-analytics {
-  font: 500 10px var(--mono); color: var(--ink);
+  font: 500 11px var(--mono); color: var(--ink);
   background: color-mix(in srgb, var(--sheet) 96%, transparent);
   border: 1px solid var(--line);
   padding: 4px 7px; white-space: nowrap; text-align: left;
@@ -394,7 +434,7 @@ html[data-theme="signal"] .globe-sat {
   transform: translate(12px, -50%);
 }
 .globe-analytics .lbl {
-  color: var(--dim); display: block; font-size: 8px;
+  color: var(--dim); display: block; font-size: 10px;
   letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 1px;
 }
 .globe-analytics .up { color: var(--ok); }
@@ -976,4 +1016,45 @@ html[data-theme="sprite"] #heatmap-wrap {
   border: 2px solid var(--line);
   border-radius: 0;
   box-shadow: 2px 2px 0 rgba(36, 25, 16, 0.1);
+}
+
+/* ==== Globe stage on small screens ====
+   Kept here beside the desktop #cobe-stage / #cobe-wrap rules so the cascade
+   order is explicit: this file loads after each page's inline stylesheet, so a
+   phone override written there would lose to the fixed-position rules above.
+   Tablet (<=1100px): the rails are 280px each, so the globe's max-width
+   tracks them (it was calc(100vw - 744px) = 156px at 900px wide).
+   Phone (<=760px): the stage leaves the fixed layer and becomes the first
+   block of a normally scrolling page (index.html hands the rails over to
+   static flow at the same breakpoint); the wrapper's viewport-relative
+   max-width, which computed to 0px on a 375px screen, is dropped. */
+/* Above the phone breakpoint the stage is offset so the globe is centred in
+   the free band between the two rails rather than in the viewport, which put
+   its left limb under the left rail (32px at 900px). Tablet rails are both
+   280px, so the band starts at the 52px sidebar; desktop rails are 344px and
+   320px, so the band's centre sits (344-320)/2 = 12px further right and the
+   stage starts at 52 + 24 = 76px. */
+@media (min-width: 761px) {
+  #cobe-stage { left: 52px; }
+}
+@media (min-width: 1101px) {
+  #cobe-stage { left: 76px; }
+}
+@media (max-width: 1100px) {
+  /* 52px sidebar + two 280px rails + 40px of breathing room. */
+  #cobe-wrap { max-width: calc(100vw - 652px); }
+}
+@media (max-width: 760px) {
+  /* The Signal star-field rule above sets background-attachment: fixed at a
+     higher specificity, so it is named here too or the stars stay pinned to
+     the viewport and pan against the stage as the page scrolls. */
+  #cobe-stage, #cobe-stage.on,
+  html[data-theme="signal"]:not([data-mode="light"]) #cobe-stage {
+    position: relative; inset: auto; height: auto; padding: 12px 0 4px;
+    background-attachment: scroll;
+  }
+  #cobe-wrap {
+    width: min(78vw, 340px); height: min(78vw, 340px);
+    max-width: none; max-height: none;
+  }
 }

@@ -4,6 +4,10 @@
 <script>
   try {
     var t = localStorage.getItem('shardlure_theme') || 'signal';
+    // Validate before writing the attribute: a stale value from a removed
+    // theme (localStorage outlives releases) matched no theme block and the
+    // page rendered in the pre-theme :root palette.
+    if (t !== 'signal' && t !== 'meridian' && t !== 'sprite') t = 'signal';
     var m = localStorage.getItem('shardlure_mode') || 'dark';
     var d = localStorage.getItem('shardlure_density') || 'comfortable';
     document.documentElement.setAttribute('data-theme', t);
@@ -21,9 +25,9 @@
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/logo-180.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Pixelify+Sans:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<!-- Typography is self-hosted (internal/web/fonts, see its README): no egress,
+     no third-party host in the CSP, identical rendering on an air-gapped box. -->
+<link rel="stylesheet" href="/fonts/fonts.css?v=2">
 
 <style>
   :root {
@@ -35,7 +39,11 @@
     --line-strong: rgba(200,120,100,0.22);
     --text: #e8dcd8;
     --dim: #907068;
-    --dim-2: #604840;
+    /* Pre-theme fallbacks only: themes.css redefines --dim-2 and --focus-ring
+       per theme (see the comment there). These must still clear 4.5:1 / 3:1
+       on the legacy ground in case a theme block ever fails to apply. */
+    --dim-2: #9b7e75;
+    --focus-ring: var(--accent-2);
     --accent: #d02828;
     --accent-2: #c89828;
     --good: #48b878;
@@ -44,7 +52,7 @@
     --red-team: #d87030;
     --blue-team: #c89828;
     --mono: "JetBrains Mono", ui-monospace, monospace;
-    --sans: "Chakra Petch", system-ui, sans-serif;
+    --sans: "Inter", system-ui, sans-serif; /* vendored; themes.css overrides per theme */
     /* Density scale. "comfortable" is the default; "compact" restores the
        original 13px base for operators who preferred the denser layout. */
     --fs-base: 14px;
@@ -58,6 +66,12 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; }
+  /* Screen-reader-only text (chart summaries, hidden labels). */
+  .visually-hidden:where(:not(:focus-within, :active)) {
+    position: absolute !important; clip-path: inset(50%) !important; overflow: hidden !important;
+    width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important;
+    border: 0 !important; white-space: nowrap !important;
+  }
   body {
     font: var(--fs-base)/1.5 var(--sans);
     background: var(--bg);
@@ -90,7 +104,12 @@
   .nav a:hover { color: var(--text); border-color: var(--line-strong); }
   .nav a.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
-  @media (max-width: 720px) { .stats { grid-template-columns: 1fr 1fr; } }
+  /* Column count lives in a class, never an inline style: an inline
+     grid-template-columns beats every media query, which is how the five-tile
+     rows kept five 46px columns on a 375px phone. */
+  .stats.cols-5 { grid-template-columns: repeat(5, 1fr); }
+  .stats.tight { margin-bottom: 12px; }
+  @media (max-width: 720px) { .stats, .stats.cols-5 { grid-template-columns: 1fr 1fr; } }
   .stat { background: var(--glass-2); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px; position: relative; overflow: hidden; }
   .stat::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px; opacity: 0; transition: opacity 0.2s; }
   .stat:hover::after { opacity: 1; }
@@ -133,12 +152,12 @@
   td.loc { color: var(--dim); }
   .empty { color: var(--dim); font-family: var(--mono); font-size: 11px; padding: 8px 0; }
   tr.actor-row { cursor: pointer; }
-  tr.actor-row:hover td { background: rgba(255,255,255,0.03); }
+  tr.actor-row:hover td { background: color-mix(in srgb, var(--ink) 4%, transparent); }
   tr.actor-row.selected td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .bars { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; }
   .bar-row { display: grid; grid-template-columns: 100px 1fr 48px; gap: 8px; align-items: center; font-family: var(--mono); font-size: 11px; }
   .bar-row .lbl { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bar-row .track { height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; display: block; }
+  .bar-row .track { height: 6px; background: color-mix(in srgb, var(--ink) 8%, transparent); border-radius: 3px; overflow: hidden; display: block; }
   .bar-row .fill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 3px; }
   .bar-row .n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; }
   #heatmap-wrap {
@@ -184,14 +203,14 @@
   .cap-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
   .cap-head h2 { margin: 0; }
   .cap-live {
-    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
-    padding: 4px 10px; border-radius: 3px; border: 1px solid rgba(72,184,120,0.35);
-    color: var(--good); background: rgba(72,184,120,0.08);
+    font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+    padding: 4px 10px; border-radius: 3px; border: 1px solid color-mix(in srgb, var(--good) 35%, transparent);
+    color: var(--good); background: color-mix(in srgb, var(--good) 8%, transparent);
   }
   .cap-live.active { animation: capPulse 1.2s infinite; }
   @keyframes capPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(72,184,120,0.45); }
-    50% { box-shadow: 0 0 0 6px rgba(72,184,120,0); }
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 45%, transparent); }
+    50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--good) 0%, transparent); }
   }
   .cap-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
   @media (max-width: 720px) { .cap-stats { grid-template-columns: 1fr 1fr; } }
@@ -199,7 +218,7 @@
   .cap-stat .n { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--good); }
   .cap-stat .n.warn { color: var(--warn); }
   .cap-stat .n.dim { color: var(--accent-2); }
-  .cap-stat .l { color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
+  .cap-stat .l { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
   td.url { color: var(--accent-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   td.hash { color: var(--dim); font-size: 10px; font-family: var(--mono); white-space: normal; word-break: break-all; line-height: 1.35; font-variant-numeric: tabular-nums; }
   td.size { color: var(--good); text-align: right; }
@@ -212,15 +231,15 @@
   #capture-table th:nth-child(6), #capture-table td:nth-child(6) { width: 11%; }
   #capture-table th:nth-child(7), #capture-table td:nth-child(7) { width: 9%; }
   .cap-badge {
-    font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
     padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line);
     display: inline-block;
   }
-  .cap-badge.capturing { color: var(--warn); border-color: rgba(200,152,40,0.45); background: rgba(200,152,40,0.1); }
-  .cap-badge.fetched { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
+  .cap-badge.capturing { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+  .cap-badge.fetched { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); }
   .cap-badge.failed, .cap-badge.blocked { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
   tr.cap-row-new td { animation: capFade 0.45s ease; }
-  @keyframes capFade { from { background: rgba(72,184,120,0.12); } to { background: transparent; } }
+  @keyframes capFade { from { background: color-mix(in srgb, var(--good) 12%, transparent); } to { background: transparent; } }
 
   /* ==== SOC console v2: sidebar + topbar + denser data ==== */
   html, body { height: 100%; overflow: hidden; }
@@ -309,7 +328,7 @@
     background: var(--panel-bg); border: 1px solid var(--line-strong);
     border-radius: var(--radius); box-shadow: 0 12px 32px color-mix(in srgb, var(--ink) 35%, transparent);
   }
-  .palette .pg { font: 600 9px var(--mono); letter-spacing: .14em; text-transform: uppercase;
+  .palette .pg { font: 600 10px var(--mono); letter-spacing: .14em; text-transform: uppercase;
     color: var(--dim); padding: 8px 10px 4px; }
   .palette .pi { display: flex; justify-content: space-between; gap: 10px;
     padding: 6px 10px; font: 12px var(--mono); color: var(--text); cursor: pointer; }
@@ -318,17 +337,18 @@
   .palette .pempty { padding: 10px; font: 11px var(--mono); color: var(--dim); }
   .chip {
     font-family: var(--mono); font-size: 10.5px; padding: 5px 9px; border-radius: 3px;
-    border: 1px solid var(--line); color: var(--dim); background: rgba(0,0,0,0.25);
+    border: 1px solid var(--line); color: var(--dim); background: color-mix(in srgb, var(--bg) 60%, transparent);
     cursor: pointer; user-select: none;
     letter-spacing: 0.04em;
+    /* WCAG 2.5.8 target size: a comfortable 28px tall, not 24. */
+    min-height: 28px; display: inline-flex; align-items: center;
   }
   .chip:hover { color: var(--text); border-color: var(--line-strong); }
   .chip.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .chip-sep { color: var(--dim-2); font-family: var(--mono); font-size: 10px; padding: 0 2px; }
   .toolbar input.search {
-    background: rgba(0,0,0,0.35); border: 1px solid var(--line); color: var(--text);
+    background: color-mix(in srgb, var(--bg) 75%, transparent); border: 1px solid var(--line); color: var(--text);
     font-family: var(--mono); font-size: 11px; padding: 5px 9px; border-radius: 3px; min-width: 180px;
-    outline: none;
   }
   .toolbar input.search:focus { border-color: var(--accent-2); }
 
@@ -363,17 +383,17 @@
 
   /* Tag/badge cluster shared across tabs */
   .tag {
-    display: inline-block; font-family: var(--mono); font-size: 9.5px;
+    display: inline-block; font-family: var(--mono); font-size: 10px;
     padding: 2px 6px; border-radius: 4px; letter-spacing: 0.05em;
     border: 1px solid var(--line); color: var(--dim);
   }
   .tag.hot { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  .tag.warm { color: var(--warn); border-color: rgba(200,152,40,0.4); background: rgba(200,152,40,0.08); }
-  .tag.cool { color: var(--accent-2); border-color: rgba(200,152,40,0.4); background: rgba(200,152,40,0.08); }
-  .tag.ok { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
-  .tag.red { color: var(--red-team); border-color: rgba(216,112,48,0.4); background: rgba(216,112,48,0.08); }
-  .tag.blue { color: var(--blue-team); border-color: rgba(200,152,40,0.4); background: rgba(200,152,40,0.08); }
-  .tag.purple { color: var(--purple); border-color: rgba(168,120,192,0.4); background: rgba(168,120,192,0.08); }
+  .tag.warm { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+  .tag.cool { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 40%, transparent); background: color-mix(in srgb, var(--accent-2) 8%, transparent); }
+  .tag.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); }
+  .tag.red { color: var(--red-team); border-color: color-mix(in srgb, var(--red-team) 40%, transparent); background: color-mix(in srgb, var(--red-team) 8%, transparent); }
+  .tag.blue { color: var(--blue-team); border-color: color-mix(in srgb, var(--blue-team) 40%, transparent); background: color-mix(in srgb, var(--blue-team) 8%, transparent); }
+  .tag.purple { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 40%, transparent); background: color-mix(in srgb, var(--purple) 8%, transparent); }
 
   /* Sparkline row */
   .spark { display: inline-flex; align-items: flex-end; height: 14px; gap: 1px; }
@@ -397,12 +417,12 @@
     border: 1px solid var(--line);
   }
   .team-banner.blue {
-    background: linear-gradient(90deg, rgba(200,152,40,0.08), rgba(200,152,40,0.02));
-    border-color: rgba(200,152,40,0.25);
+    background: linear-gradient(90deg, color-mix(in srgb, var(--accent-2) 8%, transparent), color-mix(in srgb, var(--accent-2) 2%, transparent));
+    border-color: color-mix(in srgb, var(--accent-2) 25%, transparent);
   }
   .team-banner.red {
-    background: linear-gradient(90deg, rgba(216,112,48,0.08), rgba(216,112,48,0.02));
-    border-color: rgba(216,112,48,0.25);
+    background: linear-gradient(90deg, color-mix(in srgb, var(--red-team) 8%, transparent), color-mix(in srgb, var(--red-team) 2%, transparent));
+    border-color: color-mix(in srgb, var(--red-team) 25%, transparent);
   }
   .team-banner .tb-title { font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; }
   .team-banner.blue .tb-title { color: var(--blue-team); }
@@ -424,13 +444,13 @@
     min-width: 0;
   }
   .mitre-col h4 {
-    margin: 0 0 8px; font-size: 9.5px; letter-spacing: 0.1em;
+    margin: 0 0 8px; font-size: 10px; letter-spacing: 0.1em;
     text-transform: uppercase; color: var(--blue-team);
     font-weight: 600; text-align: center; line-height: 1.3;
     min-height: 22px;
   }
   .mitre-col .mt-empty {
-    color: var(--dim-2); font-family: var(--mono); font-size: 9px;
+    color: var(--dim-2); font-family: var(--mono); font-size: 10px;
     text-align: center; padding: 6px 0; font-style: italic;
   }
   .mitre-cell {
@@ -448,7 +468,7 @@
   .mitre-cell.lv4 { background: color-mix(in srgb, var(--warn) 26%, transparent);     border-color: color-mix(in srgb, var(--warn) 52%, transparent); color: var(--text); }
   .mitre-cell.lv5 { background: color-mix(in srgb, var(--accent) 32%, transparent);   border-color: color-mix(in srgb, var(--accent) 62%, transparent); color: var(--text); }
   .mitre-cell .mt-id { font-weight: 600; letter-spacing: 0.04em; display: flex; justify-content: space-between; align-items: center; gap: 4px; }
-  .mitre-cell .mt-name { color: inherit; opacity: 0.85; font-size: 9.5px; margin-top: 2px; line-height: 1.25; white-space: normal; }
+  .mitre-cell .mt-name { color: inherit; opacity: 0.85; font-size: 10px; margin-top: 2px; line-height: 1.25; white-space: normal; }
   .mitre-cell .mt-n { font-weight: 700; font-variant-numeric: tabular-nums; }
   .mitre-top {
     display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
@@ -474,7 +494,7 @@
     display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px;
   }
   .sess-jump {
-    font: 600 9px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
     padding: 3px 10px; border-radius: 3px; cursor: pointer;
     color: var(--dim); background: var(--glass-2); border: 1px solid var(--line);
   }
@@ -489,7 +509,7 @@
   .sess-head {
     position: sticky; top: 0; z-index: 2;
     background: var(--glass); border-bottom: 1px solid var(--line-strong);
-    color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
     font-weight: 600;
   }
   .sess-head .n, .sess-row .n { text-align: right; }
@@ -499,34 +519,35 @@
     cursor: pointer; transition: background 0.12s;
   }
   .sess-row:last-child { border-bottom: 0; }
-  .sess-row:hover { background: rgba(200,152,40,0.05); }
+  .sess-row:hover { background: color-mix(in srgb, var(--accent-2) 5%, transparent); }
   .sess-row .sess-num { color: var(--dim-2); text-align: right; }
   .sess-row .sess-when { color: var(--dim); font-variant-numeric: tabular-nums; }
   .sess-row .sess-ip { color: var(--accent-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-row .sess-user { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-row .sess-client { color: var(--dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sess-row .sess-hassh { color: var(--purple); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sess-row .sess-actor { color: var(--dim-2); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-row .sess-hassh { color: var(--purple); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-row .sess-actor { color: var(--dim-2); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-row .sess-arch {
-    color: var(--dim-2); font-size: 8.5px; margin-left: 4px;
+    color: var(--dim-2); font-size: 10px; margin-left: 4px;
     padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px;
     vertical-align: middle;
   }
   /* Suggested AbuseIPDB reports */
   .abuse-note {
     margin: 0 0 8px; padding: 6px 10px; font-size: 11px; color: var(--dim);
-    background: rgba(200,152,40,0.06); border-left: 2px solid var(--blue-team); border-radius: 3px;
+    background: color-mix(in srgb, var(--blue-team) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--blue-team) 35%, var(--line)); border-radius: 3px;
   }
   .pri-badge {
     display: inline-block; min-width: 22px; text-align: center; font-weight: 700;
     font-variant-numeric: tabular-nums; padding: 1px 5px; border-radius: 4px; font-size: 11px;
   }
-  .pri-badge.pri-hi  { color: #ff6b4a; background: rgba(216,64,40,0.14); border: 1px solid rgba(216,64,40,0.45); }
-  .pri-badge.pri-mid { color: var(--blue-team); background: rgba(200,152,40,0.12); border: 1px solid rgba(200,152,40,0.4); }
-  .pri-badge.pri-lo  { color: var(--dim); background: rgba(255,255,255,0.03); border: 1px solid var(--line); }
+  .pri-badge.pri-hi  { color: var(--danger, var(--accent)); background: color-mix(in srgb, var(--danger, var(--accent)) 14%, transparent); border: 1px solid color-mix(in srgb, var(--danger, var(--accent)) 45%, transparent); }
+  .pri-badge.pri-mid { color: var(--blue-team); background: color-mix(in srgb, var(--blue-team) 12%, transparent); border: 1px solid color-mix(in srgb, var(--blue-team) 40%, transparent); }
+  .pri-badge.pri-lo  { color: var(--dim); background: color-mix(in srgb, var(--ink) 4%, transparent); border: 1px solid var(--line); }
   #abuse-suggest-table td.why { white-space: normal; }
   #abuse-suggest-table .why-tag {
-    display: inline-block; font-size: 9px; color: var(--dim); margin: 1px 3px 1px 0;
+    display: inline-block; font-size: 10px; color: var(--dim); margin: 1px 3px 1px 0;
     padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px;
   }
   #abuse-suggest-table .sg-btn { padding: 2px 7px; font-size: 10px; }
@@ -535,24 +556,32 @@
   .sess-row .sess-n { color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
   .sess-row .sess-c { color: var(--good); text-align: right; font-variant-numeric: tabular-nums; }
 
-  /* terminal-style modal */
+  /* terminal-style modal — a native <dialog> opened with showModal(), so the
+     browser owns the focus trap, the Esc key, the top layer and marking the
+     rest of the page inert, and returns focus to the opener on close. The old
+     div.open overlay left focus on <body> with every control behind it still
+     tabbable. The dialog element itself is the transparent full-viewport
+     frame (a click on it outside the card still light-dismisses, as before);
+     ::backdrop carries the dimming. */
   .sess-modal {
     position: fixed; inset: 0; z-index: 100;
-    background: rgba(10,6,8,0.88);
+    width: 100%; max-width: 100%; height: 100%; max-height: 100%;
+    margin: 0; border: 0; background: transparent; color: inherit;
     display: none; align-items: stretch; justify-content: center;
-    padding: 40px 24px;
+    padding: 40px 24px; box-sizing: border-box;
   }
-  .sess-modal.open { display: flex; }
+  .sess-modal[open] { display: flex; }
+  .sess-modal::backdrop { background: rgba(10,6,8,0.88); }
   .sess-modal .sm-card {
-    background: #141010; border: 1px solid var(--line-strong); border-radius: 4px;
-    width: 100%; max-width: 1100px; display: flex; flex-direction: column;
+    background: var(--glass); border: 1px solid var(--line-strong); border-radius: 4px;
+    width: 100%; max-width: 1100px; display: flex; flex-direction: column; min-height: 0;
     box-shadow: 0 24px 80px rgba(0,0,0,0.6);
   }
   .sm-head {
     display: flex; align-items: center; gap: 12px; padding: 12px 18px;
     border-bottom: 1px solid var(--line);
   }
-  .sm-head .sm-title { font-family: var(--mono); font-size: 12px; color: var(--text); flex: 1; }
+  .sm-head .sm-title { margin: 0; font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--text); flex: 1; }
   .sm-head .sm-sub { font-family: var(--mono); font-size: 10px; color: var(--dim); }
   .sm-head .sm-close {
     border: 1px solid var(--line); background: transparent; color: var(--dim);
@@ -563,7 +592,7 @@
   .sm-body {
     flex: 1; overflow: auto; padding: 14px 18px;
     font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
-    background: #02060d;
+    background: var(--bg);
   }
   .sm-line { display: grid; grid-template-columns: 64px 110px 1fr 220px; gap: 10px; padding: 2px 0; }
   .sm-line .ln-off { color: var(--dim-2); text-align: right; }
@@ -574,8 +603,8 @@
   .sm-line.kind-connect .ln-txt { color: var(--purple); }
   .sm-line .ln-techs { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
   .sm-line .ln-techs .tt {
-    border: 1px solid rgba(200,152,40,0.3); background: rgba(200,152,40,0.06);
-    color: var(--blue-team); font-size: 9px; padding: 1px 5px; border-radius: 4px;
+    border: 1px solid color-mix(in srgb, var(--blue-team) 30%, transparent); background: color-mix(in srgb, var(--blue-team) 6%, transparent);
+    color: var(--blue-team); font-size: 10px; padding: 1px 5px; border-radius: 4px;
     letter-spacing: 0.04em;
   }
   .sm-transcript {
@@ -610,18 +639,22 @@
   }
   .ioc-kind:hover { color: var(--text); border-color: var(--line-strong); }
   .ioc-kind.active {
-    color: var(--blue-team); border-color: rgba(200,152,40,0.5);
-    background: rgba(200,152,40,0.08);
+    color: var(--blue-team); border-color: color-mix(in srgb, var(--blue-team) 50%, transparent);
+    background: color-mix(in srgb, var(--blue-team) 8%, transparent);
   }
   .ioc-actions { display: flex; gap: 8px; }
+  /* Real <button>s: every download goes through downloadWithAuth (a fetch with
+     the auth header + a Blob), so these never had a usable href — and an
+     anchor without one is neither focusable nor a link to assistive tech. */
   .ioc-dl {
     color: var(--text); background: transparent; border: 1px solid var(--line-strong);
     font-family: var(--mono); font-size: 11px; padding: 5px 12px; border-radius: 3px;
     text-decoration: none; transition: background 0.12s, border-color 0.12s;
+    cursor: pointer; line-height: normal;
   }
   .ioc-dl:hover {
-    color: var(--blue-team); border-color: rgba(200,152,40,0.6);
-    background: rgba(200,152,40,0.05);
+    color: var(--blue-team); border-color: color-mix(in srgb, var(--blue-team) 60%, transparent);
+    background: color-mix(in srgb, var(--blue-team) 5%, transparent);
   }
   #ioc-table { table-layout: fixed; }
   #ioc-table td:nth-child(1) {
@@ -637,21 +670,23 @@
   /* ==== Slice E: threat intel enrichment ==== */
   .enrich-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
   .enrich-input {
-    flex: 1; background: rgba(255,255,255,0.02); border: 1px solid var(--line);
+    flex: 1; background: color-mix(in srgb, var(--ink) 3%, transparent); border: 1px solid var(--line);
     border-radius: 3px; color: var(--text); font-family: var(--mono); font-size: 12px;
     padding: 6px 10px;
   }
-  .enrich-input:focus { outline: none; border-color: rgba(200,152,40,0.5); }
+  .enrich-input:focus { border-color: color-mix(in srgb, var(--blue-team) 50%, transparent); }
   .enrich-btn {
-    background: transparent; color: var(--blue-team); border: 1px solid rgba(200,152,40,0.4);
+    background: transparent; color: var(--blue-team); border: 1px solid color-mix(in srgb, var(--blue-team) 40%, transparent);
     font-family: var(--mono); font-size: 11px; padding: 5px 16px; border-radius: 3px;
     cursor: pointer; letter-spacing: 0.04em;
   }
-  .enrich-btn:hover { background: rgba(200,152,40,0.08); }
+  .enrich-btn:hover { background: color-mix(in srgb, var(--accent-2) 8%, transparent); }
   .enrich-cards { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  /* Verdict is carried by the full border tint AND the text badge — never by
+     a side stripe alone, which reads as decoration and says nothing to AT. */
   .enrich-card {
-    border: 1px solid var(--line); border-left: 3px solid var(--line-strong);
-    border-radius: 3px; padding: 10px 12px; background: rgba(255,255,255,0.01);
+    border: 1px solid var(--line);
+    border-radius: 3px; padding: 10px 12px; background: color-mix(in srgb, var(--ink) 2%, transparent);
   }
   .enrich-card .ec-head {
     display: flex; align-items: center; justify-content: space-between;
@@ -665,14 +700,14 @@
     font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 4px;
     letter-spacing: 0.05em;
   }
-  .enrich-card.verdict-malicious  { border-left-color: var(--accent); }
+  .enrich-card.verdict-malicious  { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
   .enrich-card.verdict-malicious  .ec-verdict { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
-  .enrich-card.verdict-suspicious { border-left-color: var(--warn); }
-  .enrich-card.verdict-suspicious .ec-verdict { background: rgba(200,152,40,0.12); color: var(--warn); }
-  .enrich-card.verdict-benign     { border-left-color: var(--good); }
-  .enrich-card.verdict-benign     .ec-verdict { background: rgba(72,219,156,0.12); color: var(--good); }
-  .enrich-card.verdict-unknown    .ec-verdict { background: rgba(255,255,255,0.04); color: var(--dim); }
-  .enrich-card.verdict-error      { border-left-color: var(--accent); }
+  .enrich-card.verdict-suspicious { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+  .enrich-card.verdict-suspicious .ec-verdict { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); }
+  .enrich-card.verdict-benign     { border-color: color-mix(in srgb, var(--good) 55%, var(--line)); }
+  .enrich-card.verdict-benign     .ec-verdict { background: color-mix(in srgb, var(--good) 12%, transparent); color: var(--good); }
+  .enrich-card.verdict-unknown    .ec-verdict { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--dim); }
+  .enrich-card.verdict-error      { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
   .enrich-card .ec-summary {
     font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 4px;
   }
@@ -684,7 +719,7 @@
   .enrich-card .ec-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
   .enrich-card .ec-tag {
     border: 1px solid var(--line); color: var(--purple); font-family: var(--mono);
-    font-size: 9px; padding: 1px 6px; border-radius: 4px;
+    font-size: 10px; padding: 1px 6px; border-radius: 4px;
   }
   .enrich-card .ec-link {
     color: var(--blue-team); font-family: var(--mono); font-size: 10px;
@@ -692,7 +727,7 @@
   }
   .enrich-card .ec-link:hover { text-decoration: underline; }
   .enrich-card .ec-status {
-    font-family: var(--mono); font-size: 9px; color: var(--dim-2);
+    font-family: var(--mono); font-size: 10px; color: var(--dim-2);
     margin-left: auto;
   }
   .enrich-card .ec-status.stale { color: var(--warn); }
@@ -713,7 +748,7 @@
   .ttp-table td.num { color: var(--accent); font-variant-numeric: tabular-nums; }
   .ttp-table td.tcol .tt {
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); background: color-mix(in srgb, var(--accent) 6%, transparent);
-    color: var(--accent); font-family: var(--mono); font-size: 9px;
+    color: var(--accent); font-family: var(--mono); font-size: 10px;
     padding: 1px 5px; border-radius: 4px; margin-right: 3px;
   }
   .ttp-table td.range { color: var(--dim); font-family: var(--mono); font-size: 10px; }
@@ -874,9 +909,6 @@
     width: 100%;
     height: 100%;
   }
-  .graph-canvas .vis-network canvas {
-    outline: none;
-  }
   .graph-legend {
     display: flex; align-items: center; gap: 14px;
     font-family: var(--mono); font-size: 11px; color: var(--dim);
@@ -926,7 +958,7 @@
     font-family: var(--mono); font-size: 11px;
     padding: 7px 10px; border-radius: 3px;
   }
-  .deobf-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .deobf-input:focus { border-color: var(--accent); }
   .deobf-btn {
     background: transparent; color: var(--dim); border: 1px solid var(--line);
     font-family: var(--mono); font-size: 11px; padding: 5px 12px; border-radius: 3px;
@@ -959,7 +991,7 @@
     display: inline-block;
     background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    border-radius: 3px; padding: 0 5px; font-size: 9px; margin-right: 4px;
+    border-radius: 3px; padding: 0 5px; font-size: 10px; margin-right: 4px;
     letter-spacing: 0.04em; text-transform: uppercase;
   }
   ::-webkit-scrollbar { width: 4px; height: 4px; }
@@ -971,7 +1003,7 @@
   .geo-bars { display: flex; flex-direction: column; gap: 4px; }
   .geo-row { display: grid; grid-template-columns: 24px minmax(0,80px) 1fr 42px; gap: 4px; align-items: center; font: 11px var(--mono); }
   .geo-flag { text-align: center; }
-  .geo-track { height: 4px; background: rgba(255,255,255,0.04); border-radius: 2px; overflow: hidden; }
+  .geo-track { height: 4px; background: color-mix(in srgb, var(--ink) 6%, transparent); border-radius: 2px; overflow: hidden; }
   .geo-fill { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
   .geo-n { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; font-size: 10px; }
 
@@ -986,7 +1018,7 @@
 
   /* ── Widget: timeline ── */
   .tl-live {
-    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
     padding: 2px 8px; border-radius: 3px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
     vertical-align: middle; margin-left: 8px; font-weight: 600;
@@ -1012,7 +1044,7 @@
     position: relative; transition: background 0.15s;
     font: 10.5px var(--mono);
   }
-  .tl-row:hover { background: rgba(255,255,255,0.035); }
+  .tl-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
   .tl-row-fresh { animation: tlRowIn 0.5s ease; background: color-mix(in srgb, var(--accent) 7%, transparent); }
   @keyframes tlRowIn {
     from { opacity: 0; transform: translateX(-6px); background: color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -1030,11 +1062,11 @@
     50% { box-shadow: 0 0 0 2px var(--bg), 0 0 0 5px transparent; }
   }
   .tl-kind-auth .tl-dot { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 55%, transparent); }
-  .tl-kind-ok .tl-dot { border-color: var(--warn); background: rgba(200,152,40,0.55); }
-  .tl-kind-cmd .tl-dot { border-color: var(--good); background: rgba(72,184,120,0.55); }
-  .tl-kind-net .tl-dot { border-color: var(--purple); background: rgba(168,120,192,0.45); }
-  .tl-kind-file .tl-dot { border-color: var(--accent-2); background: rgba(200,152,40,0.45); }
-  .tl-kind-tun .tl-dot { border-color: var(--purple); background: rgba(168,120,192,0.65); }
+  .tl-kind-ok .tl-dot { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 55%, transparent); }
+  .tl-kind-cmd .tl-dot { border-color: var(--good); background: color-mix(in srgb, var(--good) 55%, transparent); }
+  .tl-kind-net .tl-dot { border-color: var(--purple); background: color-mix(in srgb, var(--purple) 45%, transparent); }
+  .tl-kind-file .tl-dot { border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 45%, transparent); }
+  .tl-kind-tun .tl-dot { border-color: var(--purple); background: color-mix(in srgb, var(--purple) 65%, transparent); }
   .tl-main { min-width: 0; }
   .tl-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 3px; }
   .tl-time {
@@ -1043,24 +1075,24 @@
   }
   .tl-row-fresh .tl-time { color: var(--accent); font-weight: 600; }
   .tl-kind-badge {
-    font-size: 8.5px; letter-spacing: 0.07em; text-transform: uppercase;
+    font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase;
     padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line);
-    background: rgba(255,255,255,0.03); white-space: nowrap;
+    background: color-mix(in srgb, var(--ink) 4%, transparent); white-space: nowrap;
   }
   .tl-kind-auth .tl-kind-badge { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  .tl-kind-ok .tl-kind-badge { color: var(--warn); border-color: rgba(200,152,40,0.4); background: rgba(200,152,40,0.08); }
-  .tl-kind-cmd .tl-kind-badge { color: var(--good); border-color: rgba(72,184,120,0.4); background: rgba(72,184,120,0.08); }
-  .tl-kind-net .tl-kind-badge { color: var(--purple); border-color: rgba(168,120,192,0.4); background: rgba(168,120,192,0.08); }
-  .tl-kind-file .tl-kind-badge { color: var(--accent-2); border-color: rgba(200,152,40,0.35); background: rgba(200,152,40,0.06); }
-  .tl-kind-tun .tl-kind-badge { color: var(--purple); border-color: rgba(168,120,192,0.45); background: rgba(168,120,192,0.1); }
+  .tl-kind-ok .tl-kind-badge { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+  .tl-kind-cmd .tl-kind-badge { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); }
+  .tl-kind-net .tl-kind-badge { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 40%, transparent); background: color-mix(in srgb, var(--purple) 8%, transparent); }
+  .tl-kind-file .tl-kind-badge { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 35%, transparent); background: color-mix(in srgb, var(--accent-2) 6%, transparent); }
+  .tl-kind-tun .tl-kind-badge { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 45%, transparent); background: color-mix(in srgb, var(--purple) 10%, transparent); }
   .tl-ip { color: var(--accent-2); font-weight: 500; }
-  .tl-user { color: var(--dim); font-size: 9.5px; }
+  .tl-user { color: var(--dim); font-size: 10px; }
   .tl-user b { color: var(--text); font-weight: 600; }
   .tl-body { color: var(--text); line-height: 1.4; min-width: 0; }
   .tl-cmd {
     display: block; color: var(--good);
-    background: rgba(72,184,120,0.06); border-left: 2px solid rgba(72,184,120,0.55);
-    padding: 3px 8px; border-radius: 0 3px 3px 0;
+    background: color-mix(in srgb, var(--good) 8%, transparent); border: 1px solid color-mix(in srgb, var(--good) 35%, transparent);
+    padding: 3px 8px; border-radius: 3px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .tl-cmd::before { content: '$ '; color: var(--dim); }
@@ -1073,7 +1105,7 @@
 
   /* ── Widget: credentials ── */
   .cred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .cred-col h3 { font: 600 9px var(--mono); text-transform: uppercase; letter-spacing: 0.12em; color: var(--dim); margin-bottom: 6px; }
+  .cred-col h3 { font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: 0.12em; color: var(--dim); margin-bottom: 6px; }
   .cred-item { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dotted var(--line); font: 11px var(--mono); }
   .cred-val { color: var(--text); }
   .cred-n { color: var(--accent); font-variant-numeric: tabular-nums; }
@@ -1082,31 +1114,48 @@
   .radar-bars { display: flex; flex-direction: column; gap: 4px; }
   .radar-row { display: grid; grid-template-columns: 105px 1fr 50px; gap: 5px; align-items: center; font: 10.5px var(--mono); }
   .radar-ip { color: var(--accent-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .radar-track { height: 5px; background: rgba(255,255,255,0.04); border-radius: 2px; overflow: hidden; }
+  .radar-track { height: 5px; background: color-mix(in srgb, var(--ink) 6%, transparent); border-radius: 2px; overflow: hidden; }
   .radar-fill { display: block; height: 100%; border-radius: 2px; }
   .radar-rate { text-align: right; font-variant-numeric: tabular-nums; }
   .radar-row:first-child .radar-ip { color: var(--accent); }
 
   /* ── Bazaar upload button ── */
-  .bz-btn { background: rgba(200,152,40,0.08); color: var(--accent-2); border: 1px solid rgba(200,152,40,0.30); font: 600 9px var(--mono); padding: 3px 10px; border-radius: 3px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.06em; }
-  .bz-btn:hover { color: var(--text); border-color: var(--accent-2); background: rgba(200,152,40,0.14); }
-  .bz-btn.ok { color: var(--good); border-color: rgba(72,184,120,0.30); background: rgba(72,184,120,0.08); cursor: default; }
+  .bz-btn { background: color-mix(in srgb, var(--accent-2) 8%, transparent); color: var(--accent-2); border: 1px solid color-mix(in srgb, var(--accent-2) 30%, transparent); font: 600 10px var(--mono); padding: 3px 10px; border-radius: 3px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.06em; }
+  .bz-btn:hover { color: var(--text); border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
+  .bz-btn.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 30%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); cursor: default; }
   .bz-btn.err { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
-  /* ── Collapsible panels ── */
-  .panel-collapse .panel-head { cursor: pointer; user-select: none; }
-  .panel-collapse .panel-head::after {
-    content: '▾'; font: 10px var(--mono); color: var(--dim); margin-left: 8px;
+  /* ── Collapsible panels ──
+     The trigger is a real <button> inside the heading (aria-expanded +
+     aria-controls), not a click handler on the head <div>: a div is not in
+     the tab order, cannot be operated from the keyboard and exposes no state
+     to a screen reader. The button inherits the h2 typography so nothing
+     changes visually. The collapsed body is also visibility:hidden — max-height
+     0 alone left every button inside it reachable by Tab. */
+  .panel-toggle {
+    all: unset; cursor: pointer; user-select: none;
+    font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .panel-toggle::after {
+    content: '▾'; font: 10px var(--mono); color: var(--dim);
     transition: transform 0.2s;
   }
-  .panel-collapse.collapsed .panel-head::after { transform: rotate(-90deg); }
-  .panel-collapse .panel-body { max-height: 2000px; overflow: auto; transition: max-height 0.3s ease, opacity 0.2s; }
-  .panel-collapse.collapsed .panel-body { max-height: 0; overflow: hidden; opacity: 0; padding: 0; }
+  .panel-toggle[aria-expanded="false"]::after { transform: rotate(-90deg); }
+  .panel-toggle:focus-visible { outline: 2px solid var(--focus-ring, var(--accent)); outline-offset: 3px; border-radius: 2px; }
+  .panel-collapse .panel-body {
+    max-height: 2000px; overflow: auto;
+    transition: max-height 0.3s ease, opacity 0.2s, visibility 0s linear 0s;
+  }
+  .panel-collapse.collapsed .panel-body {
+    max-height: 0; overflow: hidden; opacity: 0; padding: 0; visibility: hidden;
+    transition: max-height 0.3s ease, opacity 0.2s, visibility 0s linear 0.3s;
+  }
 
   /* ==== Settings tab ==== */
   .set-note {
     font: 12px/1.5 var(--sans); color: var(--dim); background: var(--glass);
-    border: 1px solid var(--line); border-left: 2px solid var(--accent-2);
+    border: 1px solid color-mix(in srgb, var(--accent-2) 35%, var(--line));
     border-radius: 4px; padding: 10px 12px; margin: 0 0 12px;
   }
   .set-note code { font: 11px var(--mono); color: var(--text); }
@@ -1158,7 +1207,7 @@
     font: 10px var(--mono); text-transform: uppercase; letter-spacing: .04em;
     padding: 2px 6px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--dim);
   }
-  .set-badge.set { color: var(--good); border-color: rgba(72,184,120,0.4); }
+  .set-badge.set { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
   .set-health-flags { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
   .set-health-providers { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
   .sh-flag, .sh-prov {
@@ -1166,22 +1215,62 @@
     font: 11px var(--mono); color: var(--dim);
   }
   .sh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim-2); flex: none; }
-  .sh-dot.on   { background: var(--good); box-shadow: 0 0 6px rgba(72,184,120,0.5); }
+  .sh-dot.on   { background: var(--good); box-shadow: 0 0 6px color-mix(in srgb, var(--good) 50%, transparent); }
   .sh-dot.off  { background: var(--dim-2); }
   .sh-dot.warn { background: var(--warn); }
   .set-health-stats .num { font-size: 20px; }
   #sh-ingest.stale { color: var(--warn); }
+
+  /* ==== Small screens ====
+     The shell is a fixed 52px sidebar + content grid with no breakpoint, so
+     a 375px phone got a 323px content column beside a rail of icons. Below
+     760px the sidebar becomes a slim top strip, the content takes the full
+     width, wide tables keep a readable minimum width and scroll inside their
+     panel instead of being crushed by table-layout:fixed, and the
+     fixed-column session grid scrolls horizontally. */
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
+    .sidebar {
+      grid-row: 1; grid-column: 1; flex-direction: row; align-items: center;
+      padding: 6px 10px; gap: 8px; border-right: 0; border-bottom: 1px solid var(--line);
+    }
+    .sb-brand, .sb-dot { margin-bottom: 0; }
+    .sb-item.on::before { left: 8px; right: 8px; top: auto; bottom: -1px; width: auto; height: 2px; border-radius: 2px 2px 0 0; }
+    .topbar { grid-column: 1; grid-row: 2; padding: 8px 12px; }
+    .shell-main { grid-column: 1; grid-row: 3; }
+    .wrap { padding: 12px 12px 56px; }
+    .toolbar { margin-left: 0; width: 100%; }
+    .toolbar input.search { flex: 1 1 140px; min-width: 0; }
+    .tabs { overflow-x: auto; scrollbar-width: none; }
+    .tab { padding: 9px 10px; letter-spacing: 0.08em; white-space: nowrap; }
+    .stat .num { font-size: 18px; }
+    .grid > .panel, .panel-body { overflow-x: auto; }
+    #actors-table, #cmds-table, #capture-table, #abuse-suggest-table, #urlhaus-table, #urlhaus-log,
+    #threatfox-table, #threatfox-log, #ttp-table, #payloads-table, #pending-table, #bazaar-table,
+    #ioc-table, #tunnels-table, #set-reports-table { min-width: 620px; }
+    .sess-head, .sess-row { min-width: 640px; }
+    .cred-grid { grid-template-columns: 1fr; }
+    .set-row { grid-template-columns: 1fr; gap: 6px; }
+    .set-actions { flex-wrap: wrap; }
+    .replay-select { min-width: 0; max-width: 100%; flex: 1 1 100%; }
+    .sess-modal { padding: 12px; }
+    .sm-line { grid-template-columns: 44px 1fr; }
+    .sm-line .ln-kind, .sm-line .ln-txt { grid-column: 2; }
+    .sm-line .ln-techs { grid-column: 2; justify-content: flex-start; }
+    .pm-grid { grid-template-columns: 1fr; gap: 2px 0; }
+    .pm-grid .pm-k { margin-top: 6px; }
+    .mitre-col h4 { min-height: 0; }
+  }
 </style>
-<script src="/vendor/vis-network.min.js"></script>
-<link rel="stylesheet" href="/themes.css?v=16" />
+<link rel="stylesheet" href="/themes.css?v=18" />
 </head>
 <body>
 <div class="shell">
 
-<nav class="sidebar">
+<nav class="sidebar" aria-label="Primary">
   <div class="sb-brand" title="ShardLure"><svg class="sb-logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><path d="M32 4 L54 19 L48 45 L32 60 L16 45 L10 19 Z" fill="currentColor"/><path d="M32 4 L32 60 L16 45 L10 19 Z" fill="#000" opacity="0.30"/><path d="M32 4 L10 19 L16 45 Z" fill="#000" opacity="0.16"/></svg></div>
-  <a class="sb-item" href="/" title="Globe"><svg viewBox="0 0 24 24"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg></a>
-  <a class="sb-item on" href="/intel" title="Intel Console"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
+  <a class="sb-item" href="/" title="Globe" aria-label="Globe"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg></a>
+  <a class="sb-item on" href="/intel" title="Intel Console" aria-label="Intel Console" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></a>
   <div class="sb-spacer"></div>
   <div class="sb-dot"></div>
 </nav>
@@ -1201,7 +1290,10 @@
       <span class="chip" data-window="30d">30d</span>
       <span class="chip" data-window="90d">90d</span>
       <span class="chip-sep">·</span>
-      <input class="search" id="search-input" placeholder="search IP / user / command…" />
+      <input class="search" id="search-input" type="text" role="combobox"
+             aria-label="Search IPs, users, commands, sessions and payloads"
+             aria-autocomplete="list" aria-expanded="false" aria-controls="palette" aria-haspopup="listbox"
+             autocomplete="off" spellcheck="false" placeholder="search IP / user / command…" />
       <div class="palette" id="palette" hidden role="listbox" aria-label="Search results"></div>
     </div>
   </div>
@@ -1210,15 +1302,15 @@
 <div class="shell-main">
 <div class="wrap">
   <div class="tabs" id="tabs" role="tablist">
-    <span class="tab active" data-view="overview" role="tab" tabindex="0" aria-selected="true"><span class="tdot"></span>Overview</span>
-    <span class="tab blue" data-view="blue" role="tab" tabindex="0" aria-selected="false"><span class="tdot" style="background:var(--blue-team)"></span>Blue Team</span>
-    <span class="tab red" data-view="red" role="tab" tabindex="0" aria-selected="false"><span class="tdot" style="background:var(--red-team)"></span>Red Team</span>
-    <span class="tab" data-view="settings" role="tab" tabindex="0" aria-selected="false"><span class="tdot" style="background:var(--dim)"></span>Settings</span>
+    <span class="tab active" id="tab-overview" data-view="overview" role="tab" tabindex="0" aria-selected="true" aria-controls="view-overview"><span class="tdot"></span>Overview</span>
+    <span class="tab blue" id="tab-blue" data-view="blue" role="tab" tabindex="0" aria-selected="false" aria-controls="view-blue"><span class="tdot" style="background:var(--blue-team)"></span>Blue Team</span>
+    <span class="tab red" id="tab-red" data-view="red" role="tab" tabindex="0" aria-selected="false" aria-controls="view-red"><span class="tdot" style="background:var(--red-team)"></span>Red Team</span>
+    <span class="tab" id="tab-settings" data-view="settings" role="tab" tabindex="0" aria-selected="false" aria-controls="view-settings"><span class="tdot" style="background:var(--dim)"></span>Settings</span>
   </div>
 
   <!-- ============ OVERVIEW TAB ============ -->
-  <section class="view active" id="view-overview">
-  <div class="stats" style="grid-template-columns: repeat(5, 1fr)">
+  <section class="view active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+  <div class="stats cols-5">
     <div class="stat"><div class="num accent" id="s-events">0</div><div class="label">events</div></div>
     <div class="stat"><div class="num blue" id="s-actors">0</div><div class="label">actors</div></div>
     <div class="stat"><div class="num accent" id="s-ips">0</div><div class="label">unique IPs</div></div>
@@ -1230,7 +1322,7 @@
     <section class="panel">
       <h2>Threat Level</h2>
       <div class="gauge-outer" id="threat-gauge">
-        <svg class="gauge-svg" viewBox="0 0 200 110">
+        <svg class="gauge-svg" viewBox="0 0 200 110" role="img" aria-labelledby="gauge-lbl-svg gauge-val">
           <defs>
             <linearGradient id="gg" x1="0%" y1="0%" x2="100%" y2="0%">
               <stop offset="0%" stop-color="var(--good)"/>
@@ -1238,7 +1330,7 @@
               <stop offset="100%" stop-color="var(--accent)"/>
             </linearGradient>
           </defs>
-          <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="12" stroke-linecap="round"/>
+          <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="currentColor" style="color: color-mix(in srgb, var(--ink) 8%, transparent)" stroke-width="12" stroke-linecap="round"/>
           <path id="gauge-arc" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gg)" stroke-width="12" stroke-linecap="round" stroke-dasharray="0 251"/>
           <text id="gauge-val" x="100" y="88" text-anchor="middle" fill="var(--text)" font-family="var(--mono)" font-size="36" font-weight="700">0</text>
           <text id="gauge-lbl-svg" x="100" y="104" text-anchor="middle" fill="var(--dim)" font-family="var(--mono)" font-size="10" font-weight="600" letter-spacing="0.12em">LOW</text>
@@ -1269,7 +1361,8 @@
   <div class="grid">
     <section class="panel full">
       <h2>Activity heatmap (72h · by event kind)</h2>
-      <div id="heatmap-wrap"><canvas id="heatmap" height="120"></canvas></div>
+      <div id="heatmap-wrap"><canvas id="heatmap" height="120" role="img" aria-label="Activity heatmap: events per hour by kind over the last 72 hours" aria-describedby="heatmap-desc"></canvas></div>
+      <p id="heatmap-desc" class="visually-hidden">No hourly data yet.</p>
     </section>
 
     <section class="panel">
@@ -1362,7 +1455,7 @@
   </section><!-- /view-overview -->
 
   <!-- ============ BLUE TEAM TAB ============ -->
-  <section class="view" id="view-blue">
+  <section class="view" id="view-blue" role="tabpanel" aria-labelledby="tab-blue">
     <div class="team-banner blue">
       <span class="tb-title">Blue Team</span>
       <span class="tb-sub">Defensive view · MITRE ATT&amp;CK coverage, sessions, IOCs and threat intel enrichment</span>
@@ -1402,21 +1495,21 @@
       </section>
 
       <section class="panel full panel-collapse" id="panel-ioc">
-        <div class="panel-head" onclick="this.parentElement.classList.toggle('collapsed')">
-          <h2>IOC export</h2>
+        <div class="panel-head">
+          <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="ioc-body">IOC export</button></h2>
           <span class="meta" id="ioc-meta">STIX 2.1 · CSV</span>
         </div>
-        <div class="panel-body">
+        <div class="panel-body" id="ioc-body">
         <div class="ioc-toolbar">
           <div class="ioc-kinds">
-            <button class="ioc-kind active" data-kind="ip" onclick="event.stopPropagation()">IP</button>
-            <button class="ioc-kind" data-kind="hash" onclick="event.stopPropagation()">hash</button>
-            <button class="ioc-kind" data-kind="url" onclick="event.stopPropagation()">URL</button>
-            <button class="ioc-kind" data-kind="user" onclick="event.stopPropagation()">user</button>
+            <button type="button" class="ioc-kind active" data-kind="ip">IP</button>
+            <button type="button" class="ioc-kind" data-kind="hash">hash</button>
+            <button type="button" class="ioc-kind" data-kind="url">URL</button>
+            <button type="button" class="ioc-kind" data-kind="user">user</button>
           </div>
           <div class="ioc-actions">
-            <a class="ioc-dl" id="ioc-dl-csv" download onclick="event.stopPropagation()">download CSV</a>
-            <a class="ioc-dl" id="ioc-dl-stix" href="/api/ioc/stix?window=24h" download onclick="event.stopPropagation()">download STIX bundle</a>
+            <button type="button" class="ioc-dl" id="ioc-dl-csv">download CSV</button>
+            <button type="button" class="ioc-dl" id="ioc-dl-stix">download STIX bundle</button>
           </div>
         </div>
         <div class="table-scroll">
@@ -1468,7 +1561,7 @@
           <button class="bz-btn" id="urlhaus-submit-all-btn" onclick="submitAllURLhaus(this)" style="margin-left:auto;display:none">▲ Submit All to URLhaus</button>
         </div>
         <div class="panel-body">
-        <div class="stats" id="urlhaus-stats" style="grid-template-columns: repeat(4,1fr); margin-bottom: 12px;">
+        <div class="stats tight" id="urlhaus-stats">
           <div class="stat"><div class="num accent" id="uh-submitted">0</div><div class="label">submitted</div></div>
           <div class="stat"><div class="num" style="color:var(--accent-2)" id="uh-eligible">0</div><div class="label">eligible now</div></div>
           <div class="stat"><div class="num" style="color:var(--purple)" id="uh-pending">0</div><div class="label">candidates</div></div>
@@ -1507,7 +1600,7 @@
           <button class="bz-btn" id="threatfox-submit-all-btn" onclick="submitAllThreatFox(this)" style="margin-left:auto;display:none">▲ Submit All to ThreatFox</button>
         </div>
         <div class="panel-body">
-        <div class="stats" id="threatfox-stats" style="grid-template-columns: repeat(4,1fr); margin-bottom: 12px;">
+        <div class="stats tight" id="threatfox-stats">
           <div class="stat"><div class="num accent" id="tf-submitted">0</div><div class="label">IOCs submitted</div></div>
           <div class="stat"><div class="num" style="color:var(--accent-2)" id="tf-eligible">0</div><div class="label">eligible now</div></div>
           <div class="stat"><div class="num" style="color:var(--purple)" id="tf-pending">0</div><div class="label">candidates</div></div>
@@ -1545,8 +1638,8 @@
           <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo</span>
         </div>
         <div class="enrich-toolbar">
-          <input id="enrich-ip" class="enrich-input" placeholder="lookup an IP (1.2.3.4)…" />
-          <button id="enrich-go" class="enrich-btn">lookup</button>
+          <input id="enrich-ip" class="enrich-input" type="text" aria-label="IP address to enrich" autocomplete="off" spellcheck="false" placeholder="lookup an IP (1.2.3.4)…" />
+          <button id="enrich-go" type="button" class="enrich-btn">lookup</button>
         </div>
         <div class="enrich-cards" id="enrich-cards">
           <div class="empty">click an IP in the IOC table or enter one above.</div>
@@ -1556,7 +1649,7 @@
   </section><!-- /view-blue -->
 
   <!-- ============ RED TEAM TAB ============ -->
-  <section class="view" id="view-red">
+  <section class="view" id="view-red" role="tabpanel" aria-labelledby="tab-red">
     <div class="team-banner red">
       <span class="tb-title">Red Team</span>
       <span class="tb-sub">Offensive view · harvested TTPs, payload library, wordlists, infrastructure pivots and replay</span>
@@ -1564,11 +1657,11 @@
 
     <div class="grid">
       <section class="panel full panel-collapse" id="panel-ttp">
-        <div class="panel-head" onclick="this.parentElement.classList.toggle('collapsed')">
-          <h2>TTP harvesting</h2>
+        <div class="panel-head">
+          <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="ttp-body">TTP harvesting</button></h2>
           <span class="meta" id="ttp-meta">clustered command sequences</span>
         </div>
-        <div class="panel-body">
+        <div class="panel-body" id="ttp-body">
         <table class="dense ttp-table" id="ttp-table">
           <thead>
             <tr>
@@ -1587,12 +1680,12 @@
       </section>
 
       <section class="panel panel-collapse" id="panel-payloads">
-        <div class="panel-head" onclick="this.parentElement.classList.toggle('collapsed')">
-          <h2>Payload library</h2>
+        <div class="panel-head">
+          <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="payloads-body">Payload library</button></h2>
           <span class="meta" id="payloads-meta">captured binaries / scripts</span>
-          <button class="bz-btn" id="upload-all-btn" onclick="event.stopPropagation();uploadAllToBazaar(this)" style="margin-left:auto">▲ Upload All to MalwareBazaar</button>
+          <button type="button" class="bz-btn" id="upload-all-btn" onclick="uploadAllToBazaar(this)" style="margin-left:auto">▲ Upload All to MalwareBazaar</button>
         </div>
-        <div class="panel-body">
+        <div class="panel-body" id="payloads-body">
         <table class="dense" id="payloads-table">
           <thead>
             <tr>
@@ -1624,7 +1717,7 @@
             <button class="wl-kind" data-kind="passwords">passwords</button>
             <button class="wl-kind" data-kind="combos">combos</button>
           </div>
-          <a class="ioc-dl" id="wl-dl" download>download .txt</a>
+          <button type="button" class="ioc-dl" id="wl-dl">download .txt</button>
         </div>
         <div class="wl-preview" id="wl-preview">
           <div class="empty">loading…</div>
@@ -1676,7 +1769,7 @@
           <span class="meta" id="replay-meta">bash · sandbox-only</span>
         </div>
         <div class="replay-toolbar">
-          <select id="replay-session" class="replay-select"></select>
+          <select id="replay-session" class="replay-select" aria-label="Session to replay"></select>
           <label class="replay-toggle">
             <input type="checkbox" id="replay-sleeps" checked>
             inter-cmd sleeps
@@ -1685,7 +1778,7 @@
             <input type="checkbox" id="replay-dryrun">
             dry-run (comment cmds)
           </label>
-          <a class="ioc-dl" id="replay-dl" download>download .sh</a>
+          <button type="button" class="ioc-dl" id="replay-dl">download .sh</button>
         </div>
         <pre class="replay-pre" id="replay-pre"><div class="empty">select a session</div></pre>
       </section>
@@ -1696,7 +1789,7 @@
           <span class="meta" id="deobf-meta">base64 · hex · eval · urlencoded</span>
         </div>
         <div class="deobf-tester">
-          <input type="text" id="deobf-input" class="deobf-input"
+          <input type="text" id="deobf-input" class="deobf-input" aria-label="Command to decode"
                  placeholder="Paste a suspicious command - decoded live"
                  spellcheck="false" autocomplete="off">
           <button id="deobf-clear" class="deobf-btn">clear</button>
@@ -1712,7 +1805,7 @@
         <div class="panel-head">
           <h2>Pending uploads</h2>
           <span class="meta" id="pending-meta">payloads not yet on MalwareBazaar</span>
-          <button class="bz-btn" id="upload-pending-btn" onclick="event.stopPropagation();uploadAllPending(this)" style="margin-left:auto">▲ Upload all pending</button>
+          <button type="button" class="bz-btn" id="upload-pending-btn" onclick="uploadAllPending(this)" style="margin-left:auto">▲ Upload all pending</button>
         </div>
         <div class="panel-body">
         <table class="dense" id="pending-table">
@@ -1737,7 +1830,7 @@
           <h2>MalwareBazaar sharing</h2>
           <span class="meta" id="bazaar-meta">abuse.ch threat intel exchange</span>
         </div>
-        <div class="stats" id="bazaar-stats" style="grid-template-columns: repeat(4,1fr); margin-bottom: 12px;">
+        <div class="stats tight" id="bazaar-stats">
           <div class="stat"><div class="num accent" id="bz-uploaded">0</div><div class="label">uploaded</div></div>
           <div class="stat"><div class="num" style="color:var(--accent-2)" id="bz-dupes">0</div><div class="label">duplicates</div></div>
           <div class="stat"><div class="num" style="color:var(--purple)" id="bz-pending">0</div><div class="label">pending</div></div>
@@ -1763,7 +1856,7 @@
   </section><!-- /view-red -->
 
   <!-- ============ SETTINGS TAB ============ -->
-  <section class="view" id="view-settings">
+  <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings">
     <div class="team-banner" style="border-color:var(--line-strong)">
       <span class="tb-title">Settings</span>
       <span class="tb-sub">API keys &amp; runtime configuration · saved to the local SQLite DB (0600) · applied live, no restart</span>
@@ -1823,7 +1916,7 @@
       <div class="panel-head"><h2>Live status</h2>
         <span class="meta" id="set-health-meta">—</span></div>
       <div class="panel-body">
-        <div class="stats set-health-stats" style="grid-template-columns: repeat(5,1fr)">
+        <div class="stats cols-5 set-health-stats">
           <div class="stat"><div class="num accent" id="sh-events">—</div><div class="label">events</div></div>
           <div class="stat"><div class="num blue" id="sh-actors">—</div><div class="label">actors</div></div>
           <div class="stat"><div class="num accent" id="sh-ips">—</div><div class="label">unique IPs</div></div>
@@ -1909,28 +2002,28 @@
 </div>
 
 <!-- Payload library inspector modal (slice G) -->
-<div class="sess-modal" id="payload-modal">
+<dialog class="sess-modal" id="payload-modal" aria-labelledby="pm-title">
   <div class="sm-card">
     <div class="sm-head">
-      <div class="sm-title" id="pm-title">payload</div>
+      <h2 class="sm-title" id="pm-title">payload</h2>
       <div class="sm-sub" id="pm-sub"></div>
-      <button class="sm-close" id="pm-close">close (esc)</button>
+      <button type="button" class="sm-close" id="pm-close">close (esc)</button>
     </div>
-    <div class="sm-body" id="pm-body"></div>
+    <div class="sm-body" id="pm-body" tabindex="0"></div>
   </div>
-</div>
+</dialog>
 
 <!-- Cowrie session play-by-play modal (slice C) -->
-<div class="sess-modal" id="sess-modal">
+<dialog class="sess-modal" id="sess-modal" aria-labelledby="sm-title">
   <div class="sm-card">
     <div class="sm-head">
-      <div class="sm-title" id="sm-title">session</div>
+      <h2 class="sm-title" id="sm-title">session</h2>
       <div class="sm-sub" id="sm-sub"></div>
-      <button class="sm-close" id="sm-close">close (esc)</button>
+      <button type="button" class="sm-close" id="sm-close">close (esc)</button>
     </div>
-    <div class="sm-body" id="sm-body"></div>
+    <div class="sm-body" id="sm-body" tabindex="0"></div>
   </div>
-</div>
+</dialog>
 
 <script>
 // ── Dashboard auth token forwarding ──────────────────────────────────────
@@ -1952,6 +2045,35 @@ var currentToken = (function () {
 })();
 // DASH_TOKEN kept as a truthiness snapshot for the "was auth on at load?" gate
 // below; the actual value used per request is always the live currentToken.
+
+// ── Polling discipline ────────────────────────────────────────────────────
+// Every periodic refresh on this page goes through pollEvery, never a bare
+// setInterval (a test pins that). It adds two things: (1) ticks are skipped
+// while the tab is hidden — thirteen pollers kept hitting /api/* from a
+// background tab, which on the production box is a multi-second /api/intel
+// every 5 s for nobody; (2) when the tab becomes visible again every poller
+// runs once immediately, so the operator never stares at stale numbers for
+// up to a minute after switching back. Each fn keeps its own "is my view
+// active" guard, so the resume burst only does the work the visible tab needs.
+var _pollers = [];
+function pollEvery(ms, fn) {
+  var p = { fn: fn, ms: ms, last: 0 };
+  _pollers.push(p);
+  return setInterval(function () { if (document.hidden) return; p.last = Date.now(); fn(); }, ms);
+}
+// On return, run each poller only if more than half its period has elapsed
+// since it last ran: without that guard a rapid hide/show toggle (alt-tab,
+// a phone notification banner) fired the full burst several times over,
+// including the 60 s graph rebuild.
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) return;
+  var now = Date.now();
+  _pollers.forEach(function (p) {
+    if (now - p.last < p.ms / 2) return;
+    p.last = now;
+    try { p.fn(); } catch (e) {}
+  });
+});
 
 /* ==== UI theme (Signal / Meridian / Sprite) ==== */
 window.__shardlureTheme = 'signal';
@@ -2220,6 +2342,7 @@ function drawHeatmap(cells) {
     ctx.fillStyle = pal.axis;
     ctx.font = '12px monospace';
     ctx.fillText('No hourly data yet', 12, 28);
+    setHeatmapDesc('No hourly data yet.');
     return;
   }
   const hours = [], kinds = new Set(), map = {};
@@ -2256,15 +2379,37 @@ function drawHeatmap(cells) {
       ctx.globalAlpha = 1;
     });
   });
+  // Text alternative for the canvas (aria-describedby="heatmap-desc"): the
+  // same totals a sighted reader takes from the colour, as a sentence.
+  var byKind = {}, byHour = {};
+  cells.forEach(function (c) {
+    byKind[c.kind] = (byKind[c.kind] || 0) + (c.n || 0);
+    byHour[c.t] = (byHour[c.t] || 0) + (c.n || 0);
+  });
+  var peakT = hours[0], peakN = -1;
+  hours.forEach(function (h) { if (byHour[h] > peakN) { peakN = byHour[h]; peakT = h; } });
+  setHeatmapDesc(hours.length + ' hourly columns from ' + fmtHeatHour(hours[0]) + ' to ' + fmtHeatHour(hours[hours.length - 1]) +
+    ' UTC. Busiest hour ' + fmtHeatHour(peakT) + ' with ' + fmt(peakN) + ' events. Totals by kind: ' +
+    kindList.map(function (k) { return k + ' ' + fmt(byKind[k]); }).join(', ') + '.');
   ctx.fillStyle = pal.axis;
-  ctx.font = '9px ui-monospace, monospace';
+  ctx.font = '10px ui-monospace, monospace';
   ctx.textAlign = 'center';
   const step = Math.max(1, Math.floor(hours.length / 10));
   hours.forEach(function(h, xi) {
     if (xi % step !== 0 && xi !== hours.length - 1) return;
-    const d = new Date(h * 1000);
-    ctx.fillText((d.getUTCMonth()+1)+'/'+d.getUTCDate()+' '+d.getUTCHours()+'h', padL + xi * cellW + 7, cssH - 6);
+    ctx.fillText(fmtHeatHour(h), padL + xi * cellW + 7, cssH - 6);
   });
+}
+
+function setHeatmapDesc(text) {
+  var el = document.getElementById('heatmap-desc');
+  if (el && el.textContent !== text) el.textContent = text;
+}
+// One formatter for the heatmap's axis labels AND its text alternative, so
+// what a screen reader hears matches the label a sighted reader sees.
+function fmtHeatHour(t) {
+  var d = new Date(t * 1000);
+  return (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' ' + d.getUTCHours() + ':00';
 }
 
 let selectedActor = null;
@@ -2452,32 +2597,45 @@ async function refreshCapture() {
   } catch (_) {}
 }
 
+// In-flight guard + try/catch: /api/intel is the slowest endpoint (seconds
+// on a cold cache in production), so the 5 s timer could start a second
+// request before the first returned and the two raced to paint; a rejected
+// fetch was an unhandled promise on every tick.
+var _intelRefreshInFlight = false;
 async function refresh() {
-  const r = await fetch('/api/intel?_=' + Date.now(), { cache: 'no-store' });
-  if (!r.ok) return;
-  const d = await r.json();
-  _lastIntel = d;
-  document.getElementById('s-events').textContent = fmt(d.summary && d.summary.eventCount);
-  document.getElementById('s-actors').textContent = fmt(d.summary && d.summary.actorCount);
-  document.getElementById('s-ips').textContent = fmt(d.summary && d.summary.uniqueIps);
-  var upEl = document.getElementById('s-uptime');
-  if (upEl) {
-    upEl.textContent = (d.uptimeSeconds != null) ? fmtUptime(d.uptimeSeconds) : '—';
-    upEl.title = d.startedAt ? ('running since ' + new Date(d.startedAt).toLocaleString()) : 'process uptime';
+  if (_intelRefreshInFlight) return;
+  _intelRefreshInFlight = true;
+  try {
+    const r = await fetch('/api/intel?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    _lastIntel = d;
+    document.getElementById('s-events').textContent = fmt(d.summary && d.summary.eventCount);
+    document.getElementById('s-actors').textContent = fmt(d.summary && d.summary.actorCount);
+    document.getElementById('s-ips').textContent = fmt(d.summary && d.summary.uniqueIps);
+    var upEl = document.getElementById('s-uptime');
+    if (upEl) {
+      upEl.textContent = (d.uptimeSeconds != null) ? fmtUptime(d.uptimeSeconds) : '—';
+      upEl.title = d.startedAt ? ('running since ' + new Date(d.startedAt).toLocaleString()) : 'process uptime';
+    }
+    document.getElementById('s-upd').textContent = d.generatedAt ? rel(d.generatedAt) + ' ago' : '—';
+    renderBars(document.getElementById('bars-kind'), d.kindCounts);
+    renderBars(document.getElementById('bars-playbook'), d.playbookCounts);
+    renderBars(document.getElementById('bars-intent'), d.intentCounts);
+    renderBars(document.getElementById('bars-source'), d.sourceCounts);
+    window._lastHeatmap = d.heatmap;
+    drawHeatmap(d.heatmap);
+    renderActors(d.actors);
+    renderCommands(d.recentCommands);
+    if (selectedActor) loadActorDetail(selectedActor);
+    renderGeo(d.topCountries);
+    renderGauge(d.threat);
+    renderRadar(d.radar);
+  } catch (e) {
+    // keep the last good paint; the next tick retries
+  } finally {
+    _intelRefreshInFlight = false;
   }
-  document.getElementById('s-upd').textContent = d.generatedAt ? rel(d.generatedAt) + ' ago' : '—';
-  renderBars(document.getElementById('bars-kind'), d.kindCounts);
-  renderBars(document.getElementById('bars-playbook'), d.playbookCounts);
-  renderBars(document.getElementById('bars-intent'), d.intentCounts);
-  renderBars(document.getElementById('bars-source'), d.sourceCounts);
-  window._lastHeatmap = d.heatmap;
-  drawHeatmap(d.heatmap);
-  renderActors(d.actors);
-  renderCommands(d.recentCommands);
-  if (selectedActor) loadActorDetail(selectedActor);
-  renderGeo(d.topCountries);
-  renderGauge(d.threat);
-  renderRadar(d.radar);
 }
 
 refresh();
@@ -2490,8 +2648,8 @@ function overviewActive() {
   const v = document.getElementById('view-overview');
   return !v || v.classList.contains('active');
 }
-setInterval(function(){ if (overviewActive()) refresh(); }, 5000);
-setInterval(function(){ if (overviewActive()) refreshCapture(); }, 5000);
+pollEvery(5000, function(){ if (overviewActive()) refresh(); });
+pollEvery(5000, function(){ if (overviewActive()) refreshCapture(); });
 window.addEventListener('resize', function() {
   if (window._lastHeatmap) drawHeatmap(window._lastHeatmap);
 });
@@ -2556,6 +2714,19 @@ window.addEventListener('hashchange', function() {
   if (v === 'settings') loadSettings();
 });
 
+// Collapsible panels: the heading's <button class="panel-toggle"> owns the
+// state (aria-expanded) and the panel's .collapsed class follows it. One
+// delegated listener covers every panel, including any rendered later.
+document.addEventListener('click', function (e) {
+  var btn = e.target.closest('.panel-toggle');
+  if (!btn) return;
+  var panel = btn.closest('.panel-collapse');
+  if (!panel) return;
+  var open = btn.getAttribute('aria-expanded') !== 'false';
+  btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  panel.classList.toggle('collapsed', open);
+});
+
 // ── Settings panel ────────────────────────────────────────────────────────
 // (reuses the existing esc() helper defined earlier for HTML escaping)
 var _settingsLoaded = false;
@@ -2564,15 +2735,18 @@ function srcLabel(src) {
   if (src === 'env') return '<span class="sl-src env">from env</span>';
   return '<span class="sl-src">not set</span>';
 }
+// id for a row's visible name so its control can point at it with
+// aria-labelledby — the placeholder is a hint, not the label.
+function labelId(key) { return 'sl-' + String(key).replace(/[^A-Za-z0-9_-]/g, '-'); }
 // Render one secret row: masked hint + password input + Save/Clear/Test.
 function secretRowHTML(s) {
   var test = s.testable
     ? '<button class="set-btn" onclick="testProvider(\'' + esc(s.testable) + '\', this)">Test</button>'
     : '';
   return '<div class="set-row" data-key="' + esc(s.key) + '">'
-    + '<div class="set-label"><span class="sl-name">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-label"><span class="sl-name" id="' + labelId(s.key) + '">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
     + '<div class="set-control">'
-    +   '<input type="password" placeholder="' + (s.set ? 'saved · ' + esc(s.hint) + ' — enter to replace' : 'not configured — paste key') + '" autocomplete="off" spellcheck="false">'
+    +   '<input type="password" aria-labelledby="' + labelId(s.key) + '" placeholder="' + (s.set ? 'saved · ' + esc(s.hint) + ' — enter to replace' : 'not configured — paste key') + '" autocomplete="off" spellcheck="false">'
     + '</div>'
     + '<div class="set-actions">'
     +   '<button class="set-btn primary" onclick="saveSecret(this)">Save</button>'
@@ -2588,9 +2762,9 @@ function knobRowHTML(s) {
     var on = /^(1|true|yes|on)$/i.test(s.value || '');
     ctrl = '<label class="set-toggle"><input type="checkbox" ' + (on ? 'checked' : '') + '> enabled</label>';
   } else if (s.kind === 'int') {
-    ctrl = '<input type="number" value="' + esc(s.value) + '" placeholder="default">';
+    ctrl = '<input type="number" aria-labelledby="' + labelId(s.key) + '" value="' + esc(s.value) + '" placeholder="default">';
   } else if (s.kind === 'float') {
-    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="default" inputmode="decimal">';
+    ctrl = '<input type="text" aria-labelledby="' + labelId(s.key) + '" value="' + esc(s.value) + '" placeholder="default" inputmode="decimal">';
   } else {
     var ph = 'default';
     if (s.key === 'bazaar.tags') ph = 'e.g. shardlure, honeypot';
@@ -2598,10 +2772,10 @@ function knobRowHTML(s) {
     else if (s.key === 'urlhaus.tags') ph = 'e.g. shardlure, honeypot';
     else if (s.key === 'urlhaus.endpoint') ph = 'https://urlhaus.abuse.ch/api/';
     else if (s.key === 'urlhaus.active_days') ph = '1-3 (default 3)';
-    ctrl = '<input type="text" value="' + esc(s.value) + '" placeholder="' + (s.kind === 'intcsv' ? 'e.g. 18,22' : ph) + '">';
+    ctrl = '<input type="text" aria-labelledby="' + labelId(s.key) + '" value="' + esc(s.value) + '" placeholder="' + (s.kind === 'intcsv' ? 'e.g. 18,22' : ph) + '">';
   }
   return '<div class="set-row" data-key="' + esc(s.key) + '" data-kind="' + esc(s.kind) + '">'
-    + '<div class="set-label"><span class="sl-name">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
+    + '<div class="set-label"><span class="sl-name" id="' + labelId(s.key) + '">' + esc(s.label) + '</span>' + srcLabel(s.source) + '</div>'
     + '<div class="set-control">' + ctrl + '</div>'
     + '<div class="set-actions">'
     +   '<button class="set-btn primary" onclick="saveKnob(this)">Save</button>'
@@ -2990,6 +3164,18 @@ function closePalette() {
   var el = paletteEl();
   if (el) { el.hidden = true; el.innerHTML = ''; }
   _pal = { items: [], sel: -1 };
+  syncPaletteAria();
+}
+
+// Combobox state lives on the input: aria-expanded mirrors the listbox and
+// aria-activedescendant names the highlighted option, so a screen reader
+// follows the arrow keys without focus ever leaving the text field.
+function syncPaletteAria() {
+  var el = paletteEl();
+  var open = !!el && !el.hidden;
+  searchInput.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open && _pal.sel >= 0) searchInput.setAttribute('aria-activedescendant', 'pal-opt-' + _pal.sel);
+  else searchInput.removeAttribute('aria-activedescendant');
 }
 
 /* Build grouped results from data already fetched into the page's state plus
@@ -3061,16 +3247,18 @@ function renderPalette(items) {
   if (!items.length) {
     el.innerHTML = '<div class="pempty">no matches — press Esc to close</div>';
     el.hidden = false;
+    syncPaletteAria();
     return;
   }
   var html = '', group = '';
   items.forEach(function (it, i) {
     if (it.group !== group) { group = it.group; html += '<div class="pg">' + esc(group) + '</div>'; }
-    html += '<div class="pi' + (i === _pal.sel ? ' sel' : '') + '" data-i="' + i + '" role="option">' +
+    html += '<div class="pi' + (i === _pal.sel ? ' sel' : '') + '" data-i="' + i + '" id="pal-opt-' + i + '" role="option" aria-selected="' + (i === _pal.sel ? 'true' : 'false') + '">' +
       '<span>' + esc(it.label) + '</span><span class="sub">' + esc(it.sub || '') + '</span></div>';
   });
   el.innerHTML = html;
   el.hidden = false;
+  syncPaletteAria();
   el.querySelectorAll('.pi').forEach(function (row) {
     row.addEventListener('click', function () {
       var it = _pal.items[Number(row.getAttribute('data-i'))];
@@ -3085,8 +3273,10 @@ function movePaletteSel(delta) {
   var el = paletteEl();
   el.querySelectorAll('.pi').forEach(function (row, i) {
     row.classList.toggle('sel', i === _pal.sel);
+    row.setAttribute('aria-selected', i === _pal.sel ? 'true' : 'false');
     if (i === _pal.sel && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
   });
+  syncPaletteAria();
 }
 
 function activatePaletteSel() {
@@ -3233,9 +3423,9 @@ setActiveView = function(name) {
   if (name === 'blue') refreshMitre();
 };
 onWindowChange('view-blue', refreshMitre);
-setInterval(function() {
+pollEvery(30000, function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshMitre();
-}, 30000);
+});
 // Kick off once in case the page loaded with #tab=blue.
 if (readTabFromHash() === 'blue') refreshMitre();
 
@@ -3419,7 +3609,7 @@ async function openSession(sid) {
   document.getElementById('sm-title').textContent = 'session ' + sid;
   document.getElementById('sm-sub').textContent = '';
   document.getElementById('sm-body').innerHTML = '<div class="empty">loading…</div>';
-  modal.classList.add('open');
+  if (!modal.open) modal.showModal();
   try {
     const r = await fetch('/api/intel/session?id=' + encodeURIComponent(sid) + '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) {
@@ -3433,14 +3623,14 @@ async function openSession(sid) {
 }
 
 function closeSession() {
-  document.getElementById('sess-modal').classList.remove('open');
+  var m = document.getElementById('sess-modal');
+  if (m.open) m.close();
 }
 document.getElementById('sm-close').addEventListener('click', closeSession);
+// Light dismiss: a click that lands on the <dialog> itself (its transparent
+// frame or the ::backdrop) rather than on the card. Esc is native.
 document.getElementById('sess-modal').addEventListener('click', function(e) {
   if (e.target.id === 'sess-modal') closeSession();
-});
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') closeSession();
 });
 
 // Hook sessions loader into Blue tab activation and window chips.
@@ -3450,9 +3640,9 @@ setActiveView = function(name) {
   if (name === 'blue') refreshSessions();
 };
 onWindowChange('view-blue', refreshSessions);
-setInterval(function() {
+pollEvery(30000, function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshSessions();
-}, 30000);
+});
 if (readTabFromHash() === 'blue') refreshSessions();
 
 // ==== Suggested AbuseIPDB reports =================================
@@ -3619,13 +3809,13 @@ setActiveView = function(name) {
     refreshThreatFox();
   }
 };
-setInterval(function() {
+pollEvery(30000, function() {
   if (document.getElementById('view-blue').classList.contains('active')) {
     refreshAbuseSuggest();
     refreshURLhaus();
     refreshThreatFox();
   }
-}, 30000);
+});
 if (readTabFromHash() === 'blue') { refreshAbuseSuggest(); refreshURLhaus(); refreshThreatFox(); }
 
 // ==== URLhaus URL sharing =========================================
@@ -4007,7 +4197,6 @@ async function refreshIOC() {
     e.preventDefault(); e.stopPropagation();
     downloadWithAuth('/api/ioc/stix?window=' + encodeURIComponent(window), 'shardlure-ioc.stix.json');
   };
-  stixLink.removeAttribute('href');
   try {
     const r = await fetch('/api/ioc/list?kind=' + IOC.kind + '&window=' + encodeURIComponent(window) +
                          '&limit=50&_=' + Date.now(), { cache: 'no-store' });
@@ -4031,9 +4220,9 @@ setActiveView = function(name) {
   if (name === 'blue') refreshIOC();
 };
 onWindowChange('view-blue', refreshIOC);
-setInterval(function() {
+pollEvery(30000, function() {
   if (document.getElementById('view-blue').classList.contains('active')) refreshIOC();
-}, 30000);
+});
 if (readTabFromHash() === 'blue') refreshIOC();
 
 // ==== Slice E: threat intel enrichment ============================
@@ -4195,9 +4384,9 @@ setActiveView = function(name) {
   if (name === 'red') { refreshTTP(); refreshTunnels(); }
 };
 onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); });
-setInterval(function() {
+pollEvery(30000, function() {
   if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); }
-}, 30000);
+});
 if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); }
 
 // ==== Proxy targets (direct-tcpip pivots) =========================
@@ -4528,7 +4717,7 @@ async function openPayload(sha) {
   document.getElementById('pm-title').textContent = 'payload · ' + sha.slice(0, 24);
   document.getElementById('pm-sub').textContent = '';
   document.getElementById('pm-body').innerHTML = '<div class="empty">loading…</div>';
-  modal.classList.add('open');
+  if (!modal.open) modal.showModal();
   try {
     const r = await fetch('/api/intel/payload?sha=' + encodeURIComponent(sha) + '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) {
@@ -4603,13 +4792,10 @@ function renderPayloadDetail(d) {
   document.getElementById('pm-body').innerHTML = mismatchBlock + grid + errBlock + stringsBlock + hexBlock + bzBtn;
 }
 
-function closePayload() { document.getElementById('payload-modal').classList.remove('open'); }
+function closePayload() { var m = document.getElementById('payload-modal'); if (m.open) m.close(); }
 document.getElementById('pm-close').addEventListener('click', closePayload);
 document.getElementById('payload-modal').addEventListener('click', function(e) {
   if (e.target.id === 'payload-modal') closePayload();
-});
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') closePayload();
 });
 
 const _setActiveForPayloads = setActiveView;
@@ -4618,10 +4804,10 @@ setActiveView = function(name) {
   if (name === 'red') refreshPayloads();
 };
 onWindowChange('view-red', refreshPayloads);
-setInterval(function() {
+pollEvery(30000, function() {
   if (_uploadAllRunning) return;
   if (document.getElementById('view-red').classList.contains('active')) refreshPayloads();
-}, 30000);
+});
 if (readTabFromHash() === 'red') refreshPayloads();
 
 // ==== Slice H: credential wordlist export =========================
@@ -4681,9 +4867,9 @@ setActiveView = function(name) {
   if (name === 'red') refreshWordlist();
 };
 onWindowChange('view-red', refreshWordlist);
-setInterval(function() {
+pollEvery(30000, function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshWordlist();
-}, 30000);
+});
 if (readTabFromHash() === 'red') refreshWordlist();
 
 // ==== Slice I: infrastructure pivot graph =========================
@@ -4718,10 +4904,30 @@ const NODE_STYLE = {
   user:  { color: '#48b878', shape: 'triangle' },
 };
 
+// vis-network (689 KB) is loaded on first use, not in <head>: it was a
+// synchronous, render-blocking script on every page load for a panel on the
+// third tab that many sessions never open. Same-origin, so script-src 'self'
+// still covers it. The promise is memoised so concurrent callers share one
+// request; a failed load clears it so the next refresh retries.
+var _visLoad = null;
+function ensureVis() {
+  if (typeof vis !== 'undefined') return Promise.resolve();
+  if (_visLoad) return _visLoad;
+  _visLoad = new Promise(function (resolve, reject) {
+    var el = document.createElement('script');
+    el.src = '/vendor/vis-network.min.js';
+    el.onload = function () { resolve(); };
+    el.onerror = function () { _visLoad = null; reject(new Error('vis-network failed to load')); };
+    document.head.appendChild(el);
+  });
+  return _visLoad;
+}
+
 async function refreshGraph() {
   const window = Filters.window || '7d';
   const stats = document.getElementById('graph-stats');
   try {
+    await ensureVis();
     const r = await fetch('/api/intel/graph?window=' + encodeURIComponent(window) +
                          '&top=80&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) {
@@ -4732,12 +4938,12 @@ async function refreshGraph() {
     renderGraph(data);
     // Disclose the top-N-per-kind sampling so "240 nodes" doesn't read as the
     // whole population (the graph is intentionally capped to stay renderable).
-    var shown = data.nodes.length;
+    var shown = (data.nodes || []).length;
     var totalNodes = data.totalNodes || shown;
     var nodeLabel = totalNodes > shown
       ? (shown + ' of ' + fmt(totalNodes) + ' nodes (top ' + (data.cap || 80) + '/kind)')
       : (shown + ' nodes');
-    stats.textContent = nodeLabel + ' · ' + data.edges.length + ' edges · ' +
+    stats.textContent = nodeLabel + ' · ' + (data.edges || []).length + ' edges · ' +
                         data.windowHours + 'h window' + sampledNote(data);
   } catch (e) {
     stats.textContent = 'load failed: ' + e.message;
@@ -4793,7 +4999,7 @@ function renderGraph(data) {
   }
   GRAPH.lastData = data;
   var tc = graphThemeColors();
-  const nodes = data.nodes.map(function(n) {
+  const nodes = (data.nodes || []).map(function(n) {
     const style = NODE_STYLE[n.kind] || NODE_STYLE.user;
     // actor nodes read the accent colour at runtime instead of a hardcoded
     // literal, so the graph tracks the active theme (see graphThemeColors).
@@ -4874,9 +5080,9 @@ setActiveView = function(name) {
   }
 };
 onWindowChange('view-red', function() { setTimeout(refreshGraph, 50); });
-setInterval(function() {
+pollEvery(60000, function() {
   if (document.getElementById('view-red').classList.contains('active')) refreshGraph();
-}, 60000);
+});
 if (readTabFromHash() === 'red') setTimeout(refreshGraph, 100);
 
 // ==== Slice J: replay script generator ============================
@@ -5069,14 +5275,14 @@ onWindowChange('view-red', refreshDeobf);
 // active text selection inside the rows. Replacing innerHTML in
 // either case would reset scroll position and clobber the
 // selection - both noisy enough to be reported as bugs.
-setInterval(function() {
+pollEvery(60000, function() {
   if (!document.getElementById('view-red').classList.contains('active')) return;
   var rows = document.getElementById('deobf-rows');
   if (rows && rows.scrollTop > 4) return;
   var sel = window.getSelection && window.getSelection();
   if (sel && sel.toString() && rows && rows.contains(sel.anchorNode)) return;
   refreshDeobf();
-}, 60000);
+});
 if (readTabFromHash() === 'red') refreshDeobf();
 
 // ==== Slice L: MalwareBazaar sharing ================================
@@ -5472,8 +5678,8 @@ async function uploadToBazaar(sha,btn) {
 
 refreshCreds();
 refreshTimeline();
-setInterval(function(){if(document.getElementById('view-overview').classList.contains('active'))refreshCreds()},30000);
-setInterval(function(){if(document.getElementById('view-overview').classList.contains('active'))refreshTimeline()},3000);
+pollEvery(30000, function(){if(document.getElementById('view-overview').classList.contains('active'))refreshCreds()});
+pollEvery(3000, function(){if(document.getElementById('view-overview').classList.contains('active'))refreshTimeline()});
 </script>
 </div><!-- /shell-main -->
 </div><!-- /shell -->
