@@ -396,7 +396,7 @@ Do not commit your real config. `admin_ips` may reveal private network details s
 
 ## Deployment
 
-<img width="1918" height="964" alt="image" src="https://github.com/user-attachments/assets/9a86570e-bda5-4cc0-a095-a4c49c391281" />
+<img width="1918" height="964" alt="image" src="https://github.com/user-attachments/assets/1ef218d2-9fe6-44e0-8423-cac956ce6146" />
 
 Use tar pipe deployment instead of direct `scp` for source files:
 
