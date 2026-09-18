@@ -9,11 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
 	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
+	"github.com/networkshard/shardlure/pkg/models"
 )
 
 // cmdReport is the dispatcher for "shardlure report <destination>". Kept
@@ -128,7 +130,10 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 		fatal(fmt.Errorf("no AbuseIPDB API key found — save one in the dashboard Settings panel, or export SHARDLURE_ABUSEIPDB_KEY (same key as enrichment /check)"))
 	}
 
-	cands, err := collectReportCandidates(st, *minProbe)
+	ctx, cancel := newCommandContext(context.Background())
+	defer cancel()
+
+	cands, err := collectReportCandidatesContext(ctx, st, *minProbe)
 	if err != nil {
 		fatal(fmt.Errorf("collect candidates: %w", err))
 	}
@@ -174,9 +179,6 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	reported, skipped, ferr := abuseipdb.Report(ctx, &abuseReportRecorderAdapter{st: st}, cands, opts)
 	fmt.Printf("\nresult: reported=%d skipped=%d\n", reported, skipped)
 	if ferr != nil {
@@ -198,53 +200,55 @@ func (a *abuseReportRecorderAdapter) RecordAbuseIPDBReport(ip, status string, sc
 	return a.st.RecordAbuseIPDBReport(ip, status, score, categories, at)
 }
 
-// collectReportCandidates pulls actors eligible for reporting. The heavy
-// filtering (brute playbook, probe floor, admin/private reject) is the vet
-// gate's job — this just surfaces actors above the probe floor with a primary
-// IP, ordered by aggression so --limit reports the worst offenders first.
+// collectReportCandidates loads each target's independent source evidence once.
+// Lifetime/cluster scores never pre-filter or rank target evidence; shared
+// selection applies Vet, deduplicates IPs and ranks current reporting priority.
 func collectReportCandidates(st *store.Store, minProbe int) ([]abuseipdb.ReportCandidate, error) {
+	return collectReportCandidatesContext(context.Background(), st, minProbe)
+}
+
+func collectReportCandidatesContext(ctx context.Context, st *store.Store, minProbe int) ([]abuseipdb.ReportCandidate, error) {
 	since := time.Now().Add(-store.RecentRateWindow)
-	actors, err := st.ActorsForReporting(since, 1000)
+	actors, err := st.ActorsForReportingContext(ctx, since, 1000)
 	if err != nil {
 		return nil, err
 	}
-	// Windowed rates, one query for the whole pool. Actor.AttemptsPerHour is a
-	// LIFETIME average and understates an actively escalating attacker by 2-3x,
-	// which is the wrong figure to weight a report about current behaviour by.
-	// Absent from the map means no activity in the window: 0 is the honest value
-	// and only lowers priority, since Vet does not gate on the rate.
-	rates, err := st.RecentRatesByActor(since)
-	if err != nil {
-		return nil, err
-	}
-	// Per-primary-IP last-seen, NOT actor.LastSeen: the actor figure is the max
-	// across a HASSH cluster, and the report names one address. The cluster max
-	// let a fresh cluster-mate carry a 17.7-day-dormant primary IP through the
-	// staleness gate. Absent from the map means no observation for that IP —
-	// the zero time, which Vet hard-rejects.
-	ipSeen, err := st.PrimaryIPLastSeen()
-	if err != nil {
-		return nil, err
-	}
+	now := time.Now()
 	out := make([]abuseipdb.ReportCandidate, 0, len(actors))
+	seen := make(map[string]bool)
 	for _, a := range actors {
-		if a.PrimaryIP == "" || a.ProbeScore < minProbe {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		// The stored score describes lifetime/cluster activity, not the target's
+		// recent evidence. Only Vet may enforce the configured score floor.
+		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
 			continue
 		}
-		out = append(out, abuseipdb.ReportCandidate{
-			SrcIP:           a.PrimaryIP,
-			Playbook:        a.Playbook,
-			ProbeScore:      a.ProbeScore,
-			EventCount:      a.EventCount,
-			UniqueUsers:     a.UniqueUsers,
-			AttemptsPerHour: rates[a.ID],
-			// Required by Vet's staleness gate: the pool reaches past the window
-			// (ActorsForReporting unions in top actors by lifetime rate), so
-			// without this the CLI would offer month-dormant IPs.
-			LastSeen: ipSeen[a.ID],
-		})
+		seen[a.PrimaryIP] = true
+		for _, source := range []models.Source{models.SourceJournal, models.SourceCowrie} {
+			evidence, err := actor.ReportEvidenceForIPContext(ctx, st, &models.Actor{PrimaryIP: a.PrimaryIP, Source: source}, now)
+			if err != nil {
+				return nil, err
+			}
+			if evidence.EventCount == 0 {
+				continue // no first-hand evidence for the target in the report window
+			}
+			out = append(out, abuseipdb.ReportCandidate{
+				SrcIP:           evidence.PrimaryIP,
+				Playbook:        evidence.Playbook,
+				ProbeScore:      evidence.ProbeScore,
+				EventCount:      evidence.EventCount,
+				UniqueUsers:     evidence.UniqueUsers,
+				AttemptsPerHour: evidence.AttemptsPerHour,
+				// Required by Vet's staleness gate: the pool reaches past the window
+				// (ActorsForReporting unions in top actors by lifetime rate), so
+				// without this the CLI would offer month-dormant IPs.
+				LastSeen: evidence.LastSeen,
+			})
+		}
 	}
-	return out, nil
+	return abuseipdb.SelectCandidates(out, nil, minProbe, now), nil
 }
 
 func printAbuseReportProgress(c abuseipdb.ReportCandidate, res *abuseipdb.Result, err error) {

@@ -131,7 +131,7 @@ WHERE a.origin = 'quarantine_fetch'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
   AND a.size_bytes >= 64
   AND (a.url LIKE 'http://%' OR a.url LIKE 'https://%')
-  AND COALESCE(a.ts, a.created_at) >= ?
+  AND julianday(a.last_successful_fetch_at) >= julianday(?)
   AND a.url NOT IN (SELECT ioc FROM threatfox_submissions)`
 
 // ListThreatFoxSubmissions returns recorded submissions, newest first.
@@ -200,16 +200,16 @@ func (s *Store) ThreatFoxCandidates(activeDays, limit int) ([]ThreatFoxCandidate
 	cutoff := time.Now().UTC().Add(-time.Duration(activeDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	q := `
 SELECT a.url, COALESCE(a.sha256,''), COALESCE(a.size_bytes,0), a.origin, a.status,
-       COALESCE(a.ts, a.created_at), COALESCE(a.local_path,'')
+       a.last_successful_fetch_at, COALESCE(a.local_path,'')
 FROM artifacts a
 WHERE a.origin = 'quarantine_fetch'
   AND a.status = 'fetched'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
   AND a.size_bytes >= 64
   AND (a.url LIKE 'http://%' OR a.url LIKE 'https://%')
-  AND COALESCE(a.ts, a.created_at) >= ?
+  AND julianday(a.last_successful_fetch_at) >= julianday(?)
   AND a.url NOT IN (SELECT ioc FROM threatfox_submissions)
-ORDER BY COALESCE(a.ts, a.created_at) DESC`
+ORDER BY julianday(a.last_successful_fetch_at) DESC`
 	args := []any{cutoff}
 	if limit > 0 {
 		q += ` LIMIT ?`

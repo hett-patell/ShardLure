@@ -2,6 +2,7 @@ package web
 
 import (
 	"container/list"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -360,30 +361,31 @@ func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
 		releaseClaims(need[48:])
 		need = need[:48]
 	}
-	deadline := time.Now().Add(budget)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 	var wg sync.WaitGroup
 	for i, ip := range need {
-		if time.Now().After(deadline) {
+		if ctx.Err() != nil {
 			releaseClaims(need[i:])
 			break
 		}
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
-			g.fetch(ip)
+			g.fetch(ctx, ip)
 		}(ip)
 	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(budget):
-	}
+	wg.Wait()
 }
 
-func (g *geoResolver) fetch(ip string) {
+func (g *geoResolver) fetch(ctx context.Context, ip string) {
 	select {
 	case g.sem <- struct{}{}:
+	case <-ctx.Done():
+		g.mu.Lock()
+		delete(g.inflight, ip)
+		g.mu.Unlock()
+		return
 	default:
 		g.mu.Lock()
 		delete(g.inflight, ip)
@@ -426,11 +428,20 @@ func (g *geoResolver) fetch(ip string) {
 		g.mu.Unlock()
 		return
 	}
-	resp, err := g.http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		g.mu.Lock()
 		delete(g.inflight, ip)
-		g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Minute)})
+		g.mu.Unlock()
+		return
+	}
+	resp, err := g.http.Do(req)
+	if err != nil {
+		g.mu.Lock()
+		delete(g.inflight, ip)
+		if ctx.Err() == nil {
+			g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Minute)})
+		}
 		g.mu.Unlock()
 		return
 	}

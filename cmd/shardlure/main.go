@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -109,8 +110,10 @@ func main() {
 			}
 		}
 		if tailscaleHint {
-			if p := addrPort(addr); p > 0 {
-				addr = fmt.Sprintf("0.0.0.0:%d", p)
+			var err error
+			addr, err = tailscaleBindAddress(addr, tailscaleIPv4())
+			if err != nil {
+				fatal(err)
 			}
 		}
 		fmt.Printf("serving live dashboard on http://%s\n", addr)
@@ -119,7 +122,16 @@ func main() {
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
-		if err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx); err != nil {
+		var workers sync.WaitGroup
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			runStoreBackfills(ctx, st)
+		}()
+		err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx)
+		cancel()
+		workers.Wait()
+		if err != nil {
 			fatal(err)
 		}
 	case "live":
@@ -240,19 +252,17 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 	if cowriePath == "" {
 		fatal(fmt.Errorf("cowrie path missing; set in config cowrie.json_log or pass --cowrie=<path>"))
 	}
-	// When --tailscale is set, bind to 0.0.0.0:PORT so the dashboard is
-	// reachable from both loopback (localhost) and Tailscale clients.
-	// Tailscale itself provides network-level access control; the security
-	// check allows wildcard binding when TailscaleMode is true.
+	// Bind only the private interface. A flag cannot make wildcard sockets
+	// private; missing Tailscale must be a startup failure, not public fallback.
 	if tailscaleHint {
-		if p := addrPort(addr); p > 0 {
-			addr = fmt.Sprintf("0.0.0.0:%d", p)
-		} else {
-			fmt.Fprintln(os.Stderr, "warning: --tailscale set but could not parse port from", addr)
+		var err error
+		addr, err = tailscaleBindAddress(addr, tailscaleIPv4())
+		if err != nil {
+			fatal(err)
 		}
 	}
 	dashURL := addr
-	if p := addrPort(addr); p > 0 {
+	if p := addrPort(addr); p > 0 && !tailscaleHint {
 		dashURL = fmt.Sprintf("http://127.0.0.1:%d", p)
 	}
 	fmt.Printf("live wrapper: cowrie=%s journal=%v interval=%s dashboard=%s\n", cowriePath, journalSSH, interval, dashURL)
@@ -278,15 +288,23 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	var workers sync.WaitGroup
+	startWorker := func(fn func()) {
+		workers.Add(1)
+		go func() { defer workers.Done(); fn() }()
+	}
 
 	// Start the artifact retry worker in the background. It polls for failed
 	// captures and retries them with exponential backoff, bounded by the
 	// configured max attempts.
 	artWorker := capture.NewArtifactWorker(st, capRunner.Fetch(), 5, 2*time.Minute)
-	go artWorker.Run(ctx)
+	if cfg.Capture.Enabled && cfg.Capture.QuarantineFetch {
+		startWorker(func() { artWorker.Run(ctx) })
+	}
+	startWorker(func() { runStoreBackfills(ctx, st) })
 
 	if journalSSH {
-		go func() {
+		startWorker(func() {
 			// Restart the tail on failure with capped backoff. A scanner error
 			// (e.g. an oversized journal line) or journalctl exiting would
 			// otherwise end journal ingestion silently for the daemon's whole
@@ -301,18 +319,20 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "journal tail stopped: %v (restarting in %s)\n", err, backoff)
 				}
+				timer := time.NewTimer(backoff)
 				select {
 				case <-ctx.Done():
+					timer.Stop()
 					return
-				case <-time.After(backoff):
+				case <-timer.C:
 				}
 				if backoff < 30*time.Second {
 					backoff *= 2
 				}
 			}
-		}()
+		})
 	}
-	go func() {
+	startWorker(func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -328,12 +348,12 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 				}
 			}
 		}
-	}()
+	})
 	// Periodic data retention purge — deletes old events,
 	// enrichments, artifacts, and TTY transcripts past the
 	// configured retention window. Fires once at startup
 	// and then every 24h.
-	go func() {
+	startWorker(func() {
 		t := time.NewTicker(24 * time.Hour)
 		defer t.Stop()
 		runPurge := func() {
@@ -354,10 +374,72 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 				runPurge()
 			}
 		}
-	}()
+	})
 
-	if err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx); err != nil {
+	err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx)
+	cancel()
+	workers.Wait()
+	if err != nil {
 		fatal(err)
+	}
+}
+
+func runStoreBackfills(ctx context.Context, st *store.Store) {
+	const (
+		batchSize = 1000
+		batchGap  = 250 * time.Millisecond
+		errorGap  = 5 * time.Second
+	)
+	for ctx.Err() == nil {
+		result, err := st.BackfillArtifactTimes(ctx, batchSize)
+		if err == nil && result.Invalid > 0 {
+			fmt.Fprintf(os.Stderr, "artifact timestamp backfill quarantined/skipped %d malformed row(s)\n", result.Invalid)
+		}
+		if err == nil && result.Done {
+			break
+		}
+		wait := batchGap
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "artifact timestamp backfill: %v\n", err)
+			wait = errorGap
+		}
+		if !waitForBackfill(ctx, wait) {
+			return
+		}
+	}
+	for ctx.Err() == nil {
+		result, err := st.BackfillEventTimes(ctx, batchSize)
+		if err == nil && result.Invalid > 0 {
+			fmt.Fprintf(os.Stderr, "event timestamp backfill skipped %d malformed row(s)\n", result.Invalid)
+		}
+		if err == nil && result.Done {
+			return
+		}
+		wait := batchGap
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "event timestamp backfill: %v\n", err)
+			wait = errorGap
+		}
+		if !waitForBackfill(ctx, wait) {
+			return
+		}
+	}
+}
+
+func waitForBackfill(ctx context.Context, wait time.Duration) bool {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -752,6 +834,16 @@ func tailscaleIPv4() string {
 		}
 	}
 	return ""
+}
+
+func tailscaleBindAddress(addr, ipText string) (string, error) {
+	ip := net.ParseIP(ipText)
+	_, tailnet, _ := net.ParseCIDR("100.64.0.0/10")
+	port := addrPort(addr)
+	if ip == nil || !tailnet.Contains(ip) || port <= 0 {
+		return "", fmt.Errorf("--tailscale requires an available tailscale0 IPv4 address and valid listen port")
+	}
+	return net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
 }
 
 // addrPort extracts a TCP port from any listen address that

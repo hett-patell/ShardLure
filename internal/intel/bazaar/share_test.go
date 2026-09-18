@@ -20,9 +20,10 @@ import (
 // sqlite store; replicating that here would re-test sqlite, not
 // the Share logic.
 type memRecorder struct {
-	mu      sync.Mutex
-	seen    map[string]bool
-	records []struct {
+	mu        sync.Mutex
+	seen      map[string]bool
+	recordErr error
+	records   []struct {
 		sha, status, url string
 		at               time.Time
 	}
@@ -39,6 +40,9 @@ func (m *memRecorder) BazaarUploadRecorded(sha string) (bool, error) {
 func (m *memRecorder) RecordBazaarUpload(sha, status, url string, at time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.recordErr != nil {
+		return m.recordErr
+	}
 	m.seen[sha] = true
 	m.records = append(m.records, struct {
 		sha, status, url string
@@ -106,6 +110,51 @@ func TestShareUploadsAndRecords(t *testing.T) {
 	}
 	if calls != prevCalls {
 		t.Errorf("dedup failed: network was hit again")
+	}
+}
+
+func TestShareLedgerFailureIsNotUploadedAndStops(t *testing.T) {
+	dir := t.TempDir()
+	samplePath := filepath.Join(dir, "sample.bin")
+	body := []byte("#!/bin/sh\n# redtail miner installer\n" + strings.Repeat("padding ", 20))
+	if err := os.WriteFile(samplePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte("{\"query_status\":\"inserted\"}"))
+	}))
+	defer srv.Close()
+
+	ledgerErr := errors.New("ledger write failed")
+	rec := newMemRecorder()
+	rec.recordErr = ledgerErr
+	now := time.Now()
+	candidates := []Candidate{
+		{SHA256: "aa11", LocalPath: samplePath, SizeBytes: int64(len(body)), CreatedAt: now, Origin: "cowrie_download", ObservedAt: now},
+		{SHA256: "bb22", LocalPath: samplePath, SizeBytes: int64(len(body)), CreatedAt: now, Origin: "cowrie_download", ObservedAt: now},
+	}
+	var progressErr error
+	uploaded, skipped, err := Share(context.Background(), rec, candidates, Options{
+		APIKey: "k", Endpoint: srv.URL, MaxBytes: 1 << 20, RateLimit: time.Millisecond,
+		OnProgress: func(_ Candidate, _ Classification, _ *Result, err error) { progressErr = err },
+	})
+	if !errors.Is(err, ledgerErr) {
+		t.Fatalf("error = %v, want ledger failure", err)
+	}
+	if uploaded != 0 || skipped != 0 {
+		t.Fatalf("uploaded=%d skipped=%d, want 0/0", uploaded, skipped)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider received %d uploads, want 1 before fail-stop", calls.Load())
+	}
+	if !errors.Is(progressErr, ledgerErr) {
+		t.Fatalf("progress error = %v, want ledger failure", progressErr)
+	}
+	if len(rec.records) != 0 {
+		t.Fatalf("ledger contains %d records, want 0", len(rec.records))
 	}
 }
 
@@ -346,18 +395,19 @@ func TestShareFatalRejectionStops(t *testing.T) {
 
 func TestShareSemanticRejections(t *testing.T) {
 	tests := []struct {
-		status    string
-		wantCalls int32
-		fatal     bool
+		status     string
+		wantStatus string
+		wantCalls  int32
+		fatal      bool
 	}{
-		{status: "no_api_key", wantCalls: 1, fatal: true},
-		{status: "user_blacklisted", wantCalls: 1, fatal: true},
-		{status: "http_post_expected", wantCalls: 2},
-		{status: "file_expected", wantCalls: 2},
-		{status: "file_too_large", wantCalls: 2},
-		{status: "file_type_not_allowed", wantCalls: 2},
-		{status: "", wantCalls: 2},
-		{status: "future_status", wantCalls: 2},
+		{status: "no_api_key", wantStatus: "no_api_key", wantCalls: 1, fatal: true},
+		{status: "user_blacklisted", wantStatus: "user_blacklisted", wantCalls: 1, fatal: true},
+		{status: "http_post_expected", wantStatus: "http_post_expected", wantCalls: 2},
+		{status: "file_expected", wantStatus: "file_expected", wantCalls: 2},
+		{status: "file_too_large", wantStatus: "file_too_large", wantCalls: 2},
+		{status: "file_type_not_allowed", wantStatus: "file_type_not_allowed", wantCalls: 2},
+		{status: "", wantStatus: "invalid_response", wantCalls: 2},
+		{status: "future_status", wantStatus: "unknown", wantCalls: 2},
 	}
 
 	for _, tt := range tests {
@@ -397,15 +447,15 @@ func TestShareSemanticRejections(t *testing.T) {
 			if got := calls.Load(); got != tt.wantCalls {
 				t.Fatalf("calls = %d, want %d for status %q", got, tt.wantCalls, tt.status)
 			}
-			if tt.status != "" && !strings.Contains(err.Error(), tt.status) {
-				t.Fatalf("error %q does not identify status %q", err, tt.status)
+			if !strings.Contains(err.Error(), tt.wantStatus) {
+				t.Fatalf("error %q does not identify sanitized status %q", err, tt.wantStatus)
 			}
 			var semanticErr *SemanticError
 			if !errors.As(err, &semanticErr) {
 				t.Fatalf("error %T is not *SemanticError: %v", err, err)
 			}
-			if semanticErr.Status != tt.status || semanticErr.Fatal() != tt.fatal {
-				t.Fatalf("semantic error = (status=%q fatal=%v), want (%q, %v)", semanticErr.Status, semanticErr.Fatal(), tt.status, tt.fatal)
+			if semanticErr.Status != tt.wantStatus || semanticErr.Fatal() != tt.fatal {
+				t.Fatalf("semantic error = (status=%q fatal=%v), want (%q, %v)", semanticErr.Status, semanticErr.Fatal(), tt.wantStatus, tt.fatal)
 			}
 			if len(rec.records) != 0 {
 				t.Fatalf("rejected samples were recorded: %+v", rec.records)
@@ -446,7 +496,7 @@ func TestShareFatalSemanticRejectionRetainedAfterPriorError(t *testing.T) {
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("calls = %d, want 2", got)
 	}
-	if err == nil || !strings.Contains(err.Error(), "http 502") {
+	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("error = %v, want prior transport error", err)
 	}
 	var semanticErr *SemanticError
@@ -509,6 +559,50 @@ func TestSharePacesAfterNonfatalSemanticRejection(t *testing.T) {
 	}
 	if gap := times[1].Sub(times[0]); gap < rateLimit {
 		t.Errorf("inter-request gap = %v, want at least %v", gap, rateLimit)
+	}
+}
+
+func TestSharePacesAfterHTTPFailure(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sample.sh")
+	body := []byte("#!/bin/sh\n# redtail miner installer\n" + strings.Repeat("padding ", 20))
+	if err := os.WriteFile(p, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var attempts []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts = append(attempts, time.Now())
+		n := len(attempts)
+		mu.Unlock()
+		if n == 1 {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte("{\"query_status\":\"inserted\"}"))
+	}))
+	defer srv.Close()
+
+	now := time.Now()
+	cands := []Candidate{
+		{SHA256: "pace-1", LocalPath: p, SizeBytes: int64(len(body)), Origin: "cowrie_download", CreatedAt: now, ObservedAt: now},
+		{SHA256: "pace-2", LocalPath: p, SizeBytes: int64(len(body)), Origin: "cowrie_download", CreatedAt: now, ObservedAt: now},
+	}
+	_, _, err := Share(context.Background(), newMemRecorder(), cands, Options{
+		APIKey: "k", Endpoint: srv.URL, MaxBytes: 1 << 20, RateLimit: 100 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("first HTTP failure must be returned")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("attempts=%d, want 2", len(attempts))
+	}
+	if gap := attempts[1].Sub(attempts[0]); gap < 80*time.Millisecond {
+		t.Fatalf("HTTP failure was followed after %v, want configured pacing", gap)
 	}
 }
 

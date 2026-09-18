@@ -3,10 +3,12 @@ package threatfox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ type fakeRecorder struct {
 	mu        sync.Mutex
 	submitted map[string]string // ioc -> status
 	failOn    string            // ioc whose ThreatFoxSubmitted call errors
+	recordErr error
 }
 
 func newFakeRecorder() *fakeRecorder { return &fakeRecorder{submitted: map[string]string{}} }
@@ -34,6 +37,9 @@ func (f *fakeRecorder) ThreatFoxSubmitted(ioc string) (bool, error) {
 func (f *fakeRecorder) RecordThreatFoxSubmission(ioc, iocType, malware, status string, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.recordErr != nil {
+		return f.recordErr
+	}
 	f.submitted[ioc] = status
 	return nil
 }
@@ -113,6 +119,40 @@ func TestShareSubmitsVettedCandidateIOCs(t *testing.T) {
 	}
 	if rec.count() != 3 {
 		t.Errorf("recorded %d IOCs in ledger, want 3", rec.count())
+	}
+}
+
+func TestShareLedgerFailureStopsUntrackedIOCSubmissions(t *testing.T) {
+	srv := newOKServer(t)
+	rec := newFakeRecorder()
+	ledgerErr := errors.New("ledger write failed")
+	rec.recordErr = ledgerErr
+	var progressSubmitted bool
+	var progressCount int
+	var progressReason string
+
+	submitted, skipped, err := Share(context.Background(), rec, []Candidate{goodCandidate()}, Options{
+		APIKey: "k", Endpoint: srv.URL, RateLimit: time.Millisecond, Now: vetNow,
+		OnProgress: func(_ Candidate, durable bool, count int, reason string) {
+			progressSubmitted = durable
+			progressCount = count
+			progressReason = reason
+		},
+	})
+	if !errors.Is(err, ledgerErr) {
+		t.Fatalf("error = %v, want ledger failure", err)
+	}
+	if submitted != 0 || skipped != 0 {
+		t.Fatalf("submitted=%d skipped=%d, want 0/0", submitted, skipped)
+	}
+	if srv.received() != 1 {
+		t.Fatalf("server received %d IOCs, want 1 before fail-stop", srv.received())
+	}
+	if rec.count() != 0 {
+		t.Fatalf("ledger contains %d IOCs, want 0", rec.count())
+	}
+	if progressSubmitted || progressCount != 0 || !strings.Contains(progressReason, "ledger") {
+		t.Fatalf("progress submitted=%v count=%d reason=%q", progressSubmitted, progressCount, progressReason)
 	}
 }
 
@@ -209,6 +249,92 @@ func TestShareIgnoredIsFailureNotRecorded(t *testing.T) {
 	}
 	if rec.count() != 0 {
 		t.Errorf("rejected IOCs must NOT be recorded (so a fixed run retries); got %d", rec.count())
+	}
+}
+
+func TestShareProgressCountsOnlyDurablyRecordedIOCs(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body struct {
+			IOCs []string `json:"iocs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if calls == 1 {
+			http.Error(w, "temporary", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"query_status": "ok",
+			"data": map[string]any{
+				"ok": body.IOCs, "ignored": []string{}, "duplicated": []string{},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	rec := newFakeRecorder()
+	var progressSubmitted bool
+	var progressCount int
+	var progressReason string
+	submitted, skipped, err := Share(context.Background(), rec, []Candidate{goodCandidate()}, Options{
+		APIKey: "k", Endpoint: srv.URL, RateLimit: time.Millisecond, Now: vetNow,
+		OnProgress: func(_ Candidate, durable bool, count int, reason string) {
+			progressSubmitted = durable
+			progressCount = count
+			progressReason = reason
+		},
+	})
+	if err == nil {
+		t.Fatal("partial provider failure must be returned")
+	}
+	if submitted != 1 || skipped != 0 {
+		t.Fatalf("submitted=%d skipped=%d, want 1/0", submitted, skipped)
+	}
+	if rec.count() != 2 {
+		t.Fatalf("recorded %d IOCs, want 2", rec.count())
+	}
+	if !progressSubmitted || progressCount != 2 || !strings.Contains(progressReason, "partial") {
+		t.Fatalf("progress submitted=%v count=%d reason=%q", progressSubmitted, progressCount, progressReason)
+	}
+}
+
+func TestSharePacesAfterFailedIOC(t *testing.T) {
+	var mu sync.Mutex
+	var attempts []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			IOCs []string `json:"iocs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		attempts = append(attempts, time.Now())
+		n := len(attempts)
+		mu.Unlock()
+		if n == 1 {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"query_status": "ok",
+			"data":         map[string]any{"ok": body.IOCs, "ignored": []string{}, "duplicated": []string{}},
+		})
+	}))
+	defer srv.Close()
+
+	_, _, err := Share(context.Background(), newFakeRecorder(), []Candidate{goodCandidate()}, Options{
+		APIKey: "k", Endpoint: srv.URL, RateLimit: 100 * time.Millisecond, Now: vetNow,
+	})
+	if err == nil {
+		t.Fatal("failed IOC must be returned")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) < 2 {
+		t.Fatalf("attempts=%d, want at least 2", len(attempts))
+	}
+	if gap := attempts[1].Sub(attempts[0]); gap < 80*time.Millisecond {
+		t.Fatalf("failed IOC was followed after %v, want configured pacing", gap)
 	}
 }
 

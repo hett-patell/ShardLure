@@ -117,21 +117,22 @@ func TestUploadDuplicate(t *testing.T) {
 
 func TestUploadSemanticStatuses(t *testing.T) {
 	tests := []struct {
-		name     string
-		status   string
-		accepted bool
-		fatal    bool
+		name       string
+		status     string
+		wantStatus string
+		accepted   bool
+		fatal      bool
 	}{
-		{name: "inserted", status: "inserted", accepted: true},
-		{name: "already known", status: "file_already_known", accepted: true},
-		{name: "no API key", status: "no_api_key", fatal: true},
-		{name: "user blacklisted", status: "user_blacklisted", fatal: true},
-		{name: "HTTP POST expected", status: "http_post_expected"},
-		{name: "file expected", status: "file_expected"},
-		{name: "file too large", status: "file_too_large"},
-		{name: "file type not allowed", status: "file_type_not_allowed"},
-		{name: "empty status", status: ""},
-		{name: "unknown status", status: "future_status"},
+		{name: "inserted", status: "inserted", wantStatus: "inserted", accepted: true},
+		{name: "already known", status: "file_already_known", wantStatus: "file_already_known", accepted: true},
+		{name: "no API key", status: "no_api_key", wantStatus: "no_api_key", fatal: true},
+		{name: "user blacklisted", status: "user_blacklisted", wantStatus: "user_blacklisted", fatal: true},
+		{name: "HTTP POST expected", status: "http_post_expected", wantStatus: "http_post_expected"},
+		{name: "file expected", status: "file_expected", wantStatus: "file_expected"},
+		{name: "file too large", status: "file_too_large", wantStatus: "file_too_large"},
+		{name: "file type not allowed", status: "file_type_not_allowed", wantStatus: "file_type_not_allowed"},
+		{name: "empty status", status: "", wantStatus: "invalid_response"},
+		{name: "unknown status", status: "future_status", wantStatus: "unknown"},
 	}
 
 	for _, tt := range tests {
@@ -144,8 +145,8 @@ func TestUploadSemanticStatuses(t *testing.T) {
 			res, err := NewClient(srv.URL).Upload(
 				context.Background(), "test-key", strings.NewReader("payload"), "abc123", Submission{Filename: "sample"},
 			)
-			if res == nil || res.Status != tt.status {
-				t.Fatalf("result = %+v, want status %q", res, tt.status)
+			if res == nil || res.Status != tt.wantStatus {
+				t.Fatalf("result = %+v, want status %q", res, tt.wantStatus)
 			}
 			if tt.accepted {
 				if err != nil {
@@ -163,8 +164,8 @@ func TestUploadSemanticStatuses(t *testing.T) {
 			if !errors.As(err, &semanticErr) {
 				t.Fatalf("error %T is not *SemanticError: %v", err, err)
 			}
-			if semanticErr.Status != tt.status {
-				t.Fatalf("SemanticError.Status = %q, want %q", semanticErr.Status, tt.status)
+			if semanticErr.Status != tt.wantStatus {
+				t.Fatalf("SemanticError.Status = %q, want %q", semanticErr.Status, tt.wantStatus)
 			}
 			if semanticErr.Fatal() != tt.fatal {
 				t.Fatalf("SemanticError.Fatal() = %v, want %v", semanticErr.Fatal(), tt.fatal)
@@ -172,8 +173,8 @@ func TestUploadSemanticStatuses(t *testing.T) {
 			if res.IsAccepted() {
 				t.Fatalf("semantic rejection %q classified as accepted", tt.status)
 			}
-			if tt.status != "" && !strings.Contains(err.Error(), tt.status) {
-				t.Fatalf("error %q does not identify status %q", err, tt.status)
+			if !strings.Contains(err.Error(), tt.wantStatus) {
+				t.Fatalf("error %q does not identify sanitized status %q", err, tt.wantStatus)
 			}
 		})
 	}
@@ -203,7 +204,7 @@ func TestUploadNoAPIKey(t *testing.T) {
 // is unambiguous: their endpoint is down or rate-limiting us.
 func TestUploadHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "down", http.StatusServiceUnavailable)
+		http.Error(w, "provider-token-secret", http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL)
@@ -213,6 +214,97 @@ func TestUploadHTTPError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "503") {
 		t.Errorf("error should mention status: %v", err)
+	}
+	if strings.Contains(err.Error(), "provider-token-secret") {
+		t.Fatalf("provider response body leaked into error: %v", err)
+	}
+}
+
+func TestUploadRejectsMalformedSuccessResponseWithoutBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("provider-token-secret"))
+	}))
+	defer srv.Close()
+
+	res, err := NewClient(srv.URL).Upload(context.Background(), "k", bytes.NewReader([]byte("x")), "abc", Submission{})
+	if err == nil {
+		t.Fatal("malformed 2xx response must fail closed")
+	}
+	if res != nil {
+		t.Fatalf("malformed response returned result: %+v", res)
+	}
+	if strings.Contains(err.Error(), "provider-token-secret") {
+		t.Fatalf("provider response body leaked into error: %v", err)
+	}
+}
+
+func TestUploadSanitizesUnknownSemanticStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("{\"query_status\":\"future_status_with_token-secret\"}"))
+	}))
+	defer srv.Close()
+
+	res, err := NewClient(srv.URL).Upload(context.Background(), "k", bytes.NewReader([]byte("x")), "abc", Submission{})
+	if err == nil {
+		t.Fatal("unknown semantic status must return an error")
+	}
+	if res == nil || res.Status != "unknown" {
+		t.Fatalf("result = %+v, want sanitized unknown status", res)
+	}
+	var semanticErr *SemanticError
+	if !errors.As(err, &semanticErr) || semanticErr.Status != "unknown" {
+		t.Fatalf("error = %v, want unknown SemanticError", err)
+	}
+	if strings.Contains(err.Error(), "token-secret") {
+		t.Fatalf("provider status leaked into error: %v", err)
+	}
+}
+
+func TestUploadPreservesCancellationIdentityWithoutEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := NewClient("https://endpoint.example.test/api?key=endpoint-secret").Upload(ctx, "k", bytes.NewReader([]byte("x")), "abc", Submission{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "endpoint-secret") {
+		t.Fatalf("endpoint leaked into cancellation error: %v", err)
+	}
+}
+
+func TestUploadResponseSizeBoundary(t *testing.T) {
+	const limit = 1 << 20
+	valid := `{"query_status":"inserted"}`
+	for _, tc := range []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "exact limit", size: limit},
+		{name: "one byte over", size: limit + 1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := valid + strings.Repeat(" ", tc.size-len(valid))
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			res, err := NewClient(srv.URL).Upload(context.Background(), "key", strings.NewReader("sample"), "abc123", Submission{Filename: "sample"})
+			if tc.wantErr {
+				if err == nil || res != nil {
+					t.Fatalf("oversized response returned result=%+v error=%v", res, err)
+				}
+				if !strings.Contains(err.Error(), "too large") {
+					t.Fatalf("error = %v, want sanitized size error", err)
+				}
+				return
+			}
+			if err != nil || res == nil || !res.IsAccepted() {
+				t.Fatalf("exact-limit response result=%+v error=%v", res, err)
+			}
+		})
 	}
 }
 

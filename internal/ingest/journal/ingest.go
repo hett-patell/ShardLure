@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/netmatch"
@@ -177,7 +176,7 @@ func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.E
 	}
 	tsSet := make(map[string]struct{}, len(candidates))
 	for _, e := range candidates {
-		tsSet[e.TS.UTC().Format(time.RFC3339Nano)] = struct{}{}
+		tsSet[store.CanonicalEventTime(e.TS)] = struct{}{}
 	}
 	tsList := make([]string, 0, len(tsSet))
 	for t := range tsSet {
@@ -206,11 +205,12 @@ func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.E
 
 func identityForEvent(e *models.Event) store.EventIdentity {
 	return store.EventIdentity{
-		TS:       e.TS.UTC().Format(time.RFC3339Nano),
+		TS:       store.CanonicalEventTime(e.TS),
 		Kind:     e.Kind,
 		SrcIP:    e.SrcIP,
+		SrcPort:  e.SrcPort,
+		Raw:      e.Raw,
 		Username: e.Username,
-		Command:  e.Command,
 	}
 }
 

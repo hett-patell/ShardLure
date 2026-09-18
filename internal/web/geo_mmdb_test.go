@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -202,5 +203,46 @@ func TestGeoMMDBMissFallsThroughToHTTP(t *testing.T) {
 	}
 	if ent := g.cached("8.8.8.8"); ent.CC != "TL" {
 		t.Errorf("expected the HTTP tier's answer, got %+v", ent)
+	}
+}
+
+func TestGeoPrefetchCancelsAndJoinsHTTPWorkersAtBudget(t *testing.T) {
+	var active atomic.Int32
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		active.Add(1)
+		close(started)
+		<-r.Context().Done()
+		active.Add(-1)
+		close(finished)
+		return nil, r.Context().Err()
+	})
+
+	st := newGeoTestStore(t)
+	keys := newGeoTestKeys(t, st, map[string]string{
+		settings.KeyGeoHTTP: "1", settings.KeyGeoInsecure: "1",
+	})
+	g := newGeoResolver(geoConfig{Enabled: true, InsecureHTTP: true}, st, keys)
+	g.http.Transport = transport
+	g.lookupURLOverride = func(string) string { return "https://geo.example.test/lookup" }
+
+	startedAt := time.Now()
+	g.prefetch([]string{"8.8.8.8"}, 50*time.Millisecond)
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("prefetch cancellation took %v", elapsed)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("HTTP worker never started")
+	}
+	select {
+	case <-finished:
+	default:
+		t.Fatal("prefetch returned before its HTTP worker finished")
+	}
+	if active.Load() != 0 {
+		t.Fatalf("active HTTP workers=%d after prefetch return", active.Load())
 	}
 }

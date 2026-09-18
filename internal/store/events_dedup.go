@@ -10,9 +10,11 @@ import (
 // the superset used by both sources: journal events carry no session, so
 // SessionID is "" there and simply never mismatches.
 type EventIdentity struct {
-	TS        string // RFC3339Nano UTC, exactly as persisted
+	TS        string // CanonicalEventTime, exactly as persisted
 	Kind      models.EventKind
 	SrcIP     string
+	SrcPort   int
+	Raw       string
 	SessionID string
 	Username  string
 	Command   string
@@ -49,16 +51,21 @@ func (s *Store) IterateEventIdentitiesByTS(source models.Source, tsList []string
 		// backfill hold NULL there (ADD COLUMN default), which would fail a
 		// plain string scan — and a fresh parse of the same log line yields
 		// "" for those fields, so NULL must compare as "".
-		query := "SELECT source, ts, kind, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(username,''), COALESCE(command,'') FROM events WHERE ts IN (" +
+		query := "SELECT source, ts, kind, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(username,''), COALESCE(command,''), COALESCE(src_port,0), COALESCE(raw,'') FROM events WHERE ts IN (" +
 			strings.Join(placeholders, ",") + ")"
 		if err := s.QueryRows(query, args, func(scan func(...any) error) error {
 			var src string
 			var id EventIdentity
-			if err := scan(&src, &id.TS, &id.Kind, &id.SrcIP, &id.SessionID, &id.Username, &id.Command); err != nil {
+			if err := scan(&src, &id.TS, &id.Kind, &id.SrcIP, &id.SessionID, &id.Username, &id.Command, &id.SrcPort, &id.Raw); err != nil {
 				return err
 			}
 			if src != want {
 				return nil
+			}
+			if source == models.SourceJournal {
+				id.SessionID, id.Command = "", ""
+			} else {
+				id.SrcPort, id.Raw = 0, ""
 			}
 			fn(id)
 			return nil

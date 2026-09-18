@@ -9,19 +9,23 @@ import (
 
 // Artifact is a quarantined payload linked to attacker activity.
 type Artifact struct {
-	ID        int64
-	TS        time.Time
-	CreatedAt time.Time
-	SrcIP     string
-	SessionID string
-	ActorID   string
-	URL       string
-	LocalPath string
-	SHA256    string
-	SizeBytes int64
-	Origin    string
-	Status    string
-	Detail    string
+	ID                    int64
+	TS                    time.Time
+	CreatedAt             time.Time
+	FirstObservedAt       time.Time
+	LastSeenAt            time.Time
+	LastFetchAttemptAt    time.Time
+	LastSuccessfulFetchAt time.Time
+	SrcIP                 string
+	SessionID             string
+	ActorID               string
+	URL                   string
+	LocalPath             string
+	SHA256                string
+	SizeBytes             int64
+	Origin                string
+	Status                string
+	Detail                string
 }
 
 func (s *Store) ensureArtifactsTable() error {
@@ -105,38 +109,32 @@ func (s *Store) TouchArtifactTS(url string, ts time.Time) error {
 			return nil // already at least as fresh — the hot path, write-free
 		}
 	}
-	_, err = s.execWrite(`UPDATE artifacts SET ts = ? WHERE url = ?`,
-		ts.UTC().Format(time.RFC3339Nano), url)
+	// CAS prevents a delayed older observation from overwriting a newer touch.
+	res, err := s.execWrite(`UPDATE artifacts SET ts = ?, last_seen_at = ? WHERE url = ? AND ts IS ?`,
+		captureTime(ts), captureTime(ts), url, cur)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return s.TouchArtifactTS(url, ts)
+	}
 	return err
 }
 
+// UpsertArtifact registers new evidence or advances an existing observation.
+// Only fenced CompleteArtifactCapture may change a queued capture's result;
+// duplicate discovery/import must not reset a lease, resurrect a terminal row,
+// replace provenance, or make old successful evidence fresh without a fetch.
 func (s *Store) UpsertArtifact(a Artifact) error {
-	if err := s.ensureArtifactsTable(); err != nil {
+	if err := s.RecordArtifact(a); err != nil {
 		return err
 	}
-	ts := a.TS.UTC().Format(time.RFC3339Nano)
-	if a.TS.IsZero() {
-		ts = time.Now().UTC().Format(time.RFC3339Nano)
+	seen := a.TS
+	if a.LastSeenAt.After(seen) {
+		seen = a.LastSeenAt
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.execWrite(`
-INSERT INTO artifacts (ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(url) DO UPDATE SET
-  ts=excluded.ts,
-  src_ip=excluded.src_ip,
-  session_id=excluded.session_id,
-  actor_id=excluded.actor_id,
-  local_path=excluded.local_path,
-  sha256=excluded.sha256,
-  size_bytes=excluded.size_bytes,
-  origin=excluded.origin,
-  status=excluded.status,
-  detail=excluded.detail,
-  created_at=artifacts.created_at`,
-		ts, a.SrcIP, a.SessionID, a.ActorID, a.URL, a.LocalPath, a.SHA256, a.SizeBytes,
-		a.Origin, a.Status, a.Detail, now)
-	return err
+	return s.TouchArtifactTS(a.URL, seen)
 }
 
 // RecordArtifact inserts a new artifact row (no update on conflict).
@@ -144,16 +142,36 @@ func (s *Store) RecordArtifact(a Artifact) error {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err
 	}
-	ts := a.TS.UTC().Format(time.RFC3339Nano)
-	if a.TS.IsZero() {
-		ts = time.Now().UTC().Format(time.RFC3339Nano)
-	}
+	ts, first, seen, attempted, fetched := artifactTimes(a)
 	_, err := s.execWrite(`
-INSERT OR IGNORE INTO artifacts (ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT OR IGNORE INTO artifacts (ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at, first_observed_at, last_seen_at, last_fetch_attempt_at, last_successful_fetch_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, a.SrcIP, a.SessionID, a.ActorID, a.URL, a.LocalPath, a.SHA256, a.SizeBytes,
-		a.Origin, a.Status, a.Detail, time.Now().UTC().Format(time.RFC3339Nano))
+		a.Origin, a.Status, a.Detail, captureTime(time.Now()), first, seen, attempted, fetched)
 	return err
+}
+
+func artifactTimes(a Artifact) (ts, first, seen string, attempted, fetched any) {
+	if a.TS.IsZero() {
+		a.TS = time.Now()
+	}
+	if a.FirstObservedAt.IsZero() {
+		a.FirstObservedAt = a.TS
+	}
+	if a.LastSeenAt.IsZero() {
+		a.LastSeenAt = a.TS
+	}
+	// Imports carry their source observation, not today's registration time.
+	if a.Status == "fetched" && a.LastSuccessfulFetchAt.IsZero() {
+		a.LastSuccessfulFetchAt = a.TS
+	}
+	if !a.LastSuccessfulFetchAt.IsZero() {
+		fetched = captureTime(a.LastSuccessfulFetchAt)
+	}
+	if !a.LastFetchAttemptAt.IsZero() {
+		attempted = captureTime(a.LastFetchAttemptAt)
+	}
+	return captureTime(a.TS), captureTime(a.FirstObservedAt), captureTime(a.LastSeenAt), attempted, fetched
 }
 
 // CaptureSummary aggregates artifact capture state for the dashboard.
@@ -233,7 +251,7 @@ FROM artifacts`)
 // stays in sync with scanArtifact below — the NULL-hardening commit had to
 // apply the identical COALESCE edit to four hand-written copies of this
 // list, which is exactly the drift this removes.
-const artifactColumns = `id, COALESCE(ts,''), COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), COALESCE(size_bytes,0), origin, status, COALESCE(detail,''), COALESCE(created_at,'')`
+const artifactColumns = `id, COALESCE(ts,''), COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), COALESCE(size_bytes,0), origin, status, COALESCE(detail,''), COALESCE(created_at,''), COALESCE(first_observed_at,''), COALESCE(last_seen_at,''), COALESCE(last_fetch_attempt_at,''), COALESCE(last_successful_fetch_at,'')`
 
 // oneRowScanner abstracts *sql.Row / *sql.Rows for scanArtifact. (Distinct
 // from dashboard.go's rowScanner, which is a full rows-iterator interface.)
@@ -245,13 +263,17 @@ type oneRowScanner interface {
 // for legacy rows recorded before created_at existed.
 func scanArtifact(r oneRowScanner) (Artifact, error) {
 	var a Artifact
-	var ts, created string
+	var ts, created, first, seen, attempted, fetched string
 	if err := r.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
-		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created); err != nil {
+		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created, &first, &seen, &attempted, &fetched); err != nil {
 		return Artifact{}, err
 	}
 	a.TS, _ = parseTime(ts)
 	a.CreatedAt, _ = parseTime(created)
+	a.FirstObservedAt, _ = parseTime(first)
+	a.LastSeenAt, _ = parseTime(seen)
+	a.LastFetchAttemptAt, _ = parseTime(attempted)
+	a.LastSuccessfulFetchAt, _ = parseTime(fetched)
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = a.TS
 	}
@@ -491,6 +513,9 @@ type SharePolicy struct {
 // Returns newest-first. Duplicate sha256 across multiple URL rows is fine —
 // the bazaar uploader dedupes on sha256 itself.
 func (s *Store) ArtifactsForShare(since time.Time, pol SharePolicy) ([]Artifact, error) {
+	if len(pol.Origins) == 0 {
+		return nil, nil
+	}
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
@@ -513,8 +538,8 @@ FROM artifacts
 WHERE status='fetched'
   AND size_bytes >= ?
   AND sha256 IS NOT NULL AND sha256 != ''`+originClause+`
-  AND COALESCE(created_at, ts) >= ?
-ORDER BY COALESCE(created_at, ts) DESC`, args...)
+  AND julianday(last_successful_fetch_at) >= julianday(?)
+ORDER BY julianday(last_successful_fetch_at) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -589,6 +614,64 @@ LIMIT 1`, sha256)
 		return nil, err
 	}
 	return &a, nil
+}
+
+// GetArtifactForShareBySHA chooses the freshest successful payload evidence,
+// not the newest observation (which may be an old redelivery or a TTY row).
+// Policy comes from the destination's Vet gate. It only ranks candidates;
+// Vet remains authoritative, including for the fallback non-shareable row.
+func (s *Store) GetArtifactForShareBySHA(sha256 string, policy SharePolicy) (*Artifact, error) {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`SELECT `+artifactColumns+` FROM artifacts WHERE sha256=? AND status='fetched'`, sha256)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	allowed := func(a Artifact) bool {
+		if a.LocalPath == "" || a.SizeBytes < policy.MinBytes {
+			return false
+		}
+		if len(policy.Origins) == 0 {
+			return true
+		}
+		for _, origin := range policy.Origins {
+			if a.Origin == origin {
+				return true
+			}
+		}
+		return false
+	}
+	// Keep one best row in memory and compare parsed instants, including legacy
+	// offsets/nanoseconds; julianday and text ordering lose this information.
+	var best *Artifact
+	for rows.Next() {
+		a, err := scanArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		better := best == nil
+		if best != nil {
+			if allowed(a) != allowed(*best) {
+				better = allowed(a)
+			} else if !a.LastSuccessfulFetchAt.Equal(best.LastSuccessfulFetchAt) {
+				better = a.LastSuccessfulFetchAt.After(best.LastSuccessfulFetchAt)
+			} else {
+				better = a.TS.After(best.TS) || (a.TS.Equal(best.TS) && a.ID > best.ID)
+			}
+		}
+		if better {
+			best = &a
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if best == nil {
+		return nil, sql.ErrNoRows
+	}
+	return best, nil
 }
 
 // ensureCowrieTTYIndex creates the small lookup table that binds a
@@ -725,7 +808,7 @@ func (s *Store) RecentCommandEvents(limit int) ([]*EventRow, error) {
 		limit = 200
 	}
 	rows, err := s.db.Query(`
-SELECT id, ts, src_ip, session_id, actor_id, command
+SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(command,'')
 FROM events
 WHERE kind='command' AND command != ''
 ORDER BY ts DESC
@@ -742,7 +825,7 @@ func (s *Store) RecentFileDownloadEvents(limit int) ([]*EventRow, error) {
 		limit = 100
 	}
 	rows, err := s.db.Query(`
-SELECT id, ts, src_ip, session_id, actor_id, command, filename, sha256
+SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(command,''), COALESCE(filename,''), COALESCE(sha256,'')
 FROM events
 WHERE kind='file_download'
 ORDER BY ts DESC
@@ -815,13 +898,23 @@ func (s *Store) DueArtifactCaptures(now time.Time, limit, maxAttempts int) ([]st
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
+	// A crash during the last allowed attempt must not leave a permanent
+	// in-flight row. Never terminate a claim while its lease remains live.
+	if _, err := s.execWrite(`UPDATE artifacts SET status='failed_permanently',
+detail='capture attempt budget exhausted', lease_until=NULL, next_attempt_at=NULL
+WHERE origin='quarantine_fetch' AND status IN ('pending','failed','capturing')
+AND attempt_count>=? AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))`,
+		captureBudget(maxAttempts), captureTime(now)); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`
 SELECT url FROM artifacts
-WHERE status IN ('capturing','failed')
+WHERE origin='quarantine_fetch' AND status IN ('pending','capturing','failed')
   AND attempt_count < ?
-  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+  AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?))
+  AND (lease_until IS NULL OR julianday(lease_until) <= julianday(?))
 ORDER BY created_at ASC
-LIMIT ?`, maxAttempts, now.UTC().Format(time.RFC3339Nano), limit)
+LIMIT ?`, captureBudget(maxAttempts), captureTime(now), captureTime(now), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -842,15 +935,26 @@ LIMIT ?`, maxAttempts, now.UTC().Format(time.RFC3339Nano), limit)
 // expectedAttempt (optimistic concurrency — prevents two workers from
 // claiming the same artifact). Returns store.ErrClaimStale if the attempt
 // count moved underneath us.
-func (s *Store) ClaimArtifactCapture(url string, now, leaseUntil time.Time, expectedAttempt int) error {
+func (s *Store) ClaimArtifactCapture(url string, now, leaseUntil time.Time, expectedAttempt int, budgets ...int) error {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err
 	}
+	budget := 5
+	if len(budgets) > 0 {
+		budget = captureBudget(budgets[0])
+	}
+	if !leaseUntil.After(now) || expectedAttempt < 0 || expectedAttempt >= budget {
+		return ErrClaimStale
+	}
 	res, err := s.execWrite(`
 UPDATE artifacts
-SET status='capturing', next_attempt_at=?
-WHERE url=? AND attempt_count=?`,
-		leaseUntil.UTC().Format(time.RFC3339Nano), url, expectedAttempt)
+SET status='capturing', lease_until=?, next_attempt_at=NULL,
+    attempt_count=attempt_count+1, last_fetch_attempt_at=?
+WHERE url=? AND attempt_count=? AND origin='quarantine_fetch'
+  AND status IN ('pending','failed','capturing')
+  AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))
+  AND (next_attempt_at IS NULL OR julianday(next_attempt_at)<=julianday(?))`,
+		captureTime(leaseUntil), captureTime(now), url, expectedAttempt, captureTime(now), captureTime(now))
 	if err != nil {
 		return err
 	}
@@ -865,6 +969,13 @@ WHERE url=? AND attempt_count=?`,
 // already claimed or completed the artifact.
 var ErrClaimStale = errors.New("artifact claim stale")
 
+func captureBudget(n int) int {
+	if n <= 0 || n > 5 {
+		return 5
+	}
+	return n
+}
+
 // CompleteArtifactCapture records the outcome of a capture attempt. On
 // success the status is set to "fetched" (terminal). On failure the
 // attempt_count is bumped and next_attempt_at is set for exponential backoff;
@@ -874,34 +985,38 @@ func (s *Store) CompleteArtifactCapture(url string, attempt int, status, detail,
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err
 	}
-	var nextTS sql.NullString
-	if nextAttempt != nil {
-		nextTS.String = nextAttempt.UTC().Format(time.RFC3339Nano)
-		nextTS.Valid = true
+	if attempt <= 0 {
+		return ErrClaimStale
 	}
-	if status == "fetched" {
-		// Terminal success: stamp final fields, clear lease.
-		res, err := s.execWrite(`
-UPDATE artifacts
-SET status='fetched', detail=?, local_path=?, sha256=?, size_bytes=?,
-    attempt_count=?, next_attempt_at=NULL
-WHERE url=? AND attempt_count=?`,
-			detail, localPath, sha256, sizeBytes, attempt, url, attempt-1)
-		if err != nil {
-			return err
+	now := time.Now().UTC()
+	var nextTS, fetched any
+	switch status {
+	case "fetched":
+		fetched = captureTime(now)
+	case "empty", "blocked", "invalid", "failed_permanently":
+	case "failed":
+		if attempt >= 5 {
+			status = "failed_permanently"
+		} else {
+			// The storage boundary enforces backoff even for a buggy caller.
+			floor := now.Add(30 * time.Second * time.Duration(1<<uint(attempt-1)))
+			if nextAttempt == nil || nextAttempt.Before(floor) {
+				nextAttempt = &floor
+			}
+			nextTS = captureTime(*nextAttempt)
 		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return ErrClaimStale
-		}
-		return nil
+	default:
+		return errors.New("invalid capture completion status")
 	}
-	// Retryable failure: bump attempt, schedule next retry.
+	// Claim increments attempt_count. It is a monotonically increasing fencing
+	// token; an expired/reclaimed worker cannot overwrite the current result.
 	res, err := s.execWrite(`
 UPDATE artifacts
-SET status='failed', detail=?, attempt_count=?, next_attempt_at=?
-WHERE url=? AND attempt_count=?`,
-		detail, attempt, nextTS, url, attempt-1)
+SET status=?, detail=?, local_path=?, sha256=?, size_bytes=?, next_attempt_at=?,
+    lease_until=NULL, last_successful_fetch_at=COALESCE(?, last_successful_fetch_at)
+WHERE url=? AND attempt_count=? AND status='capturing'
+  AND julianday(lease_until)>julianday(?)`,
+		status, detail, localPath, sha256, sizeBytes, nextTS, fetched, url, attempt, captureTime(now))
 	if err != nil {
 		return err
 	}

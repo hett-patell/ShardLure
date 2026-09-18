@@ -249,62 +249,7 @@ func looksLikeSHA256(s string) bool {
 }
 
 func (r *Runner) fetchFromCommands(ctx context.Context) (int, error) {
-	events, err := r.st.RecentCommandEvents(500)
-	if err != nil {
-		return 0, err
-	}
-	var n int
-	for _, e := range events {
-		for _, rawURL := range ExtractURLs(e.Command) {
-			exists, err := r.urlKeyDone(rawURL)
-			if err != nil {
-				continue
-			}
-			if exists {
-				// Redelivery: a new command referenced an already-captured
-				// URL. Keep the row's recency truthful without re-fetching —
-				// otherwise an actively-circulating payload ages out of the
-				// dashboard window. No-op unless e.TS is newer than the row.
-				_ = r.st.TouchArtifactTS(rawURL, e.TS)
-				continue
-			}
-			pending := store.Artifact{
-				TS:        e.TS,
-				SrcIP:     e.SrcIP,
-				SessionID: e.SessionID,
-				ActorID:   e.ActorID,
-				URL:       rawURL,
-				Origin:    "quarantine_fetch",
-				Status:    "capturing",
-			}
-			if err := r.st.UpsertArtifact(pending); err != nil {
-				return n, err
-			}
-			res, err := r.fetch.Fetch(ctx, rawURL)
-			art := pending
-			art.Status = "failed"
-			if res != nil {
-				art.LocalPath = res.LocalPath
-				art.SHA256 = res.SHA256
-				art.SizeBytes = res.Size
-				art.Status = res.Status
-				art.Detail = res.Detail
-			}
-			if err != nil && art.Detail == "" {
-				art.Detail = err.Error()
-			}
-			if err := r.st.UpsertArtifact(art); err != nil {
-				return n, err
-			}
-			// The row exists in the DB from here on (success or failure),
-			// which is exactly what ArtifactURLRecorded would report.
-
-			if art.Status == "fetched" {
-				n++
-			}
-		}
-	}
-	return n, nil
+	return r.st.DiscoverCommandArtifacts(ctx, 2000, ExtractURLs)
 }
 
 func (r *Runner) syncCowrieDownloads() (int, error) {

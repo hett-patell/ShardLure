@@ -1,9 +1,11 @@
 package web
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -1298,17 +1300,16 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	art, err := s.st.GetArtifactBySHA(sha)
+	art, err := s.st.GetArtifactForShareBySHA(sha, store.SharePolicy{
+		MinBytes: bazaar.MinSampleBytes, Origins: bazaar.ShareableOrigins(),
+	})
 	if err != nil || art == nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "artifact not found"})
 		return
 	}
 
-	observed := art.TS
-	if observed.IsZero() {
-		observed = art.CreatedAt
-	}
+	observed := art.LastSuccessfulFetchAt
 	cand := bazaar.Candidate{
 		SHA256: art.SHA256, LocalPath: art.LocalPath, SizeBytes: art.SizeBytes,
 		URL: art.URL, CreatedAt: art.CreatedAt,
@@ -1335,17 +1336,13 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Server-side submission throttle: enforce a minimum gap between MB
-	// uploads process-wide so a scripted/looped caller can't spam the API
-	// (MB bans repeat offenders). Vet-skipped samples never reach the network
-	// inside Share, so the occasional extra sub-second wait on a skip is
-	// harmless. Held only for the brief sleep, released before the network IO.
-	s.bazaarMu.Lock()
+	// uploads process-wide so a scripted/looped caller can't spam the API.
+	// Waiting is cancellable when the HTTP client disconnects, and the lane is
+	// released before Share performs network I/O.
 	const minBazaarGap = 2 * time.Second
-	if wait := minBazaarGap - time.Since(s.lastBazaarAt); s.lastBazaarAt.After(time.Time{}) && wait > 0 {
-		time.Sleep(wait)
+	if err := s.waitForBazaarSlot(r.Context(), minBazaarGap); err != nil {
+		return
 	}
-	s.lastBazaarAt = time.Now()
-	s.bazaarMu.Unlock()
 
 	_, _, shareErr := bazaar.Share(r.Context(), rec, []bazaar.Candidate{cand}, opts)
 
@@ -1376,6 +1373,41 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func (s *Server) waitForBazaarSlot(ctx context.Context, gap time.Duration) error {
+	s.bazaarMu.Lock()
+	if s.bazaarGate == nil {
+		s.bazaarGate = make(chan struct{}, 1)
+	}
+	gate := s.bazaarGate
+	s.bazaarMu.Unlock()
+
+	select {
+	case gate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-gate }()
+
+	s.bazaarMu.Lock()
+	wait := gap - time.Since(s.lastBazaarAt)
+	hasPrevious := !s.lastBazaarAt.IsZero()
+	s.bazaarMu.Unlock()
+	if hasPrevious && wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	s.bazaarMu.Lock()
+	s.lastBazaarAt = time.Now()
+	s.bazaarMu.Unlock()
+	return nil
+}
+
 // abuseReportRecorderAdapter bridges store's AbuseReport API to the argument
 // list abuseipdb.ReportRecorder expects, keeping the abuseipdb package free of
 // any store import (mirrors bazaarRecorderAdapter).
@@ -1389,6 +1421,66 @@ func (a *abuseReportRecorderAdapter) AbuseIPDBReported(ip string, within time.Du
 
 func (a *abuseReportRecorderAdapter) RecordAbuseIPDBReport(ip, status string, score int, categories []int, at time.Time) error {
 	return a.st.RecordAbuseIPDBReport(ip, status, score, categories, at)
+}
+
+// waitForAbuseReportSlot enforces the process-wide gap between single-report
+// submissions without trapping a disconnected HTTP request in time.Sleep. The
+// gate also makes acquisition itself cancellable when another request is
+// already waiting for its slot.
+func (s *Server) waitForAbuseReportSlot(ctx context.Context, gap time.Duration) error {
+	s.abuseReportMu.Lock()
+	if s.abuseReportGate == nil {
+		s.abuseReportGate = make(chan struct{}, 1)
+	}
+	gate := s.abuseReportGate
+	s.abuseReportMu.Unlock()
+
+	select {
+	case gate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-gate }()
+
+	s.abuseReportMu.Lock()
+	wait := gap - time.Since(s.lastAbuseReportAt)
+	hasPrevious := !s.lastAbuseReportAt.IsZero()
+	s.abuseReportMu.Unlock()
+	if hasPrevious && wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	s.abuseReportMu.Lock()
+	s.lastAbuseReportAt = time.Now()
+	s.abuseReportMu.Unlock()
+	return nil
+}
+
+// acquireAbuseReportTarget serializes report attempts for one target from the
+// initial ledger check through the upstream POST and successful ledger write.
+// The context-aware channel makes a queued duplicate request cheap to cancel
+// when its HTTP client disconnects.
+func (s *Server) acquireAbuseReportTarget(ctx context.Context, ip string) (func(), error) {
+	s.abuseReportTargetOnce.Do(func() {
+		for i := range s.abuseReportTargetGates {
+			s.abuseReportTargetGates[i] = make(chan struct{}, 1)
+		}
+	})
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(ip))
+	gate := s.abuseReportTargetGates[h.Sum32()%uint32(len(s.abuseReportTargetGates))]
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // handleAbuseIPDBReport reports a single confirmed brute-forcer (by primary IP)
@@ -1424,47 +1516,50 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dedup early-out: if we reported this IP within the window, don't even
-	// build the candidate.
-	if already, _ := s.st.AbuseIPDBReported(ip, rewindow); already {
+	// Keep this target gate held until Report has either recorded a successful
+	// submission or returned. The batch path acquires the same gate through the
+	// orchestrator hook, closing the cross-endpoint dedup race.
+	releaseTarget, err := s.acquireAbuseReportTarget(r.Context(), ip)
+	if err != nil {
+		return
+	}
+	defer releaseTarget()
+
+	// Dedup early-out: if we reported this IP within the window, don't build its
+	// evidence again. This check is protected by the same gate as the POST and
+	// ledger write below.
+	already, err := s.st.AbuseIPDBReported(ip, rewindow)
+	if err != nil {
+		httpError(w, "abuse report ledger", err, http.StatusInternalServerError)
+		return
+	}
+	if already {
 		json.NewEncoder(w).Encode(map[string]string{"status": "already_reported"})
 		return
 	}
 
-	// Resolve to the BEST reportable actor row for this IP, not merely the
-	// most-recent. An IP can have both a cowrie and a journal actor row; the
-	// journal row is often the confirmed brute-forcer while the cowrie row is
-	// "unknown". Picking by last_seen (GetActorByPrimaryIP) would vet-reject a
-	// genuinely reportable IP, contradicting the suggestions widget.
-	act, err := s.st.GetReportableActorByIP(ip)
-	if err != nil || act == nil {
+	cand, err := s.reportCandidateForIP(r.Context(), ip)
+	if err != nil {
+		httpError(w, "report evidence", err, http.StatusInternalServerError)
+		return
+	}
+	if cand.EventCount == 0 {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "no actor for that IP"})
 		return
 	}
-	cand := newReportCandidate(act, s.recentRatesCached()[act.ID], s.primaryIPSeenCached()[act.ID])
-
-	// Server-side throttle: enforce a minimum gap between /report POSTs
-	// process-wide so a scripted caller can't spam the API. Held only for the
-	// brief sleep, released before the network IO.
-	s.abuseReportMu.Lock()
-	const minAbuseGap = 2 * time.Second
-	if wait := minAbuseGap - time.Since(s.lastAbuseReportAt); s.lastAbuseReportAt.After(time.Time{}) && wait > 0 {
-		time.Sleep(wait)
-	}
-	s.lastAbuseReportAt = time.Now()
-	s.abuseReportMu.Unlock()
 
 	var skipReason string
 	var reportErr error
 	opts := abuseipdb.Options{
-		APIKey:     abuseKey,
-		Endpoint:   s.abuseEndpoint,
-		Categories: s.abuseCategoriesLive(),
-		Comment:    s.abuseCommentLive(),
-		MinProbe:   s.abuseMinProbeLive(),
-		Rewindow:   rewindow,
-		Admin:      s.abuseAdmin,
+		APIKey:      abuseKey,
+		Endpoint:    s.abuseEndpoint,
+		Categories:  s.abuseCategoriesLive(),
+		Comment:     s.abuseCommentLive(),
+		MinProbe:    s.abuseMinProbeLive(),
+		Rewindow:    rewindow,
+		Admin:       s.abuseAdmin,
+		WaitForSlot: s.waitForAbuseReportSlot,
 		OnProgress: func(_ abuseipdb.ReportCandidate, _ *abuseipdb.Result, err error) {
 			if err != nil {
 				// Vet skip reasons are honeypot-side policy text (no secrets/IPs
@@ -1539,40 +1634,9 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Build the candidate set from the same ranked suggestions the widget shows
-	// (Vet + dedup happen inside Report, so we don't pre-filter here beyond
-	// resolving each IP to its best reportable actor row).
-	actors, err := s.st.ActorsForReporting(time.Now().Add(-recentRateWindow), 1000)
-	if err != nil {
-		httpError(w, "api_intel", err, http.StatusInternalServerError)
-		return
-	}
-	seen := map[string]bool{}
-	cands := make([]abuseipdb.ReportCandidate, 0, len(actors))
-	// One windowed-rate lookup for the whole batch, not one per candidate.
-	batchRates := s.recentRatesCached()
-	batchIPSeen := s.primaryIPSeenCached()
-	for _, a := range actors {
-		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
-			continue
-		}
-		seen[a.PrimaryIP] = true
-		// Resolve to the best reportable row for the IP so a low-signal cowrie
-		// row doesn't mask a confirmed journal row (see GetReportableActorByIP).
-		// This runs once per unique IP; each lookup is an index seek on
-		// idx_actors_primary_ip (migration v14), and every reported candidate is
-		// then gated behind a 2s network throttle downstream — so the per-IP
-		// query cost here is negligible and not worth batching.
-		best, berr := s.st.GetReportableActorByIP(a.PrimaryIP)
-		if berr != nil || best == nil {
-			best = &a
-		}
-		cands = append(cands, newReportCandidate(best, batchRates[best.ID], batchIPSeen[best.ID]))
-	}
-
-	// Guard against concurrent batch runs (a second click, a script loop).
-	// TryLock returns false if another batch is already in flight — return
-	// immediately instead of queueing behind a ~2000s network call.
+	// Reject a concurrent batch before any actor/evidence queries. Those scans
+	// are the expensive part of the request and serve no purpose when another
+	// batch already owns the submission lane.
 	if !s.abuseReportBatchMu.TryLock() {
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "batch report already in progress"})
@@ -1580,21 +1644,48 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 	}
 	defer s.abuseReportBatchMu.Unlock()
 
+	// Resolve each target using the same source-specific evidence and ranking
+	// as suggestions. Report re-runs Vet and the submission ledger check.
+	actors, err := s.st.ActorsForReportingContext(r.Context(), time.Now().Add(-recentRateWindow), 1000)
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	seen := map[string]bool{}
+	cands := make([]abuseipdb.ReportCandidate, 0, len(actors))
+	for _, a := range actors {
+		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
+			continue
+		}
+		seen[a.PrimaryIP] = true
+		cand, err := s.reportCandidateForIP(r.Context(), a.PrimaryIP)
+		if err != nil {
+			httpError(w, "report evidence", err, http.StatusInternalServerError)
+			return
+		}
+		cands = append(cands, cand)
+	}
+	// ActorsForReporting is a deliberately broad, lifetime-oriented pool. Its
+	// ordering is an index/query concern, not submission priority: quota must be
+	// spent in the same current-evidence order as suggestions and the CLI. The
+	// per-IP chooser above has already selected one independent source; this
+	// final pass ranks those selected targets against one another without ever
+	// combining their counts.
+	cands = abuseipdb.SelectCandidates(cands, s.abuseAdmin, s.abuseMinProbeLive(), time.Now())
+
 	opts := abuseipdb.Options{
-		APIKey:     abuseKey,
-		Endpoint:   s.abuseEndpoint,
-		Categories: s.abuseCategoriesLive(),
-		Comment:    s.abuseCommentLive(),
-		MinProbe:   s.abuseMinProbeLive(),
-		Rewindow:   s.abuseRewindowLive(),
-		Admin:      s.abuseAdmin,
+		APIKey:        abuseKey,
+		Endpoint:      s.abuseEndpoint,
+		Categories:    s.abuseCategoriesLive(),
+		Comment:       s.abuseCommentLive(),
+		MinProbe:      s.abuseMinProbeLive(),
+		Rewindow:      s.abuseRewindowLive(),
+		Admin:         s.abuseAdmin,
+		AcquireTarget: s.acquireAbuseReportTarget,
+		WaitForSlot:   s.waitForAbuseReportSlot,
 	}
 	rec := &abuseReportRecorderAdapter{st: s.st}
 	reported, skipped, ferr := abuseipdb.Report(r.Context(), rec, cands, opts)
-
-	s.abuseReportMu.Lock()
-	s.lastAbuseReportAt = time.Now()
-	s.abuseReportMu.Unlock()
 
 	resp := reportAllResponse{Status: "ok", Reported: reported, Skipped: skipped}
 	if errors.Is(ferr, abuseipdb.ErrRateLimited) {
@@ -1642,33 +1733,41 @@ func (s *Server) handleAbuseIPDBSuggestions(w http.ResponseWriter, r *http.Reque
 	// Pull the most-aggressive actors and let Suggest's Vet gate + scoring do
 	// the selection. 1000 is a generous ceiling; the vast majority never pass
 	// Vet, so the scored set is small.
-	actors, err := s.st.ActorsForReporting(time.Now().Add(-recentRateWindow), 1000)
+	actors, err := s.st.ActorsForReportingContext(r.Context(), time.Now().Add(-recentRateWindow), 1000)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
 	}
-	suggestRates := s.recentRatesCached()
-	suggestIPSeen := s.primaryIPSeenCached()
 	inputs := make([]abuseipdb.SuggestInput, 0, len(actors))
+	seen := make(map[string]bool)
 	for _, a := range actors {
-		if a.PrimaryIP == "" {
+		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
 			continue
 		}
-		// LastSeen rides on the candidate (newReportCandidate sets it), not on
-		// SuggestInput's deprecated field: Vet reads only Cand.LastSeen, so keeping
-		// a second copy here would let this call site keep working if the
-		// passthrough were ever dropped — silently un-gating staleness.
-		inputs = append(inputs, abuseipdb.SuggestInput{
-			Cand: newReportCandidate(&a, suggestRates[a.ID], suggestIPSeen[a.ID]),
-		})
+		seen[a.PrimaryIP] = true
+		cand, err := s.reportCandidateForIPCached(r.Context(), a.PrimaryIP)
+		if err != nil {
+			httpError(w, "report evidence", err, http.StatusInternalServerError)
+			return
+		}
+		inputs = append(inputs, abuseipdb.SuggestInput{Cand: cand})
 	}
 	// Exclude IPs already reported within the re-report window so the list is
-	// always actionable. Closure hits the store per-candidate, but only for the
-	// handful that pass Vet (Suggest calls it after the gate).
+	// always actionable. Resolve the bounded set in one chunked, cancellable
+	// store operation; a ledger error fails closed instead of presenting a
+	// report button whose dedup state is unknown.
 	rewindow := s.abuseRewindowLive()
+	ips := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		ips = append(ips, input.Cand.SrcIP)
+	}
+	reportedIPs, err := s.st.AbuseIPDBReportedIPsContext(r.Context(), ips, rewindow)
+	if err != nil {
+		httpError(w, "abuse report ledger", err, http.StatusInternalServerError)
+		return
+	}
 	alreadyReported := func(ip string) bool {
-		ok, _ := s.st.AbuseIPDBReported(ip, rewindow)
-		return ok
+		return reportedIPs[ip]
 	}
 	// vetted = candidates that passed the gate, counted before `limit` truncated
 	// the list. Total used to be len(sugg), i.e. the page size, so a run with more

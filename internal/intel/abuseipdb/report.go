@@ -55,6 +55,15 @@ type Options struct {
 	// Now overrides the clock for the staleness gate. Zero = time.Now().
 	// Injected for tests; production leaves it unset.
 	Now time.Time
+
+	// AcquireTarget serializes the complete deduplication and submission flow
+	// for one target. It is supplied by callers that share a reporting lane
+	// with another endpoint (for example the web single-report and report-all
+	// handlers). A nil hook preserves the package's standalone behavior.
+	AcquireTarget func(context.Context, string) (release func(), err error)
+	// WaitForSlot serializes and paces actual submissions across callers that
+	// share a provider account. It runs after Vet and dedup.
+	WaitForSlot func(context.Context, time.Duration) error
 }
 
 var (
@@ -126,14 +135,27 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 			continue
 		}
 
+		releaseTarget := func() {}
+		if opts.AcquireTarget != nil {
+			acquiredRelease, err := opts.AcquireTarget(ctx, cand.SrcIP)
+			if err != nil {
+				return reported, skipped, err
+			}
+			if acquiredRelease != nil {
+				releaseTarget = acquiredRelease
+			}
+		}
+
 		already, err := rec.AbuseIPDBReported(cand.SrcIP, opts.Rewindow)
 		if err != nil {
+			releaseTarget()
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
 		if already {
+			releaseTarget()
 			skipped++
 			// Report the reason, like every other skip. This branch used to be
 			// silent, so a run that skipped 25 candidates printed 14 reasons and
@@ -147,6 +169,7 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		}
 
 		if opts.DryRun {
+			releaseTarget()
 			// Counts against MaxReports so --dry-run --limit N previews exactly
 			// the N candidates the real run would report.
 			submitted++
@@ -155,17 +178,24 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 			}
 			continue
 		}
+		if opts.WaitForSlot != nil {
+			if err := opts.WaitForSlot(ctx, opts.RateLimit); err != nil {
+				releaseTarget()
+				return reported, skipped, err
+			}
+		}
 
 		res, rerr := c.Submit(ctx, opts.APIKey, Submission{
 			IP:         cand.SrcIP,
 			Categories: opts.Categories,
 			Comment:    buildComment(cand, opts.Comment),
-			Timestamp:  time.Now().UTC(),
+			Timestamp:  cand.LastSeen,
 		})
 		// Counted on attempt, not on acceptance: MaxReports bounds what we send
 		// to AbuseIPDB, and a rejected POST was still a call we made.
 		submitted++
 		if rerr != nil {
+			releaseTarget()
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, nil, rerr)
 			}
@@ -175,25 +205,34 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 			continue
 		}
 		if res.RateLimited {
+			releaseTarget()
 			// Daily report cap reached — stop cleanly rather than spam.
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, res, ErrRateLimited)
 			}
 			return reported, skipped, errors.Join(firstErr, ErrRateLimited)
 		}
+		if rerr := rec.RecordAbuseIPDBReport(cand.SrcIP, "reported", res.Score, opts.Categories, time.Now().UTC()); rerr != nil {
+			releaseTarget()
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, res, rerr)
+			}
+			// The provider accepted the report, but without the local ledger row a
+			// later run cannot deduplicate it. Stop before creating more untracked
+			// submissions and do not count this as a durable success.
+			return reported, skipped, errors.Join(firstErr, rerr)
+		}
+		releaseTarget()
+		reported++
 		if opts.OnProgress != nil {
 			opts.OnProgress(cand, res, nil)
 		}
-		if rerr := rec.RecordAbuseIPDBReport(cand.SrcIP, "reported", res.Score, opts.Categories, time.Now().UTC()); rerr != nil && firstErr == nil {
-			firstErr = rerr
-		}
-		reported++
 
 		// Be polite to the endpoint between POSTs. Skip the wait when the budget
 		// is already spent — the next iteration would only break, and pacing
 		// exists to space out API calls, not to delay the summary line.
 		budgetSpent := opts.MaxReports > 0 && submitted >= opts.MaxReports
-		if i+1 < len(candidates) && !budgetSpent {
+		if opts.WaitForSlot == nil && i+1 < len(candidates) && !budgetSpent {
 			t := time.NewTimer(opts.RateLimit)
 			select {
 			case <-ctx.Done():

@@ -20,6 +20,101 @@ PRODUCT_PATH = ROOT / "PRODUCT.md"
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def test_live_service_is_unprivileged_and_preserves_retention_access(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result, _ = self._run_installer_functions(
+                root,
+                'DATA_DIR=/srv/shardlure\n'
+                'COWRIE_HOME=/srv/shardlure/cowrie\n'
+                'COWRIE_LOG=$COWRIE_HOME/var/log/cowrie/cowrie.json\n'
+                'COWRIE=1\n'
+                'DEST=/usr/local/bin/shardlure\n'
+                'render_live_service\n',
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for required in (
+                "User=shardlure", "Group=shardlure", "UMask=0077",
+                "SupplementaryGroups=systemd-journal cowrie", "ProtectSystem=strict",
+                "NoNewPrivileges=true", "CapabilityBoundingSet=\n",
+                "ReadOnlyPaths=/srv/shardlure/cowrie",
+                "ReadWritePaths=/srv/shardlure/cowrie/var/lib/cowrie/downloads /srv/shardlure/cowrie/var/lib/cowrie/tty",
+                "MemoryMax=1G", "TasksMax=256", "TimeoutStopSec=45",
+                " live 127.0.0.1:8080 ",
+            ):
+                self.assertIn(required, result.stdout)
+
+    def test_no_cowrie_service_needs_neither_cowrie_group_nor_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _ = self._run_installer_functions(
+                Path(tmp),
+                'DATA_DIR=/srv/shardlure\nCOWRIE=0\nDEST=/usr/local/bin/shardlure\nrender_live_service\n',
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("SupplementaryGroups=systemd-journal\n", result.stdout)
+            self.assertNotIn("ReadOnlyPaths=", result.stdout)
+            self.assertNotIn("--cowrie=", result.stdout)
+            self.assertNotIn("Wants=cowrie.service", result.stdout)
+
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "requires systemd unit verifier")
+    def test_rendered_service_passes_systemd_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result, _ = self._run_installer_functions(
+                root,
+                'DATA_DIR=/srv/shardlure\nCOWRIE=0\nDEST=/usr/bin/true\nrender_live_service\n',
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            unit = root / "shardlure-live.service"
+            unit.write_text(result.stdout)
+            checked = subprocess.run(
+                ["systemd-analyze", "verify", str(unit)], capture_output=True, text=True,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_runtime_account_migration_is_scoped_and_rejects_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "data"
+            data.mkdir()
+            evidence = data / "evidence"
+            evidence.mkdir()
+            (data / "shardlure.db").write_text("fixture")
+            (data / "shardlure.yaml").write_text("fixture")
+            unrelated = data / "operator-notes"
+            unrelated.write_text("untouched")
+            result, _ = self._run_installer_functions(
+                root,
+                'DATA_DIR="$TEST_DATA"\nCOWRIE=0\n'
+                'id() { return 0; }\n'
+                'usermod() { printf "usermod %s\\n" "$*"; }\n'
+                'chown() { printf "chown %s\\n" "$*"; }\n'
+                'prepare_service_account\n',
+                extra={"TEST_DATA": str(data)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("shardlure:shardlure", result.stdout)
+            self.assertIn("root:shardlure", result.stdout)
+            self.assertNotIn(str(unrelated), result.stdout)
+            self.assertEqual(evidence.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((data / "shardlure.db").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((data / "shardlure.yaml").stat().st_mode & 0o777, 0o640)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "data"
+            data.mkdir()
+            (data / "evidence").symlink_to(root, target_is_directory=True)
+            result, _ = self._run_installer_functions(
+                root,
+                'DATA_DIR="$TEST_DATA"\nCOWRIE=0\n'
+                'id() { printf "MUTATION\\n"; return 0; }\n'
+                'prepare_service_account\n',
+                extra={"TEST_DATA": str(data)},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("MUTATION", result.stdout)
+
     def _git(self, repository: Path, *args: str) -> None:
         subprocess.run(
             ["git", *args],
@@ -689,7 +784,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         for derivative in (
             'cat > "$DATA_DIR/shardlure.yaml"',
-            "cat > /etc/systemd/system/shardlure-live.service",
+            "render_live_service > /etc/systemd/system/shardlure-live.service",
             "# -- cowrie installation",
         ):
             with self.subTest(derivative=derivative):

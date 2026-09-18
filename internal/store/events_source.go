@@ -1,8 +1,15 @@
 package store
 
 import (
+	"database/sql"
+	"fmt"
+	"sort"
+	"time"
+
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+const fullEventColumns = `id, ts, source, kind, COALESCE(src_ip,''), COALESCE(src_port,0), COALESCE(username,''), COALESCE(password,''), COALESCE(session_id,''), COALESCE(hassh,''), COALESCE(ssh_client,''), COALESCE(command,''), COALESCE(sha256,''), COALESCE(filename,''), COALESCE(dst_ip,''), COALESCE(dst_port,0), COALESCE(raw,''), COALESCE(actor_id,'')`
 
 // EventsBySource loads every event for the given source into memory.
 //
@@ -27,26 +34,13 @@ func (s *Store) EventsBySource(source models.Source) ([]*models.Event, error) {
 //
 // Returning an error from fn aborts iteration and propagates the error.
 func (s *Store) IterateEventsBySource(source models.Source, fn func(*models.Event) error) error {
-	rows, err := s.db.Query(`SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, raw, actor_id
-FROM events WHERE source=? ORDER BY ts ASC`, source)
+	rows, err := s.db.Query("SELECT "+eventTimeBucketSQL+" AS time_bucket,"+fullEventColumns+
+		" FROM events WHERE source=? ORDER BY time_bucket ASC,id ASC", source)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-
-	for rows.Next() {
-		e := &models.Event{}
-		var ts string
-		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.SrcIP, &e.SrcPort, &e.Username, &e.Password,
-			&e.SessionID, &e.HASSH, &e.SSHClient, &e.Command, &e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.Raw, &e.ActorID); err != nil {
-			return err
-		}
-		e.TS, _ = parseTime(ts)
-		if err := fn(e); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+	return iterateFullEventRowsExact(rows, fn)
 }
 
 // IterateEventsByActorIDs streams every event whose actor_id is in ids, in
@@ -65,8 +59,8 @@ func (s *Store) IterateEventsByActorIDs(ids []string, fn func(*models.Event) err
 	// (verified via EXPLAIN QUERY PLAN). Callers only need ts order WITHIN
 	// each actor (the collectors key clusters by actor), and the touched-ID
 	// set per live tick is small, so per-ID queries are the cheaper shape.
-	const q = `SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, raw, actor_id
-FROM events WHERE actor_id = ? ORDER BY ts ASC`
+	q := "SELECT " + eventTimeBucketSQL + " AS time_bucket," + fullEventColumns +
+		" FROM events WHERE actor_id=? ORDER BY time_bucket ASC,id ASC"
 	for _, id := range ids {
 		rows, err := s.db.Query(q, id)
 		if err != nil {
@@ -74,23 +68,65 @@ FROM events WHERE actor_id = ? ORDER BY ts ASC`
 		}
 		err = func() error {
 			defer rows.Close()
-			for rows.Next() {
-				e := &models.Event{}
-				var ts string
-				if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.SrcIP, &e.SrcPort, &e.Username, &e.Password,
-					&e.SessionID, &e.HASSH, &e.SSHClient, &e.Command, &e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.Raw, &e.ActorID); err != nil {
-					return err
-				}
-				e.TS, _ = parseTime(ts)
-				if err := fn(e); err != nil {
-					return err
-				}
-			}
-			return rows.Err()
+			return iterateFullEventRowsExact(rows, fn)
 		}()
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func iterateFullEventRowsExact(rows *sql.Rows, fn func(*models.Event) error) error {
+	type bucketedEvent struct {
+		bucket sql.NullInt64
+		event  *models.Event
+	}
+	var group []bucketedEvent
+	flush := func() error {
+		sort.Slice(group, func(i, j int) bool {
+			a, b := group[i].event, group[j].event
+			if !a.TS.Equal(b.TS) {
+				return a.TS.Before(b.TS)
+			}
+			return a.ID < b.ID
+		})
+		for _, item := range group {
+			if err := fn(item.event); err != nil {
+				return err
+			}
+		}
+		group = group[:0]
+		return nil
+	}
+	equalBucket := func(a, b sql.NullInt64) bool {
+		return a.Valid == b.Valid && (!a.Valid || a.Int64 == b.Int64)
+	}
+	for rows.Next() {
+		var item bucketedEvent
+		item.event = &models.Event{}
+		var ts string
+		if err := rows.Scan(&item.bucket, &item.event.ID, &ts, &item.event.Source, &item.event.Kind,
+			&item.event.SrcIP, &item.event.SrcPort, &item.event.Username, &item.event.Password,
+			&item.event.SessionID, &item.event.HASSH, &item.event.SSHClient, &item.event.Command,
+			&item.event.SHA256, &item.event.Filename, &item.event.DstIP, &item.event.DstPort,
+			&item.event.Raw, &item.event.ActorID); err != nil {
+			return err
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return fmt.Errorf("event %d ts: %w", item.event.ID, err)
+		}
+		item.event.TS = parsed
+		if len(group) > 0 && !equalBucket(group[0].bucket, item.bucket) {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		group = append(group, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return flush()
 }

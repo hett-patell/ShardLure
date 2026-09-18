@@ -1,6 +1,21 @@
 package actor
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
+
+func TestPlaybookFeaturesIncludesLateUsernames(t *testing.T) {
+	var features playbookFeatures
+	for i := 0; i < 12000; i++ {
+		features.add(strconv.Itoa(i))
+	}
+	features.add("solana")
+	features.add("ethereum")
+	if features.users != 12002 || features.classify(500) != "crypto_target" {
+		t.Fatalf("late rare signals were truncated or weighted by a bounded sample: %+v", features)
+	}
+}
 
 func TestClassifyPlaybook(t *testing.T) {
 	cases := []struct {

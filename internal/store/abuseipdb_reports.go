@@ -1,7 +1,11 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -57,10 +61,100 @@ func (s *Store) AbuseIPDBReported(ip string, within time.Duration) (bool, error)
 		err := s.db.QueryRow(`SELECT COUNT(1) FROM abuseipdb_reports WHERE ip=?`, ip).Scan(&n)
 		return n > 0, err
 	}
-	cutoff := time.Now().Add(-within).UTC().Format(time.RFC3339Nano)
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(1) FROM abuseipdb_reports WHERE ip=? AND reported_at >= ?`, ip, cutoff).Scan(&n)
-	return n > 0, err
+	var reportedAt string
+	err := s.db.QueryRow(`SELECT reported_at FROM abuseipdb_reports WHERE ip=?`, ip).Scan(&reportedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, reportedAt)
+	if err != nil {
+		return false, fmt.Errorf("abuseipdb report %s reported_at: %w", ip, err)
+	}
+	return !parsed.Before(time.Now().Add(-within)), nil
+}
+
+// AbuseIPDBReportedIPsContext returns the subset of ips present in the report
+// ledger inside the re-report window. Suggestions use this bulk form instead
+// of issuing one SQLite query for every candidate that passes Vet.
+func (s *Store) AbuseIPDBReportedIPsContext(ctx context.Context, ips []string, within time.Duration) (map[string]bool, error) {
+	reported := make(map[string]bool)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.ensureAbuseReportsTable(); err != nil {
+		return nil, err
+	}
+
+	unique := make([]string, 0, len(ips))
+	seen := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		unique = append(unique, ip)
+	}
+	if len(unique) == 0 {
+		return reported, nil
+	}
+
+	const chunkSize = 400
+	cutoff := time.Time{}
+	if within > 0 {
+		cutoff = time.Now().Add(-within)
+	}
+	for start := 0; start < len(unique); start += chunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := start + chunkSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		batch := unique[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, 0, len(batch))
+		for i, ip := range batch {
+			placeholders[i] = "?"
+			args = append(args, ip)
+		}
+		query := `SELECT ip,reported_at FROM abuseipdb_reports WHERE ip IN (` + strings.Join(placeholders, ",") + `)`
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var ip, reportedAt string
+			if err := rows.Scan(&ip, &reportedAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if within > 0 {
+				parsed, err := time.Parse(time.RFC3339Nano, reportedAt)
+				if err != nil {
+					rows.Close()
+					return nil, fmt.Errorf("abuseipdb report %s reported_at: %w", ip, err)
+				}
+				if parsed.Before(cutoff) {
+					continue
+				}
+			}
+			reported[ip] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return reported, nil
 }
 
 // RecordAbuseIPDBReport upserts the row for a submission. Categories are stored
@@ -75,9 +169,9 @@ func (s *Store) RecordAbuseIPDBReport(ip, status string, score int, categories [
 	if err := s.ensureAbuseReportsTable(); err != nil {
 		return err
 	}
-	ts := at.UTC().Format(time.RFC3339Nano)
+	ts := formatFixedUTC(at)
 	if at.IsZero() {
-		ts = time.Now().UTC().Format(time.RFC3339Nano)
+		ts = formatFixedUTC(time.Now())
 	}
 	_, err := s.execWrite(`
 INSERT INTO abuseipdb_reports (ip, reported_at, status, categories, abuse_score)
@@ -102,18 +196,27 @@ func (s *Store) AbuseReportStats() (AbuseReportStats, error) {
 	if err := s.ensureAbuseReportsTable(); err != nil {
 		return AbuseReportStats{}, err
 	}
-	var st AbuseReportStats
-	var lastTS sql.NullString
-	err := s.db.QueryRow(`SELECT COUNT(*), MAX(reported_at) FROM abuseipdb_reports`).Scan(&st.TotalReported, &lastTS)
+	rows, err := s.db.Query(`SELECT ip,reported_at FROM abuseipdb_reports`)
 	if err != nil {
-		return st, err
+		return AbuseReportStats{}, err
 	}
-	if lastTS.Valid {
-		if t, perr := time.Parse(time.RFC3339Nano, lastTS.String); perr == nil {
-			st.LastReportAt = t
+	defer rows.Close()
+	var st AbuseReportStats
+	for rows.Next() {
+		var ip, reportedAt string
+		if err := rows.Scan(&ip, &reportedAt); err != nil {
+			return st, err
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, reportedAt)
+		if err != nil {
+			return st, fmt.Errorf("abuseipdb report %s reported_at: %w", ip, err)
+		}
+		st.TotalReported++
+		if st.LastReportAt.IsZero() || parsed.After(st.LastReportAt) {
+			st.LastReportAt = parsed
 		}
 	}
-	return st, nil
+	return st, rows.Err()
 }
 
 // ListAbuseReports returns recorded reports, newest first. limit<=0 = no cap.
@@ -121,14 +224,8 @@ func (s *Store) ListAbuseReports(limit int) ([]AbuseReport, error) {
 	if err := s.ensureAbuseReportsTable(); err != nil {
 		return nil, err
 	}
-	q := `SELECT ip, reported_at, status, COALESCE(categories,''), COALESCE(abuse_score,0)
-	      FROM abuseipdb_reports ORDER BY reported_at DESC`
-	args := []interface{}{}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.Query(`SELECT ip, reported_at, status, COALESCE(categories,''), COALESCE(abuse_score,0)
+	      FROM abuseipdb_reports`)
 	if err != nil {
 		return nil, err
 	}
@@ -140,13 +237,27 @@ func (s *Store) ListAbuseReports(limit int) ([]AbuseReport, error) {
 		if err := rows.Scan(&r.IP, &tsStr, &r.Status, &cats, &r.AbuseScore); err != nil {
 			return nil, err
 		}
-		if t, perr := time.Parse(time.RFC3339Nano, tsStr); perr == nil {
-			r.ReportedAt = t
+		parsed, err := time.Parse(time.RFC3339Nano, tsStr)
+		if err != nil {
+			return nil, fmt.Errorf("abuseipdb report %s reported_at: %w", r.IP, err)
 		}
+		r.ReportedAt = parsed
 		r.Categories = parseCategories(cats)
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].ReportedAt.Equal(out[j].ReportedAt) {
+			return out[i].ReportedAt.After(out[j].ReportedAt)
+		}
+		return out[i].IP < out[j].IP
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func joinCategories(cats []int) string {

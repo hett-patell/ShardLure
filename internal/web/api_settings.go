@@ -326,6 +326,7 @@ func (s *Server) handleSettingsTest(w http.ResponseWriter, r *http.Request) {
 	default:
 		// Enrichment providers (abuseipdb, virustotal, greynoise, otx, ipqs, ipinfo).
 		ok, msg = enrich.TestProvider(ctx, nil, s.keys, req.Provider, testIP)
+		msg = safeSettingsTestMessage(msg)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": ok, "message": msg})
 }
@@ -373,7 +374,7 @@ func (s *Server) testBazaar(ctx context.Context) (bool, string) {
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return false, "unreachable: " + err.Error()
+		return false, "unreachable: " + externalHTTPError(err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
@@ -397,6 +398,10 @@ func (s *Server) testBazaar(ctx context.Context) (bool, string) {
 // is actually serving lookups — an operator with a GeoLite2 database should not
 // be told "geo lookups not enabled" merely because outbound HTTP is off.
 func (s *Server) testIPAPI(ctx context.Context, ip string) (bool, string) {
+	return s.testIPAPIWithClient(ctx, ip, &http.Client{Timeout: 6 * time.Second})
+}
+
+func (s *Server) testIPAPIWithClient(ctx context.Context, ip string, client *http.Client) (bool, string) {
 	if s.geo != nil && s.geo.mmdb.ready() {
 		if ent, ok := s.geo.mmdb.lookup(ip, time.Now()); ok {
 			where := ent.Country
@@ -419,10 +424,9 @@ func (s *Server) testIPAPI(ctx context.Context, ip string) (bool, string) {
 	if err != nil {
 		return false, "request build failed"
 	}
-	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return false, "unreachable: " + err.Error()
+		return false, "unreachable: " + externalHTTPError(err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))

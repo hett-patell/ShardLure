@@ -152,7 +152,7 @@ func (s *Store) AppendJournalEventAtomic(e *models.Event, update *JournalActorUp
 	}
 
 	stored := *e
-	normalizedTS := stored.TS.UTC().Format(time.RFC3339Nano)
+	normalizedTS := CanonicalEventTime(stored.TS)
 	err = s.WithTx(func(tx *sql.Tx) error {
 		var exists int
 		err := tx.QueryRow(`
@@ -177,16 +177,24 @@ LIMIT 1`, normalizedTS, stored.Source, stored.Kind, stored.SrcIP, stored.SrcPort
 			return err
 		}
 		if update != nil {
-			if err := upsertActor(tx, update.Actor); err != nil {
+			// The resident username map is a bounded cache, not an absolute
+			// counter. Increment the real name only after dedup, in this same
+			// transaction; overflow and cache eviction cannot inflate it.
+			if update.Username != "" && update.Username != "?" {
+				if _, err := tx.Exec(`INSERT INTO actor_users(actor_id,username,count) VALUES(?,?,1)
+ON CONFLICT(actor_id,username) DO UPDATE SET count=actor_users.count+1`, update.Actor.ID, update.Username); err != nil {
+					return err
+				}
+			}
+			a := *update.Actor
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM actor_users WHERE actor_id=?`, a.ID).Scan(&a.UniqueUsers); err != nil {
+				return err
+			}
+			if err := upsertActor(tx, &a); err != nil {
 				return err
 			}
 			if err := upsertActorIP(tx, update.Actor.ID, stored.SrcIP, update.IPFirst, update.IPLast, update.IPCount); err != nil {
 				return err
-			}
-			if update.Username != "" && update.Username != "?" {
-				if err := upsertActorUser(tx, update.Actor.ID, update.Username, update.UserCount); err != nil {
-					return err
-				}
 			}
 		}
 		inserted = true
@@ -239,88 +247,90 @@ func deleteActorsTx(tx *sql.Tx, source models.Source) error {
 	return err
 }
 
-// ReconcileSessionHASSH updates events for a cowrie session whose actor_id
-// was assigned before the session's HASSH fingerprint was known (the common
-// case: connect/login events arrive before cowrie.client.kex). It rewrites
-// every event for sessionID whose actor_id differs from newActorID to use
-// newActorID, then deletes and rewrites the aggregate rows for every old and
-// new actor ID involved. Zero-event actor rows (including the old IP-based
-// actor if all its events moved) are deleted so the dashboard never shows a
-// ghost actor. The caller supplies pre-rebuilt aggregates for the affected
-// actor IDs so this method is pure storage plumbing.
-func (s *Store) ReconcileSessionHASSH(sessionID, newActorID string, rebuilt []*models.AggregatedActor) error {
+// ReconcileSessionHASSH transfers only the session's retained evidence between
+// lifetime aggregates. Reads, callback and writes share the writer transaction;
+// callers must not use Store methods inside reconcile (writeMu is not reentrant).
+// The iterator excludes already-canonical rows, so retrying never double-counts.
+func (s *Store) ReconcileSessionHASSH(sessionID, newActorID, hassh string,
+	reconcile func(map[string]*ActorState, func(func(*models.Event) error) error) ([]*models.AggregatedActor, error)) error {
+	if sessionID == "" || hassh == "" || newActorID == "" {
+		return errors.New("store: empty HASSH reconciliation identity")
+	}
 	return s.WithTx(func(tx *sql.Tx) error {
-		// Discover old actor IDs: distinct actor_id values on this session's
-		// events that differ from newActorID.
-		oldRows, err := tx.Query(
-			`SELECT DISTINCT actor_id FROM events WHERE session_id=? AND actor_id<>? AND actor_id<>''`,
-			sessionID, newActorID)
+		rows, err := tx.Query("SELECT DISTINCT actor_id FROM events WHERE source=? AND session_id=? AND actor_id<>? AND actor_id<>''", models.SourceCowrie, sessionID, newActorID)
 		if err != nil {
 			return err
 		}
-		var oldIDs []string
-		func() {
-			defer oldRows.Close()
-			for oldRows.Next() {
-				var id string
-				if err := oldRows.Scan(&id); err != nil {
-					return
-				}
-				oldIDs = append(oldIDs, id)
+		ids := []string{newActorID}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
 			}
-		}()
-		if err := oldRows.Err(); err != nil {
+			ids = append(ids, id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
 			return err
 		}
-		if len(oldIDs) == 0 {
-			return nil // nothing to reconcile
-		}
-
-		// Update the events' actor_id to the new value.
-		if _, err := tx.Exec(
-			`UPDATE events SET actor_id=? WHERE session_id=? AND actor_id<>? AND actor_id<>''`,
-			newActorID, sessionID, newActorID); err != nil {
-			return err
-		}
-
-		// Clear and rewrite aggregates for every affected actor ID (old + new).
-		allIDs := append(oldIDs, newActorID)
-		for _, id := range allIDs {
-			if err := deleteActorChildrenTx(tx, id); err != nil {
+		if len(ids) > 1 {
+			states, err := actorStatesForIDs(tx, ids)
+			if err != nil {
 				return err
 			}
-		}
-		for _, agg := range rebuilt {
-			if err := upsertActor(tx, agg.Actor); err != nil {
+			stream := func(fn func(*models.Event) error) error {
+				rows, err := tx.Query(
+					"SELECT ts,kind,COALESCE(src_ip,''),COALESCE(username,''),COALESCE(ssh_client,''),COALESCE(command,''),COALESCE(sha256,''),actor_id FROM events WHERE source=? AND session_id=? AND actor_id<>? AND actor_id<>'' ORDER BY ts",
+					models.SourceCowrie, sessionID, newActorID)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for rows.Next() {
+					e := &models.Event{Source: models.SourceCowrie, SessionID: sessionID, HASSH: hassh}
+					var ts string
+					if err := rows.Scan(&ts, &e.Kind, &e.SrcIP, &e.Username, &e.SSHClient, &e.Command, &e.SHA256, &e.ActorID); err != nil {
+						return err
+					}
+					e.TS, err = parseTime(ts)
+					if err != nil {
+						return err
+					}
+					if err := fn(e); err != nil {
+						return err
+					}
+				}
+				return rows.Err()
+			}
+			updated, err := reconcile(states, stream)
+			if err != nil {
 				return err
 			}
-			for ip, st := range agg.IPs {
-				if err := upsertActorIP(tx, agg.Actor.ID, ip, st.First, st.Last, st.Count); err != nil {
+			for _, id := range ids {
+				if err := deleteActorChildrenTx(tx, id); err != nil {
 					return err
 				}
 			}
-			for username, count := range agg.Users {
-				if err := upsertActorUser(tx, agg.Actor.ID, username, count); err != nil {
-					return err
-				}
-			}
-		}
-
-		// Delete any actor rows that now have zero events (the old IP-based
-		// actor that was fully subsumed by the HASSH actor).
-		for _, id := range oldIDs {
-			var n int
-			if err := tx.QueryRow(
-				`SELECT COUNT(1) FROM events WHERE actor_id=?`, id).Scan(&n); err != nil {
+			if err := writeActorsTx(tx, updated); err != nil {
 				return err
 			}
-			if n == 0 {
-				if _, err := tx.Exec(`DELETE FROM actors WHERE id=?`, id); err != nil {
-					return err
+			for _, agg := range updated {
+				a := agg.Actor
+				// Retention is not proof that an actor has no lifetime evidence. Only
+				// a genuinely empty, unannotated aggregate may be removed.
+				if a.ID != newActorID && a.EventCount == 0 && a.Campaigns == "" && a.Notes == "" {
+					if _, err := tx.Exec("DELETE FROM actors WHERE id=?", a.ID); err != nil {
+						return err
+					}
 				}
 			}
 		}
-		return nil
+		// Also repairs legacy rows whose actor_id was already moved but whose
+		// HASSH was left empty. Blank actor IDs (admin exemptions) stay blank.
+		_, err = tx.Exec("UPDATE events SET hassh=?,actor_id=CASE WHEN COALESCE(actor_id,'')='' THEN actor_id ELSE ? END WHERE source=? AND session_id=? AND (COALESCE(hassh,'')<>? OR (actor_id<>'' AND actor_id<>?))", hassh, newActorID, models.SourceCowrie, sessionID, hassh, newActorID)
+		return err
 	})
 }
 

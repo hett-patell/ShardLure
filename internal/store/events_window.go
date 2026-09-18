@@ -1,10 +1,148 @@
 package store
 
 import (
+	"container/heap"
+	"context"
+	"database/sql"
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+const eventWindowColumns = `id, ts, source, kind, COALESCE(src_ip,''), COALESCE(src_port,0), COALESCE(username,''), COALESCE(password,''), COALESCE(session_id,''), COALESCE(hassh,''), COALESCE(ssh_client,''), COALESCE(command,''), COALESCE(sha256,''), COALESCE(filename,''), COALESCE(dst_ip,''), COALESCE(dst_port,0), COALESCE(actor_id,'')`
+
+const eventTimeBucketSQL = `CASE
+WHEN ts_unix_ns IS NOT NULL THEN ts_unix_ns / 1000000
+ELSE CAST((julianday(ts) - 2440587.5) * 86400000 AS INTEGER)
+END`
+
+type recentEventHeap []*models.Event
+
+func (h recentEventHeap) Len() int { return len(h) }
+func (h recentEventHeap) Less(i, j int) bool {
+	if !h[i].TS.Equal(h[j].TS) {
+		return h[i].TS.Before(h[j].TS)
+	}
+	return h[i].ID < h[j].ID
+}
+func (h recentEventHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *recentEventHeap) Push(x any)   { *h = append(*h, x.(*models.Event)) }
+func (h *recentEventHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+func eventAfter(a, b *models.Event) bool {
+	return a.TS.After(b.TS) || (a.TS.Equal(b.TS) && a.ID > b.ID)
+}
+
+func (s *Store) collectEventsSince(since time.Time, limit int) ([]*models.Event, int, error) {
+	recent := &recentEventHeap{}
+	heap.Init(recent)
+	total := 0
+	err := s.iterateEventsSinceExactContext(context.Background(), since, false, func(e *models.Event) error {
+		total++
+		if recent.Len() < limit {
+			heap.Push(recent, e)
+		} else if eventAfter(e, (*recent)[0]) {
+			heap.Pop(recent)
+			heap.Push(recent, e)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	out := append([]*models.Event(nil), (*recent)...)
+	sort.Slice(out, func(i, j int) bool { return eventAfter(out[i], out[j]) })
+	return out, total, nil
+}
+
+func (s *Store) iterateEventsSinceExactContext(ctx context.Context, since time.Time, descending bool, fn func(*models.Event) error) error {
+	direction := "ASC"
+	if descending {
+		direction = "DESC"
+	}
+	// RFC3339 permits offsets through +/-14h. Widen the legacy text-index
+	// prefilter by 15h, then enforce the exact cutoff after parsing in Go.
+	legacyFloor := formatFixedUTC(since.Add(-15 * time.Hour))
+	query := "SELECT " + eventTimeBucketSQL + " AS time_bucket," + eventWindowColumns +
+		" FROM events WHERE (ts_unix_ns >= ? OR (ts_unix_ns IS NULL AND ts >= ?))" +
+		" ORDER BY time_bucket " + direction + ", id " + direction
+	rows, err := s.db.QueryContext(ctx, query, since.UnixNano(), legacyFloor)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type bucketedEvent struct {
+		bucket sql.NullInt64
+		event  *models.Event
+	}
+	var group []bucketedEvent
+	flush := func() error {
+		sort.Slice(group, func(i, j int) bool {
+			a, b := group[i].event, group[j].event
+			if !a.TS.Equal(b.TS) {
+				if descending {
+					return a.TS.After(b.TS)
+				}
+				return a.TS.Before(b.TS)
+			}
+			if descending {
+				return a.ID > b.ID
+			}
+			return a.ID < b.ID
+		})
+		for _, item := range group {
+			if item.event.TS.Before(since) {
+				continue
+			}
+			if err := fn(item.event); err != nil {
+				return err
+			}
+		}
+		group = group[:0]
+		return nil
+	}
+	equalBucket := func(a, b sql.NullInt64) bool {
+		return a.Valid == b.Valid && (!a.Valid || a.Int64 == b.Int64)
+	}
+	for rows.Next() {
+		var item bucketedEvent
+		item.event = &models.Event{}
+		var ts, source, kind string
+		if err := rows.Scan(&item.bucket, &item.event.ID, &ts, &source, &kind,
+			&item.event.SrcIP, &item.event.SrcPort, &item.event.Username, &item.event.Password,
+			&item.event.SessionID, &item.event.HASSH, &item.event.SSHClient, &item.event.Command,
+			&item.event.SHA256, &item.event.Filename, &item.event.DstIP, &item.event.DstPort,
+			&item.event.ActorID); err != nil {
+			return err
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return fmt.Errorf("event %d ts: %w", item.event.ID, err)
+		}
+		item.event.TS = parsed
+		item.event.Source = models.Source(source)
+		item.event.Kind = models.EventKind(kind)
+		if len(group) > 0 && !equalBucket(group[0].bucket, item.bucket) {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		group = append(group, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return flush()
+}
 
 // EventsSince returns events with TS >= since. Includes all columns the
 // classifier and exporters need (kind, command, src_ip, actor_id,
@@ -23,29 +161,8 @@ func (s *Store) EventsSince(since time.Time, limit int) ([]*models.Event, error)
 	if limit <= 0 {
 		limit = 5000
 	}
-	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, actor_id
-FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
-		since.UTC().Format(time.RFC3339Nano), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*models.Event
-	for rows.Next() {
-		e := &models.Event{}
-		var ts, source, kind string
-		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
-			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.Command,
-			&e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.ActorID); err != nil {
-			return nil, err
-		}
-		e.TS, _ = parseTime(ts)
-		e.Source = models.Source(source)
-		e.Kind = models.EventKind(kind)
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	out, _, err := s.collectEventsSince(since, limit)
+	return out, err
 }
 
 // IterateEventsSince streams every event with TS >= since (no row cap), in
@@ -55,30 +172,13 @@ FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
 // buffering the whole result set in memory, so MITRE/TTP/IOC/graph/deobf can
 // classify the entire window on a small VPS. fn must not retain e across calls.
 func (s *Store) IterateEventsSince(since time.Time, fn func(*models.Event) error) error {
-	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, actor_id
-FROM events WHERE ts >= ? ORDER BY ts ASC`,
-		since.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		e := &models.Event{}
-		var ts, source, kind string
-		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
-			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.Command,
-			&e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.ActorID); err != nil {
-			return err
-		}
-		e.TS, _ = parseTime(ts)
-		e.Source = models.Source(source)
-		e.Kind = models.EventKind(kind)
-		if err := fn(e); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+	return s.IterateEventsSinceContext(context.Background(), since, fn)
+}
+
+// IterateEventsSinceContext is the cancellable form used by report and web
+// paths whose callers may disconnect during a large legacy window scan.
+func (s *Store) IterateEventsSinceContext(ctx context.Context, since time.Time, fn func(*models.Event) error) error {
+	return s.iterateEventsSinceExactContext(ctx, since, false, fn)
 }
 
 // EventsSinceAll returns every event in the window (full window, no silent
@@ -114,12 +214,7 @@ func (s *Store) EventsSinceCapped(since time.Time, limit int) (events []*models.
 	if limit <= 0 {
 		limit = defaultWindowEventCap
 	}
-	sinceStr := since.UTC().Format(time.RFC3339Nano)
-	if err = s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE ts >= ?`, sinceStr).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	events, err = s.EventsSince(since, limit)
-	return events, total, err
+	return s.collectEventsSince(since, limit)
 }
 
 // defaultWindowEventCap bounds the events any single windowed-analytics fetch

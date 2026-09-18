@@ -232,6 +232,127 @@ checkout_fresh_cowrie() {
   COWRIE_HOME="$cowrie_final_path"
 }
 
+validate_service_path() {
+  local service_path="$1" service_ancestor="$1"
+  [[ "$service_path" == /* ]] || err "service path must be absolute: $service_path"
+  while [[ "$service_ancestor" != / ]]; do
+    [[ ! -L "$service_ancestor" ]] || err "symlink in service path: $service_path"
+    service_ancestor=$(dirname -- "$service_ancestor")
+  done
+  if [[ -e "$service_path" ]]; then
+    local unsafe_entry
+    unsafe_entry=$(find "$service_path" -xdev \( -type l -o \( -type f -links +1 \) -o \( ! -type f ! -type d \) \) -print -quit) || err "cannot validate service path: $service_path"
+    [[ -z "$unsafe_entry" ]] || err "symlink, hardlink or special file in service data: $unsafe_entry"
+  fi
+}
+
+prepare_service_account() {
+  # DATA_DIR is shared with Cowrie. Only explicitly owned daemon paths change
+  # ownership; a blanket recursive chown would break the honeypot boundary.
+  case "$DATA_DIR" in
+    /var/lib/*|/srv/*|/opt/*|/mnt/*/*|/tmp/*/*) ;;
+    *) err "use a dedicated service data directory under /var/lib, /srv or /opt" ;;
+  esac
+  local service_path
+  local -a owned=("$DATA_DIR/evidence" "$DATA_DIR/artifacts" "$DATA_DIR/logs")
+  local -a cowrie_read=() retention_dirs=()
+  validate_service_path "$DATA_DIR/shardlure.yaml"
+  for service_path in "$DATA_DIR/shardlure.db" "$DATA_DIR/shardlure.db-wal" "$DATA_DIR/shardlure.db-shm"; do
+    [[ ! -e "$service_path" && ! -L "$service_path" ]] || owned+=("$service_path")
+  done
+  if [[ "$COWRIE" -eq 1 ]]; then
+    cowrie_read=("$COWRIE_HOME/var/log/cowrie" "$COWRIE_HOME/var/lib/cowrie/downloads" "$COWRIE_HOME/var/lib/cowrie/tty")
+    retention_dirs=("$COWRIE_HOME/var/lib/cowrie/downloads" "$COWRIE_HOME/var/lib/cowrie/tty")
+  fi
+  for service_path in "${owned[@]}" "${cowrie_read[@]}"; do
+    validate_service_path "$service_path"
+  done
+  if ! id -u shardlure &>/dev/null; then
+    useradd --system --user-group --no-create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin shardlure
+  fi
+  local service_groups=systemd-journal service_data_group=shardlure
+  if [[ "$COWRIE" -eq 1 ]]; then
+    service_groups+=,cowrie
+    service_data_group=cowrie
+  fi
+  usermod -a -G "$service_groups" shardlure
+  chown -- "shardlure:$service_data_group" "$DATA_DIR"
+  chmod 0710 -- "$DATA_DIR"
+  for service_path in "${owned[@]}"; do
+    [[ -e "$service_path" ]] || mkdir -- "$service_path"
+    chown -hR -- shardlure:shardlure "$service_path"
+    find "$service_path" -xdev -type d -exec chmod 0700 -- {} +
+    find "$service_path" -xdev -type f -exec chmod 0600 -- {} +
+  done
+  if [[ -e "$DATA_DIR/shardlure.yaml" ]]; then
+    chown -- root:shardlure "$DATA_DIR/shardlure.yaml"
+    chmod 0640 -- "$DATA_DIR/shardlure.yaml"
+  fi
+  if [[ "$COWRIE" -eq 1 ]]; then
+    for service_path in "$COWRIE_HOME" "$COWRIE_HOME/var" "$COWRIE_HOME/var/lib" "$COWRIE_HOME/var/lib/cowrie" "$COWRIE_HOME/var/log"; do
+      chgrp -- cowrie "$service_path"
+      chmod g+rx,g-w,o-rwx -- "$service_path"
+    done
+    for service_path in "${cowrie_read[@]}"; do
+      mkdir -p -- "$service_path"
+      chown -hR -- cowrie:cowrie "$service_path"
+      find "$service_path" -xdev -type d -exec chmod 0750 -- {} +
+      find "$service_path" -xdev -type f -exec chmod 0640 -- {} +
+    done
+    # Retention may unlink old captures, but cannot modify code or keys.
+    chmod 0770 -- "${retention_dirs[@]}"
+  fi
+}
+
+render_live_service() {
+  local service_groups=systemd-journal service_cowrie_args="" service_cowrie_units=""
+  local service_listen="127.0.0.1:$DASH_PORT"
+  if [[ -n "${TSIP:-}" ]]; then
+    service_listen=":$DASH_PORT --tailscale"
+  fi
+  if [[ "$COWRIE" -eq 1 ]]; then
+    service_groups+=" cowrie"
+    service_cowrie_args="--cowrie=$COWRIE_LOG"
+    service_cowrie_units="Wants=cowrie.service"
+  fi
+  cat <<SVC
+[Unit]
+Description=ShardLure live telemetry ingest + web dashboard
+After=network.target
+$service_cowrie_units
+[Service]
+Type=simple
+User=shardlure
+Group=shardlure
+SupplementaryGroups=$service_groups
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=$DATA_DIR
+MemoryMax=1G
+TasksMax=256
+TimeoutStopSec=45
+Environment=SHARDLURE_CONFIG=$DATA_DIR/shardlure.yaml
+Environment=SHARDLURE_DASH_TOKEN=$DASH_TOKEN
+ExecStart=$DEST live $service_listen $service_cowrie_args
+Restart=always
+RestartSec=5
+SVC
+  if [[ "$COWRIE" -eq 1 ]]; then
+    printf 'ReadOnlyPaths=%s\nReadWritePaths=%s/var/lib/cowrie/downloads %s/var/lib/cowrie/tty\n' "$COWRIE_HOME" "$COWRIE_HOME" "$COWRIE_HOME"
+  fi
+  printf '[Install]\nWantedBy=multi-user.target\n'
+}
+
 # Tests source the pure checkout functions above. Return before argument
 # parsing, root checks, downloads, package installation, or filesystem writes.
 if [[ "${SHARDLURE_INSTALL_SOURCE_ONLY:-0}" == "1" ]]; then
@@ -371,46 +492,8 @@ log "config written to $DATA_DIR/shardlure.yaml"
 # The cowrie.service unit is written AFTER cowrie itself is installed, since
 # the ExecStart path depends on the cowrie layout (old: bin/cowrie shell
 # script, new: venv/bin/cowrie console_script created by 'pip install -e .').
-# The shardlure-live unit can be written now since it doesn't depend on cowrie's
-# internal layout.
+# The live unit and account permissions are finalized after Cowrie setup.
 
-ENV=""
-if [[ -n "$DASH_TOKEN" ]]; then
-  ENV="Environment=SHARDLURE_DASH_TOKEN=$DASH_TOKEN"
-fi
-
-# Only depend on cowrie.service when we'll actually install cowrie. Otherwise
-# systemd emits 'Failed to add dependency' warnings for a unit that doesn't
-# exist.
-if [[ "$COWRIE" -eq 1 ]]; then
-  COWRIE_DEP="After=network.target cowrie.service
-Wants=cowrie.service"
-else
-  COWRIE_DEP="After=network.target"
-fi
-
-cat > /etc/systemd/system/shardlure-live.service <<SVC
-[Unit]
-Description=ShardLure live dashboard + telemetry ingest
-$COWRIE_DEP
-[Service]
-Type=simple
-$ENV
-ExecStart=$DEST -config $DATA_DIR/shardlure.yaml live :$DASH_PORT --tailscale --cowrie=$COWRIE_LOG
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-SVC
-
-# The unit embeds SHARDLURE_DASH_TOKEN via Environment=; systemd units are
-# world-readable by default (0644), so any local user could read the token.
-# Lock the unit to root-only when a token is present.
-if [[ -n "$DASH_TOKEN" ]]; then
-  chmod 600 /etc/systemd/system/shardlure-live.service
-fi
-
-log "shardlure-live systemd unit written (cowrie unit deferred until cowrie install completes)"
 
 # -- cowrie installation ---------------------------------------------------
 if [[ "$COWRIE" -eq 1 ]]; then
@@ -503,10 +586,10 @@ if [[ -x "$COWRIE_HOME/venv/bin/cowrie" ]]; then
   # Modern layout. AUTHBIND_ENABLED=yes is read by the cowrie launcher and
   # tells it to invoke twistd via authbind when binding low ports.
   COWRIE_EXEC="Environment=AUTHBIND_ENABLED=yes
-ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/cowrie start -n"
+ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/cowrie start -n --umask=0027"
 elif [[ -x "$COWRIE_HOME/bin/cowrie" ]]; then
   # Legacy layout.
-  COWRIE_EXEC="ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/python3 $COWRIE_HOME/bin/cowrie start -n"
+  COWRIE_EXEC="ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/python3 $COWRIE_HOME/bin/cowrie start -n --umask=0027"
 fi
 
 if [[ "$COWRIE" -eq 1 ]]; then
@@ -520,11 +603,13 @@ After=network.target
 [Service]
 Type=simple
 User=cowrie
+Group=cowrie
 WorkingDirectory=$COWRIE_HOME
 # TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
 # 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
 # host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.
 Environment=TZ=UTC
+UMask=0027
 $COWRIE_EXEC
 Restart=always
 RestartSec=5
@@ -535,10 +620,14 @@ SVC
 fi
 
 # -- start services --------------------------------------------------------
+prepare_service_account
+render_live_service > /etc/systemd/system/shardlure-live.service
+chmod 0600 /etc/systemd/system/shardlure-live.service
+log "unprivileged systemd unit written (private dashboard binding)"
 systemctl daemon-reload
 UNITS=("shardlure-live.service")
 [[ "$COWRIE" -eq 1 ]] && UNITS+=("cowrie.service")
-systemctl enable "${UNITS[@]}" 2>/dev/null || true
+systemctl enable "${UNITS[@]}"
 if [[ "$COWRIE" -eq 1 ]]; then
   if systemctl is-active --quiet cowrie.service; then
     systemctl restart cowrie.service
@@ -558,7 +647,7 @@ sleep 2
 echo
 systemctl is-active "${UNITS[@]}" 2>&1 || true
 echo
-log "dashboard: http://$ADMIN_IPS:$DASH_PORT"
+log "dashboard: http://${TSIP:-127.0.0.1}:$DASH_PORT (use an SSH tunnel for loopback)"
 if [[ -n "$DASH_TOKEN" ]]; then
   log "auth token: (set, ${#DASH_TOKEN} chars)"
 fi

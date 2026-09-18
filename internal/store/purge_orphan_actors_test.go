@@ -104,6 +104,52 @@ func TestMaintenancePurgeDeletesOrphanActors(t *testing.T) {
 	}
 }
 
+func TestMaintenancePurgeOrphanActorsUsesExactMixedTimes(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "purge-orphan-time.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+	seedActor(t, st, "cowrie:fresh-offset", cutoff.Add(2*time.Hour), "", "")
+	seedActor(t, st, "cowrie:old-offset", cutoff.Add(-2*time.Hour), "", "")
+	freshText := cutoff.Add(2 * time.Hour).In(time.FixedZone("minus-14", -14*60*60)).Format(time.RFC3339Nano)
+	oldText := cutoff.Add(-2 * time.Hour).In(time.FixedZone("plus-14", 14*60*60)).Format(time.RFC3339Nano)
+	if _, err := st.db.Exec(`UPDATE actors SET first_seen=?,last_seen=? WHERE id='cowrie:fresh-offset'`, freshText, freshText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE actors SET first_seen=?,last_seen=? WHERE id='cowrie:old-offset'`, oldText, oldText); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MaintenancePurge(30); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, st, `SELECT COUNT(*) FROM actors WHERE id='cowrie:fresh-offset'`); got != 1 {
+		t.Fatalf("fresh offset actor rows=%d, want 1", got)
+	}
+	if got := countRows(t, st, `SELECT COUNT(*) FROM actors WHERE id='cowrie:old-offset'`); got != 0 {
+		t.Fatalf("old offset actor rows=%d, want 0", got)
+	}
+}
+
+func TestMaintenancePurgeRejectsMalformedOrphanActorTime(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "purge-orphan-malformed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	seedActor(t, st, "cowrie:bad-time", time.Now().Add(-90*24*time.Hour), "", "")
+	if _, err := st.db.Exec(`UPDATE actors SET last_seen='not-a-time' WHERE id='cowrie:bad-time'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MaintenancePurge(30); err == nil {
+		t.Fatal("malformed orphan actor timestamp must stop retention")
+	}
+	if got := countRows(t, st, `SELECT COUNT(*) FROM actors WHERE id='cowrie:bad-time'`); got != 1 {
+		t.Fatalf("malformed actor rows=%d, want 1", got)
+	}
+}
+
 // Retention disabled must stay a complete no-op, including for actors.
 func TestMaintenancePurgeZeroRetentionKeepsOrphans(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "purge-noop.db"))

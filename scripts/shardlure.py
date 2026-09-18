@@ -7,6 +7,7 @@ import glob
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -288,101 +289,146 @@ def ssh_is_socket_activated() -> bool:
     return cp.stdout.strip() in ("enabled", "static", "indirect")
 
 
-def migrate_sshd(admin_port: int) -> None:
-    log(f"moving real SSH to port {admin_port} (key-only)")
-    ensure_admin_ssh_keys()
-    dropin = Path("/etc/ssh/sshd_config.d/99-shardlure-admin.conf")
-    dropin.parent.mkdir(parents=True, exist_ok=True)
-    main_cfg = Path("/etc/ssh/sshd_config")
-    bak = Path("/etc/ssh/sshd_config.shardlure-bak")
-    socket_activated = ssh_is_socket_activated()
-    socket_dropin = Path("/etc/systemd/system/ssh.socket.d/zz-shardlure-admin.conf")
-    if main_cfg.exists() and not bak.exists():
-        shutil.copy2(main_cfg, bak)
-    if main_cfg.exists():
-        text = main_cfg.read_text()
-        lines = []
-        for line in text.splitlines():
-            if line.startswith("Port "):
-                lines.append("#" + line)
-            else:
-                lines.append(line)
-        main_cfg.write_text("\n".join(lines) + "\n")
-    dropin.write_text(
-        f"""# Managed by ShardLure
-Port {admin_port}
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-PubkeyAuthentication yes
-PermitRootLogin prohibit-password
-"""
-    )
+SSHD_CONFIG = Path("/etc/ssh/sshd_config")
+SSHD_DROPIN = Path("/etc/ssh/sshd_config.d/99-shardlure-admin.conf")
+SSH_SOCKET_DROPIN = Path("/etc/systemd/system/ssh.socket.d/zz-shardlure-admin.conf")
+
+
+def _effective_ssh_config() -> str:
+    cp = run(["sshd", "-T"], capture_output=True, text=True)
+    cp.check_returncode()
+    return cp.stdout or ""
+
+
+def _ssh_ports(config: str) -> set[int]:
+    return {int(m.group(1)) for m in re.finditer(r"(?im)^port\s+(\d+)\s*$", config)}
+
+
+def _reload_ssh(socket_activated: bool) -> None:
     if socket_activated:
-        # The first (empty) ListenStream= clears the unit's inherited
-        # ListenStream=22; the rest bind the admin port. Without the reset
-        # line systemd would ADD the admin port while keeping 22, leaving the
-        # real sshd squatting on the bait port.
-        #
-        # Bind BOTH 0.0.0.0 and [::] explicitly: Ubuntu's stock ss.socket ships
-        # BindIPv6Only=ipv6-only, so a bare `ListenStream=2222` binds IPv6 ONLY
-        # and the documented `ssh -p 2222 user@<ipv4>` (incl. a Tailscale v4 IP)
-        # gets connection-refused. Listing both stacks makes the admin port
-        # reachable regardless of the inherited BindIPv6Only.
-        log("ssh is socket-activated; writing ssh.socket drop-in for the admin port")
-        socket_dropin.parent.mkdir(parents=True, exist_ok=True)
-        socket_dropin.write_text(
-            f"""# Managed by ShardLure
-[Socket]
-ListenStream=
-ListenStream=0.0.0.0:{admin_port}
-ListenStream=[::]:{admin_port}
-"""
-        )
-
-    def _rollback(reason: str) -> None:
-        log(f"sshd config invalid ({reason}); rolling back to backup")
-        if bak.exists():
-            shutil.copy2(bak, main_cfg)
-        try:
-            dropin.unlink()
-        except FileNotFoundError:
-            pass
-        if socket_activated:
-            try:
-                socket_dropin.unlink()
-            except FileNotFoundError:
-                pass
-            run(["systemctl", "daemon-reload"])
-            run(["systemctl", "restart", "ssh.socket"])
-        run(["systemctl", "daemon-reload"])
-        run(["systemctl", "reload", "ssh"])
-
-    cp = run(["sshd", "-t"])
-    if cp.returncode != 0:
-        _rollback("sshd -t failed")
-        die("sshd -t rejected the new configuration; original ssh restored")
-
-    run(["systemctl", "daemon-reload"])
+        # Accept=no socket activation passes listeners to the long-lived sshd
+        # parent. Restarting only the socket leaves that parent holding the old
+        # descriptors (and the old authentication policy). Debian/Ubuntu use
+        # KillMode=process so replacing the parent preserves session children.
+        # Refuse unknown/custom kill semantics rather than disconnect the admin.
+        cp = run(["systemctl", "show", "ssh.service", "--property=KillMode", "--value"],
+                 capture_output=True, text=True)
+        cp.check_returncode()
+        if (cp.stdout or "").strip() != "process":
+            die("socket-activated SSH requires KillMode=process to preserve sessions; configure SSH manually")
+    run(["systemctl", "daemon-reload"]).check_returncode()
     if socket_activated:
-        # Restart the socket so the new ListenStream= takes effect. Already
-        # established admin connections survive (their sshd@ instances keep
-        # running); only the listening socket is rebound.
-        cp = run(["systemctl", "restart", "ssh.socket"])
-        if cp.returncode != 0:
-            _rollback("ssh.socket restart failed")
-            die("ssh.socket restart failed; original ssh restored")
-        # ssh.service may still hold port 22 from a non-socket start; stop it so
-        # Cowrie can bind the bait port. Ignore errors (it may not be running).
-        run(["systemctl", "stop", "ssh.service"])
+        run(["systemctl", "restart", "ssh.socket", "ssh.service"]).check_returncode()
     else:
         cp = run(["systemctl", "reload", "ssh"])
         if cp.returncode != 0:
-            cp2 = run(["systemctl", "reload", "sshd"])
-            if cp2.returncode != 0:
-                _rollback("systemctl reload failed")
-                die("ssh reload failed; original ssh restored")
-    log(f"real SSH now on port {admin_port}")
+            run(["systemctl", "reload", "sshd"]).check_returncode()
+
+
+def _apply_ssh_ports(admin_port: int, *, final: bool):
+    if not 1 <= admin_port <= 65535:
+        raise ValueError("admin port must be 1-65535")
+    previous_ports = _ssh_ports(_effective_ssh_config())
+    if not previous_ports:
+        die("cannot determine current SSH ports; refusing to change access")
+    ports = {admin_port} if final else previous_ports | {admin_port}
+    socket_activated = ssh_is_socket_activated()
+    paths = (SSHD_CONFIG, SSHD_DROPIN, SSH_SOCKET_DROPIN)
+    snapshot = {p: (p.read_bytes(), p.stat().st_mode & 0o777) if p.exists() else None for p in paths}
+
+    def rollback() -> None:
+        for path, saved in snapshot.items():
+            if saved is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(saved[0])
+                path.chmod(saved[1])
+        run(["sshd", "-t"]).check_returncode()
+        _reload_ssh(socket_activated)
+
+    # Keep the original backup for uninstall, but rollback THIS attempt to
+    # its exact immediate predecessor (including pre-existing drop-ins).
+    backup = SSHD_CONFIG.with_name("sshd_config.shardlure-bak")
+    if SSHD_CONFIG.exists() and not backup.exists():
+        shutil.copy2(SSHD_CONFIG, backup)
+    try:
+        if SSHD_CONFIG.exists():
+            text = SSHD_CONFIG.read_text()
+            text = re.sub(r"(?im)^(\s*Port\s+.*)$", r"#\1", text)
+            SSHD_CONFIG.write_text(text)
+        SSHD_DROPIN.parent.mkdir(parents=True, exist_ok=True)
+        saved_policy = snapshot[SSHD_DROPIN]
+        policy = re.sub(r"(?im)^\s*Port[ \t]+[^\n]*\n?", "", saved_policy[0].decode()) if saved_policy else ""
+        if final:
+            policy = ("PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
+                      "ChallengeResponseAuthentication no\nPubkeyAuthentication yes\n"
+                      "PermitRootLogin prohibit-password\n")
+        SSHD_DROPIN.write_text("# Managed by ShardLure\n" +
+                              "".join(f"Port {port}\n" for port in sorted(ports)) + policy)
+        if socket_activated:
+            SSH_SOCKET_DROPIN.parent.mkdir(parents=True, exist_ok=True)
+            if final:
+                socket_text = "# Managed by ShardLure\n[Socket]\nBindIPv6Only=ipv6-only\nListenStream=\n"
+            else:
+                # Do not reset inherited ListenStream entries during staging.
+                # Preserve a previous override too (repeat install/custom port).
+                saved = snapshot[SSH_SOCKET_DROPIN]
+                socket_text = saved[0].decode() if saved else "# Managed by ShardLure\n"
+                socket_text += "\n[Socket]\nBindIPv6Only=ipv6-only\n"
+            for port in sorted(ports if final else {admin_port} - previous_ports):
+                socket_text += f"ListenStream=0.0.0.0:{port}\nListenStream=[::]:{port}\n"
+            SSH_SOCKET_DROPIN.write_text(socket_text)
+        run(["sshd", "-t"]).check_returncode()
+        effective = _effective_ssh_config()
+        if _ssh_ports(effective) != ports:
+            raise RuntimeError("other SSH includes override the requested ports")
+        if final:
+            values = dict(line.lower().split(None, 1) for line in effective.splitlines() if len(line.split(None, 1)) == 2)
+            if values.get("passwordauthentication") != "no" or values.get("kbdinteractiveauthentication") != "no" or values.get("pubkeyauthentication") != "yes":
+                raise RuntimeError("other SSH includes override the key-only policy")
+        _reload_ssh(socket_activated)
+    except BaseException:
+        rollback()
+        raise
+    return rollback
+
+
+def migrate_sshd(admin_port: int):
+    """Stage the new listener while retaining all effective old SSH ports."""
+    log(f"adding admin SSH port {admin_port}; existing ports stay available until verification")
+    return _apply_ssh_ports(admin_port, final=False)
+
+
+def finalize_sshd_migration(admin_port: int) -> None:
+    """Retire old listeners only after a separate public-key login succeeds."""
+    _apply_ssh_ports(admin_port, final=True)
+
+
+def open_admin_firewall(admin_port: int) -> bool:
+    if not 1 <= admin_port <= 65535:
+        raise ValueError("admin port must be 1-65535")
+    if not shutil.which("ufw"):
+        return False
+    cp = run(["ufw", "status"], capture_output=True, text=True)
+    cp.check_returncode()
+    if not re.search(r"(?im)^status:\s*active\s*$", cp.stdout or ""):
+        return False
+    run(["ufw", "allow", f"{admin_port}/tcp"]).check_returncode()
+    return True
+
+
+def migrate_ssh_safely(admin_port: int) -> None:
+    ensure_admin_ssh_keys()
+    if not open_admin_firewall(admin_port):
+        log("UFW is absent/inactive: ensure the admin port is allowed by any host/cloud firewall")
+    rollback = migrate_sshd(admin_port)
+    try:
+        verify_admin_ssh_gate(admin_port)
+        finalize_sshd_migration(admin_port)
+    except BaseException:
+        if rollback is not None:
+            rollback()
+        raise
 
 
 def ensure_cowrie_user() -> None:
@@ -792,17 +838,83 @@ def write_config(admin_ips: list[str], admin_port: int, honeypot_port: int, dash
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
 
 
+def prepare_service_account() -> None:
+    """Migrate only daemon-owned state, leaving the Cowrie checkout read-only.
+
+    Refuse symlinks/hardlinks before host mutations. Never recursively chown
+    DATA_DIR: it also contains Cowrie's separately owned code and secrets.
+    """
+    def checked(path: Path) -> None:
+        if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
+            die(f"service access path must be absolute and symlink-free: {path}")
+        if path.exists():
+            info = path.stat()
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+                die(f"unsupported service access target: {path}")
+            if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                die(f"refusing hard-linked service data: {path}")
+
+    if (len(DATA_DIR.parts) < 3 or DATA_DIR == Path.home() or
+            DATA_DIR in (Path("/var/lib"), Path("/var/log"), Path("/usr/local")) or
+            (DATA_DIR.parent == Path("/home"))):
+        die("service data must use a dedicated directory, not a system or home directory")
+    owned = [DATA_DIR / name for name in ("evidence", "artifacts", "logs")]
+    for directory in list(owned):
+        checked(directory)
+        if directory.exists():
+            owned.extend(directory.rglob("*"))
+    owned.extend(DATA_DIR / name for name in ("shardlure.db", "shardlure.db-wal", "shardlure.db-shm")
+                 if (DATA_DIR / name).exists() or (DATA_DIR / name).is_symlink())
+    retention_dirs = {COWRIE_HOME / "var/lib/cowrie/downloads", COWRIE_HOME / "var/lib/cowrie/tty"}
+    cowrie_paths = [COWRIE_HOME, COWRIE_HOME / "var", COWRIE_HOME / "var/log",
+                   COWRIE_HOME / "var/lib", COWRIE_HOME / "var/lib/cowrie"]
+    for directory in (COWRIE_HOME / "var/log/cowrie", *sorted(retention_dirs)):
+        checked(directory)
+        if directory.exists():
+            cowrie_paths.append(directory)
+            cowrie_paths.extend(directory.rglob("*"))
+    for path in [DATA_DIR, CONFIG_FILE, *owned, *cowrie_paths, *retention_dirs]:
+        checked(path)
+
+    if run(["id", "-u", "shardlure"], capture_output=True).returncode != 0:
+        run(["useradd", "--system", "--user-group", "--no-create-home",
+             "--home-dir", str(DATA_DIR), "--shell", "/usr/sbin/nologin", "shardlure"]).check_returncode()
+    run(["usermod", "-a", "-G", f"systemd-journal,{COWRIE_USER}", "shardlure"]).check_returncode()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    run(["chown", "--", f"shardlure:{COWRIE_USER}", str(DATA_DIR)]).check_returncode()
+    DATA_DIR.chmod(0o710)  # Cowrie can traverse, but cannot list daemon data.
+    for path in owned:
+        if not path.exists():
+            path.mkdir()
+        run(["chown", "--", "shardlure:shardlure", str(path)]).check_returncode()
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    if CONFIG_FILE.exists():
+        run(["chown", "--", "root:shardlure", str(CONFIG_FILE)]).check_returncode()
+        CONFIG_FILE.chmod(0o640)
+    for path in cowrie_paths:
+        if path.exists():
+            run(["chgrp", "--", COWRIE_USER, str(path)]).check_returncode()
+            path.chmod((path.stat().st_mode & 0o750) | (0o050 if path.is_dir() else 0o040))
+    # Retention needs unlink rights on these two directories, not write access
+    # to existing payload bytes, private keys, configuration or executable code.
+    for path in sorted(retention_dirs):
+        path.mkdir(parents=True, exist_ok=True)
+        run(["chown", "--", f"{COWRIE_USER}:{COWRIE_USER}", str(path)]).check_returncode()
+        path.chmod(0o770)
+
+
 def install_services(honeypot_port: int, dash_port: int) -> None:
     log("installing systemd services")
+    listen = f":{dash_port} --tailscale" if _tailscale_iface() else f"127.0.0.1:{dash_port}"
     py = COWRIE_HOME / "venv/bin/python"
     twistd = COWRIE_HOME / "venv/bin/twistd"
     if honeypot_port < 1024 and shutil.which("authbind"):
         cowrie_exec = (
             f"/usr/bin/authbind --deep {py} {twistd} "
-            f"--umask 0022 --nodaemon --pidfile= -l - cowrie"
+            f"--umask 0027 --nodaemon --pidfile= -l - cowrie"
         )
     else:
-        cowrie_exec = f"{py} {twistd} --umask 0022 --nodaemon --pidfile= -l - cowrie"
+        cowrie_exec = f"{py} {twistd} --umask 0027 --nodaemon --pidfile= -l - cowrie"
     (SYSTEMD_DIR / "cowrie.service").write_text(
         f"""[Unit]
 Description=Cowrie SSH honeypot (ShardLure)
@@ -816,6 +928,7 @@ WorkingDirectory={COWRIE_HOME}
 Environment=PYTHONPATH={COWRIE_HOME}/src
 Environment=PATH={COWRIE_HOME}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=TZ=UTC
+UMask=0027
 ExecStart={cowrie_exec}
 Restart=always
 RestartSec=5
@@ -832,8 +945,29 @@ Wants=cowrie.service
 
 [Service]
 Type=simple
+User=shardlure
+Group=shardlure
+SupplementaryGroups=systemd-journal {COWRIE_USER}
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths={DATA_DIR}
+ReadOnlyPaths={COWRIE_HOME}
+ReadWritePaths={COWRIE_HOME}/var/lib/cowrie/downloads {COWRIE_HOME}/var/lib/cowrie/tty
+MemoryMax=1G
+TasksMax=256
+TimeoutStopSec=45
 Environment=SHARDLURE_CONFIG={CONFIG_FILE}
-ExecStart={BIN_DIR}/shardlure live :{dash_port} --tailscale --cowrie={COWRIE_LOG}
+ExecStart={BIN_DIR}/shardlure live {listen} --cowrie={COWRIE_LOG}
 Restart=always
 RestartSec=5
 
@@ -851,7 +985,8 @@ def open_firewall(honeypot_port: int, admin_port: int, dash_port: int) -> None:
     if not shutil.which("ufw"):
         return
     cp = run(["ufw", "status"], capture_output=True, text=True)
-    if "active" not in (cp.stdout or "").lower():
+    cp.check_returncode()
+    if not re.search(r"(?im)^Status:\s+active\s*$", cp.stdout or ""):
         return
     # The honeypot MUST be world-reachable (that's the point) and the admin
     # SSH port is key-only, so both open publicly. The DASHBOARD is different:
@@ -862,7 +997,7 @@ def open_firewall(honeypot_port: int, admin_port: int, dash_port: int) -> None:
     # only via localhost / an SSH tunnel. An operator who genuinely wants it
     # public can `ufw allow 8080/tcp` themselves after setting a token.
     for port in (honeypot_port, admin_port):
-        run(["ufw", "allow", f"{port}/tcp"])
+        run(["ufw", "allow", f"{port}/tcp"]).check_returncode()
     ts_iface = _tailscale_iface()
     if ts_iface:
         run(["ufw", "allow", "in", "on", ts_iface, "to", "any", "port", str(dash_port), "proto", "tcp"])
@@ -1021,12 +1156,13 @@ def verify_admin_ssh_gate(admin_port: int) -> None:
             host = parts[2]  # the server-side IP of the current SSH connection
     print(
         "\n  -------------------------------------------------------------\n"
-        f"  Real SSH now listens on port {admin_port} (key-only).\n"
-        "  >>> In a SEPARATE terminal, RIGHT NOW, confirm you can log in:\n"
-        f"        ssh -p {admin_port} {user}@{host}\n"
+        f"  Real SSH also listens on port {admin_port}; old SSH ports remain open.\n"
+        "  >>> In a SEPARATE terminal, confirm a PUBLIC-KEY login with this command:\n"
+        f"        ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no "
+        f"-o KbdInteractiveAuthentication=no -p {admin_port} {user}@{host}\n"
         "  Do NOT close this session until that works.\n"
-        "  (If it fails, Ctrl-C here; the original sshd is still recoverable\n"
-        "   from /etc/ssh/sshd_config.shardlure-bak.)\n"
+        "  Only after confirmation will old ports close and password login be disabled.\n"
+        "  If it fails, Ctrl-C here to restore the previous SSH configuration.\n"
         "  -------------------------------------------------------------\n"
     )
     while True:
@@ -1034,8 +1170,7 @@ def verify_admin_ssh_gate(admin_port: int) -> None:
         if ans in ("yes", "y"):
             return
         if ans in ("abort", "a", "no", "n"):
-            die("aborted at SSH-verify gate. Real SSH is on the new port; "
-                "fix access (or restore from the .shardlure-bak backup) before re-running.")
+            die("aborted — restoring previous SSH configuration; fix your key access before proceeding")
         print("  Please type 'yes' once you've confirmed login, or 'abort' to stop.")
 
 
@@ -1045,13 +1180,13 @@ def cmd_run() -> None:
     install_deps()
     honeypot, admin, dash = prompt_config()
     admin_ips = collect_admin_ips()
-    migrate_sshd(admin)
-    verify_admin_ssh_gate(admin)
+    migrate_ssh_safely(admin)
     ensure_cowrie_user()
     install_cowrie(honeypot)
     build_shardlure()
     write_config(admin_ips, admin, honeypot, dash)
     open_firewall(honeypot, admin, dash)
+    prepare_service_account()
     install_services(honeypot, dash)
     print_summary(admin, honeypot, dash)
 
@@ -1067,6 +1202,7 @@ def cmd_finish() -> None:
     build_shardlure()
     write_config(admin_ips, admin, honeypot, dash)
     open_firewall(honeypot, admin, dash)
+    prepare_service_account()
     install_services(honeypot, dash)
     print_summary(admin, honeypot, dash)
 

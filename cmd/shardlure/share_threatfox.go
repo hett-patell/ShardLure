@@ -117,7 +117,7 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := newCommandContext(context.Background())
 	defer cancel()
 
 	submitted, skipped, ferr := threatfox.Share(ctx, &threatFoxRecorderAdapter{st: st}, cands, opts)

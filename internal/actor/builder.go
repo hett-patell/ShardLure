@@ -334,10 +334,20 @@ func (c *cowrieCollector) add(e *models.Event) {
 	if st.Client == "" {
 		st.Client = e.SSHClient
 	}
-	st.Flags |= flagsForEvent(e)
-	if e.Kind == models.KindCommand && looksLikeDeployCmd(e.Command) {
-		st.Flags |= models.ActorFlagDeployCmd
+	st.Flags |= CowrieEventFlags(e)
+}
+
+// CowrieEventFlags also lets legacy aggregate repair recover signals without
+// counting retained events a second time or replacing lifetime totals.
+func CowrieEventFlags(e *models.Event) int {
+	if e == nil {
+		return 0
 	}
+	flags := flagsForEvent(e)
+	if e.Kind == models.KindCommand && looksLikeDeployCmd(e.Command) {
+		flags |= models.ActorFlagDeployCmd
+	}
+	return flags
 }
 
 // flagsForEvent maps an event kind onto the persisted ActorFlag bitmask.

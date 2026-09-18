@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -98,8 +97,8 @@ type submitBody struct {
 
 // Result is the parsed ThreatFox response for one submission.
 type Result struct {
-	// Status is the upstream query_status verbatim (e.g. "ok",
-	// "illegal_malware"); unknown values are surfaced, not guessed.
+	// Status is "ok" for a structurally valid response. Arbitrary provider
+	// query_status text is never retained or returned.
 	Status string
 	// Accepted is true when the IOC landed in the `ok` array (newly added).
 	Accepted bool
@@ -114,9 +113,6 @@ type Result struct {
 	// Reward is the abuse.ch contribution credit reported for the submission,
 	// when present; purely informational.
 	Reward int
-	// Raw is the trimmed response body, kept for the CLI's -v output and to
-	// record an unexpected status without losing information.
-	Raw string
 }
 
 // Errors surfaced to callers, kept as sentinels so the CLI can map them to
@@ -160,7 +156,7 @@ func (c *Client) Submit(ctx context.Context, apiKey string, s Submission) (*Resu
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("threatfox: build request: %w", err)
+		return nil, errors.New("threatfox: invalid submission endpoint")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Auth-Key", apiKey)
@@ -168,31 +164,32 @@ func (c *Client) Submit(ctx context.Context, apiKey string, s Submission) (*Resu
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("threatfox: post: %w", err)
+		return nil, intelutil.SafeRequestError("threatfox", "post", err)
 	}
 	defer resp.Body.Close()
 
 	// Cap the body: a misbehaving endpoint must not stream unbounded data into
 	// the decoder. ThreatFox replies with a small JSON object.
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	trimmed := strings.TrimSpace(string(raw))
+	raw, err := intelutil.ReadBoundedResponse("threatfox", resp.Body, 256<<10)
+	if err != nil {
+		return nil, err
+	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, ErrUnauthorized
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("threatfox: HTTP %d: %s", resp.StatusCode, intelutil.Truncate(trimmed, 200))
+		return nil, fmt.Errorf("threatfox: submission returned HTTP %d", resp.StatusCode)
 	}
 
-	// ThreatFox wraps everything in {"query_status": "...", "data": ...}. The
-	// data shape varies (object with reward/ok/ignored, or a message string),
-	// so decode defensively: pull the status and any duplicate/reward signal we
-	// recognise, keep Raw for everything else.
+	// ThreatFox wraps everything in {"query_status": "...", "data": ...}.
 	var parsed struct {
 		QueryStatus string          `json:"query_status"`
 		Data        json.RawMessage `json:"data"`
 	}
-	_ = json.Unmarshal(raw, &parsed)
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, errors.New("threatfox: invalid submission response")
+	}
 
 	status := strings.ToLower(strings.TrimSpace(parsed.QueryStatus))
 	// Auth failures reported in-band (documented abuse.ch pattern: a 200 with
@@ -202,14 +199,14 @@ func (c *Client) Submit(ctx context.Context, apiKey string, s Submission) (*Resu
 		return nil, ErrUnauthorized
 	}
 
-	res := &Result{Status: parsed.QueryStatus, Raw: intelutil.Truncate(trimmed, 2000)}
-	// Any non-"ok" top-level status is a failure. abuse.ch does not publish the
-	// submit error vocabulary, so we do NOT switch on a fixed enum — the
-	// non-"ok" status is surfaced verbatim (via res.Status) and the caller
-	// treats it as a failed submission. Only "ok" carries the data accounting.
-	if status == "ok" {
-		res.Accepted, res.Duplicate, res.Ignored, res.Reward = parseSubmitData(parsed.Data)
+	if status != "ok" {
+		return nil, errors.New("threatfox: submission rejected")
 	}
+	accepted, duplicate, ignored, reward, err := parseSubmitData(parsed.Data, s.IOC)
+	if err != nil {
+		return nil, errors.New("threatfox: invalid submission response")
+	}
+	res := &Result{Status: "ok", Accepted: accepted, Duplicate: duplicate, Ignored: ignored, Reward: reward}
 	return res, nil
 }
 
@@ -223,9 +220,9 @@ func (c *Client) Submit(ctx context.Context, apiKey string, s Submission) (*Resu
 //   - ok        -> accepted (newly added)
 //   - duplicated -> already in the dataset (a success for dedup)
 //   - ignored   -> rejected by ThreatFox (a failure — do not record)
-func parseSubmitData(data json.RawMessage) (accepted, duplicate, ignored bool, reward int) {
+func parseSubmitData(data json.RawMessage, expectedIOC string) (accepted, duplicate, ignored bool, reward int, err error) {
 	if len(data) == 0 {
-		return false, false, false, 0
+		return false, false, false, 0, errors.New("missing data")
 	}
 	var obj struct {
 		OK         []json.RawMessage `json:"ok"`
@@ -234,7 +231,23 @@ func parseSubmitData(data json.RawMessage) (accepted, duplicate, ignored bool, r
 		Reward     int               `json:"reward"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
-		return false, false, false, 0
+		return false, false, false, 0, err
 	}
-	return len(obj.OK) > 0, len(obj.Duplicated) > 0, len(obj.Ignored) > 0, obj.Reward
+	if outcomes := len(obj.OK) + len(obj.Duplicated) + len(obj.Ignored); outcomes != 1 {
+		return false, false, false, 0, errors.New("ambiguous outcome")
+	}
+	var outcome json.RawMessage
+	switch {
+	case len(obj.OK) == 1:
+		accepted, outcome = true, obj.OK[0]
+	case len(obj.Duplicated) == 1:
+		duplicate, outcome = true, obj.Duplicated[0]
+	case len(obj.Ignored) == 1:
+		ignored, outcome = true, obj.Ignored[0]
+	}
+	var reportedIOC string
+	if err := json.Unmarshal(outcome, &reportedIOC); err != nil || reportedIOC == "" || reportedIOC != expectedIOC {
+		return false, false, false, 0, errors.New("invalid outcome IOC")
+	}
+	return accepted, duplicate, ignored, obj.Reward, nil
 }

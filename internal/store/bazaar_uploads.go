@@ -142,7 +142,7 @@ WHERE a.status='fetched'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
   AND a.size_bytes >= ?
   AND a.origin IN (`+strings.Join(ph, ",")+`)
-  AND COALESCE(a.created_at, a.ts) >= ?
+  AND julianday(a.last_successful_fetch_at) >= julianday(?)
   AND a.sha256 NOT IN (SELECT sha256 FROM bazaar_uploads)`, args...).Scan(&st.Pending); err != nil {
 		log.Printf("bazaar pending count: %v (defaulting to 0)", err)
 	}

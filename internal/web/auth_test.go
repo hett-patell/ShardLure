@@ -71,7 +71,10 @@ func TestAuthGates(t *testing.T) {
 		{"page no creds", true, "", "", "", false, http.StatusUnauthorized},
 		{"api valid header", false, tok, "", "", true, 0},
 		{"api query rejected", false, "", tok, "", false, http.StatusUnauthorized},
-		{"api cookie rejected", false, "", "", tok, false, http.StatusUnauthorized},
+		// A fresh browser has only the HttpOnly bootstrap cookie: it cannot read
+		// the token to construct an Authorization header. Safe API reads must
+		// therefore accept that session, just as page navigations do.
+		{"api valid session cookie", false, "", "", tok, true, 0},
 		{"api bad header", false, "wrong", "", "", false, http.StatusUnauthorized},
 		{"api no creds", false, "", "", "", false, http.StatusUnauthorized},
 	}
@@ -94,6 +97,51 @@ func TestAuthGates(t *testing.T) {
 			}
 			if !c.wantOK && c.wantCode != 0 && rec.Code != c.wantCode {
 				t.Fatalf("denied request should %d, got %d", c.wantCode, rec.Code)
+			}
+		})
+	}
+}
+
+// TestCookieAuthenticatedAPIWritesRequireSameOrigin proves the CSRF boundary
+// that becomes necessary once API auth accepts the HttpOnly session cookie.
+// A bearer-authenticated client remains exempt because cross-site requests
+// cannot manufacture its Authorization header.
+func TestCookieAuthenticatedAPIWritesRequireSameOrigin(t *testing.T) {
+	const tok = "s3cret-token"
+	s := newAuthTestServer(t, tok)
+
+	cases := []struct {
+		name     string
+		cookie   bool
+		bearer   bool
+		origin   string
+		wantOK   bool
+		wantCode int
+	}{
+		{"same-origin cookie POST", true, false, "http://example.com", true, 0},
+		{"cross-origin cookie POST", true, false, "https://attacker.example", false, http.StatusForbidden},
+		{"originless cookie POST", true, false, "", false, http.StatusForbidden},
+		{"cross-origin bearer POST", false, true, "https://attacker.example", true, 0},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "http://example.com/api/settings", nil)
+			if c.cookie {
+				r.AddCookie(&http.Cookie{Name: "shardlure_session", Value: tok})
+			}
+			if c.bearer {
+				r.Header.Set("Authorization", "Bearer "+tok)
+			}
+			if c.origin != "" {
+				r.Header.Set("Origin", c.origin)
+			}
+			if got := s.requireDashboardAuth(rec, r); got != c.wantOK {
+				t.Fatalf("auth = %v, want %v (status %d)", got, c.wantOK, rec.Code)
+			}
+			if !c.wantOK && rec.Code != c.wantCode {
+				t.Fatalf("status = %d, want %d", rec.Code, c.wantCode)
 			}
 		})
 	}

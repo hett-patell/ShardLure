@@ -83,9 +83,9 @@ func NewSafeFetcher(evidenceDir string, maxBytes int64, timeout time.Duration, a
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
-				return fmt.Errorf("too many redirects")
+				return &captureError{status: "invalid", detail: "too many redirects"}
 			}
-			return sf.assertSafeURL(req.URL.String())
+			return sf.assertSafeURLContext(req.Context(), req.URL.String())
 		},
 	}
 	return sf
@@ -97,14 +97,17 @@ func NewSafeFetcher(evidenceDir string, maxBytes int64, timeout time.Duration, a
 // the runtime can't be tricked into connecting to a different
 // address than the one we approved.
 func (f *SafeFetcher) safeDial(ctx context.Context, network, address string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, safeCaptureError(err, "dial cancelled")
+	}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
-		return nil, err
+		return nil, &captureError{status: "invalid", detail: "invalid target address"}
 	}
 	// Literal IP: validate once, dial directly.
 	if ip := net.ParseIP(host); ip != nil {
 		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
-			return nil, fmt.Errorf("blocked target %s", ip)
+			return nil, &captureError{status: "blocked", detail: "blocked target address"}
 		}
 		var d net.Dialer
 		return d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
@@ -112,53 +115,60 @@ func (f *SafeFetcher) safeDial(ctx context.Context, network, address string) (ne
 	// Hostname: resolve, filter, take the first survivor.
 	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
-		return nil, fmt.Errorf("dns lookup %s: %w", host, err)
+		return nil, safeCaptureError(err, "dns lookup failed")
 	}
 	for _, ip := range ips {
 		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
 			// Any blocked answer in the set is fatal: an attacker
 			// who controls DNS could otherwise rotate through good
 			// and bad IPs and the runtime might pick a bad one.
-			return nil, fmt.Errorf("blocked resolved target %s for %s", ip, host)
+			return nil, &captureError{status: "blocked", detail: "blocked resolved target"}
 		}
 	}
 	if len(ips) == 0 {
-		return nil, fmt.Errorf("no addresses for %s", host)
+		return nil, safeCaptureError(nil, "dns returned no addresses")
 	}
 	var d net.Dialer
 	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
 }
 
 func (f *SafeFetcher) assertSafeURL(raw string) error {
+	return f.assertSafeURLContext(context.Background(), raw)
+}
+
+func (f *SafeFetcher) assertSafeURLContext(ctx context.Context, raw string) error {
+	if err := ctx.Err(); err != nil {
+		return safeCaptureError(err, "validation cancelled")
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return err
+		return &captureError{status: "invalid", detail: "invalid URL"}
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
 	default:
-		return fmt.Errorf("unsupported scheme %q", u.Scheme)
+		return &captureError{status: "invalid", detail: "unsupported URL scheme"}
 	}
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("missing host")
+		return &captureError{status: "invalid", detail: "missing URL host"}
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
-			return fmt.Errorf("blocked target %s", ip)
+			return &captureError{status: "blocked", detail: "blocked target address"}
 		}
 		return nil
 	}
-	ips, err := net.LookupIP(host)
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
-		return fmt.Errorf("dns lookup: %w", err)
+		return safeCaptureError(err, "dns lookup failed")
 	}
 	if len(ips) == 0 {
-		return fmt.Errorf("no addresses for %s", host)
+		return safeCaptureError(nil, "dns returned no addresses")
 	}
 	for _, ip := range ips {
 		if blockedIP(ip, f.adminMatcher(), f.TestLoopback) {
-			return fmt.Errorf("blocked resolved target %s", ip)
+			return &captureError{status: "blocked", detail: "blocked resolved target"}
 		}
 	}
 	return nil
@@ -181,38 +191,55 @@ func blockedIP(ip net.IP, admin *netmatch.Set, allowLoopback bool) bool {
 
 // Fetch downloads url into evidence/quarantine/<sha256> (mode 0600). Never executes content.
 func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, error) {
-	if err := f.assertSafeURL(rawURL); err != nil {
-		return &FetchResult{Status: "blocked", Detail: err.Error()}, err
+	// Include DNS validation and body/filesystem work in the same total budget,
+	// not just Client.Do. A stopped daemon must not start another lookup.
+	if f.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, f.Timeout)
+		defer cancel()
+	}
+	if err := f.assertSafeURLContext(ctx, rawURL); err != nil {
+		return captureFailure(err, "URL validation failed")
 	}
 	dir := filepath.Join(f.EvidenceDir, "quarantine")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		return captureFailure(err, "cannot create quarantine directory")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return terminalCaptureFailure("invalid", "invalid HTTP request")
 	}
 	req.Header.Set("User-Agent", "ShardLure-Evidence/1.0")
 
 	resp, err := f.Client.Do(req)
 	if err != nil {
-		return &FetchResult{Status: "failed", Detail: err.Error()}, err
+		return captureFailure(err, "HTTP request failed")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		detail := fmt.Sprintf("http %d", resp.StatusCode)
-		return &FetchResult{Status: "failed", Detail: detail}, fmt.Errorf("%s", detail)
+		status := "failed"
+		// Request/auth/not-found failures will not improve with an identical
+		// retry. Timeouts, Too Early, throttling and server failures may.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 &&
+			resp.StatusCode != 408 && resp.StatusCode != 425 && resp.StatusCode != 429 {
+			status = "failed_permanently"
+		}
+		return terminalCaptureFailure(status, detail)
+	}
+	if resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != "" {
+		return terminalCaptureFailure("invalid", "partial HTTP response")
 	}
 
 	if cl := resp.ContentLength; cl > f.MaxBytes {
-		return &FetchResult{Status: "blocked", Detail: "content-length too large"}, fmt.Errorf("content-length %d exceeds limit", cl)
+		return terminalCaptureFailure("blocked", "content-length too large")
 	}
 
 	tmp, err := os.CreateTemp(dir, "fetch-*.part")
 	if err != nil {
-		return nil, err
+		return captureFailure(err, "cannot create quarantine file")
 	}
 	tmpPath := tmp.Name()
 	defer func() {
@@ -223,10 +250,13 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, e
 	h := sha256.New()
 	n, err := io.Copy(tmp, io.TeeReader(io.LimitReader(resp.Body, f.MaxBytes+1), h))
 	if err != nil {
-		return &FetchResult{Status: "failed", Detail: err.Error()}, err
+		return captureFailure(err, "cannot read or store response body")
+	}
+	if err := ctx.Err(); err != nil {
+		return captureFailure(err, "capture cancelled")
 	}
 	if n > f.MaxBytes {
-		return &FetchResult{Status: "blocked", Detail: "body too large"}, fmt.Errorf("body exceeds %d bytes", f.MaxBytes)
+		return terminalCaptureFailure("blocked", "body too large")
 	}
 	if n == 0 {
 		// A 200 with an empty body is not a payload (parked host, dead drop
@@ -235,7 +265,7 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, e
 		return &FetchResult{Status: "empty", Detail: "zero-byte body"}, nil
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, err
+		return captureFailure(err, "cannot close quarantine file")
 	}
 
 	sum := hex.EncodeToString(h.Sum(nil))
@@ -244,10 +274,12 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, e
 		if os.IsExist(err) || fileExists(final) {
 			_ = os.Remove(tmpPath)
 		} else {
-			return nil, err
+			return captureFailure(err, "cannot finalize quarantine file")
 		}
 	}
-	_ = os.Chmod(final, 0o600)
+	if err := os.Chmod(final, 0o600); err != nil {
+		return captureFailure(err, "cannot secure quarantine file")
+	}
 
 	return &FetchResult{
 		LocalPath: final,

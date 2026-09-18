@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"crypto/sha256"
 	"log"
 	"math"
 	"sync"
@@ -25,7 +26,7 @@ type ArtifactWorker struct {
 // NewArtifactWorker creates a worker bound to the given store and fetcher.
 // maxAttempts caps the retry budget; leaseDur is the per-claim lease window.
 func NewArtifactWorker(st *store.Store, fetch *SafeFetcher, maxAttempts int, leaseDur time.Duration) *ArtifactWorker {
-	if maxAttempts <= 0 {
+	if maxAttempts <= 0 || maxAttempts > 5 {
 		maxAttempts = 5
 	}
 	if leaseDur <= 0 {
@@ -43,6 +44,7 @@ func NewArtifactWorker(st *store.Store, fetch *SafeFetcher, maxAttempts int, lea
 func (w *ArtifactWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	w.tick(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -54,6 +56,9 @@ func (w *ArtifactWorker) Run(ctx context.Context) {
 }
 
 func (w *ArtifactWorker) tick(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	w.mu.Lock()
 	if w.busy {
 		w.mu.Unlock()
@@ -71,43 +76,50 @@ func (w *ArtifactWorker) tick(ctx context.Context) {
 	now := time.Now().UTC()
 	urls, err := w.st.DueArtifactCaptures(now, 1, w.maxAttempts)
 	if err != nil {
-		log.Printf("capture-worker: query due: %v", err)
+		log.Print("capture-worker: query due failed")
 		return
 	}
 	if len(urls) == 0 {
 		return
 	}
 	url := urls[0]
+	// Raw URLs are evidence and can contain passwords or query credentials.
+	// Logs use a stable digest; upstream database errors are not safe text.
+	urlID := sha256.Sum256([]byte(url))
 
 	// We don't know the current attempt_count from the query above, so read
 	// it from the row. If the row disappeared or changed, the claim will fail
 	// with ErrClaimStale and we move on.
 	attempt := w.currentAttempt(url)
 	leaseUntil := now.Add(w.leaseDur)
-	if err := w.st.ClaimArtifactCapture(url, now, leaseUntil, attempt); err != nil {
+	if ctx.Err() != nil {
+		return
+	}
+	if err := w.st.ClaimArtifactCapture(url, now, leaseUntil, attempt, w.maxAttempts); err != nil {
 		if err != store.ErrClaimStale {
-			log.Printf("capture-worker: claim %s: %v", url, err)
+			log.Printf("capture-worker: claim failed url_id=%x", urlID[:8])
 		}
 		return
 	}
 
-	deadline, cancel := context.WithTimeout(ctx, w.leaseDur)
+	// Leave time to persist the result before the fencing lease expires.
+	deadline, cancel := context.WithTimeout(ctx, w.leaseDur*9/10)
 	defer cancel()
 
 	res, fetchErr := w.fetch.Fetch(deadline, url)
 	nextAttempt := attempt + 1
 	if res != nil && res.Status == "fetched" {
 		if err := w.st.CompleteArtifactCapture(url, nextAttempt, "fetched", res.Detail, res.LocalPath, res.SHA256, res.Size, nil); err != nil {
-			log.Printf("capture-worker: complete %s: %v", url, err)
+			log.Printf("capture-worker: complete failed url_id=%x", urlID[:8])
 		}
 		return
 	}
 	// Zero-byte body: the URL answered but serves nothing. That's terminal,
 	// not a failure — record "empty" and don't burn the retry budget on a
 	// parked host.
-	if res != nil && res.Status == "empty" {
-		if err := w.st.CompleteArtifactCapture(url, nextAttempt, "empty", res.Detail, "", "", 0, nil); err != nil {
-			log.Printf("capture-worker: complete %s: %v", url, err)
+	if res != nil && (res.Status == "empty" || res.Status == "blocked" || res.Status == "invalid" || res.Status == "failed_permanently") {
+		if err := w.st.CompleteArtifactCapture(url, nextAttempt, res.Status, res.Detail, "", "", 0, nil); err != nil {
+			log.Printf("capture-worker: complete failed url_id=%x", urlID[:8])
 		}
 		return
 	}
@@ -118,12 +130,14 @@ func (w *ArtifactWorker) tick(ctx context.Context) {
 		detail = res.Detail
 	}
 	if fetchErr != nil && detail == "" {
-		detail = fetchErr.Error()
+		detail = safeCaptureError(fetchErr, "capture failed").Error()
 	}
 
 	if nextAttempt >= w.maxAttempts {
 		// Budget exhausted — mark as permanently failed (no more retries).
-		_ = w.st.CompleteArtifactCapture(url, nextAttempt, "failed_permanently", detail, "", "", 0, nil)
+		if err := w.st.CompleteArtifactCapture(url, nextAttempt, "failed_permanently", detail, "", "", 0, nil); err != nil {
+			log.Printf("capture-worker: complete failed url_id=%x", urlID[:8])
+		}
 		return
 	}
 
@@ -134,7 +148,7 @@ func (w *ArtifactWorker) tick(ctx context.Context) {
 	))
 	next := time.Now().UTC().Add(backoff)
 	if err := w.st.CompleteArtifactCapture(url, nextAttempt, "failed", detail, "", "", 0, &next); err != nil {
-		log.Printf("capture-worker: schedule retry %s: %v", url, err)
+		log.Printf("capture-worker: schedule retry failed url_id=%x", urlID[:8])
 	}
 }
 

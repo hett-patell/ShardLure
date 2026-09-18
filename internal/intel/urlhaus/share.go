@@ -167,6 +167,7 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 	}
 
 	client := NewClient(opts.Endpoint)
+	var lastAttempt time.Time
 	for start := 0; start < len(queue); start += opts.BatchSize {
 		if ctx.Err() != nil {
 			return submitted, skipped, ctx.Err()
@@ -182,7 +183,11 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 			entries = append(entries, p.entry)
 		}
 
+		if err := intelutil.WaitForProviderAttempt(ctx, lastAttempt, opts.RateLimit); err != nil {
+			return submitted, skipped, err
+		}
 		res, err := client.Submit(ctx, opts.APIKey, entries, opts.Anonymous)
+		lastAttempt = time.Now()
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -204,23 +209,26 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 		if status == "" {
 			status = "submitted"
 		}
+		ledgerFailed := false
 		for _, p := range batch {
-			if err := rec.RecordURLhausSubmission(p.cand.URL, status, time.Now()); err != nil && firstErr == nil {
-				firstErr = err
+			if err := rec.RecordURLhausSubmission(p.cand.URL, status, time.Now()); err != nil {
+				firstErr = errors.Join(firstErr, err)
+				ledgerFailed = true
+				if opts.OnProgress != nil {
+					opts.OnProgress(p.cand, false, "accepted upstream; local ledger write failed")
+				}
+				continue
 			}
 			submitted++
 			if opts.OnProgress != nil {
 				opts.OnProgress(p.cand, true, status)
 			}
 		}
-
-		// Be a polite API citizen between batches (abuse.ch fair-use).
-		if end < len(queue) {
-			select {
-			case <-ctx.Done():
-				return submitted, skipped, ctx.Err()
-			case <-time.After(opts.RateLimit):
-			}
+		if ledgerFailed {
+			// The provider accepted this batch, but any missing ledger row can be
+			// submitted again on the next run. Stop before creating more untracked
+			// public submissions.
+			return submitted, skipped, firstErr
 		}
 	}
 	return submitted, skipped, firstErr

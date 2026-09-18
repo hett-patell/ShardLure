@@ -88,17 +88,25 @@ type Server struct {
 	// floor guarantees we never machine-gun the MB API regardless of client.
 	bazaarMu     sync.Mutex
 	lastBazaarAt time.Time
+	bazaarGate   chan struct{}
 
 	// abuseReportMu + lastAbuseReportAt throttle AbuseIPDB /report POSTs
 	// process-wide, the same defense as bazaar: the per-actor button is
 	// bypassable, so a server-side floor guarantees we never spam the API.
 	abuseReportMu     sync.Mutex
 	lastAbuseReportAt time.Time
+	abuseReportGate   chan struct{}
 	// abuseReportBatchMu serializes batch report-all runs. Separate from
 	// abuseReportMu so single-IP reports aren't blocked for the duration
 	// of a multi-minute batch. TryLock returns "already in progress" to
 	// concurrent callers instead of queueing.
 	abuseReportBatchMu sync.Mutex
+	// abuseReportTargetOnce/gates serialize the complete dedup -> submission ->
+	// ledger-record flow for a target. A fixed bucket pool keeps attacker-
+	// controlled target strings from growing an unbounded lock map; collisions
+	// only serialize otherwise unrelated targets briefly.
+	abuseReportTargetOnce  sync.Once
+	abuseReportTargetGates [64]chan struct{}
 
 	// urlhausBatchMu serializes URLhaus submit batches. Without it a
 	// double-clicked "Submit All" could race the dedup ledger and publish the
@@ -174,6 +182,11 @@ type Server struct {
 	ratesMu     sync.Mutex
 	ratesCached map[string]float64
 	ratesAt     time.Time
+
+	// Advisory per-IP evidence only; actual report POSTs bypass this cache.
+	reportEvidenceMu     sync.Mutex
+	reportEvidenceCache  map[string]reportEvidenceEntry
+	reportEvidenceFlight chan struct{}
 
 	// Per-actor primary-IP last-seen for the report staleness gate; see
 	// report_candidate.go for why this is not actors.last_seen.
@@ -1039,7 +1052,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 				"Set a token, or bind to loopback/Tailscale", s.addr)
 		}
 		// Also fail for wildcard / unresolved addresses without a token.
-		if listenHostIP(s.addr) == nil && !s.tailscaleMode {
+		if listenHostIP(s.addr) == nil {
 			return fmt.Errorf("refusing to start: dashboard would bind a WILDCARD address (%s) with no "+
 				"SHARDLURE_DASH_TOKEN set - credential exports would be world-readable. "+
 				"Set a token, or bind to an explicit loopback address", s.addr)
@@ -1054,9 +1067,10 @@ func (s *Server) RunContext(ctx context.Context) error {
 				"Keep it on Tailscale/loopback or set SHARDLURE_DASH_TOKEN.")
 	}
 
+	var handlers handlerDrain
 	srv := &http.Server{
 		Addr:        s.addr,
-		Handler:     securityHeaders(mux),
+		Handler:     handlers.wrap(securityHeaders(mux)),
 		ReadTimeout: 10 * time.Second,
 		// 60s rather than 20s so /debug/pprof/profile?seconds=30 can
 		// complete. No handler is supposed to take longer than a few
@@ -1079,19 +1093,24 @@ func (s *Server) RunContext(ctx context.Context) error {
 		errCh <- nil
 	}()
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-		<-errCh
-		// Close the geo mmdb handle on the way out. One long-lived fd is
-		// harmless in practice, but the resolver has a lifecycle method and
-		// shutdown is the one place it belongs.
+	defer func() {
+		handlers.stop()
+		// Close cancels remaining request contexts if graceful shutdown times
+		// out. Join handlers before closing their shared resources.
+		_ = srv.Close()
+		handlers.wait()
 		if s.geo != nil {
 			s.geo.mmdb.close()
 		}
-		return nil
+	}()
+	select {
+	case <-ctx.Done():
+		handlers.stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := srv.Shutdown(shutdownCtx)
+		<-errCh
+		return err
 	case err := <-errCh:
 		return err
 	}
@@ -1166,10 +1185,9 @@ func isPublicIP(ip net.IP) bool {
 	return true
 }
 
-// requireDashboardAuth gates /api/* and debug routes. Header-only by design:
-// the token must never travel in an /api URL, where it would leak into access
-// logs, Referer headers, and proxy logs. The dashboard's fetch wrapper always
-// sets the Authorization header, so these routes need nothing else.
+// requireDashboardAuth accepts explicit credentials or the page bootstrap's
+// HttpOnly cookie. Cookie-authenticated writes must prove same-origin; explicit
+// headers remain usable by CLI clients. API query tokens are never accepted.
 func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardToken() == "" {
 		return true
@@ -1179,6 +1197,14 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 		token = r.Header.Get("X-ShardLure-Token")
 	}
 	if s.tokenMatches(token) {
+		return true
+	}
+	if ck, err := r.Cookie("shardlure_session"); err == nil && s.tokenMatches(ck.Value) {
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" ||
+			(r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && !sameOriginRequest(r)) {
+			http.Error(w, "same-origin request required", http.StatusForbidden)
+			return false
+		}
 		return true
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="shardlure-dashboard"`)
@@ -1217,8 +1243,7 @@ func securityHeaders(next http.Handler) http.Handler {
 // headers, or server access logs. Subsequent page loads authenticate via
 // the cookie alone.
 //
-// All /api endpoints remain header-only (Authorization / X-ShardLure-Token);
-// the cookie is only used by the two HTML page routes.
+// API routes also accept this cookie, with a same-origin gate on writes.
 func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardToken() == "" {
 		return true
