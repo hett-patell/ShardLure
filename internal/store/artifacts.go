@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -820,16 +821,12 @@ func (s *Store) RecentCommandEvents(limit int) ([]*EventRow, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := s.db.Query(`
-SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(command,'')
-FROM events
-WHERE kind='command' AND command != ''
-ORDER BY ts DESC
-LIMIT ?`, limit)
+	query, args := orderedGlobalEventQuery(`id,ts,COALESCE(src_ip,''),COALESCE(session_id,''),COALESCE(actor_id,''),COALESCE(command,'')`,
+		nil, "kind='command' AND command != ''", nil, true, limit)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	return scanEventRows(rows)
 }
 
@@ -837,12 +834,9 @@ func (s *Store) RecentFileDownloadEvents(limit int) ([]*EventRow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`
-SELECT id, ts, COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(command,''), COALESCE(filename,''), COALESCE(sha256,'')
-FROM events
-WHERE kind='file_download'
-ORDER BY ts DESC
-LIMIT ?`, limit)
+	query, args := orderedGlobalEventQuery(`id,ts,COALESCE(src_ip,''),COALESCE(session_id,''),COALESCE(actor_id,''),COALESCE(command,''),COALESCE(filename,''),COALESCE(sha256,'')`,
+		nil, "kind='file_download'", nil, true, limit)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -868,11 +862,14 @@ func scanEventRows(rows rowScanner) ([]*EventRow, error) {
 	var out []*EventRow
 	for rows.Next() {
 		var e EventRow
-		var ts, cmd string
-		if err := rows.Scan(&e.ID, &ts, &e.SrcIP, &e.SessionID, &e.ActorID, &cmd); err != nil {
+		var ts, cmd, exact string
+		if err := rows.Scan(&e.ID, &ts, &e.SrcIP, &e.SessionID, &e.ActorID, &cmd, &exact); err != nil {
 			return nil, err
 		}
-		e.TS, _ = parseTime(ts)
+		var err error
+		if e.TS, err = parseTime(ts); err != nil {
+			return nil, fmt.Errorf("event %d: invalid timestamp", e.ID)
+		}
 		e.Command = cmd
 		out = append(out, &e)
 	}
@@ -888,11 +885,14 @@ func scanEventRowsWithFile(rows rowScanner) ([]*EventRow, error) {
 	var out []*EventRow
 	for rows.Next() {
 		var e EventRow
-		var ts, cmd, fn, sum string
-		if err := rows.Scan(&e.ID, &ts, &e.SrcIP, &e.SessionID, &e.ActorID, &cmd, &fn, &sum); err != nil {
+		var ts, cmd, fn, sum, exact string
+		if err := rows.Scan(&e.ID, &ts, &e.SrcIP, &e.SessionID, &e.ActorID, &cmd, &fn, &sum, &exact); err != nil {
 			return nil, err
 		}
-		e.TS, _ = parseTime(ts)
+		var err error
+		if e.TS, err = parseTime(ts); err != nil {
+			return nil, fmt.Errorf("event %d: invalid timestamp", e.ID)
+		}
 		e.Command = cmd
 		e.Filename = fn
 		e.SHA256 = sum

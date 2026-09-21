@@ -203,3 +203,72 @@ func TestActorEventQueryUsesScopedLegacyIndex(t *testing.T) {
 		t.Fatalf("both branches must seek by actor; got %d actor lookups:\n%s", lookups, strings.Join(plans, "\n"))
 	}
 }
+
+func TestCredentialAggregateUsesBoundedNativeAndLegacyQueries(t *testing.T) {
+	st := newTestStore(t, "credential-plan.db")
+	since := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	query, args := credentialWindowQuery(since)
+	query += "SELECT username,COUNT(*) FROM credential_events GROUP BY username ORDER BY COUNT(*) DESC LIMIT 1"
+	rows, err := st.db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var a, b, c int
+		var detail string
+		if err := rows.Scan(&a, &b, &c, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "ts>?") || !strings.Contains(plan, "idx_events_legacy_ts") {
+		t.Fatalf("credential polls must seek native time and scan only unconverted legacy rows:\n%s", plan)
+	}
+}
+
+func TestAggregateReadsDoNotAllocateEventHistory(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) {
+			st := newTestStore(t, "aggregate-allocations.db")
+			since := time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC)
+			seedQueryRows(t, st, 10, 1)
+			if _, err := st.db.Exec("UPDATE events SET kind='failed_password',username='root',password='inert'"); err != nil {
+				t.Fatal(err)
+			}
+			if legacy {
+				if _, err := st.db.Exec("UPDATE events SET ts='2026-09-18T00:00:00Z',ts_unix_ns=NULL WHERE id=1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			read := func() {
+				rows, err := st.TopUsernamesSince(since, 1)
+				if err != nil || len(rows) != 1 {
+					t.Fatalf("rows=%+v err=%v", rows, err)
+				}
+				if _, err := st.WindowActivitySince(since); err != nil {
+					t.Fatal(err)
+				}
+			}
+			small := testing.AllocsPerRun(2, read)
+			seedQueryRows(t, st, 3000, 11)
+			if _, err := st.db.Exec("UPDATE events SET kind='failed_password',username='root',password='inert' WHERE id>10"); err != nil {
+				t.Fatal(err)
+			}
+			large := testing.AllocsPerRun(2, read)
+			if large > small*4+1000 {
+				t.Fatalf("aggregate allocations scale with events: %.0f -> %.0f", small, large)
+			}
+			rows, err := st.TopUsernamesSince(since, 1)
+			if err != nil || len(rows) != 1 || rows[0].Count != 3010 {
+				t.Fatalf("true total lost: rows=%+v err=%v", rows, err)
+			}
+			t.Logf("10 -> 3010 rows: allocations %.0f -> %.0f", small, large)
+		})
+	}
+}

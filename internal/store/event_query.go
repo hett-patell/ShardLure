@@ -35,14 +35,27 @@ const legacyEventTimeSQL = "shardlure_event_time(ts,id)"
 // visits only unconverted rows through a partial index that empties as backfill
 // progresses. Parsing/sorting legacy rows stays in SQLite, never a Go time bucket.
 func eventTimeBranches(columns string, since *time.Time, predicate string, predicateArgs []any) (string, []any) {
-	nativeWhere := "ts_unix_ns IS NOT NULL"
-	legacyWhere := "ts_unix_ns IS NULL"
 	legacyFrom := "events INDEXED BY idx_events_legacy_ts"
-	var nativeArgs, legacyArgs []any
 	if predicate != "" {
 		// Scoped reads must retain actor/source index seeks; forcing the global
 		// legacy index makes one actor lookup scan every unconverted row.
 		legacyFrom = "events"
+	}
+	return eventTimeBranchesFrom(columns, since, predicate, predicateArgs, legacyFrom)
+}
+
+// Global aggregates and kind-filtered feeds must scan the shrinking legacy
+// index, not every historical row of a common kind. Actor/session/source reads
+// use eventTimeBranches instead so their selective indexes remain available.
+func globalEventTimeBranches(columns string, since *time.Time, predicate string, predicateArgs []any) (string, []any) {
+	return eventTimeBranchesFrom(columns, since, predicate, predicateArgs, "events INDEXED BY idx_events_legacy_ts")
+}
+
+func eventTimeBranchesFrom(columns string, since *time.Time, predicate string, predicateArgs []any, legacyFrom string) (string, []any) {
+	nativeWhere := "ts_unix_ns IS NOT NULL"
+	legacyWhere := "ts_unix_ns IS NULL"
+	var nativeArgs, legacyArgs []any
+	if predicate != "" {
 		nativeWhere += " AND (" + predicate + ")"
 		legacyWhere += " AND (" + predicate + ")"
 		nativeArgs = append(nativeArgs, predicateArgs...)
@@ -61,6 +74,15 @@ func eventTimeBranches(columns string, since *time.Time, predicate string, predi
 
 func orderedEventQuery(columns string, since *time.Time, predicate string, predicateArgs []any, descending bool, limit int) (string, []any) {
 	query, args := eventTimeBranches(columns, since, predicate, predicateArgs)
+	return orderEventBranches(query, args, descending, limit)
+}
+
+func orderedGlobalEventQuery(columns string, since *time.Time, predicate string, predicateArgs []any, descending bool, limit int) (string, []any) {
+	query, args := globalEventTimeBranches(columns, since, predicate, predicateArgs)
+	return orderEventBranches(query, args, descending, limit)
+}
+
+func orderEventBranches(query string, args []any, descending bool, limit int) (string, []any) {
 	direction := "ASC"
 	if descending {
 		direction = "DESC"
