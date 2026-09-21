@@ -41,6 +41,31 @@ func TestSubmitAcceptsPlaintextOKResponse(t *testing.T) {
 	}
 }
 
+func TestSubmitAcceptsPlaintextAlreadyQueuedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		_, _ = w.Write([]byte("already_queued: https://example.test/a"))
+	}))
+	defer srv.Close()
+
+	res, err := NewClient(srv.URL).Submit(context.Background(), "key", []Entry{{URL: "https://example.test/a", Threat: ThreatMalwareDownload}}, false)
+	if err != nil || res == nil || res.Status != "already_queued" {
+		t.Fatalf("plaintext already_queued result=%+v error=%v", res, err)
+	}
+}
+
+func TestSubmitRejectsMismatchedPlaintextAlreadyQueuedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("already_queued: https://other.test/a"))
+	}))
+	defer srv.Close()
+
+	res, err := NewClient(srv.URL).Submit(context.Background(), "key", []Entry{{URL: "https://example.test/a", Threat: ThreatMalwareDownload}}, false)
+	if err == nil || res != nil {
+		t.Fatalf("mismatched already_queued result=%+v error=%v", res, err)
+	}
+}
+
 func TestSubmitRejectsPlaintextNoData(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=UTF-8")

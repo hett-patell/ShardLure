@@ -138,11 +138,18 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		// URLhaus's legacy submission endpoint returns a bare plaintext ok
-		// for accepted batches (and plaintext error tokens such as no_data).
-		// Accept exactly that success token; every other non-JSON body remains
-		// fail-closed rather than treating an HTML error page as a submission.
-		if strings.EqualFold(strings.TrimSpace(string(raw)), "ok") {
+		// for accepted batches and already_queued: URL when it has accepted a
+		// single URL for processing. Other plaintext tokens such as no_data are
+		// errors. Keep multi-entry already_queued responses fail-closed because a
+		// single echoed URL cannot prove the whole batch was accepted.
+		text := strings.TrimSpace(string(raw))
+		if strings.EqualFold(text, "ok") {
 			return &Result{Status: "ok"}, nil
+		}
+		const queuedPrefix = "already_queued:"
+		if len(entries) == 1 && strings.HasPrefix(strings.ToLower(text), queuedPrefix) &&
+			strings.TrimSpace(text[len(queuedPrefix):]) == entries[0].URL {
+			return &Result{Status: "already_queued"}, nil
 		}
 		return nil, errors.New("urlhaus: invalid submission response")
 	}
