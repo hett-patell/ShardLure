@@ -2,8 +2,8 @@
 
 Date: September 21, 2026.
 
-Status: high-level design approved in conversation; this detailed specification
-awaits written-spec review. Implementation and release completion are not claimed.
+Status: detailed specification approved in conversation on September 21, 2026.
+Implementation planning follows; implementation and release completion are not claimed.
 
 Baseline: `fix/reliability` at `e0bbe7b0bf6a3c64ce862bb9fe4ee4a46a79bc7d`.
 Target: `v2.8.0`, including the new operational tooling rather than deferring it
