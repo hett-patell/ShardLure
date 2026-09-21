@@ -125,8 +125,9 @@ func TestV21UpgradePreservesUnbackfilledEventRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// v21 adds only an index; removing that step recreates a populated v20 DB.
-	if _, err := st.db.Exec("DROP INDEX idx_events_legacy_ts; DELETE FROM schema_migrations WHERE version=21;"); err != nil {
+	// v21 adds only an index. Remove all later migration stamps too so this
+	// fixture still presents a v20 database after newer migrations are added.
+	if _, err := st.db.Exec("DROP INDEX idx_events_legacy_ts; DELETE FROM schema_migrations WHERE version>=21;"); err != nil {
 		t.Fatal(err)
 	}
 	const legacy = "2026-01-01T01:00:00+02:00"

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"time"
 )
 
@@ -26,16 +27,7 @@ type ThreatFoxSubmission struct {
 // the other side tables, so DDL never runs under writeMu on a hot path).
 func (s *Store) ensureThreatFoxTable() error {
 	s.onceThreatFox.Do(func() {
-		_, s.errThreatFox = s.execWrite(`
-CREATE TABLE IF NOT EXISTS threatfox_submissions (
-  ioc          TEXT PRIMARY KEY,
-  ioc_type     TEXT NOT NULL,
-  malware      TEXT NOT NULL,
-  submitted_at TEXT NOT NULL,
-  status       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_threatfox_submissions_ts ON threatfox_submissions(submitted_at);
-`)
+		s.errThreatFox = s.WithTx(func(tx *sql.Tx) error { return ensureLedgerTimeSchema(tx, threatfoxLedger) })
 	})
 	return s.errThreatFox
 }
@@ -68,15 +60,20 @@ func (s *Store) RecordThreatFoxSubmission(ioc, iocType, malware, status string, 
 	if at.IsZero() {
 		at = time.Now()
 	}
+	ts := at.UTC().Format(time.RFC3339Nano)
+	if _, err := parseLedgerTimestamp(ts); err != nil {
+		return err
+	}
 	_, err := s.execWrite(`
-INSERT INTO threatfox_submissions (ioc, ioc_type, malware, submitted_at, status)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO threatfox_submissions (ioc, ioc_type, malware, submitted_at, status, submitted_at_key)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(ioc) DO UPDATE SET
   ioc_type=excluded.ioc_type,
   malware=excluded.malware,
   submitted_at=excluded.submitted_at,
+  submitted_at_key=excluded.submitted_at_key,
   status=excluded.status`,
-		ioc, iocType, malware, at.UTC().Format(time.RFC3339Nano), status)
+		ioc, iocType, malware, ts, status, formatFixedUTC(at))
 	return err
 }
 
@@ -104,12 +101,13 @@ func (s *Store) ThreatFoxSubmissionStats(activeDays int) (ThreatFoxStats, error)
 	}
 	var st ThreatFoxStats
 	var lastTS *string
-	if err := s.db.QueryRow(`SELECT COUNT(1), MAX(submitted_at) FROM threatfox_submissions`).Scan(&st.TotalSubmitted, &lastTS); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(1), ("+latestLedgerTimeSQL(threatfoxLedger)+") FROM threatfox_submissions").Scan(&st.TotalSubmitted, &lastTS); err != nil {
 		return st, err
 	}
 	if lastTS != nil {
-		if t, perr := time.Parse(time.RFC3339Nano, *lastTS); perr == nil {
-			st.LastSubmittedAt = t
+		var err error
+		if st.LastSubmittedAt, err = parseLedgerTimestamp(*lastTS); err != nil {
+			return st, err
 		}
 	}
 	if activeDays <= 0 {
@@ -139,13 +137,7 @@ func (s *Store) ListThreatFoxSubmissions(limit int) ([]ThreatFoxSubmission, erro
 	if err := s.ensureThreatFoxTable(); err != nil {
 		return nil, err
 	}
-	q := `SELECT ioc, ioc_type, malware, submitted_at, status
-	      FROM threatfox_submissions ORDER BY submitted_at DESC`
-	args := []any{}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
+	q, args := orderedLedgerQuery(threatfoxLedger, "ioc,ioc_type,malware,submitted_at,status", limit)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -154,12 +146,12 @@ func (s *Store) ListThreatFoxSubmissions(limit int) ([]ThreatFoxSubmission, erro
 	var out []ThreatFoxSubmission
 	for rows.Next() {
 		var r ThreatFoxSubmission
-		var ts string
-		if err := rows.Scan(&r.IOC, &r.IOCType, &r.Malware, &ts, &r.Status); err != nil {
+		var ts, key string
+		if err := rows.Scan(&r.IOC, &r.IOCType, &r.Malware, &ts, &r.Status, &key); err != nil {
 			return nil, err
 		}
-		if t, perr := time.Parse(time.RFC3339Nano, ts); perr == nil {
-			r.SubmittedAt = t
+		if r.SubmittedAt, err = parseLedgerRowTimestamp(ts, key); err != nil {
+			return nil, err
 		}
 		out = append(out, r)
 	}

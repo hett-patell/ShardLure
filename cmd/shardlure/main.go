@@ -416,7 +416,7 @@ func runStoreBackfills(ctx context.Context, st *store.Store) {
 			fmt.Fprintf(os.Stderr, "event timestamp backfill skipped %d malformed row(s)\n", result.Invalid)
 		}
 		if err == nil && result.Done {
-			return
+			break
 		}
 		wait := batchGap
 		if err != nil {
@@ -424,6 +424,26 @@ func runStoreBackfills(ctx context.Context, st *store.Store) {
 				return
 			}
 			fmt.Fprintf(os.Stderr, "event timestamp backfill: %v\n", err)
+			wait = errorGap
+		}
+		if !waitForBackfill(ctx, wait) {
+			return
+		}
+	}
+	for ctx.Err() == nil {
+		result, err := st.BackfillLedgerTimes(ctx, batchSize)
+		if err == nil && result.Invalid > 0 {
+			fmt.Fprintf(os.Stderr, "submission ledger timestamp backfill skipped %d malformed row(s)\n", result.Invalid)
+		}
+		if err == nil && result.Done {
+			return
+		}
+		wait := batchGap
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "submission ledger timestamp backfill: %v\n", err)
 			wait = errorGap
 		}
 		if !waitForBackfill(ctx, wait) {

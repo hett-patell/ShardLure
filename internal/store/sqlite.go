@@ -706,6 +706,13 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	// v22 is schema-only: keep original submission/dedup records intact and
+	// repair exact ordering keys in bounded background transactions.
+	if current < 22 {
+		if err := s.migrateLedgerTimes(now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
