@@ -28,6 +28,35 @@ func TestSubmitRejectsMalformedSuccessResponse(t *testing.T) {
 	}
 }
 
+func TestSubmitAcceptsPlaintextOKResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	res, err := NewClient(srv.URL).Submit(context.Background(), "key", []Entry{{URL: "https://example.test/a", Threat: ThreatMalwareDownload}}, false)
+	if err != nil || res == nil || res.Status != "ok" {
+		t.Fatalf("plaintext ok result=%+v error=%v", res, err)
+	}
+}
+
+func TestSubmitRejectsPlaintextNoData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		_, _ = w.Write([]byte("no_data"))
+	}))
+	defer srv.Close()
+
+	res, err := NewClient(srv.URL).Submit(context.Background(), "key", []Entry{{URL: "https://example.test/a", Threat: ThreatMalwareDownload}}, false)
+	if err == nil || res != nil {
+		t.Fatalf("plaintext no_data result=%+v error=%v", res, err)
+	}
+	if strings.Contains(err.Error(), "no_data") {
+		t.Fatalf("provider token leaked into error: %v", err)
+	}
+}
+
 func TestSubmitRejectsNonOKStatusWithoutProviderText(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("{\"query_status\":\"future_provider_status\",\"message\":\"token-secret\"}"))

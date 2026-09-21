@@ -306,10 +306,16 @@ prepare_service_account() {
 
 render_live_service() {
   local service_groups=systemd-journal service_cowrie_args="" service_cowrie_units=""
-  local service_listen="127.0.0.1:$DASH_PORT"
-  if [[ -n "${TSIP:-}" ]]; then
-    service_listen=":$DASH_PORT --tailscale"
-  fi
+  local service_tailscale_units="" service_tailscale_prestart=""
+	local service_listen="127.0.0.1:$DASH_PORT"
+	if [[ -n "${TSIP:-}" ]]; then
+		service_listen=":$DASH_PORT --tailscale"
+    # tailscaled can be active before its interface receives an IPv4 address
+    # after boot. The binary intentionally refuses a wildcard fallback, so wait
+    # here rather than entering a restart loop while the tailnet converges.
+    service_tailscale_units=$'Wants=network-online.target tailscaled.service\nAfter=network-online.target tailscaled.service'
+    service_tailscale_prestart="ExecStartPre=/bin/sh -ec 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do /usr/bin/tailscale ip -4 | grep -q . && exit 0; sleep 1; done; exit 1'"
+	fi
   if [[ "$COWRIE" -eq 1 ]]; then
     service_groups+=" cowrie"
     service_cowrie_args="--cowrie=$COWRIE_LOG"
@@ -319,6 +325,7 @@ render_live_service() {
 [Unit]
 Description=ShardLure live telemetry ingest + web dashboard
 After=network.target
+$service_tailscale_units
 $service_cowrie_units
 [Service]
 Type=simple
@@ -343,6 +350,7 @@ TasksMax=256
 TimeoutStopSec=45
 Environment=SHARDLURE_CONFIG=$DATA_DIR/shardlure.yaml
 Environment=SHARDLURE_DASH_TOKEN=$DASH_TOKEN
+$service_tailscale_prestart
 ExecStart=$DEST live $service_listen $service_cowrie_args
 Restart=always
 RestartSec=5

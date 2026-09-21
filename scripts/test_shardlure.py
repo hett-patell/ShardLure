@@ -307,6 +307,11 @@ class ServiceSafetyTests(unittest.TestCase):
             self.assertIn("MemoryMax=1G", live)
             self.assertIn("TasksMax=256", live)
             self.assertIn("--tailscale", live)
+            self.assertIn("Wants=network-online.target tailscaled.service", live)
+            self.assertIn("After=network-online.target tailscaled.service", live)
+            self.assertIn("ExecStartPre=/bin/sh -ec", live)
+            self.assertIn("tailscale ip -4", live)
+            self.assertEqual(live.count("ExecStart="), 1)
             self.assertEqual(
                 [call.args[0] for call in fake_run.call_args_list],
                 [

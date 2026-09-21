@@ -56,6 +56,19 @@ class ReleaseContractTests(unittest.TestCase):
             self.assertNotIn("--cowrie=", result.stdout)
             self.assertNotIn("Wants=cowrie.service", result.stdout)
 
+    def test_tailscale_service_waits_for_address_before_live_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _ = self._run_installer_functions(
+                Path(tmp),
+                'DATA_DIR=/srv/shardlure\nCOWRIE=0\nDEST=/usr/local/bin/shardlure\n'
+                'TSIP=100.64.0.10\nrender_live_service\n',
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Wants=network-online.target tailscaled.service", result.stdout)
+            self.assertIn("After=network-online.target tailscaled.service", result.stdout)
+            self.assertIn("ExecStartPre=/bin/sh -ec", result.stdout)
+            self.assertIn("tailscale ip -4", result.stdout)
+
     @unittest.skipUnless(shutil.which("systemd-analyze"), "requires systemd unit verifier")
     def test_rendered_service_passes_systemd_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

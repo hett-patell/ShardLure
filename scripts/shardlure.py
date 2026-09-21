@@ -905,7 +905,16 @@ def prepare_service_account() -> None:
 
 def install_services(honeypot_port: int, dash_port: int) -> None:
     log("installing systemd services")
-    listen = f":{dash_port} --tailscale" if _tailscale_iface() else f"127.0.0.1:{dash_port}"
+    tailscale = _tailscale_iface()
+    listen = f":{dash_port} --tailscale" if tailscale else f"127.0.0.1:{dash_port}"
+    tailscale_unit = ""
+    tailscale_prestart = ""
+    if tailscale:
+        # tailscaled can report active before it has assigned tailscale0 an
+        # address after boot. Keep --tailscale fail-closed, but wait for the
+        # address rather than making systemd restart the daemon repeatedly.
+        tailscale_unit = "Wants=network-online.target tailscaled.service\nAfter=network-online.target tailscaled.service\n"
+        tailscale_prestart = "ExecStartPre=/bin/sh -ec 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do /usr/bin/tailscale ip -4 | grep -q . && exit 0; sleep 1; done; exit 1'\n"
     py = COWRIE_HOME / "venv/bin/python"
     twistd = COWRIE_HOME / "venv/bin/twistd"
     if honeypot_port < 1024 and shutil.which("authbind"):
@@ -942,6 +951,7 @@ WantedBy=multi-user.target
 Description=ShardLure live dashboard + telemetry ingest
 After=network.target cowrie.service
 Wants=cowrie.service
+{tailscale_unit}
 
 [Service]
 Type=simple
@@ -967,7 +977,7 @@ MemoryMax=1G
 TasksMax=256
 TimeoutStopSec=45
 Environment=SHARDLURE_CONFIG={CONFIG_FILE}
-ExecStart={BIN_DIR}/shardlure live {listen} --cowrie={COWRIE_LOG}
+{tailscale_prestart}ExecStart={BIN_DIR}/shardlure live {listen} --cowrie={COWRIE_LOG}
 Restart=always
 RestartSec=5
 

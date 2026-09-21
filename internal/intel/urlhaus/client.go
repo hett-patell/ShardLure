@@ -137,6 +137,13 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 		Rejected []json.RawMessage `json:"rejected"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
+		// URLhaus's legacy submission endpoint returns a bare plaintext ok
+		// for accepted batches (and plaintext error tokens such as no_data).
+		// Accept exactly that success token; every other non-JSON body remains
+		// fail-closed rather than treating an HTML error page as a submission.
+		if strings.EqualFold(strings.TrimSpace(string(raw)), "ok") {
+			return &Result{Status: "ok"}, nil
+		}
 		return nil, errors.New("urlhaus: invalid submission response")
 	}
 
