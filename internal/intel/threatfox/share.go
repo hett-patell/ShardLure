@@ -29,8 +29,10 @@ type Options struct {
 	RateLimit  time.Duration
 	Reference  string // optional shared reference URL added to each submission
 
-	// OnProgress reports each candidate's outcome: submitted (with the IOC
-	// count) or skipped (with the Vet reason). Fires once per candidate.
+	// OnProgress reports each candidate's outcome: submitted (with the durable
+	// IOC count, including partial success) or skipped/failed (with a reason).
+	// Dry-run reports the number of IOCs that would be submitted.
+	// Fires once per candidate.
 	OnProgress func(c Candidate, submitted bool, iocCount int, reason string)
 
 	// MaxSubmissions bounds how many CANDIDATES this run may submit (0 =
@@ -67,7 +69,8 @@ var ErrEmptyBatch = errors.New("threatfox: no candidates to submit")
 //
 // A candidate with at least one fresh IOC counts as one submission against
 // MaxSubmissions. Returns (submitted, skipped, firstErr): submitted counts
-// candidates that sent at least one IOC (or, in dry-run, would have); skipped
+// candidates that durably recorded at least one accepted IOC (or, in dry-run,
+// would have submitted one); skipped
 // counts candidates the gate rejected or that were fully deduped. As with the
 // sibling sharers, one failing submission does not abort the run, but the first
 // error is surfaced so the CLI can exit non-zero.
@@ -157,8 +160,22 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 
 		sentCount := 0
 		var candErr error
+		// Finalize once, including on an early stop: a later IOC failure must
+		// not erase the candidate's earlier, durably recorded submissions.
+		finishCandidate := func(reason string) {
+			if sentCount > 0 {
+				submitted++
+				if reason != "" {
+					reason = "partial submission: " + reason
+				}
+			}
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, sentCount > 0, sentCount, reason)
+			}
+		}
 		for _, ioc := range fresh {
 			if err := intelutil.WaitForProviderAttempt(ctx, lastAttempt, opts.RateLimit); err != nil {
+				finishCandidate("submission interrupted: " + err.Error())
 				return submitted, skipped, err
 			}
 			res, err := client.Submit(ctx, opts.APIKey, Submission{
@@ -176,9 +193,7 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 				if errors.Is(err, ErrUnauthorized) {
 					// An auth failure fails identically for every remaining IOC
 					// and candidate — stop the whole run rather than hammering.
-					if opts.OnProgress != nil {
-						opts.OnProgress(cand, false, 0, "auth key rejected")
-					}
+					finishCandidate("auth key rejected")
 					return submitted, skipped, errors.Join(firstErr, err)
 				}
 				if candErr == nil {
@@ -212,9 +227,7 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 				status = "duplicate"
 			}
 			if rerr := rec.RecordThreatFoxSubmission(ioc.Value, ioc.Type, malware, status, time.Now().UTC()); rerr != nil {
-				if opts.OnProgress != nil {
-					opts.OnProgress(cand, false, 0, "accepted upstream; local ledger write failed")
-				}
+				finishCandidate("accepted upstream; local ledger write failed")
 				// A missing ledger row makes this accepted IOC eligible for a later
 				// duplicate submission. Stop before posting any more IOCs.
 				return submitted, skipped, errors.Join(firstErr, rerr)
@@ -222,25 +235,17 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 			sentCount++
 		}
 
-		if sentCount > 0 {
-			submitted++
-			if opts.OnProgress != nil {
-				reason := ""
-				if candErr != nil {
-					reason = "partial submission: some IOCs failed"
-				}
-				opts.OnProgress(cand, true, sentCount, reason)
-			}
-		} else {
+		outcomeReason := ""
+		if sentCount == 0 {
 			// Every IOC POST failed; report it as a non-submit with the error.
-			if opts.OnProgress != nil {
-				msg := "submit failed"
-				if candErr != nil {
-					msg = "submit failed: " + candErr.Error()
-				}
-				opts.OnProgress(cand, false, 0, msg)
+			outcomeReason = "submit failed"
+			if candErr != nil {
+				outcomeReason += ": " + candErr.Error()
 			}
+		} else if candErr != nil {
+			outcomeReason = "some IOCs failed"
 		}
+		finishCandidate(outcomeReason)
 	}
 	return submitted, skipped, firstErr
 }

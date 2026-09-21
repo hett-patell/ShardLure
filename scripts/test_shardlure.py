@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +16,67 @@ from scripts import shardlure
 
 
 EXPECTED_PIN = "65ded95b2d2b6555be8e4eb95315036a4db361f9"
+
+
+def tailscale_fixture(root: Path) -> tuple[Path, dict[str, str]]:
+    # Quotes, shell variables and systemd specifiers must remain literal.
+    directory = root / "custom bin \"quoted\" $HOME %n and apostrophe's \\ path"
+    directory.mkdir()
+    executable = directory / "tailscale"
+    executable.write_text(
+        '#!/bin/sh\n'
+        'printf \'%s\\n\' "$*" >> "$TAILSCALE_CALLS"\n'
+        '[ "$*" = "ip -4" ] || exit 99\n'
+        'case "$TAILSCALE_STATE" in\n'
+        '  empty) exit 0 ;;\n'
+        '  error) printf \'100.64.0.10\\n\'; exit 1 ;;\n'
+        '  delayed) [ "$(wc -l < "$TAILSCALE_CALLS")" -ge 3 ] || exit 1 ;;\n'
+        'esac\n'
+        'printf \'100.64.0.10\\n\'\n'
+    )
+    executable.chmod(0o755)
+    runtime_bin = root / "runtime-bin"
+    runtime_bin.mkdir()
+    sleep = runtime_bin / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    env = dict(os.environ, PATH=f"{runtime_bin}:/usr/bin:/bin",
+               TAILSCALE_CALLS=str(root / "tailscale-calls"), TAILSCALE_STATE="ready",
+               TAILSCALE_EXECUTABLE=str(executable))
+    return executable, env
+
+
+def service_command(unit: str, directive: str) -> list[str]:
+    lines = [line.partition("=")[2] for line in unit.splitlines()
+             if line.startswith(f"{directive}=")]
+    if len(lines) != 1:
+        raise AssertionError(f"expected one {directive} command, got {lines}")
+    # These commands use systemd's quoted-word subset shared with shlex, then
+    # literal dollar/specifier escapes. No host service is started in the test.
+    return [arg.replace("%%", "%").replace("$$", "$") for arg in shlex.split(lines[0])]
+
+
+def run_service_prestart(unit: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    args = service_command(unit, "ExecStartPre")
+    if env["TAILSCALE_EXECUTABLE"] not in args:
+        raise AssertionError("readiness command does not use the resolved Tailscale executable")
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=5)
+
+
+def daemon_fixture(root: Path) -> Path:
+    executable = root / "shardlure"
+    executable.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    executable.chmod(0o755)
+    return executable
+
+
+def check_service_unit(test: unittest.TestCase, root: Path, text: str) -> None:
+    if shutil.which("systemd-analyze"):
+        unit = root / "readiness-test.service"
+        unit.write_text(text)
+        checked = subprocess.run(["systemd-analyze", "verify", str(unit)],
+                                 capture_output=True, text=True)
+        test.assertEqual(checked.returncode, 0, checked.stderr)
 
 
 def read_cowrie_pin(path: Path) -> str:
@@ -227,6 +291,32 @@ class PatchDeploymentTests(unittest.TestCase):
 
 
 class ServiceSafetyTests(unittest.TestCase):
+    def test_tailscale_prestart_executes_resolved_path_and_waits_for_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable, env = tailscale_fixture(root)
+            # Only systemctl and interface discovery are stubbed; resolve the
+            # executable from PATH and render the real service files.
+            with (
+                mock.patch.dict(os.environ, PATH=f"{executable.parent}:{env['PATH']}"),
+                mock.patch.object(shardlure, "SYSTEMD_DIR", root),
+                mock.patch.object(shardlure, "BIN_DIR", root),
+                mock.patch.object(shardlure, "_tailscale_iface", return_value="tailscale0"),
+                mock.patch.object(shardlure, "run", return_value=subprocess.CompletedProcess([], 0)),
+            ):
+                (root / "shardlure").symlink_to("/usr/bin/true")
+                shardlure.install_services(2222, 8080)
+            unit = (root / "shardlure-live.service").read_text()
+            check_service_unit(self, root, unit)
+            for state, status, attempts in (("ready", 0, 1), ("delayed", 0, 3),
+                                             ("empty", 1, 30), ("error", 1, 30)):
+                with self.subTest(state=state):
+                    calls = Path(env["TAILSCALE_CALLS"])
+                    calls.unlink(missing_ok=True)
+                    result = run_service_prestart(unit, dict(env, TAILSCALE_STATE=state))
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual(calls.read_text().splitlines(), ["ip -4"] * attempts)
+
     def test_inactive_ufw_is_not_mistaken_for_active(self) -> None:
         fake_run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Status: inactive\n"))
         with mock.patch.object(shardlure.shutil, "which", return_value="/usr/sbin/ufw"), mock.patch.object(shardlure, "run", fake_run):
@@ -288,6 +378,7 @@ class ServiceSafetyTests(unittest.TestCase):
                 mock.patch.object(shardlure, "SYSTEMD_DIR", systemd_dir),
                 mock.patch.object(shardlure, "_tailscale_iface", return_value="tailscale0"),
                 mock.patch.object(shardlure, "run", fake_run),
+                mock.patch.object(shardlure.shutil, "which", side_effect=lambda name: "/opt/bin/tailscale" if name == "tailscale" else None),
                 mock.patch.object(shardlure, "COWRIE_HOME", Path("/srv/shardlure/cowrie")),
                 mock.patch.object(shardlure, "COWRIE_LOG", Path("/srv/shardlure/cowrie/var/log/cowrie/cowrie.json")),
                 mock.patch.object(shardlure, "CONFIG_FILE", Path("/etc/shardlure/shardlure.yaml")),
@@ -310,7 +401,6 @@ class ServiceSafetyTests(unittest.TestCase):
             self.assertIn("Wants=network-online.target tailscaled.service", live)
             self.assertIn("After=network-online.target tailscaled.service", live)
             self.assertIn("ExecStartPre=/bin/sh -ec", live)
-            self.assertIn("tailscale ip -4", live)
             self.assertEqual(live.count("ExecStart="), 1)
             self.assertEqual(
                 [call.args[0] for call in fake_run.call_args_list],
@@ -326,13 +416,21 @@ class ServiceSafetyTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(shardlure, "SYSTEMD_DIR", Path(tmp)),
+            mock.patch.object(shardlure, "BIN_DIR", Path(tmp)),
             mock.patch.object(shardlure, "_tailscale_iface", return_value=""),
             mock.patch.object(shardlure, "run", return_value=subprocess.CompletedProcess([], 0)),
         ):
+            daemon_fixture(Path(tmp))
             shardlure.install_services(2222, 8080)
             live = (Path(tmp) / "shardlure-live.service").read_text()
             self.assertIn(" live 127.0.0.1:8080 --cowrie=", live)
             self.assertNotIn("--tailscale", live)
+            self.assertNotIn("ExecStartPre=", live)
+            self.assertNotIn("tailscaled.service", live)
+            started = subprocess.run(service_command(live, "ExecStart"),
+                                     capture_output=True, text=True, check=True)
+            self.assertEqual(started.stdout.splitlines(),
+                             ["live", "127.0.0.1:8080", f"--cowrie={shardlure.COWRIE_LOG}"])
 
     def test_service_account_access_is_scoped_and_symlinks_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

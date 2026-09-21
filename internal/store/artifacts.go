@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -109,14 +110,26 @@ func (s *Store) TouchArtifactTS(url string, ts time.Time) error {
 			return nil // already at least as fresh — the hot path, write-free
 		}
 	}
-	// CAS prevents a delayed older observation from overwriting a newer touch.
-	res, err := s.execWrite(`UPDATE artifacts SET ts = ?, last_seen_at = ? WHERE url = ? AND ts IS ?`,
-		captureTime(ts), captureTime(ts), url, cur)
+	// Repair before replacing legacy ts: for an imported artifact it may be
+	// the only remaining evidence of an older successful fetch. The CAS still
+	// prevents a delayed older observation from overwriting a newer touch.
+	var n int64
+	err = s.WithTx(func(tx *sql.Tx) error {
+		if err := repairArtifactTimesForURL(context.Background(), tx, url); err != nil {
+			return err
+		}
+		res, err := tx.Exec(`UPDATE artifacts SET ts=?,last_seen_at=?,first_observed_at=COALESCE(first_observed_at,?) WHERE url=? AND ts IS ?`,
+			captureTime(ts), captureTime(ts), captureTime(ts), url, cur)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	n, err := res.RowsAffected()
-	if err == nil && n == 0 {
+	if n == 0 {
 		return s.TouchArtifactTS(url, ts)
 	}
 	return err
@@ -899,12 +912,14 @@ func (s *Store) DueArtifactCaptures(now time.Time, limit, maxAttempts int) ([]st
 		return nil, err
 	}
 	// A crash during the last allowed attempt must not leave a permanent
-	// in-flight row. Never terminate a claim while its lease remains live.
+	// in-flight row. Pre-v19 capturing rows kept their lease in next_attempt_at;
+	// honor it even before the background repair reaches this row.
 	if _, err := s.execWrite(`UPDATE artifacts SET status='failed_permanently',
 detail='capture attempt budget exhausted', lease_until=NULL, next_attempt_at=NULL
 WHERE origin='quarantine_fetch' AND status IN ('pending','failed','capturing')
-AND attempt_count>=? AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))`,
-		captureBudget(maxAttempts), captureTime(now)); err != nil {
+AND attempt_count>=? AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))
+AND (status!='capturing' OR next_attempt_at IS NULL OR julianday(next_attempt_at)<=julianday(?))`,
+		captureBudget(maxAttempts), captureTime(now), captureTime(now)); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
@@ -946,7 +961,14 @@ func (s *Store) ClaimArtifactCapture(url string, now, leaseUntil time.Time, expe
 	if !leaseUntil.After(now) || expectedAttempt < 0 || expectedAttempt >= budget {
 		return ErrClaimStale
 	}
-	res, err := s.execWrite(`
+	var n int64
+	err := s.WithTx(func(tx *sql.Tx) error {
+		// Validate and convert this row's legacy schedule before a worker can
+		// act on it, even if the bounded background pass has not reached it.
+		if err := repairArtifactTimesForURL(context.Background(), tx, url); err != nil {
+			return err
+		}
+		res, err := tx.Exec(`
 UPDATE artifacts
 SET status='capturing', lease_until=?, next_attempt_at=NULL,
     attempt_count=attempt_count+1, last_fetch_attempt_at=?
@@ -954,11 +976,17 @@ WHERE url=? AND attempt_count=? AND origin='quarantine_fetch'
   AND status IN ('pending','failed','capturing')
   AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))
   AND (next_attempt_at IS NULL OR julianday(next_attempt_at)<=julianday(?))`,
-		captureTime(leaseUntil), captureTime(now), url, expectedAttempt, captureTime(now), captureTime(now))
+			captureTime(leaseUntil), captureTime(now), url, expectedAttempt, captureTime(now), captureTime(now))
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
+	// Commit a malformed schedule's quarantine even when no claim succeeded.
 	if n == 0 {
 		return ErrClaimStale
 	}

@@ -29,7 +29,9 @@ func (s *Store) migrateCaptureEvidence(now string) error {
 	})
 }
 
-const artifactTimeBackfillPath = "artifacts-v19"
+// The original cursor skipped rows touched before backfill. A fresh pass also
+// repairs those rows on databases that have already completed v19/v20.
+const artifactTimeBackfillPath = "artifacts-v19-repair-v2"
 
 type ArtifactTimeBackfillResult struct {
 	Scanned int
@@ -38,117 +40,159 @@ type ArtifactTimeBackfillResult struct {
 	Done    bool
 }
 
-// BackfillArtifactTimes repairs at most limit pre-v19 artifact rows in one
-// short transaction. The durable ID cursor makes the work resumable without
-// holding startup or writeMu for the whole ledger.
+// BackfillArtifactTimes visits at most limit artifact rows (capped at 500) in
+// one short transaction. Cursor, reads and repairs share writeMu and the same
+// transaction: a claim, completion or touch cannot invalidate a repair's input.
 func (s *Store) BackfillArtifactTimes(ctx context.Context, limit int) (ArtifactTimeBackfillResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ArtifactTimeBackfillResult{}, err
 	}
-	if limit <= 0 {
+	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
-	var cursor int64
-	err := s.db.QueryRowContext(ctx, "SELECT offset FROM ingest_state WHERE source=? AND path=?",
-		"migration", artifactTimeBackfillPath).Scan(&cursor)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return ArtifactTimeBackfillResult{}, err
+	// Lazy DDL takes writeMu itself; it must run before WithTx.
+	if err := s.ensureArtifactsTable(); err != nil {
+		return ArtifactTimeBackfillResult{}, errors.New("artifact time backfill initialization failed")
 	}
-
-	// julianday rounds away sub-millisecond precision; comparisons also turn
-	// invalid dates into NULL and could silently choose today's registration
-	// date as successful-fetch provenance. Parse in Go and fail closed instead.
-	// Keyset pages bound memory even for a large imported artifact ledger.
-	type legacyRow struct {
-		id                        int64
-		ts, created, status, next string
-		attempts                  int
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(ts,''), COALESCE(created_at,''), status, COALESCE(next_attempt_at,''), attempt_count
-FROM artifacts
-WHERE id>? AND first_observed_at IS NULL AND last_seen_at IS NULL
-ORDER BY id LIMIT ?`, cursor, limit)
-	if err != nil {
-		return ArtifactTimeBackfillResult{}, err
-	}
-	var batch []legacyRow
-	for rows.Next() {
-		var row legacyRow
-		if err := rows.Scan(&row.id, &row.ts, &row.created, &row.status, &row.next, &row.attempts); err != nil {
-			rows.Close()
-			return ArtifactTimeBackfillResult{}, err
+	var result ArtifactTimeBackfillResult
+	err := s.WithTx(func(tx *sql.Tx) error {
+		var cursor int64
+		err := tx.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source='migration' AND path=?`, artifactTimeBackfillPath).Scan(&cursor)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
 		}
-		batch = append(batch, row)
-	}
-	if err := rows.Err(); err != nil {
+		// Page by primary key, including modern rows, so a sparse legacy ledger
+		// cannot turn a nominally bounded repair into a full-table scan.
+		rows, err := tx.QueryContext(ctx, `SELECT `+artifactTimeRepairColumns+` FROM artifacts WHERE id>? ORDER BY id LIMIT ?`, cursor, limit)
+		if err != nil {
+			return err
+		}
+		var batch []artifactTimeRepairRow
+		for rows.Next() {
+			var row artifactTimeRepairRow
+			if err := row.scan(rows); err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, row)
+		}
+		err = rows.Err()
 		rows.Close()
-		return ArtifactTimeBackfillResult{}, err
-	}
-	rows.Close()
-	result := ArtifactTimeBackfillResult{Scanned: len(batch), Done: len(batch) < limit}
-	if len(batch) == 0 {
-		return result, nil
-	}
-	lastID := batch[len(batch)-1].id
-	err = s.WithTx(func(tx *sql.Tx) error {
+		if err != nil {
+			return err
+		}
+		result = ArtifactTimeBackfillResult{Scanned: len(batch), Done: len(batch) < limit}
+		if len(batch) == 0 {
+			return nil
+		}
 		for _, row := range batch {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			observed, obsErr := time.Parse(time.RFC3339Nano, row.ts)
-			registered, regErr := time.Parse(time.RFC3339Nano, row.created)
-			var first, seen, attempted, fetched, lease, next any
-			invalid := obsErr != nil || regErr != nil
-			if obsErr == nil {
-				seen = captureTime(observed)
-				first = seen
+			if row.first.Valid && row.seen.Valid {
+				continue
 			}
-			if obsErr == nil && regErr == nil {
-				if registered.Before(observed) {
-					first = captureTime(registered)
-				}
-				if row.status == "fetched" {
-					fetched = first
-				}
-			}
-			if row.attempts > 0 && regErr == nil {
-				attempted = captureTime(registered)
-			}
-			if due, err := time.Parse(time.RFC3339Nano, row.next); err == nil {
-				if row.status == "capturing" {
-					lease = captureTime(due)
-				} else {
-					next = captureTime(due)
-				}
-			} else if row.next != "" {
-				invalid = true
-				if row.status == "capturing" || row.status == "failed" {
-					row.status = "failed_permanently"
-				}
-			}
-			detail := any(nil)
-			if row.status == "failed_permanently" && row.next != "" && next == nil && lease == nil {
-				detail = "invalid legacy capture schedule"
-			}
-			res, err := tx.Exec(`UPDATE artifacts SET first_observed_at=?, last_seen_at=?, last_fetch_attempt_at=?, last_successful_fetch_at=?, lease_until=?, next_attempt_at=?, status=?, detail=COALESCE(?,detail) WHERE id=? AND first_observed_at IS NULL AND last_seen_at IS NULL`, first, seen, attempted, fetched, lease, next, row.status, detail, row.id)
+			invalid, err := repairArtifactTimeRow(ctx, tx, row)
 			if err != nil {
 				return err
 			}
-			if n, err := res.RowsAffected(); err == nil {
-				result.Updated += int(n)
-			}
+			result.Updated++
 			if invalid {
 				result.Invalid++
 			}
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at)
+		_, err = tx.ExecContext(ctx, `INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at)
 VALUES('migration',?,0,?,'',?)
 ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset,updated_at=excluded.updated_at`,
-			artifactTimeBackfillPath, lastID, captureTime(time.Now()))
+			artifactTimeBackfillPath, batch[len(batch)-1].id, captureTime(time.Now()))
 		return err
 	})
 	if err != nil {
-		return ArtifactTimeBackfillResult{}, err
+		if ctx.Err() != nil {
+			return ArtifactTimeBackfillResult{}, ctx.Err()
+		}
+		return ArtifactTimeBackfillResult{}, errors.New("artifact time backfill failed")
 	}
 	return result, nil
+}
+
+const artifactTimeRepairColumns = `id,ts,created_at,status,next_attempt_at,attempt_count,first_observed_at,last_seen_at,last_fetch_attempt_at,last_successful_fetch_at,lease_until`
+
+type artifactTimeRepairRow struct {
+	id                              int64
+	ts, created, status             string
+	attempts                        int
+	first, seen, attempted, fetched sql.NullString
+	lease, next                     sql.NullString
+}
+
+func (r *artifactTimeRepairRow) scan(row interface{ Scan(...any) error }) error {
+	return row.Scan(&r.id, &r.ts, &r.created, &r.status, &r.next, &r.attempts, &r.first, &r.seen, &r.attempted, &r.fetched, &r.lease)
+}
+
+// repairArtifactTimesForURL must run in the caller's writeMu transaction. It
+// preserves legacy provenance before a touch replaces ts, or a new claim
+// replaces the legacy retry/lease fields. No ensure helpers belong here.
+func repairArtifactTimesForURL(ctx context.Context, tx *sql.Tx, url string) error {
+	var row artifactTimeRepairRow
+	err := row.scan(tx.QueryRowContext(ctx, `SELECT `+artifactTimeRepairColumns+` FROM artifacts WHERE url=? AND (first_observed_at IS NULL OR last_seen_at IS NULL)`, url))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = repairArtifactTimeRow(ctx, tx, row)
+	return err
+}
+
+func repairArtifactTimeRow(ctx context.Context, tx *sql.Tx, row artifactTimeRepairRow) (bool, error) {
+	// SQLite accepts non-RFC3339 dates and rounds sub-millisecond precision.
+	// Parse in Go; unknown legacy evidence must never acquire fresh provenance.
+	observed, obsErr := time.Parse(time.RFC3339Nano, row.ts)
+	registered, regErr := time.Parse(time.RFC3339Nano, row.created)
+	invalid := obsErr != nil || regErr != nil
+	var first, seen, attempted, fetched, detail any
+	if obsErr == nil {
+		seen = captureTime(observed)
+		first = seen
+	}
+	legacyCapture := !row.attempted.Valid && !row.lease.Valid && !row.fetched.Valid
+	if obsErr == nil && regErr == nil {
+		if registered.Before(observed) {
+			first = captureTime(registered)
+		}
+		if row.status == "fetched" && legacyCapture {
+			fetched = first
+		}
+	}
+	if row.attempts > 0 && regErr == nil && legacyCapture {
+		attempted = captureTime(registered)
+	}
+	// A modern attempt/lease/result is authoritative even while observation
+	// columns are NULL. Only untouched legacy schedules need conversion.
+	if legacyCapture && row.next.Valid {
+		due, err := time.Parse(time.RFC3339Nano, row.next.String)
+		if err == nil {
+			if row.status == "capturing" {
+				row.lease = sql.NullString{String: captureTime(due), Valid: true}
+				row.next = sql.NullString{}
+			} else {
+				row.next.String = captureTime(due)
+			}
+		} else {
+			invalid = true
+			row.next = sql.NullString{}
+			if row.status == "capturing" || row.status == "failed" || row.status == "pending" {
+				row.status = "failed_permanently"
+				detail = "invalid legacy capture schedule"
+			}
+		}
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE artifacts SET
+first_observed_at=COALESCE(first_observed_at,?), last_seen_at=COALESCE(last_seen_at,?),
+last_fetch_attempt_at=COALESCE(last_fetch_attempt_at,?), last_successful_fetch_at=COALESCE(last_successful_fetch_at,?),
+lease_until=?, next_attempt_at=?, status=?, detail=COALESCE(?,detail) WHERE id=?`,
+		first, seen, attempted, fetched, row.lease, row.next, row.status, detail, row.id)
+	return invalid, err
 }

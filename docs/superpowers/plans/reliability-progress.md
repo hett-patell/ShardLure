@@ -1,5 +1,10 @@
 # Reliability hardening progress
 
+September 21 review follow-up: the nine confirmed branch findings and current
+verification evidence are recorded in [review remediation](2026-09-21-review-remediation.md).
+The September 18 checkpoint below is historical; it predates deployment and
+the v21 index/upgrade fixes.
+
 Updated 2026-09-18. Work is uncommitted in .worktrees/fix-reliability, branch
 fix/reliability, base 552dcf9. Main checkout and ARM deployment are unchanged.
 No outbound intelligence submissions or real payload fetches.

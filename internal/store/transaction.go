@@ -158,14 +158,14 @@ func (s *Store) AppendJournalEventAtomic(e *models.Event, update *JournalActorUp
 		err := tx.QueryRow(`
 SELECT 1
 FROM events INDEXED BY idx_events_ts
-WHERE ts = ?
+WHERE ts IN (?, ?)
   AND source = ?
   AND kind = ?
   AND COALESCE(src_ip, '') = ?
   AND COALESCE(src_port, 0) = ?
   AND COALESCE(username, '') = ?
   AND COALESCE(raw, '') = ?
-LIMIT 1`, normalizedTS, stored.Source, stored.Kind, stored.SrcIP, stored.SrcPort, stored.Username, stored.Raw).Scan(&exists)
+LIMIT 1`, normalizedTS, stored.TS.UTC().Format(time.RFC3339Nano), stored.Source, stored.Kind, stored.SrcIP, stored.SrcPort, stored.Username, stored.Raw).Scan(&exists)
 		if err == nil {
 			return nil
 		}

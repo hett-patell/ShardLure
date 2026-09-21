@@ -18,6 +18,8 @@ PATCHES = (
     "command-type-builtins.py",
     "passwd-stdin.py",
     "exec-emulation.py",
+    # The live daemon uses a separate account with read access via this group.
+    "sftp-capture-permissions.py",
 )
 
 

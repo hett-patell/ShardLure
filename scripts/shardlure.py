@@ -903,6 +903,14 @@ def prepare_service_account() -> None:
         path.chmod(0o770)
 
 
+def systemd_exec_arg(value: str) -> str:
+    """Quote one literal Exec* argument, including systemd's own expansions."""
+    escaped = (value.replace("\\", "\\\\").replace('"', '\\"')
+               .replace("%", "%%").replace("$", "$$")
+               .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+    return f'"{escaped}"'
+
+
 def install_services(honeypot_port: int, dash_port: int) -> None:
     log("installing systemd services")
     tailscale = _tailscale_iface()
@@ -910,11 +918,22 @@ def install_services(honeypot_port: int, dash_port: int) -> None:
     tailscale_unit = ""
     tailscale_prestart = ""
     if tailscale:
+        tailscale_bin = shutil.which("tailscale")
+        if not tailscale_bin:
+            die("Tailscale executable disappeared before service generation")
+        tailscale_arg = systemd_exec_arg(os.path.abspath(tailscale_bin))
         # tailscaled can report active before it has assigned tailscale0 an
         # address after boot. Keep --tailscale fail-closed, but wait for the
         # address rather than making systemd restart the daemon repeatedly.
         tailscale_unit = "Wants=network-online.target tailscaled.service\nAfter=network-online.target tailscaled.service\n"
-        tailscale_prestart = "ExecStartPre=/bin/sh -ec 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do /usr/bin/tailscale ip -4 | grep -q . && exit 0; sleep 1; done; exit 1'\n"
+        # Pass the detected path as a positional argument: it is data for sh,
+        # not shell syntax. $$ survives systemd's environment expansion as $.
+        tailscale_prestart = (
+            "ExecStartPre=/bin/sh -ec 'for i in 1 2 3 4 5 6 7 8 9 10 "
+            "11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; "
+            'do address=$$("$$1" ip -4) && test -n "$$address" && exit 0; '
+            f"sleep 1; done; exit 1' sh {tailscale_arg}\n"
+        )
     py = COWRIE_HOME / "venv/bin/python"
     twistd = COWRIE_HOME / "venv/bin/twistd"
     if honeypot_port < 1024 and shutil.which("authbind"):

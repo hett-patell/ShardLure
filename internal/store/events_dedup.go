@@ -1,7 +1,9 @@
 package store
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -33,6 +35,27 @@ type EventIdentity struct {
 // cowrie side was fixed independently — which is why the workaround now
 // lives in exactly one place.
 func (s *Store) IterateEventIdentitiesByTS(source models.Source, tsList []string, fn func(EventIdentity)) error {
+	// v20 writes fixed-width UTC; pre-v20 rows use RFC3339Nano with trailing
+	// zeroes removed. Match both until backfill is finished, including during
+	// the initial journal replay which precedes the background migration.
+	keys := make([]string, 0, 2*len(tsList))
+	seen := make(map[string]bool, 2*len(tsList))
+	for _, raw := range tsList {
+		ts, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return fmt.Errorf("event dedup: invalid timestamp")
+		}
+		canonical := CanonicalEventTime(ts)
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		// Keep pairs intact even if both strings are identical. An even-sized
+		// chunk then probes both formats in one SQLite snapshot; backfill cannot
+		// move a row from a later chunk into a previously examined one.
+		keys = append(keys, canonical, ts.UTC().Format(time.RFC3339Nano))
+	}
+	tsList = keys
 	const chunk = 400
 	want := string(source)
 	for i := 0; i < len(tsList); i += chunk {
@@ -62,6 +85,11 @@ func (s *Store) IterateEventIdentitiesByTS(source models.Source, tsList []string
 			if src != want {
 				return nil
 			}
+			ts, err := time.Parse(time.RFC3339Nano, id.TS)
+			if err != nil {
+				return fmt.Errorf("event dedup: invalid stored timestamp")
+			}
+			id.TS = CanonicalEventTime(ts)
 			if source == models.SourceJournal {
 				id.SessionID, id.Command = "", ""
 			} else {

@@ -304,17 +304,43 @@ prepare_service_account() {
   fi
 }
 
+apply_cowrie_capture_patch() {
+  # This installer can be piped from GitHub without a local ShardLure checkout.
+  # Fetch the same scoped patch the wrapper applies, from the selected release.
+  local patch_url="https://raw.githubusercontent.com/$REPO/$TAG/install/persona/patches/sftp-capture-permissions.py"
+  curl -fsSL "$patch_url" -o "$DL_COWRIE_PATCH" || err "could not download Cowrie capture patch for $TAG"
+  python3 "$DL_COWRIE_PATCH" "$COWRIE_HOME" || err "Cowrie capture patch failed; refusing unreadable captures"
+}
+
+systemd_exec_arg() {
+  # Escape systemd syntax/expansions, not shell syntax. The result is one word
+  # in an Exec* line; shell commands receive it as a positional argument.
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  value="${value//\$/\$\$}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+
 render_live_service() {
   local service_groups=systemd-journal service_cowrie_args="" service_cowrie_units=""
   local service_tailscale_units="" service_tailscale_prestart=""
 	local service_listen="127.0.0.1:$DASH_PORT"
 	if [[ -n "${TSIP:-}" ]]; then
 		service_listen=":$DASH_PORT --tailscale"
+    local service_tailscale_bin service_tailscale_arg
+    service_tailscale_bin="$(command -v tailscale)" || err "Tailscale executable disappeared before service generation"
+    [[ "$service_tailscale_bin" == /* ]] || service_tailscale_bin="$PWD/$service_tailscale_bin"
+    service_tailscale_arg="$(systemd_exec_arg "$service_tailscale_bin")"
     # tailscaled can be active before its interface receives an IPv4 address
     # after boot. The binary intentionally refuses a wildcard fallback, so wait
     # here rather than entering a restart loop while the tailnet converges.
     service_tailscale_units=$'Wants=network-online.target tailscaled.service\nAfter=network-online.target tailscaled.service'
-    service_tailscale_prestart="ExecStartPre=/bin/sh -ec 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do /usr/bin/tailscale ip -4 | grep -q . && exit 0; sleep 1; done; exit 1'"
+    service_tailscale_prestart="ExecStartPre=/bin/sh -ec 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do address=\$\$(\"\$\$1\" ip -4) && test -n \"\$\$address\" && exit 0; sleep 1; done; exit 1' sh $service_tailscale_arg"
 	fi
   if [[ "$COWRIE" -eq 1 ]]; then
     service_groups+=" cowrie"
@@ -414,7 +440,8 @@ DL_BIN="$(mktemp /tmp/shardlure-dl.XXXXXX)"
 DL_SUMS="$(mktemp /tmp/shardlure-sums.XXXXXX)"
 DL_ERR="$(mktemp /tmp/shardlure-curlerr.XXXXXX)"
 DL_COWRIE_PIN="$(mktemp /tmp/shardlure-cowrie-pin.XXXXXX)"
-trap 'rm -f "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN"' EXIT
+DL_COWRIE_PATCH="$(mktemp /tmp/shardlure-cowrie-patch.XXXXXX)"
+trap 'rm -f "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN" "$DL_COWRIE_PATCH"' EXIT
 log "downloading $URL …"
 # `if !` form: under set -e a bare failing curl would abort before our
 # friendly error message could print.
@@ -552,6 +579,10 @@ if [[ "$COWRIE" -eq 1 ]]; then
     chown -R cowrie:cowrie "$COWRIE_HOME"
     log "cowrie installed at $COWRIE_HOME"
   fi
+
+  # New SFTP captures must remain readable after the one-time account migration.
+  # Run on both fresh and matching existing checkouts; the patch is idempotent.
+  apply_cowrie_capture_patch
 
   # -- cowrie.cfg override --------------------------------------------------
   # Without this, cowrie falls back to cowrie.cfg.dist defaults: port 2222

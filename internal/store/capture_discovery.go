@@ -78,18 +78,22 @@ func (s *Store) DiscoverCommandArtifacts(ctx context.Context, limit int, extract
 				}
 				queued += int(n)
 				if n == 0 {
+					// Preserve pre-upgrade fetch provenance before advancing ts.
+					if err := repairArtifactTimesForURL(ctx, tx, url); err != nil {
+						return err
+					}
 					var seen string
 					if err := tx.QueryRowContext(ctx, `SELECT COALESCE(last_seen_at,ts) FROM artifacts WHERE url=?`, url).Scan(&seen); err != nil {
 						return err
 					}
 					previous, err := parseTime(seen)
-					if err != nil {
-						return err
-					}
-					if e.TS.After(previous) {
+					// A corrupt legacy observation must not stall discovery or leak
+					// its text in a parse error. The repair left unknown fetch
+					// provenance NULL; this valid event establishes observation only.
+					if err != nil || e.TS.After(previous) {
 						// Observation only. Never modify an active lease, attempt budget,
 						// terminal status or the provenance of a successful download.
-						if _, err := tx.ExecContext(ctx, `UPDATE artifacts SET ts=?,last_seen_at=? WHERE url=?`, ts, ts, url); err != nil {
+						if _, err := tx.ExecContext(ctx, `UPDATE artifacts SET ts=?,last_seen_at=?,first_observed_at=COALESCE(first_observed_at,?) WHERE url=?`, ts, ts, ts, url); err != nil {
 							return err
 						}
 					}

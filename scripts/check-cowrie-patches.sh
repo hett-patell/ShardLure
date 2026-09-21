@@ -29,6 +29,7 @@ args_checkout="$tmp_root/cowrie-args"
 partial_bashparse="$tmp_root/cowrie-partial-bashparse"
 partial_grep="$tmp_root/cowrie-partial-grep"
 partial_honeypot="$tmp_root/cowrie-partial-honeypot"
+partial_capture="$tmp_root/cowrie-partial-capture"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -42,15 +43,18 @@ cp -a "$cowrie" "$args_checkout"
 cp -a "$cowrie" "$partial_bashparse"
 cp -a "$cowrie" "$partial_grep"
 cp -a "$cowrie" "$partial_honeypot"
+cp -a "$cowrie" "$partial_capture"
 
-# Build three exact incomplete states from the patch scripts' literal blocks:
+# Build exact incomplete states from the patch scripts' literal blocks:
 # bashparse has NEW1 + OLD2, grep has only its first NEW hunk, and honeypot
-# has the assignment without the complete guarded NEW block.
+# has the assignment without the complete guarded NEW block. Capture has a
+# chmod at the right location but the wrong permissions.
 python3 - \
   "$ROOT" \
   "$partial_bashparse/src/cowrie/shell/bashparse.py" \
   "$partial_grep/src/cowrie/commands/fs.py" \
-  "$partial_honeypot/src/cowrie/shell/honeypot.py" <<'PY'
+  "$partial_honeypot/src/cowrie/shell/honeypot.py" \
+  "$partial_capture/src/cowrie/shell/fs.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -82,6 +86,7 @@ root = Path(sys.argv[1])
 bashparse_path = Path(sys.argv[2])
 grep_path = Path(sys.argv[3])
 honeypot_path = Path(sys.argv[4])
+capture_path = Path(sys.argv[5])
 
 bashparse = string_constants(
     root / "install/persona/patches/bashparse-subshell-pipe.py"
@@ -127,6 +132,12 @@ partial = honeypot["NEW"].replace(guarded_assignment, unguarded_assignment, 1)
 content = replace_once(honeypot_path, honeypot["OLD"], partial, "honeypot partial")
 if content.count(honeypot["OLD"]) != 0 or content.count(honeypot["NEW"]) != 0:
     raise SystemExit(f"honeypot partial fixture unexpectedly contains a complete block in {honeypot_path}")
+
+capture = string_constants(root / "install/persona/patches/sftp-capture-permissions.py")
+partial = capture["NEW"].replace("os.chmod(shasumfile, 0o640)", "os.chmod(shasumfile, 0o600)")
+content = replace_once(capture_path, capture["OLD"], partial, "capture partial")
+if content.count(capture["OLD"]) != 0 or content.count(capture["NEW"]) != 0:
+    raise SystemExit(f"capture partial fixture unexpectedly contains a complete block in {capture_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -134,7 +145,8 @@ PY
 for patch in \
   "$ROOT/install/persona/patches/bashparse-subshell-pipe.py" \
   "$ROOT/install/persona/patches/grep-case-insensitive.py" \
-  "$ROOT/install/persona/patches/honeypot-capture-redirect.py"; do
+  "$ROOT/install/persona/patches/honeypot-capture-redirect.py" \
+  "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
     exit 1
@@ -146,7 +158,7 @@ if python3 "$ORCHESTRATOR" "$cowrie" --unexpected; then
 fi
 
 # Every partial state must fail both the individual script and the orchestrator
-# in check and apply modes. Each invocation gets its own checkout so all twelve
+# in check and apply modes. Each invocation gets its own checkout so all sixteen
 # paths run even if a broken apply path mutates its fixture.
 working_tree_hash() {
   python3 - "$1" <<'PY'
@@ -251,6 +263,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_honeypot" \
     "$ROOT/install/persona/patches/honeypot-capture-redirect.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "capture" \
+    "$partial_capture" \
+    "$ROOT/install/persona/patches/sftp-capture-permissions.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -274,6 +291,7 @@ expected_changed=(
   "src/cowrie/commands/fs.py"
   "src/cowrie/commands/which.py"
   "src/cowrie/shell/bashparse.py"
+  "src/cowrie/shell/fs.py"
   "src/cowrie/shell/honeypot.py"
   "src/cowrie/shell/script.py"
 )
@@ -299,39 +317,35 @@ if [[ "$reapplied_diff_hash" != "$patched_diff_hash" ]]; then
 fi
 git -C "$cowrie" diff --check
 
+# Run the real pinned, patched SFTP methods against inert local files, including
+# SHA-dedup destinations and publication-time permissions. No Twisted/network.
+python3 "$ROOT/install/persona/test_capture_permissions.py" "$cowrie" -v
+
 # Drift the final target so a sequential check/apply implementation would alter
-# the first two files before discovering incompatibility. The two checksums must
-# remain identical after the orchestrator's failed all-patch preflight.
-python3 - "$drifted/src/cowrie/shell/honeypot.py" <<'PY'
+# earlier files before discovering incompatibility. The entire working tree
+# must remain identical after the orchestrator's failed all-patch preflight.
+python3 - "$drifted/src/cowrie/shell/fs.py" <<'PY'
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 content = path.read_text(encoding="utf-8")
-old = """\
-                    temp_pp.errReceived(message)
-                    for real_path, virtual_path in temp_pp.redirect_real_files:"""
-new = """\
-                    temp_pp.errReceived(message)  # intentional compatibility drift
-                    for real_path, virtual_path in temp_pp.redirect_real_files:"""
+old = "                os.rename(self.tempfiles[fd], shasumfile)"
+new = old + "  # intentional compatibility drift"
 if content.count(old) != 1:
     raise SystemExit(f"cannot create deterministic drift in {path}")
 path.write_text(content.replace(old, new, 1), encoding="utf-8")
 PY
 
-bashparse_rel="src/cowrie/shell/bashparse.py"
-grep_rel="src/cowrie/commands/fs.py"
-bashparse_before="$(git -C "$drifted" hash-object "$bashparse_rel")"
-grep_before="$(git -C "$drifted" hash-object "$grep_rel")"
+drifted_before="$(working_tree_hash "$drifted")"
 if python3 "$ORCHESTRATOR" "$drifted"; then
   echo "[cowrie-patches] drifted final target unexpectedly passed preflight" >&2
   exit 1
 fi
-bashparse_after="$(git -C "$drifted" hash-object "$bashparse_rel")"
-grep_after="$(git -C "$drifted" hash-object "$grep_rel")"
-if [[ "$bashparse_after" != "$bashparse_before" || "$grep_after" != "$grep_before" ]]; then
+drifted_after="$(working_tree_hash "$drifted")"
+if [[ "$drifted_after" != "$drifted_before" ]]; then
   echo "[cowrie-patches] failed preflight modified an earlier patch target" >&2
   exit 1
 fi
 
-echo "[cowrie-patches] pin, exact-state, idempotence, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 16 partial-state rejections, idempotence, capture behavior, and atomic preflight checks passed"

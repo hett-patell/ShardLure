@@ -693,6 +693,19 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	// v21: isolate unconverted timestamps. A migrated database pays no
+	// full-table scan to check for legacy rows, and backfill shrinks this index.
+	if current < 21 {
+		if err := s.WithTx(func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_legacy_ts ON events(ts,id) WHERE ts_unix_ns IS NULL`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(21,?)`, now)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1257,48 +1270,7 @@ func (s *Store) ActorCount() (int, error) {
 // if there are no events. Used by the Settings health strip to show how fresh
 // ingest is ("last event 3s ago" vs a stalled feed).
 func (s *Store) LatestEventTime() (time.Time, error) {
-	var badID int64
-	var badTS string
-	err := s.db.QueryRow(`SELECT id,ts FROM events WHERE ts_unix_ns IS NULL AND julianday(ts) IS NULL LIMIT 1`).Scan(&badID, &badTS)
-	if err == nil {
-		return time.Time{}, fmt.Errorf("event %d ts: invalid timestamp %q", badID, badTS)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, err
-	}
-
-	var bucket sql.NullInt64
-	err = s.db.QueryRow("SELECT " + eventTimeBucketSQL + " FROM events ORDER BY " + eventTimeBucketSQL + " DESC LIMIT 1").Scan(&bucket)
-	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, nil
-	}
-	if err != nil {
-		return time.Time{}, err
-	}
-	if !bucket.Valid {
-		return time.Time{}, errors.New("latest event has no valid time bucket")
-	}
-	rows, err := s.db.Query("SELECT id,ts FROM events WHERE "+eventTimeBucketSQL+"=?", bucket.Int64)
-	if err != nil {
-		return time.Time{}, err
-	}
-	defer rows.Close()
-	var latest time.Time
-	for rows.Next() {
-		var id int64
-		var ts string
-		if err := rows.Scan(&id, &ts); err != nil {
-			return time.Time{}, err
-		}
-		parsed, err := time.Parse(time.RFC3339Nano, ts)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("event %d ts: %w", id, err)
-		}
-		if latest.IsZero() || parsed.After(latest) {
-			latest = parsed
-		}
-	}
-	return latest, rows.Err()
+	return latestEventTime(context.Background(), s.db)
 }
 
 // MaintenancePurge deletes rows older than retentionDays from the
@@ -1386,7 +1358,9 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		// Artifact evidence is reference-counted by local_path. Select expired
 		// rows by parsed instant, then delete those exact IDs in this transaction
 		// before checking whether each file still has a live reference.
-		rows, err := tx.Query(`SELECT id,COALESCE(first_observed_at,ts,created_at,''),COALESCE(local_path,'') FROM artifacts`)
+		// Retention follows observation recency, not immutable fetch provenance.
+		// Redelivery keeps evidence alive without making an old fetch shareable.
+		rows, err := tx.Query(`SELECT id,COALESCE(last_seen_at,ts,created_at,''),COALESCE(local_path,'') FROM artifacts`)
 		if err != nil {
 			return err
 		}

@@ -1,11 +1,16 @@
 import json
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from scripts.test_shardlure import (
+    check_service_unit, daemon_fixture, run_service_prestart, service_command, tailscale_fixture,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +25,56 @@ PRODUCT_PATH = ROOT / "PRODUCT.md"
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def test_installer_applies_release_capture_patch_idempotently(self) -> None:
+        patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
+        blocks = runpy.run_path(str(patch))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cowrie = root / "cowrie"
+            target = cowrie / "src/cowrie/shell/fs.py"
+            target.parent.mkdir(parents=True)
+            target.write_text(blocks["OLD"])
+            unrelated = cowrie / "operator-note"
+            unrelated.write_text("unchanged")
+            result, calls = self._run_installer_functions(
+                root,
+                'TAG=v9.9.9\nCOWRIE_HOME="$TEST_COWRIE"\n'
+                'DL_COWRIE_PATCH="$TEST_PATCH"\n'
+                'apply_cowrie_capture_patch\napply_cowrie_capture_patch\n',
+                curl_body=patch.read_text(),
+                extra={"TEST_COWRIE": str(cowrie), "TEST_PATCH": str(root / "capture-patch.py")},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(target.read_text(), blocks["NEW"])
+            self.assertEqual(unrelated.read_text(), "unchanged")
+            self.assertEqual(len(calls), 2)
+            for call in calls:
+                self.assertEqual(call["command"], "curl")
+                self.assertIn(
+                    "https://raw.githubusercontent.com/hett-patell/ShardLure/v9.9.9/"
+                    "install/persona/patches/sftp-capture-permissions.py", call["args"],
+                )
+
+    def test_installer_rejects_incompatible_capture_code_without_modifying_it(self) -> None:
+        patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cowrie = root / "cowrie"
+            target = cowrie / "src/cowrie/shell/fs.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("# unsupported Cowrie close implementation\n")
+            original = target.read_bytes()
+            result, _ = self._run_installer_functions(
+                root,
+                'TAG=v9.9.9\nCOWRIE_HOME="$TEST_COWRIE"\n'
+                'DL_COWRIE_PATCH="$TEST_PATCH"\napply_cowrie_capture_patch\n',
+                curl_body=patch.read_text(),
+                extra={"TEST_COWRIE": str(cowrie), "TEST_PATCH": str(root / "capture-patch.py")},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("neither pristine nor fully patched", result.stderr)
+            self.assertEqual(target.read_bytes(), original)
+
     def test_live_service_is_unprivileged_and_preserves_retention_access(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -46,28 +101,57 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_no_cowrie_service_needs_neither_cowrie_group_nor_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            executable = daemon_fixture(Path(tmp))
             result, _ = self._run_installer_functions(
                 Path(tmp),
-                'DATA_DIR=/srv/shardlure\nCOWRIE=0\nDEST=/usr/local/bin/shardlure\nrender_live_service\n',
+                'DATA_DIR=/srv/shardlure\nCOWRIE=0\nDEST="$TEST_DAEMON"\nTSIP=\nrender_live_service\n',
+                extra={"TEST_DAEMON": str(executable)},
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("SupplementaryGroups=systemd-journal\n", result.stdout)
             self.assertNotIn("ReadOnlyPaths=", result.stdout)
             self.assertNotIn("--cowrie=", result.stdout)
             self.assertNotIn("Wants=cowrie.service", result.stdout)
+            self.assertNotIn("ExecStartPre=", result.stdout)
+            self.assertNotIn("tailscaled.service", result.stdout)
+            started = subprocess.run(service_command(result.stdout, "ExecStart"),
+                                     capture_output=True, text=True, check=True)
+            self.assertEqual(started.stdout.splitlines(), ["live", "127.0.0.1:8080"])
+
+    def test_tailscale_prestart_executes_resolved_path_and_waits_for_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable, env = tailscale_fixture(root)
+            result, _ = self._run_installer_functions(
+                root,
+                'DATA_DIR=/srv/shardlure\nCOWRIE=0\nDEST=/usr/bin/true\n'
+                'TSIP=100.64.0.10\nrender_live_service\n',
+                extra={"PATH": f"{executable.parent}:{env['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            check_service_unit(self, root, result.stdout)
+            for state, status, attempts in (("ready", 0, 1), ("delayed", 0, 3),
+                                             ("empty", 1, 30), ("error", 1, 30)):
+                with self.subTest(state=state):
+                    calls = Path(env["TAILSCALE_CALLS"])
+                    calls.unlink(missing_ok=True)
+                    ready = run_service_prestart(result.stdout, dict(env, TAILSCALE_STATE=state))
+                    self.assertEqual(ready.returncode, status, ready.stderr)
+                    self.assertEqual(calls.read_text().splitlines(), ["ip -4"] * attempts)
 
     def test_tailscale_service_waits_for_address_before_live_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            executable, env = tailscale_fixture(Path(tmp))
             result, _ = self._run_installer_functions(
                 Path(tmp),
                 'DATA_DIR=/srv/shardlure\nCOWRIE=0\nDEST=/usr/local/bin/shardlure\n'
                 'TSIP=100.64.0.10\nrender_live_service\n',
+                extra={"PATH": f"{executable.parent}:{env['PATH']}"},
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Wants=network-online.target tailscaled.service", result.stdout)
             self.assertIn("After=network-online.target tailscaled.service", result.stdout)
             self.assertIn("ExecStartPre=/bin/sh -ec", result.stdout)
-            self.assertIn("tailscale ip -4", result.stdout)
 
     @unittest.skipUnless(shutil.which("systemd-analyze"), "requires systemd unit verifier")
     def test_rendered_service_passes_systemd_verification(self) -> None:
