@@ -28,7 +28,7 @@ func TestLedgerV22PreservesLegacyDataAndOptionalTables(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = db.Exec(`DROP TABLE bazaar_uploads; DROP TABLE urlhaus_submissions; DROP TABLE threatfox_submissions;
-DELETE FROM schema_migrations WHERE version=22;
+DELETE FROM schema_migrations WHERE version>=22;
 CREATE TABLE bazaar_uploads(sha256 TEXT PRIMARY KEY, uploaded_at TEXT NOT NULL, response_status TEXT NOT NULL, mb_url TEXT);
 INSERT INTO bazaar_uploads VALUES('old-sample','2026-09-21T11:00:00+01:00','file_already_known','https://example.test/bazaar');`)
 			if err != nil {

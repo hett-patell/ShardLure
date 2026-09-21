@@ -1354,19 +1354,21 @@ type summaryBlock struct {
 }
 
 type actorCard struct {
-	ID       string  `json:"id"`
-	IP       string  `json:"ip"`
-	Playbook string  `json:"playbook"`
-	Intent   string  `json:"intent"`
-	Probe    int     `json:"probe"`
-	Events   int     `json:"events"`
-	RateHour float64 `json:"rateHour"`
-	LastSeen string  `json:"lastSeen"`
-	Conf     int     `json:"conf"`
-	Lat      float64 `json:"lat,omitempty"`
-	Lon      float64 `json:"lon,omitempty"`
-	Country  string  `json:"country,omitempty"`
-	CC       string  `json:"cc,omitempty"`
+	DerivedCurrent bool    `json:"derivedCurrent"`
+	GeneratedNotes string  `json:"generatedNotes"`
+	ID             string  `json:"id"`
+	IP             string  `json:"ip"`
+	Playbook       string  `json:"playbook"`
+	Intent         string  `json:"intent"`
+	Probe          int     `json:"probe"`
+	Events         int     `json:"events"`
+	RateHour       float64 `json:"rateHour"`
+	LastSeen       string  `json:"lastSeen"`
+	Conf           int     `json:"conf"`
+	Lat            float64 `json:"lat,omitempty"`
+	Lon            float64 `json:"lon,omitempty"`
+	Country        string  `json:"country,omitempty"`
+	CC             string  `json:"cc,omitempty"`
 }
 
 type recentRecord struct {
@@ -1515,15 +1517,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	cardRates := s.recentRatesCached()
 	for _, a := range actors {
 		card := actorCard{
-			ID:       a.ID,
-			IP:       a.PrimaryIP,
-			Playbook: a.Playbook,
-			Intent:   a.Intent,
-			Probe:    a.ProbeScore,
-			Events:   a.EventCount,
-			RateHour: cardRates[a.ID],
-			LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
-			Conf:     a.Confidence,
+			DerivedCurrent: a.DerivedCurrent,
+			GeneratedNotes: a.GeneratedNotes,
+			ID:             a.ID,
+			IP:             a.PrimaryIP,
+			Playbook:       a.Playbook,
+			Intent:         a.Intent,
+			Probe:          a.ProbeScore,
+			Events:         a.EventCount,
+			RateHour:       cardRates[a.ID],
+			LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
+			Conf:           a.Confidence,
 		}
 		if !isPrivateIP(a.PrimaryIP) {
 			g := s.geo.cached(a.PrimaryIP)
@@ -1544,15 +1548,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if topActors, err := s.st.TopActorsByEvents(14); err == nil {
 		for _, a := range topActors {
 			tc := actorCard{
-				ID:       a.ID,
-				IP:       a.PrimaryIP,
-				Playbook: a.Playbook,
-				Intent:   a.Intent,
-				Probe:    a.ProbeScore,
-				Events:   a.EventCount,
-				RateHour: cardRates[a.ID],
-				LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
-				Conf:     a.Confidence,
+				DerivedCurrent: a.DerivedCurrent,
+				GeneratedNotes: a.GeneratedNotes,
+				ID:             a.ID,
+				IP:             a.PrimaryIP,
+				Playbook:       a.Playbook,
+				Intent:         a.Intent,
+				Probe:          a.ProbeScore,
+				Events:         a.EventCount,
+				RateHour:       cardRates[a.ID],
+				LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
+				Conf:           a.Confidence,
 			}
 			if !isPrivateIP(a.PrimaryIP) {
 				if g := s.geo.cached(a.PrimaryIP); g.OK {

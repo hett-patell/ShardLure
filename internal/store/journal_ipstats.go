@@ -23,9 +23,9 @@ type JournalIPStats struct {
 	UserCounts map[string]int
 }
 
-// LoadJournalIPStats returns the persisted counters for one journal
-// actor and source IP. Used by the live collector to recover state
-// for an IP that was evicted from its in-memory LRU. Returns a
+// LoadJournalIPStats is the full-corpus diagnostic reader for one journal
+// actor and source IP. The live collector uses LoadJournalCounters instead;
+// never route this unbounded username map through hydration. Returns a
 // zero-value struct (Count == 0, empty UserCounts) when the requested
 // actor/IP pair has no row yet; returns an error only on a true SQL
 // failure.

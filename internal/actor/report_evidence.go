@@ -2,10 +2,8 @@ package actor
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/store"
@@ -24,7 +22,7 @@ func ReportEvidenceForIPContext(ctx context.Context, st *store.Store, a *models.
 	var features playbookFeatures
 	var previousUser string
 	var clientID int64
-	usernameHash := sha256.New()
+	usernameHash := newUsernameHash()
 	recentCount := 0
 	recentSince := now.Add(-store.RecentRateWindow)
 	err := st.IterateReportEvidenceContext(ctx, a.Source, a.PrimaryIP, now.Add(-store.ReportPoolMaxAge), now, func(e *models.Event) {
@@ -41,10 +39,7 @@ func ReportEvidenceForIPContext(ctx context.Context, st *store.Store, a *models.
 		// The store groups usernames, so exact dedup needs one previous value,
 		// not an attacker-sized map. Hash in sorted order for builder parity.
 		if e.Username != "" && e.Username != "?" && e.Username != previousUser {
-			if features.users > 0 {
-				_, _ = io.WriteString(usernameHash, ",")
-			}
-			_, _ = io.WriteString(usernameHash, e.Username)
+			addUsernameHash(usernameHash, e.Username)
 			features.add(e.Username)
 			previousUser = e.Username
 		}
@@ -80,15 +75,16 @@ func ReportEvidenceForIPContext(ctx context.Context, st *store.Store, a *models.
 			if payload || deploy {
 				result.Confidence = ConfidenceCowriePayload
 			}
-			result.Notes = fmt.Sprintf("%d events, %d usernames", result.EventCount, features.users)
+			result.GeneratedNotes = fmt.Sprintf("%d events, %d usernames", result.EventCount, features.users)
 		} else {
 			result.ProbeScore = journalProbeScore(result.EventCount, aph, features.users)
 			result.Confidence = ConfidenceJournalBase
 			if window >= minWindowHours && aph > 100 {
 				result.Confidence = ConfidenceJournalHighAPH
 			}
-			result.Notes = fmt.Sprintf("%d distinct usernames", features.users)
+			result.GeneratedNotes = fmt.Sprintf("%d distinct usernames", features.users)
 		}
+		result.DerivedCurrent = true
 	}
 	// Classification uses the observed seven-day evidence span. Ranking and
 	// generated report comments describe the fixed recent window, not a burst

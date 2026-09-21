@@ -76,7 +76,7 @@ func (s *Store) CountsByIntent() ([]LabelCount, error) {
 }
 
 func (s *Store) CountsByPlaybook() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT playbook, COUNT(*) AS hits FROM actors WHERE playbook != '' GROUP BY playbook ORDER BY hits DESC`)
+	return s.labelCounts("SELECT label,COUNT(*) AS hits FROM (SELECT " + actorVisiblePlaybookSQL + " AS label FROM actors) WHERE label<>'' GROUP BY label ORDER BY hits DESC,label")
 }
 
 func (s *Store) CountsBySource() ([]LabelCount, error) {

@@ -52,25 +52,27 @@ type heatmapCell struct {
 }
 
 type intelActorRow struct {
-	ID          string       `json:"id"`
-	IP          string       `json:"ip"`
-	Source      string       `json:"source"`
-	Playbook    string       `json:"playbook"`
-	Intent      string       `json:"intent"`
-	Events      int          `json:"events"`
-	UniqueUsers int          `json:"uniqueUsers"`
-	RateHour    float64      `json:"rateHour"`
-	ProbeScore  int          `json:"probeScore"`
-	Confidence  int          `json:"confidence"`
-	HASSH       string       `json:"hassh,omitempty"`
-	SSHClient   string       `json:"sshClient,omitempty"`
-	FirstSeen   string       `json:"firstSeen"`
-	LastSeen    string       `json:"lastSeen"`
-	Country     string       `json:"country,omitempty"`
-	City        string       `json:"city,omitempty"`
-	CC          string       `json:"cc,omitempty"`
-	TopUsers    []topUserRow `json:"topUsers"`
-	LastCommand string       `json:"lastCommand,omitempty"`
+	DerivedCurrent bool         `json:"derivedCurrent"`
+	GeneratedNotes string       `json:"generatedNotes"`
+	ID             string       `json:"id"`
+	IP             string       `json:"ip"`
+	Source         string       `json:"source"`
+	Playbook       string       `json:"playbook"`
+	Intent         string       `json:"intent"`
+	Events         int          `json:"events"`
+	UniqueUsers    int          `json:"uniqueUsers"`
+	RateHour       float64      `json:"rateHour"`
+	ProbeScore     int          `json:"probeScore"`
+	Confidence     int          `json:"confidence"`
+	HASSH          string       `json:"hassh,omitempty"`
+	SSHClient      string       `json:"sshClient,omitempty"`
+	FirstSeen      string       `json:"firstSeen"`
+	LastSeen       string       `json:"lastSeen"`
+	Country        string       `json:"country,omitempty"`
+	City           string       `json:"city,omitempty"`
+	CC             string       `json:"cc,omitempty"`
+	TopUsers       []topUserRow `json:"topUsers"`
+	LastCommand    string       `json:"lastCommand,omitempty"`
 }
 
 type commandRow struct {
@@ -222,13 +224,15 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	for _, a := range actors {
 		row := intelActorRow{
-			ID:          a.ID,
-			IP:          a.PrimaryIP,
-			Source:      string(a.Source),
-			Playbook:    a.Playbook,
-			Intent:      a.Intent,
-			Events:      a.EventCount,
-			UniqueUsers: a.UniqueUsers,
+			DerivedCurrent: a.DerivedCurrent,
+			GeneratedNotes: a.GeneratedNotes,
+			ID:             a.ID,
+			IP:             a.PrimaryIP,
+			Source:         string(a.Source),
+			Playbook:       a.Playbook,
+			Intent:         a.Intent,
+			Events:         a.EventCount,
+			UniqueUsers:    a.UniqueUsers,
 			// Windowed, not the stored lifetime average: the UI renders this as
 			// "rate/h" meaning current intensity, and a lifetime mean understates
 			// an escalating attacker 2-3x. Absent from the map = no recent
@@ -286,20 +290,22 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := intelActorRow{
-		ID:          a.ID,
-		IP:          a.PrimaryIP,
-		Source:      string(a.Source),
-		Playbook:    a.Playbook,
-		Intent:      a.Intent,
-		Events:      a.EventCount,
-		UniqueUsers: a.UniqueUsers,
-		RateHour:    s.recentRatesCached()[a.ID],
-		ProbeScore:  a.ProbeScore,
-		Confidence:  a.Confidence,
-		HASSH:       a.HASSH,
-		SSHClient:   a.SSHClient,
-		FirstSeen:   a.FirstSeen.UTC().Format(time.RFC3339),
-		LastSeen:    a.LastSeen.UTC().Format(time.RFC3339),
+		DerivedCurrent: a.DerivedCurrent,
+		GeneratedNotes: a.GeneratedNotes,
+		ID:             a.ID,
+		IP:             a.PrimaryIP,
+		Source:         string(a.Source),
+		Playbook:       a.Playbook,
+		Intent:         a.Intent,
+		Events:         a.EventCount,
+		UniqueUsers:    a.UniqueUsers,
+		RateHour:       s.recentRatesCached()[a.ID],
+		ProbeScore:     a.ProbeScore,
+		Confidence:     a.Confidence,
+		HASSH:          a.HASSH,
+		SSHClient:      a.SSHClient,
+		FirstSeen:      a.FirstSeen.UTC().Format(time.RFC3339),
+		LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
 	}
 	if !isPrivateIP(a.PrimaryIP) {
 		g := s.geo.cached(a.PrimaryIP)

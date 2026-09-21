@@ -18,12 +18,10 @@ func reconcileSession(st *store.Store, sid, hassh string) error {
 		if target != nil {
 			cc.SeedActorState(target.Actor, target.Users, target.IPs)
 		}
-		generated := make(map[string]bool, len(states))
 		for id, s := range states {
 			if s.Actor.Source != models.SourceCowrie {
 				return nil, fmt.Errorf("HASSH reconciliation: non-Cowrie aggregate %q", id)
 			}
-			generated[id] = s.Actor.Notes == "" || s.Actor.Notes == fmt.Sprintf("%d events, %d usernames", s.Actor.EventCount, s.Actor.UniqueUsers)
 		}
 		if err := stream(func(e *models.Event) error {
 			old := states[e.ActorID]
@@ -57,7 +55,7 @@ func reconcileSession(st *store.Store, sid, hassh string) error {
 		}
 		updated := cc.Finalize()
 		for _, agg := range updated {
-			if target != nil && !generated[targetID] {
+			if target != nil {
 				agg.Actor.Notes = target.Actor.Notes
 			}
 		}
@@ -72,11 +70,9 @@ func reconcileSession(st *store.Store, sid, hassh string) error {
 			remaining.SeedActorState(s.Actor, s.Users, s.IPs)
 			for _, agg := range remaining.Finalize() {
 				agg.Actor.ID = id
-				if !generated[id] {
-					agg.Actor.Notes = s.Actor.Notes
-				} else if agg.Actor.EventCount == 0 {
-					agg.Actor.Notes = ""
-				}
+				// Legacy notes may be operator-authored even when their text
+				// resembles an old generated summary. Preserve without guessing.
+				agg.Actor.Notes = s.Actor.Notes
 				updated = append(updated, agg)
 			}
 		}

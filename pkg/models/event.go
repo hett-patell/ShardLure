@@ -86,6 +86,10 @@ type Actor struct {
 	// actor.journalProbeScore from the event mix and attempt rate.
 	ProbeScore int
 	Notes      string
+	// GeneratedNotes is classifier-owned; Notes and Campaigns are operator work.
+	GeneratedNotes string
+	// DerivedCurrent is false for pending/unknown-history journal profiles.
+	DerivedCurrent bool
 	// Flags is the ActorFlag bitmask of the event mix the actor has produced
 	// (probe/tunnel/payload/...). Persisted so the ingest path can fold fresh
 	// events into the stored aggregate without re-scanning the actor's whole

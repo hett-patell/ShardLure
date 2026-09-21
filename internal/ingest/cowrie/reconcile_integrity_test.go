@@ -220,3 +220,28 @@ func TestLateHASSHPreservesRetainedLifetimeAndAnnotations(t *testing.T) {
 		t.Fatal("historical first seen lost")
 	}
 }
+
+func TestReconcilePreservesAnnotationThatLooksGenerated(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+	path := writeTempCowrieLog(t, `{"eventid":"cowrie.login.failed","timestamp":"2026-09-21T10:00:00Z","src_ip":"1.2.3.4","username":"root","session":"annotated"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Arbitrary legacy note text is operator-owned, even when it happens to
+	// match an old classifier's output. Do not guess that it is disposable.
+	if err := st.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec("UPDATE actors SET notes='1 events, 1 usernames' WHERE id='cowrie:1.2.3.4'")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendLine(t, path, `{"eventid":"cowrie.client.kex","timestamp":"2026-09-21T10:00:01Z","session":"annotated","hassh":"annotation-target"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatal(err)
+	}
+	old, err := st.GetActor("cowrie:1.2.3.4")
+	if err != nil || old.Notes != "1 events, 1 usernames" || old.EventCount != 0 {
+		t.Fatalf("annotation-bearing actor removed: %+v err=%v", old, err)
+	}
+}

@@ -713,6 +713,11 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	if current < 23 {
+		if err := s.migrateJournalSummaries(now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -851,20 +856,20 @@ func (s *Store) UpsertActor(a *models.Actor) error {
 
 func upsertActor(db sqlExecer, a *models.Actor) error {
 	_, err := db.Exec(`
-INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags, generated_notes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   primary_ip=excluded.primary_ip, playbook=excluded.playbook, intent=excluded.intent,
   confidence=excluded.confidence, first_seen=excluded.first_seen, last_seen=excluded.last_seen,
   event_count=excluded.event_count,
   unique_users=excluded.unique_users, attempts_per_hour=excluded.attempts_per_hour,
   hassh=excluded.hassh, ssh_client=excluded.ssh_client, username_hash=excluded.username_hash,
-  campaigns=excluded.campaigns, probe_score=excluded.probe_score, notes=excluded.notes,
-  flags=excluded.flags`,
+  probe_score=excluded.probe_score,
+  flags=excluded.flags, generated_notes=excluded.generated_notes`,
 		a.ID, a.Source, a.PrimaryIP, a.Playbook, a.Intent, a.Confidence,
 		a.FirstSeen.UTC().Format(time.RFC3339Nano), a.LastSeen.UTC().Format(time.RFC3339Nano),
 		a.EventCount, a.UniqueUsers, a.AttemptsPerHour, a.HASSH, a.SSHClient,
-		a.UsernameHash, a.Campaigns, a.ProbeScore, a.Notes, a.Flags)
+		a.UsernameHash, a.Campaigns, a.ProbeScore, a.Notes, a.Flags, a.GeneratedNotes)
 	return err
 }
 
@@ -925,7 +930,7 @@ ON CONFLICT(actor_id, username) DO UPDATE SET count=excluded.count`,
 // actorColumns is the canonical SELECT list for an actors row. Kept in
 // one place so ListActors / GetActor / GetActorByPrimaryIP stay in sync
 // with scanActorRow below.
-const actorColumns = `id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags`
+const actorColumns = `id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags, generated_notes, (` + journalDerivedStateSQL + `)='current',` + journalDerivedStateSQL
 
 // rowScan is satisfied by both *sql.Row and *sql.Rows so the same
 // scan code can be used for single-row QueryRow and Query iteration.
@@ -941,9 +946,10 @@ type rowScan interface {
 // than silently zeroed (fix #13).
 func scanActorRow(r rowScan, a *models.Actor) error {
 	var fs, ls string
+	var derivedStatus string
 	if err := r.Scan(&a.ID, &a.Source, &a.PrimaryIP, &a.Playbook, &a.Intent, &a.Confidence,
 		&fs, &ls, &a.EventCount, &a.UniqueUsers, &a.AttemptsPerHour, &a.HASSH, &a.SSHClient,
-		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes, &a.Flags); err != nil {
+		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes, &a.Flags, &a.GeneratedNotes, &a.DerivedCurrent, &derivedStatus); err != nil {
 		return err
 	}
 	var err error
@@ -952,6 +958,14 @@ func scanActorRow(r rowScan, a *models.Actor) error {
 	}
 	if a.LastSeen, err = parseTime(ls); err != nil {
 		return fmt.Errorf("actor %s last_seen: %w", a.ID, err)
+	}
+	if a.Source == models.SourceJournal && !a.DerivedCurrent {
+		a.UsernameHash, a.Confidence, a.ProbeScore = "", 0, 0
+		if derivedStatus == "unknown_history" {
+			a.Playbook, a.GeneratedNotes = "unknown_history", "Historical username coverage is unverified"
+		} else {
+			a.Playbook, a.GeneratedNotes = "pending", "Journal profile derivation is pending"
+		}
 	}
 	return nil
 }

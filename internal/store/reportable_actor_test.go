@@ -46,6 +46,11 @@ func TestGetReportableActorByIP(t *testing.T) {
 	if err := st.AppendEventsAndUpsertActorsAgg(nil, []*models.AggregatedActor{journal, cowrie}); err != nil {
 		t.Fatal(err)
 	}
+	// This fixture represents a completed classifier result, not unverified
+	// pre-v23 history. Unknown-history masking is exercised separately.
+	if _, err := st.db.Exec("UPDATE journal_summaries SET status='current',completed_revision=corpus_revision WHERE actor_id=?", journal.Actor.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	// GetActorByPrimaryIP (last_seen order) picks the low-signal cowrie row —
 	// this is the behaviour that caused the bug.

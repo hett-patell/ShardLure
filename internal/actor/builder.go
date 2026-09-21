@@ -1,10 +1,8 @@
 package actor
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +19,7 @@ type IPStats struct {
 	Count       int
 	Users       map[string]int
 	First, Last time.Time
+	omitted     int // bounded live-cache misses; never a synthetic username
 }
 
 type CowrieStats struct {
@@ -239,7 +238,8 @@ func journalActor(ip string, st *IPStats) *models.Actor {
 		AttemptsPerHour: aph,
 		UsernameHash:    usernameSetHash(users),
 		ProbeScore:      journalProbeScore(st.Count, aph, len(st.Users)),
-		Notes:           fmt.Sprintf("%d distinct usernames", len(st.Users)),
+		GeneratedNotes:  fmt.Sprintf("%d distinct usernames", len(st.Users)),
+		DerivedCurrent:  true,
 	}
 	if window >= minWindowHours && aph > 100 {
 		a.Confidence = ConfidenceJournalHighAPH
@@ -452,7 +452,8 @@ func (c *cowrieCollector) finalize() []*AggregatedActor {
 			SSHClient:       st.Client,
 			UsernameHash:    uhash,
 			ProbeScore:      cowrieProbeScore(st, aph),
-			Notes:           fmt.Sprintf("%d events, %d usernames", st.Count, len(st.Users)),
+			GeneratedNotes:  fmt.Sprintf("%d events, %d usernames", st.Count, len(st.Users)),
+			DerivedCurrent:  true,
 			Campaigns:       st.Campaigns,
 			Flags:           st.Flags,
 		}
@@ -480,12 +481,9 @@ func usernameSetHash(users []string) string {
 	if len(users) == 0 {
 		return ""
 	}
-	h := sha256.New()
-	for i, u := range users {
-		if i > 0 {
-			_, _ = io.WriteString(h, ",")
-		}
-		_, _ = io.WriteString(h, u)
+	h := newUsernameHash()
+	for _, u := range users {
+		addUsernameHash(h, u)
 	}
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:8])
