@@ -24,6 +24,10 @@ func (s *Server) guardOperationalRead(handler http.HandlerFunc) http.HandlerFunc
 			w = operationalHeadWriter{w}
 		}
 		w.Header().Set("Cache-Control", "no-store")
+		if s.dashboardToken() == "" && s.originPolicy.IsTrustedPeer(r.RemoteAddr) {
+			http.Error(w, "operational endpoints require authentication through a proxy", http.StatusForbidden)
+			return
+		}
 		if r.URL.Query().Has("token") {
 			http.Error(w, "query credentials are not accepted", 401)
 			return

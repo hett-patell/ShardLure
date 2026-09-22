@@ -331,6 +331,7 @@ func waitForBackfill(ctx context.Context, wait time.Duration) bool {
 
 func webOptions(cfg config.Config) web.Options {
 	return web.Options{
+		PublicOrigin: cfg.Dashboard.PublicOrigin, TrustedProxies: append([]string(nil), cfg.Dashboard.TrustedProxies...),
 		HomeLat:         cfg.Dashboard.HomeLat,
 		HomeLon:         cfg.Dashboard.HomeLon,
 		HomeCity:        cfg.Dashboard.HomeCity,

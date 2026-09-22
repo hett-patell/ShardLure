@@ -537,6 +537,11 @@ func (s *Server) handleTokenRotate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	_, secure, err := s.originPolicy.Expected(r)
+	if err != nil {
+		http.Error(w, "invalid request origin", http.StatusForbidden)
+		return
+	}
 	tok, err := newRandomToken()
 	if err != nil {
 		httpError(w, "token_rotate", err, http.StatusInternalServerError)
@@ -555,7 +560,7 @@ func (s *Server) handleTokenRotate(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
 		MaxAge:   0, // session cookie
 	})
 	// This is the one place a token value is returned — to the authenticated

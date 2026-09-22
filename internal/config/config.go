@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,12 +24,14 @@ type Config struct {
 	} `yaml:"ssh"`
 
 	Dashboard struct {
-		Port        int     `yaml:"port"`
-		HomeLat     float64 `yaml:"home_lat"`
-		HomeLon     float64 `yaml:"home_lon"`
-		HomeCity    string  `yaml:"home_city"`
-		HomeCountry string  `yaml:"home_country"`
-		HomeCC      string  `yaml:"home_cc"`
+		PublicOrigin   string   `yaml:"public_origin"`
+		TrustedProxies []string `yaml:"trusted_proxies"`
+		Port           int      `yaml:"port"`
+		HomeLat        float64  `yaml:"home_lat"`
+		HomeLon        float64  `yaml:"home_lon"`
+		HomeCity       string   `yaml:"home_city"`
+		HomeCountry    string   `yaml:"home_country"`
+		HomeCC         string   `yaml:"home_cc"`
 	} `yaml:"dashboard"`
 
 	Journal struct {
@@ -318,6 +321,9 @@ func Parse(b []byte) (Config, error) {
 // zero values that have defined meaning (Port 0 = pick default later, Retention
 // 0 = purging disabled by design).
 func (c Config) Validate() error {
+	if _, err := netmatch.NewOriginPolicy(c.Dashboard.PublicOrigin, c.Dashboard.TrustedProxies); err != nil {
+		return err
+	}
 	if c.Observability.MinFreeBytes < 0 {
 		return fmt.Errorf("config: observability.min_free_bytes must be nonnegative")
 	}

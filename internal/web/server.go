@@ -37,11 +37,13 @@ func httpError(w http.ResponseWriter, where string, err error, code int) {
 }
 
 type Server struct {
-	onListening func(net.Addr)
-	monitor     *observability.Monitor
-	st          *store.Store
-	addr        string
-	geo         *geoResolver
+	originPolicy OriginPolicy
+	originError  error
+	onListening  func(net.Addr)
+	monitor      *observability.Monitor
+	st           *store.Store
+	addr         string
+	geo          *geoResolver
 	// keys is the live runtime keystore. Secrets (dashboard token, bazaar +
 	// abuseipdb API keys) and the tunable knobs below are read THROUGH it at
 	// request time so a value saved from the Settings panel takes effect
@@ -644,6 +646,8 @@ func (s *Server) topCountriesCached() []topCountryRow {
 }
 
 type Options struct {
+	PublicOrigin   string
+	TrustedProxies []string
 	// OnListening announces successful binding before long application seeding.
 	OnListening     func(net.Addr)
 	Monitor         *observability.Monitor
@@ -794,6 +798,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		startedAt:                time.Now(),
 	}
 	server.geo.monitor = firstOpt.Monitor
+	server.originPolicy, server.originError = NewOriginPolicy(firstOpt.PublicOrigin, firstOpt.TrustedProxies)
 	return server
 }
 
@@ -929,6 +934,9 @@ func (s *Server) RunContext(ctx context.Context) error {
 			s.geo.mmdb.close()
 		}
 	}()
+	if s.originError != nil {
+		return s.originError
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.guardOperationalRead(s.handleHealth))
 	mux.HandleFunc("/readyz", s.guardOperationalRead(s.handleReady))
@@ -1232,7 +1240,7 @@ func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bo
 	}
 	if ck, err := r.Cookie("shardlure_session"); err == nil && s.tokenMatches(ck.Value) {
 		if r.Header.Get("Sec-Fetch-Site") == "cross-site" ||
-			(r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && !sameOriginRequest(r)) {
+			(r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && !s.sameOriginRequest(r)) {
 			http.Error(w, "same-origin request required", http.StatusForbidden)
 			return false
 		}
@@ -1297,13 +1305,18 @@ func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 	// 3. Check ?token= query param (bootstrap only). On success, set cookie
 	//    and redirect to the same URL without the token so it leaves history.
 	if qt := r.URL.Query().Get("token"); s.tokenMatches(qt) {
+		_, secure, err := s.originPolicy.Expected(r)
+		if err != nil {
+			http.Error(w, "invalid request origin", http.StatusForbidden)
+			return false
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     "shardlure_session",
 			Value:    qt,
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteStrictMode,
-			Secure:   r.TLS != nil,
+			Secure:   secure,
 			MaxAge:   0, // session cookie - expires when the browser closes
 		})
 		// Strip token from the URL and redirect.
