@@ -5,6 +5,21 @@ import (
 	"testing"
 )
 
+func TestObservabilityMinimumFreeBytes(t *testing.T) {
+	c := Default()
+	if c.Observability.MinFreeBytes != 268435456 {
+		t.Fatal("missing safe default")
+	}
+	c.Observability.MinFreeBytes = 0
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Observability.MinFreeBytes = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative free-space threshold accepted")
+	}
+}
+
 func TestValidateRejectsBadValues(t *testing.T) {
 	cases := []struct {
 		name   string

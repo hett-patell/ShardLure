@@ -10,6 +10,9 @@ import (
 )
 
 type Config struct {
+	Observability struct {
+		MinFreeBytes int64 `yaml:"min_free_bytes"`
+	} `yaml:"observability"`
 	DataDir string `yaml:"data_dir"`
 
 	AdminIPs []string `yaml:"admin_ips"`
@@ -216,6 +219,7 @@ func userDataDir() string {
 func Default() Config {
 	dir := userDataDir()
 	c := Config{DataDir: dir}
+	c.Observability.MinFreeBytes = 268435456
 	c.AdminIPs = []string{}
 	c.Journal.Unit = "ssh"
 	c.SSH.AdminPort = 2222
@@ -314,6 +318,9 @@ func Parse(b []byte) (Config, error) {
 // zero values that have defined meaning (Port 0 = pick default later, Retention
 // 0 = purging disabled by design).
 func (c Config) Validate() error {
+	if c.Observability.MinFreeBytes < 0 {
+		return fmt.Errorf("config: observability.min_free_bytes must be nonnegative")
+	}
 	checkPort := func(name string, p int) error {
 		if p < 0 || p > 65535 {
 			return fmt.Errorf("config: %s must be in 0-65535, got %d", name, p)

@@ -9,6 +9,8 @@ import (
 
 type Root struct{}
 
+func (*Root) CheckWritable() error { return ErrUnsupported }
+
 func (*Root) Stat(string) (fs.FileInfo, error) { return nil, ErrUnsupported }
 
 func (*Root) Info() (fs.FileInfo, error)            { return nil, ErrUnsupported }

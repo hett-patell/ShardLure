@@ -140,6 +140,8 @@ type WorkerState struct {
 	Failure                                      Failure
 }
 type Snapshot struct {
+	Aggregates       AggregateSample
+	ProbeFailures    uint64
 	At, StartedAt    time.Time
 	Uptime           time.Duration
 	Phase            Phase
@@ -224,12 +226,14 @@ func (m *Monitor) ObserveDurableShare(provider Provider, outcome Outcome, n uint
 	m.mu.Unlock()
 	return nil
 }
-func (m *Monitor) RecordSample(sample Sample) { m.mu.Lock(); m.state.Sample = sample; m.mu.Unlock() }
+func (m *Monitor) RecordSample(sample Sample) {
+	sample.At = sample.At.UTC()
+	m.mu.Lock()
+	m.state.Sample = sample
+	m.mu.Unlock()
+}
 func (m *Monitor) Snapshot() Snapshot {
-	now := time.Now()
-	if m.now != nil {
-		now = m.now()
-	}
+	now := m.clockNow()
 	m.mu.Lock()
 	s := m.state
 	m.mu.Unlock()
@@ -247,6 +251,13 @@ func (m *Monitor) Snapshot() Snapshot {
 	return s
 }
 func (m *Monitor) Ready() (bool, Reason) { s := m.Snapshot(); return s.Ready, s.Reason }
+
+func (m *Monitor) clockNow() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
 
 func captureRequired(s Snapshot) bool {
 	return s.Sample.CaptureRequired || s.Workers[CaptureURL].Enabled || s.Workers[CaptureFiles].Enabled

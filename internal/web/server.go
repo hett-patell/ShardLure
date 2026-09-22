@@ -21,6 +21,7 @@ import (
 	"github.com/networkshard/shardlure/internal/hostsvc"
 	"github.com/networkshard/shardlure/internal/intel/vt"
 	"github.com/networkshard/shardlure/internal/netmatch"
+	"github.com/networkshard/shardlure/internal/observability"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
@@ -36,9 +37,10 @@ func httpError(w http.ResponseWriter, where string, err error, code int) {
 }
 
 type Server struct {
-	st   *store.Store
-	addr string
-	geo  *geoResolver
+	monitor *observability.Monitor
+	st      *store.Store
+	addr    string
+	geo     *geoResolver
 	// keys is the live runtime keystore. Secrets (dashboard token, bazaar +
 	// abuseipdb API keys) and the tunable knobs below are read THROUGH it at
 	// request time so a value saved from the Settings panel takes effect
@@ -641,6 +643,7 @@ func (s *Server) topCountriesCached() []topCountryRow {
 }
 
 type Options struct {
+	Monitor         *observability.Monitor
 	HomeLat         float64
 	HomeLon         float64
 	HomeCity        string
@@ -758,6 +761,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		abuseRewindow = 24 * time.Hour
 	}
 	return &Server{
+		monitor:               firstOpt.Monitor,
 		st:                    st,
 		addr:                  addr,
 		keys:                  keys,
@@ -915,6 +919,9 @@ func (s *Server) homeLive() homePoint {
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
 func (s *Server) RunContext(ctx context.Context) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", s.guardOperationalRead(s.handleHealth))
+	mux.HandleFunc("/readyz", s.guardOperationalRead(s.handleReady))
+	mux.HandleFunc("/metrics", s.guardOperationalRead(s.handleMetrics))
 	// Every /api/* route is registered through s.guard so the auth check
 	// lives in ONE place — a new handler cannot forget it. Handlers keep
 	// their own inner requireDashboardAuth calls harmlessly (it's

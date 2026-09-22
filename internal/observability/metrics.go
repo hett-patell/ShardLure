@@ -46,6 +46,32 @@ func WritePrometheus(out io.Writer, s Snapshot) error {
 	write("shardlure_health_sample_age_seconds %g\n", s.SampleAge.Seconds())
 	header("database_up", "gauge", "Last sampled database reachability.")
 	write("shardlure_database_up %d\n", flag(s.Sample.DatabaseUp && s.SampleValid))
+	header("probe_failures_total", "counter", "Process-local failed health probe cycles.")
+	write("shardlure_probe_failures_total %d\n", s.ProbeFailures)
+	age := s.At.Sub(s.Aggregates.At)
+	available := s.Aggregates.Valid && !s.Aggregates.At.IsZero() && age >= 0 && age <= 2*time.Minute
+	header("aggregate_sample_available", "gauge", "Whether operational aggregates are available and recent.")
+	write("shardlure_aggregate_sample_available %d\n", flag(available))
+	header("aggregate_sample_age_seconds", "gauge", "Age of last successful operational aggregates; availability is separate.")
+	if s.Aggregates.At.IsZero() {
+		age = 0
+	}
+	write("shardlure_aggregate_sample_age_seconds %g\n", age.Seconds())
+	header("capture_jobs", "gauge", "Persisted queued work by fixed source and state; aggregate availability is separate.")
+	for _, row := range []struct {
+		source, state string
+		n             int64
+	}{{"file", "pending", s.Aggregates.FilePending}, {"file", "retry", s.Aggregates.FileRetry}, {"file", "leased", s.Aggregates.FileLeased}, {"url", "pending", s.Aggregates.URLPending}, {"url", "retry", s.Aggregates.URLRetry}, {"url", "leased", s.Aggregates.URLLeased}} {
+		write("shardlure_capture_jobs{source=%q,state=%q} %d\n", row.source, row.state, row.n)
+	}
+	header("capture_discovery_lag", "gauge", "Event-ID distance behind discovery, not a count of expired records.")
+	write("shardlure_capture_discovery_lag{source=\"file\"} %d\nshardlure_capture_discovery_lag{source=\"command\"} %d\n", s.Aggregates.FileDiscoveryLag, s.Aggregates.CommandDiscoveryLag)
+	header("capture_protected_file_jobs", "gauge", "Live jobs retaining their required source names.")
+	write("shardlure_capture_protected_file_jobs %d\n", s.Aggregates.ProtectedFileJobs)
+	header("database_pool_connections", "gauge", "Last sampled SQL pool pressure.")
+	write("shardlure_database_pool_connections{state=\"open\"} %d\nshardlure_database_pool_connections{state=\"in_use\"} %d\n", s.Aggregates.PoolOpen, s.Aggregates.PoolInUse)
+	header("database_pool_waits", "gauge", "Sampled process SQL pool wait count; aggregate availability is separate.")
+	write("shardlure_database_pool_waits %d\n", s.Aggregates.PoolWaits)
 	header("volume_available", "gauge", "Whether volume measurements are available.")
 	write("shardlure_volume_available{role=\"data\"} %d\n", flag(s.SampleValid && s.Sample.DataAccessible))
 	write("shardlure_volume_available{role=\"evidence\"} %d\n", flag(s.SampleValid && capture && s.Sample.EvidenceAccessible))

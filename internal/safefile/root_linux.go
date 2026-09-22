@@ -25,6 +25,27 @@ type Root struct {
 	path string
 }
 
+// CheckWritable probes access without creating/removing a test file. Explicit
+// owner-read-only mode remains unavailable even to a privileged process.
+func (r *Root) CheckWritable() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return ErrClosed
+	}
+	if err := r.checkOutputLocked(); err != nil {
+		return err
+	}
+	info, err := r.dir.Stat()
+	if err != nil {
+		return ErrIO
+	}
+	if info.Mode().Perm()&0200 == 0 {
+		return ErrPermission
+	}
+	return safeError(unix.Faccessat2(int(r.dir.Fd()), ".", unix.R_OK|unix.W_OK|unix.X_OK, unix.AT_EACCESS))
+}
+
 // Stat inspects metadata through O_PATH, never a regular data descriptor. This
 // lets backup inventory exclude active SQLite inodes before opening contents.
 func (r *Root) Stat(name string) (fs.FileInfo, error) {
