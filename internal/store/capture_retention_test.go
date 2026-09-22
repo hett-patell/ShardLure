@@ -217,6 +217,45 @@ func TestCaptureRetentionRetiresOnlyExpiredTerminalDiagnostics(t *testing.T) {
 	}
 }
 
+func TestCaptureRetentionKeepsRecentArchivedJobEvidence(t *testing.T) {
+	s := newTestStore(t, "recent-result.db")
+	root := t.TempDir()
+	path := filepath.Join(root, "blob")
+	if err := os.WriteFile(path, []byte("inert"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.SetCaptureRetentionPolicy(CaptureRetentionPolicy{EvidenceRoot: root})
+	old := time.Now().Add(-72 * time.Hour)
+	if err := s.InsertEvent(&models.Event{TS: old, Source: models.SourceCowrie, Kind: models.KindFileDown, Filename: "inert"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := s.ClaimFileCaptures(context.Background(), time.Now(), 1, time.Minute)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim %v", err)
+	}
+	if err := s.CompleteFileCapture(context.Background(), jobs[0], time.Now(), FileCaptureResult{Status: FileCaptureArchived, LocalPath: path, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", SizeBytes: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MaintenancePurge(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("fresh durable result now points to deleted bytes: %v", err)
+	}
+	if _, err := s.db.Exec("UPDATE capture_file_jobs SET updated_at=?", captureTime(old)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MaintenancePurge(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expired result pinned evidence forever: %v", err)
+	}
+}
+
 func TestCaptureRetentionPreservesOperatorNoteOnlyOrphan(t *testing.T) {
 	s := newTestStore(t, "retention-notes.db")
 	old := time.Now().Add(-72 * time.Hour)

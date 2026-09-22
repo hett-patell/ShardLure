@@ -116,8 +116,12 @@ func artifactRetentionPageTx(q sqlQueryer, cursor int64, cutoff time.Time) ([]ex
 	rows, err := q.Query(`SELECT id,
 CASE WHEN length(CAST(COALESCE(last_seen_at,ts,created_at,'') AS BLOB))<=64 THEN COALESCE(last_seen_at,ts,created_at,'') END,
 CASE WHEN length(CAST(COALESCE(local_path,'') AS BLOB))<=4096 THEN COALESCE(local_path,'') END,
-origin='quarantine_fetch' AND (status='capturing' OR (status IN ('pending','failed') AND attempt_count<5))
-FROM artifacts WHERE id>? ORDER BY id LIMIT ?`, cursor, artifactRetentionPage)
+COALESCE(origin='quarantine_fetch' AND (status='capturing' OR (status IN ('pending','failed') AND attempt_count<5)),0)
+OR (origin='cowrie_file_download' AND substr(url,1,13)='cowrie-event:' AND EXISTS(
+ SELECT 1 FROM capture_file_jobs j WHERE j.event_id=CAST(substr(artifacts.url,14) AS INTEGER)
+ AND j.state='archived' AND j.result_path=artifacts.local_path
+ AND (shardlure_time_key(j.updated_at)>=? OR EXISTS(SELECT 1 FROM events e WHERE e.id=j.event_id))))
+FROM artifacts WHERE id>? ORDER BY id LIMIT ?`, formatFixedUTC(cutoff), cursor, artifactRetentionPage)
 	if err != nil {
 		return nil, cursor, 0, err
 	}
