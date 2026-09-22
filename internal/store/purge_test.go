@@ -121,6 +121,7 @@ func TestMaintenancePurgeUsesExactMixedTimestampBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	st.SetCaptureRetentionPolicy(CaptureRetentionPolicy{EvidenceRoot: dir})
 	cutoff := time.Now().UTC().AddDate(0, 0, -30)
 	fresh := cutoff.Add(2 * time.Hour)
 	old := cutoff.Add(-2 * time.Hour)
@@ -352,6 +353,7 @@ func TestMaintenancePurgeDeletesEvidenceFiles(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer s.Close()
+	s.SetCaptureRetentionPolicy(CaptureRetentionPolicy{EvidenceRoot: dir})
 
 	now := time.Now().UTC()
 	oldTS := now.AddDate(0, 0, -90)
@@ -435,6 +437,7 @@ func TestMaintenancePurgeReferenceSafe(t *testing.T) {
 	defer s.Close()
 
 	evidenceDir := filepath.Join(t.TempDir(), "evidence")
+	s.SetCaptureRetentionPolicy(CaptureRetentionPolicy{EvidenceRoot: evidenceDir})
 	if err := os.MkdirAll(evidenceDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

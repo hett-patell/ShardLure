@@ -2,8 +2,10 @@ package capture
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/netmatch"
+	"github.com/networkshard/shardlure/internal/safefile"
 )
 
 // FetchResult holds a quarantined download.
@@ -191,6 +194,12 @@ func blockedIP(ip net.IP, admin *netmatch.Set, allowLoopback bool) bool {
 
 // Fetch downloads url into evidence/quarantine/<sha256> (mode 0600). Never executes content.
 func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, error) {
+	return f.fetchWithPublication(ctx, rawURL, func(_ *FetchResult, publish func() error) error { return publish() })
+}
+
+// finalize coordinates only publication and durable recording. The HTTP read,
+// hashing and temporary-file write are deliberately outside the retention guard.
+func (f *SafeFetcher) fetchWithPublication(ctx context.Context, rawURL string, finalize func(*FetchResult, func() error) error) (*FetchResult, error) {
 	// Include DNS validation and body/filesystem work in the same total budget,
 	// not just Client.Do. A stopped daemon must not start another lookup.
 	if f.Timeout > 0 {
@@ -202,9 +211,11 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, e
 		return captureFailure(err, "URL validation failed")
 	}
 	dir := filepath.Join(f.EvidenceDir, "quarantine")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	root, err := safefile.EnsureDirectory(dir)
+	if err != nil {
 		return captureFailure(err, "cannot create quarantine directory")
 	}
+	defer root.Close()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -237,14 +248,23 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, e
 		return terminalCaptureFailure("blocked", "content-length too large")
 	}
 
-	tmp, err := os.CreateTemp(dir, "fetch-*.part")
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return captureFailure(err, "cannot create quarantine file")
+	}
+	tmpName := ".fetch-" + hex.EncodeToString(nonce[:])
+	tmp, err := root.CreateExclusive(tmpName, 0600)
 	if err != nil {
 		return captureFailure(err, "cannot create quarantine file")
 	}
-	tmpPath := tmp.Name()
+	created, err := tmp.Stat()
+	if err != nil {
+		tmp.Close()
+		return captureFailure(err, "cannot inspect quarantine file")
+	}
 	defer func() {
 		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
+		_ = root.RemoveCreated(tmpName, created)
 	}()
 
 	h := sha256.New()
@@ -264,29 +284,42 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string) (*FetchResult, e
 		// as a captured sample downstream.
 		return &FetchResult{Status: "empty", Detail: "zero-byte body"}, nil
 	}
+	if err := tmp.Sync(); err != nil {
+		return captureFailure(err, "cannot sync quarantine file")
+	}
 	if err := tmp.Close(); err != nil {
 		return captureFailure(err, "cannot close quarantine file")
 	}
 
 	sum := hex.EncodeToString(h.Sum(nil))
 	final := filepath.Join(dir, sum)
-	if err := os.Rename(tmpPath, final); err != nil {
-		if os.IsExist(err) || fileExists(final) {
-			_ = os.Remove(tmpPath)
-		} else {
-			return captureFailure(err, "cannot finalize quarantine file")
-		}
-	}
-	if err := os.Chmod(final, 0o600); err != nil {
-		return captureFailure(err, "cannot secure quarantine file")
-	}
-
-	return &FetchResult{
+	result := &FetchResult{
 		LocalPath: final,
 		SHA256:    sum,
 		Size:      n,
 		Status:    "fetched",
-	}, nil
+	}
+	err = finalize(result, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := root.PublishNoReplace(tmpName, sum)
+		if errors.Is(err, safefile.ErrExists) {
+			size, verifyErr := verifyCaptureBlob(ctx, root, sum, f.MaxBytes)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if size != n {
+				return errFileHashMismatch
+			}
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return result, safeCaptureError(err, "capture publication or recording failed")
+	}
+	return result, nil
 }
 
 func fileExists(path string) bool {

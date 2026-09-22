@@ -106,10 +106,17 @@ func (w *ArtifactWorker) tick(ctx context.Context) {
 	deadline, cancel := context.WithTimeout(ctx, w.leaseDur*9/10)
 	defer cancel()
 
-	res, fetchErr := w.fetch.Fetch(deadline, url)
 	nextAttempt := attempt + 1
+	res, fetchErr := w.fetch.fetchWithPublication(deadline, url, func(res *FetchResult, publish func() error) error {
+		return w.st.WithCaptureFileAccess(deadline, func() error {
+			if err := publish(); err != nil {
+				return err
+			}
+			return w.st.CompleteArtifactCapture(url, nextAttempt, "fetched", res.Detail, res.LocalPath, res.SHA256, res.Size, nil)
+		})
+	})
 	if res != nil && res.Status == "fetched" {
-		if err := w.st.CompleteArtifactCapture(url, nextAttempt, "fetched", res.Detail, res.LocalPath, res.SHA256, res.Size, nil); err != nil {
+		if fetchErr != nil {
 			log.Printf("capture-worker: complete failed url_id=%x", urlID[:8])
 		}
 		return

@@ -55,12 +55,12 @@ func TestMaintenancePurgeDeletesOrphanActors(t *testing.T) {
 	seedActor(t, s, "cowrie:hasevents", old, "", "")   // still has an event -> keep
 	seedActor(t, s, "cowrie:tagged", old, "mirai", "") // operator campaign tag -> keep
 
-	// `notes` is NOT an operator field: actor.builder regenerates it on every
-	// rebuild ("2 events, 0 usernames"), so EVERY actor on a live deployment
-	// has one — guarding on it made the sweep delete nothing at all (verified
-	// against prod: 6,716 of 6,716 actors carried a generated note, so the
-	// orphan count the sweep would have removed was 0 instead of 103).
-	seedActor(t, s, "cowrie:machine-note", old, "", "2 events, 0 usernames")
+	// Generated summaries do not pin an orphan; preserved legacy/operator
+	// notes do. Keep the fixture aligned with the v23 ownership split.
+	seedActor(t, s, "cowrie:machine-note", old, "", "")
+	if _, err := s.db.Exec("UPDATE actors SET generated_notes='2 events, 0 usernames' WHERE id='cowrie:machine-note'"); err != nil {
+		t.Fatal(err)
+	}
 
 	// One surviving event, timestamped inside the retention window, belonging
 	// to cowrie:hasevents.

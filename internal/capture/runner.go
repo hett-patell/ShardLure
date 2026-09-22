@@ -2,17 +2,16 @@ package capture
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/config"
+	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -23,9 +22,6 @@ type Runner struct {
 	fetch      *SafeFetcher
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
 
-	// ttySessionBound remembers tty url-keys whose artifact row has a
-	// session id stamped, ending the per-tick backfill lookups for them.
-	ttySessionBound map[string]struct{}
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
@@ -34,6 +30,7 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 	if evidence == "" {
 		evidence = filepath.Join(cfg.DataDir, "evidence")
 	}
+	st.SetCaptureRetentionPolicy(store.CaptureRetentionPolicy{CommandsEnabled: cfg.Capture.Enabled && cfg.Capture.QuarantineFetch, FilesEnabled: cfg.Capture.Enabled, EvidenceRoot: evidence})
 	return &Runner{
 		st:  st,
 		cfg: cfg,
@@ -43,7 +40,6 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 			time.Duration(capCfg.TimeoutSec)*time.Second,
 			cfg.AdminIPs,
 		),
-		ttySessionBound: map[string]struct{}{},
 	}
 }
 
@@ -59,12 +55,18 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	if !r.cfg.Capture.Enabled {
 		return 0, nil
 	}
-	if err := os.MkdirAll(r.fetch.EvidenceDir, 0o700); err != nil {
-		return 0, err
+	for _, source := range []string{r.cowrieDownloadsDir(), r.cowrieTTYDir()} {
+		if captureRootsOverlap(source, r.fetch.EvidenceDir) {
+			return 0, safeCaptureError(nil, "capture roots overlap")
+		}
 	}
 	for _, sub := range []string{"quarantine", "cowrie", "cowrie-tty", "meta"} {
-		if err := os.MkdirAll(filepath.Join(r.fetch.EvidenceDir, sub), 0o700); err != nil {
-			return 0, err
+		root, err := safefile.EnsureDirectory(filepath.Join(r.fetch.EvidenceDir, sub))
+		if err != nil {
+			return 0, safeCaptureError(err, "capture output initialization failed")
+		}
+		if err := root.Close(); err != nil {
+			return 0, safeCaptureError(err, "capture output initialization failed")
 		}
 	}
 
@@ -76,26 +78,27 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		}
 		n += c
 	}
-	c, err := r.syncCowrieDownloads()
+	c, err := r.syncCowrieSources(ctx, false)
 	if err != nil {
 		return n, err
 	}
 	n += c
-	c2, err := r.archiveFileDownloadEvents()
+	_, err = r.st.DiscoverFileCaptures(ctx, 2000)
 	if err != nil {
-		return n + c2, err
+		return n, err
 	}
-	n += c2
 	// One-shot: backfill the sha->session index from all available
 	// cowrie.json (current + rotated) log files so the cowrie-tty
 	// artifacts captured before the index existed get bound to the
 	// right session on the next sync pass. Cheap (line scan, only
 	// looks at cowrie.log.closed) and idempotent.
 	if !r.ttyIndexed {
-		r.backfillCowrieTTYIndex()
+		if err := r.backfillCowrieTTYIndexContext(ctx); err != nil {
+			return n, err
+		}
 		r.ttyIndexed = true
 	}
-	c3, err := r.syncCowrieTTY()
+	c3, err := r.syncCowrieSources(ctx, true)
 	return n + c3, err
 }
 
@@ -104,123 +107,40 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 // binding for each. Safe to call repeatedly thanks to the ON CONFLICT
 // UPDATE on the index row; we gate it behind ttyIndexed so it only
 // fires once per process lifetime.
-func (r *Runner) backfillCowrieTTYIndex() {
+func (r *Runner) backfillCowrieTTYIndexContext(ctx context.Context) error {
 	path := r.cfg.Cowrie.JSONLog
 	if path == "" {
-		return
+		return nil
 	}
-	candidates := []string{path}
-	if matches, err := filepath.Glob(path + ".*"); err == nil {
-		candidates = append(candidates, matches...)
+	root, err := safefile.OpenRoot(filepath.Dir(path))
+	if errors.Is(err, safefile.ErrNotExist) {
+		return nil
 	}
-	for _, p := range candidates {
-		_ = indexTTYBindingsFromFile(r.st, p)
-	}
-}
-
-// syncCowrieTTY copies cowrie ttylog session recordings into the evidence
-// directory and decodes each into a plain-text transcript next to the raw
-// binary. Each session is registered once in the artifacts table keyed by
-// the ttylog filename (which Cowrie names by sha256 of the input stream).
-func (r *Runner) syncCowrieTTY() (int, error) {
-	src := r.cowrieTTYDir()
-	if src == "" {
-		return 0, nil
-	}
-	entries, err := os.ReadDir(src)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
+		return safeCaptureError(err, "capture TTY index directory failed")
 	}
-	dest := filepath.Join(r.fetch.EvidenceDir, "cowrie-tty")
-	var n int
-	for _, ent := range entries {
-		if ent.IsDir() {
-			continue
+	defer root.Close()
+	base := filepath.Base(path)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		name := ent.Name()
-		// Cowrie renames closed ttylogs to <sha256>; in-progress logs
-		// have the form YYYYMMDD-HHMMSS-...-i.log. Skip the latter so
-		// we don't ingest a half-written file that will be renamed in
-		// a moment anyway.
-		if !looksLikeSHA256(name) {
-			continue
-		}
-		urlKey := "cowrie-tty:" + name
-		// Session already bound for this transcript: nothing left to do,
-		// skip the per-tick DB round-trips entirely.
-		if _, bound := r.ttySessionBound[urlKey]; bound {
-			continue
-		}
-		exists, err := r.urlKeyDone(urlKey)
-		if err != nil {
-			return n, err
-		}
-		if exists {
-			// Best-effort backfill: artifact rows recorded before
-			// session binding existed have empty session_id. Try
-			// to resolve and stamp it so the intel session view can
-			// surface the transcript. We just LOOK UP -- no copy.
-			// Once stamped, the memo above ends these lookups.
-			if sid, _ := r.st.SessionIDForCowrieTTYShasum(name); sid != "" {
-				if err := r.st.SetArtifactSessionByURL(urlKey, sid); err == nil {
-					r.ttySessionBound[urlKey] = struct{}{}
-				}
+		names, readErr := root.ReadNames(64)
+		for _, name := range names {
+			if name != base && !strings.HasPrefix(name, base+".") {
+				continue
 			}
-			continue
+			if err := indexTTYBindingsFromRoot(ctx, r.st, root, name); err != nil {
+				return err
+			}
 		}
-		srcPath := filepath.Join(src, name)
-		dstRaw := filepath.Join(dest, name)
-		sum, size, err := copyArtifact(srcPath, dstRaw, r.cfg.Capture.MaxBytes)
-		if errors.Is(err, ErrEmptyArtifact) {
-			// Zero-byte ttylog: nothing was ever typed. Record as "empty" so the
-			// row dedups permanently instead of being re-copied every tick.
-			_ = r.st.RecordArtifact(store.Artifact{
-				TS:     time.Now().UTC(),
-				URL:    urlKey,
-				Origin: "cowrie_tty",
-				Status: "empty",
-			})
-			continue
+		if readErr == io.EOF {
+			return nil
 		}
-		if err != nil {
-			// Don't silently skip — an operator needs to know a TTY capture was
-			// dropped (e.g. oversized, or a transient I/O error), since it means
-			// missing evidence.
-			log.Printf("capture: skip cowrie-tty %s: %v", name, err)
-			continue
+		if readErr != nil {
+			return safeCaptureError(readErr, "capture TTY enumeration failed")
 		}
-		// Best-effort transcript. A decode failure should not block
-		// recording the raw artifact -- the dashboard can still link
-		// to the binary file.
-		if frames, derr := DecodeTTYLog(srcPath); derr == nil {
-			transcript := RenderTranscript(frames, DefaultTranscriptOptions())
-			_ = os.WriteFile(dstRaw+".txt", []byte(transcript), 0o600)
-		}
-		// Best-effort: resolve the session id from the
-		// cowrie.log.closed event that names this shasum so the
-		// intel UI can attach the transcript to the right session.
-		sessionID, _ := r.st.SessionIDForCowrieTTYShasum(name)
-		if err := r.st.RecordArtifact(store.Artifact{
-			TS:        time.Now().UTC(),
-			SessionID: sessionID,
-			URL:       urlKey,
-			LocalPath: dstRaw,
-			SHA256:    sum,
-			SizeBytes: size,
-			Origin:    "cowrie_tty",
-			Status:    "fetched",
-		}); err != nil {
-			return n, err
-		}
-		if sessionID != "" {
-			r.ttySessionBound[urlKey] = struct{}{}
-		}
-		n++
 	}
-	return n, nil
 }
 
 func (r *Runner) cowrieTTYDir() string {
@@ -252,161 +172,6 @@ func (r *Runner) fetchFromCommands(ctx context.Context) (int, error) {
 	return r.st.DiscoverCommandArtifacts(ctx, 2000, ExtractURLs)
 }
 
-func (r *Runner) syncCowrieDownloads() (int, error) {
-	dl := r.cowrieDownloadsDir()
-	if dl == "" {
-		return 0, nil
-	}
-	entries, err := os.ReadDir(dl)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	dest := filepath.Join(r.fetch.EvidenceDir, "cowrie")
-	var n int
-	for _, ent := range entries {
-		if ent.IsDir() {
-			continue
-		}
-		// Dedup BEFORE the expensive copy+hash: urlKey is derived from the
-		// filename, which we already have, so an already-archived download
-		// can be skipped without re-reading and re-hashing it every tick.
-		urlKey := "cowrie-download:" + ent.Name()
-		exists, err := r.urlKeyDone(urlKey)
-		if err != nil {
-			continue
-		}
-		if exists {
-			// Redelivery: cowrie rewrites the same (sha-named) file when an
-			// attacker drops it again, updating its mtime. Bump the row's ts
-			// so recency stays truthful — still no copy+hash on this path.
-			if info, ierr := ent.Info(); ierr == nil {
-				_ = r.st.TouchArtifactTS(urlKey, info.ModTime().UTC())
-			}
-			continue
-		}
-		src := filepath.Join(dl, ent.Name())
-		sum, size, err := copyArtifact(src, filepath.Join(dest, ent.Name()), r.cfg.Capture.MaxBytes)
-		if errors.Is(err, ErrEmptyArtifact) {
-			// Zero-byte download stub: record as "empty" (deduped, visible,
-			// never shareable) rather than copying a hollow file as "fetched".
-			_ = r.st.RecordArtifact(store.Artifact{
-				TS:     time.Now().UTC(),
-				URL:    urlKey,
-				Origin: "cowrie_download",
-				Status: "empty",
-			})
-			continue
-		}
-		if err != nil {
-			// Surface skips (e.g. oversized download rejected by the size cap)
-			// instead of silently dropping the artifact.
-			log.Printf("capture: skip cowrie download %s: %v", ent.Name(), err)
-			continue
-		}
-		if err := r.st.RecordArtifact(store.Artifact{
-			TS:        time.Now().UTC(),
-			URL:       urlKey,
-			LocalPath: filepath.Join(dest, ent.Name()),
-			SHA256:    sum,
-			SizeBytes: size,
-			Origin:    "cowrie_download",
-			Status:    "fetched",
-		}); err != nil {
-			return n, err
-		}
-		n++
-	}
-	return n, nil
-}
-
-func (r *Runner) archiveFileDownloadEvents() (int, error) {
-	events, err := r.st.RecentFileDownloadEvents(200)
-	if err != nil {
-		return 0, err
-	}
-	var n int
-	for _, e := range events {
-		if e.Filename == "" {
-			continue
-		}
-		// e.Filename comes from cowrie JSON (attacker-influenced telemetry).
-		// Always resolve it relative to the cowrie downloads dir using only
-		// the basename, even when the recorded value is absolute — otherwise a
-		// crafted absolute path (e.g. /etc/shadow) would be copied into the
-		// evidence dir and could later be shipped to MalwareBazaar.
-		// Dedup BEFORE the expensive copy+hash: urlKey needs nothing from the
-		// file, and without this the 200 newest downloads were re-read,
-		// re-hashed, and rewritten on every 5s tick (GB/min of write
-		// amplification). Mirrors syncCowrieDownloads.
-		urlKey := e.Command
-		if urlKey == "" {
-			urlKey = "cowrie-event:" + fmt.Sprint(e.ID)
-		}
-		exists, err := r.urlKeyDone(urlKey)
-		if err != nil {
-			continue
-		}
-		if exists {
-			// Redelivery: a fresh file_download event for an already-archived
-			// URL. Bump the row's ts (no-op unless newer) so the payload
-			// panel's window/occurrence math sees it as current — the
-			// copy+hash skip that fixed the write amplification stays intact.
-			_ = r.st.TouchArtifactTS(urlKey, e.TS)
-			continue
-		}
-		src := filepath.Join(r.cowrieDownloadsDir(), filepath.Base(e.Filename))
-		if _, err := os.Stat(src); err != nil {
-			continue
-		}
-		base := e.SHA256
-		if base == "" {
-			base = filepath.Base(src)
-		}
-		dest := filepath.Join(r.fetch.EvidenceDir, "cowrie", base)
-		sum, size, err := copyArtifact(src, dest, r.cfg.Capture.MaxBytes)
-		if errors.Is(err, ErrEmptyArtifact) {
-			// Zero-byte SFTP upload (touch-style probe / aborted transfer):
-			// record as "empty" so it dedups and shows truthfully, and is never
-			// mistaken for a fetched payload downstream.
-			_ = r.st.RecordArtifact(store.Artifact{
-				TS:        e.TS,
-				SrcIP:     e.SrcIP,
-				SessionID: e.SessionID,
-				ActorID:   e.ActorID,
-				URL:       urlKey,
-				Origin:    "cowrie_file_download",
-				Status:    "empty",
-			})
-			continue
-		}
-		if err != nil {
-			// Surface skips (e.g. oversized file rejected by the size cap)
-			// instead of silently dropping the artifact.
-			log.Printf("capture: skip cowrie file_download %s: %v", base, err)
-			continue
-		}
-		if err := r.st.RecordArtifact(store.Artifact{
-			TS:        e.TS,
-			SrcIP:     e.SrcIP,
-			SessionID: e.SessionID,
-			ActorID:   e.ActorID,
-			URL:       urlKey,
-			LocalPath: dest,
-			SHA256:    sum,
-			SizeBytes: size,
-			Origin:    "cowrie_file_download",
-			Status:    "fetched",
-		}); err != nil {
-			return n, err
-		}
-		n++
-	}
-	return n, nil
-}
-
 func (r *Runner) cowrieDownloadsDir() string {
 	home := r.cfg.Cowrie.Home
 	if home == "" {
@@ -415,41 +180,88 @@ func (r *Runner) cowrieDownloadsDir() string {
 	return filepath.Join(home, "var", "lib", "cowrie", "downloads")
 }
 
-// PurgeOldSourceFiles deletes regular files older than retentionDays from
-// Cowrie's own downloads and ttylog directories. Cowrie never cleans these and
-// the store-level purge only deletes DB rows, so without this: (a) the dirs
-// grow without bound, and (b) once a tracked artifact's row is purged, the
-// surviving source file makes the next 5s tick re-copy and re-record it (the
-// "resurrection" that permanently defeats retention). retentionDays <= 0
-// disables purging, matching Store.MaintenancePurge.
+// PurgeOldSourceFiles retains the compatibility wrapper. Live mode uses the
+// cancellable form and reports errors; no failed unlink is counted as removal.
 func (r *Runner) PurgeOldSourceFiles(retentionDays int) int {
+	n, err := r.PurgeOldSourceFilesContext(context.Background(), retentionDays)
+	if err != nil {
+		log.Print("capture: source retention failed")
+	}
+	return n
+}
+
+func (r *Runner) PurgeOldSourceFilesContext(ctx context.Context, retentionDays int) (int, error) {
 	if retentionDays <= 0 {
-		return 0
+		return 0, nil
 	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 	removed := 0
 	for _, dir := range []string{r.cowrieDownloadsDir(), r.cowrieTTYDir()} {
-		if dir == "" {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
+		root, err := safefile.OpenRoot(dir)
+		if errors.Is(err, safefile.ErrNotExist) {
 			continue
 		}
-		entries, err := os.ReadDir(dir)
 		if err != nil {
-			continue
+			return removed, safeCaptureError(err, "capture source retention access failed")
 		}
-		for _, ent := range entries {
-			if ent.IsDir() || ent.Type()&os.ModeSymlink != 0 {
-				continue
+		scanErr := func() error {
+			defer root.Close()
+			for {
+				names, readErr := root.ReadNames(64)
+				for _, name := range names {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					// Closed Cowrie downloads/TTY recordings are content-addressed names.
+					// Never sweep an unrelated administrative file or an in-progress log.
+					if !looksLikeSHA256(name) {
+						continue
+					}
+					f, err := root.OpenRegular(name)
+					if errors.Is(err, safefile.ErrNotExist) || errors.Is(err, safefile.ErrNotRegular) || errors.Is(err, safefile.ErrUnsafePath) {
+						continue
+					}
+					if err != nil {
+						return safeCaptureError(err, "capture source retention read failed")
+					}
+					info, err := f.Stat()
+					f.Close()
+					if err != nil {
+						return safeCaptureError(err, "capture source retention metadata failed")
+					}
+					if !info.ModTime().Before(cutoff) {
+						continue
+					}
+					deleted, err := r.st.RemoveCaptureSourceIfSafe(ctx, name, func() (bool, error) {
+						err := root.RemoveIfUnchanged(name, info)
+						if errors.Is(err, safefile.ErrNotExist) {
+							return false, nil
+						}
+						return err == nil, err
+					})
+					if err != nil {
+						return safeCaptureError(err, "capture source retention decision failed")
+					}
+					if deleted {
+						removed++
+					}
+				}
+				if readErr == io.EOF {
+					return nil
+				}
+				if readErr != nil {
+					return safeCaptureError(readErr, "capture source retention enumeration failed")
+				}
 			}
-			info, err := ent.Info()
-			if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
-				continue
-			}
-			if err := os.Remove(filepath.Join(dir, ent.Name())); err == nil {
-				removed++
-			}
+		}()
+		if scanErr != nil {
+			return removed, scanErr
 		}
 	}
-	return removed
+	return removed, nil
 }
 
 // ErrEmptyArtifact is returned by copyArtifact for a zero-byte source. Cowrie
@@ -459,68 +271,12 @@ func (r *Runner) PurgeOldSourceFiles(retentionDays int) int {
 // status "empty" (deduped, visible, never shareable) instead of copying.
 var ErrEmptyArtifact = fmt.Errorf("zero-byte artifact")
 
-// copyArtifact copies src->dest, hashing as it goes. maxBytes caps the copy so
-// an attacker-controlled cowrie download / TTY log can't exhaust disk; a source
-// exceeding the cap is rejected (not silently truncated, which would corrupt the
-// sha). maxBytes <= 0 means unlimited (caller opted out). A zero-byte source is
-// rejected with ErrEmptyArtifact before any destination file is created.
-func copyArtifact(src, dest string, maxBytes int64) (sha string, size int64, err error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return "", 0, err
-	}
-	defer in.Close()
-	if fi, statErr := in.Stat(); statErr == nil {
-		if fi.Size() == 0 {
-			return "", 0, ErrEmptyArtifact
-		}
-		if maxBytes > 0 && fi.Size() > maxBytes {
-			return "", 0, fmt.Errorf("artifact %s exceeds max size (%d > %d bytes)", filepath.Base(src), fi.Size(), maxBytes)
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		return "", 0, err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(dest), ".copy-*")
-	if err != nil {
-		return "", 0, err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}()
-	h := sha256.New()
-	// Read at most maxBytes+1: if we get more than maxBytes the source grew
-	// between Stat and read (or is a growing file) — reject rather than truncate.
-	reader := io.Reader(in)
-	if maxBytes > 0 {
-		reader = io.LimitReader(in, maxBytes+1)
-	}
-	n, err := io.Copy(tmp, io.TeeReader(reader, h))
-	if err != nil {
-		return "", 0, err
-	}
-	if maxBytes > 0 && n > maxBytes {
-		return "", 0, fmt.Errorf("artifact %s exceeds max size (>%d bytes)", filepath.Base(src), maxBytes)
-	}
-	if err := tmp.Close(); err != nil {
-		return "", 0, err
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	if err := os.Rename(tmpPath, dest); err != nil {
-		if fileExists(dest) {
-			_ = os.Remove(tmpPath)
-		} else {
-			return "", 0, err
-		}
-	}
-	_ = os.Chmod(dest, 0o600)
-	return sum, n, nil
-}
-
 // Fetch returns the runner's SafeFetcher so it can be shared with the
 // artifact retry worker without creating a second evidence directory.
 func (r *Runner) Fetch() *SafeFetcher {
 	return r.fetch
+}
+
+func (r *Runner) FileWorker() *FileWorker {
+	return NewFileWorker(r.st, r.cowrieDownloadsDir(), r.fetch.EvidenceDir, r.cfg.Capture.MaxBytes)
 }

@@ -301,6 +301,10 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 	if cfg.Capture.Enabled && cfg.Capture.QuarantineFetch {
 		startWorker(func() { artWorker.Run(ctx) })
 	}
+	if cfg.Capture.Enabled {
+		fileWorker := capRunner.FileWorker()
+		startWorker(func() { fileWorker.Run(ctx) })
+	}
 	startWorker(func() { runStoreBackfills(ctx, st) })
 
 	if journalSSH {
@@ -363,7 +367,9 @@ func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args [
 			// Also clean Cowrie's own source dirs so they don't grow without
 			// bound and so purged artifacts can't be re-archived from the
 			// surviving source file on the next tick.
-			capRunner.PurgeOldSourceFiles(cfg.RetentionDays)
+			if _, err := capRunner.PurgeOldSourceFilesContext(ctx, cfg.RetentionDays); err != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "capture source retention failed")
+			}
 		}
 		runPurge()
 		for {

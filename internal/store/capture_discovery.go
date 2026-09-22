@@ -47,6 +47,8 @@ func (s *Store) DiscoverCommandArtifacts(ctx context.Context, limit int, extract
 	if err := s.ensureFileCaptureTable(); err != nil {
 		return 0, err
 	}
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
 	queued := 0
 	err := s.WithTx(func(tx *sql.Tx) error {
 		const key = "command-artifacts-v1"

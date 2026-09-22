@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -530,6 +531,132 @@ func TestConfinedSparseLargeFile(t *testing.T) {
 	var b [1]byte
 	if n, err := read.ReadAt(b[:], offset); err != nil || n != 1 || b[0] != 'A' {
 		t.Fatalf("large-file read=%q n=%d err=%v", b, n, err)
+	}
+}
+
+func TestConfinedEnsureDirectoryAndOwnedTemporaryCleanup(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "new", "nested")
+	r, err := EnsureDirectory(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("directory permissions: %v %v", info, err)
+	}
+	f, err := r.CreateExclusive("temporary", 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("inert"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := r.RemoveCreated("temporary", info); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "temporary")); !os.IsNotExist(err) {
+		t.Fatalf("temporary remained: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(base, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := EnsureDirectory(filepath.Join(base, "alias", "must-not-create")); err == nil {
+		r.Close()
+		t.Fatal("directory creation followed symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "must-not-create")); !os.IsNotExist(err) {
+		t.Fatalf("created outside root: %v", err)
+	}
+}
+
+func TestConfinedDirectoryEnumerationIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 300; i++ {
+		if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(i)), []byte("inert"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	seen := map[string]bool{}
+	for {
+		names, err := r.ReadNames(17)
+		if len(names) > 17 {
+			t.Fatalf("unbounded batch: %d", len(names))
+		}
+		for _, name := range names {
+			if seen[name] {
+				t.Fatalf("duplicate name %q", name)
+			}
+			seen[name] = true
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 300 {
+		t.Fatalf("missing entries: %d", len(seen))
+	}
+}
+
+func TestConfinedRetentionRemovalRequiresUnchangedEntry(t *testing.T) {
+	for _, change := range []bool{false, true} {
+		t.Run(strconv.FormatBool(change), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "source")
+			if err := os.WriteFile(path, []byte("old bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			r, err := OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			f, err := r.OpenRegular("source")
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := f.Stat()
+			f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change {
+				if err := os.Rename(path, filepath.Join(dir, "old")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("new bytes"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = r.RemoveIfUnchanged("source", expected)
+			if change {
+				if !errors.Is(err, ErrChanged) {
+					t.Fatalf("replacement deletion=%v", err)
+				}
+				b, err := os.ReadFile(path)
+				if err != nil || string(b) != "new bytes" {
+					t.Fatalf("replacement lost: %q %v", b, err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("expired file retained: %v", err)
+			}
+		})
 	}
 }
 

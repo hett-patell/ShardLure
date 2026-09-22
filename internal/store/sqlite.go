@@ -17,7 +17,8 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string // canonical database name; never a retention target
 	// writeMu serializes WRITES at the application layer. SQLite allows only
 	// one writer, and live mode has several writer goroutines (journal tail,
 	// cowrie ticker, retention purge) plus the web server sharing this db; with
@@ -26,7 +27,9 @@ type Store struct {
 	// batch). Serializing writes here avoids that WITHOUT capping the pool to a
 	// single connection — so concurrent READS still run in parallel under WAL
 	// (a 1-connection pool would make a slow analytics query block ingest).
-	writeMu sync.Mutex
+	writeMu       sync.Mutex
+	captureMu     sync.Mutex
+	capturePolicy CaptureRetentionPolicy
 
 	// Lazy-table creation guards. The artifacts / enrichment / bazaar / tty
 	// tables are created on first use (CREATE TABLE IF NOT EXISTS), but the
@@ -111,7 +114,7 @@ func openWithOwnerCheck(path string, checkOwner func(string) error) (*Store, err
 	// staleness without forcing constant reconnects.
 	db.SetMaxIdleConns(8)
 	db.SetConnMaxLifetime(time.Hour)
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -1386,13 +1389,14 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		return err
 	}
 
-	// Reference-safe purge: collect files, delete expired rows, and determine
-	// which paths have zero remaining references — all under one continuous
-	// writeMu hold. Without this, a new artifact referencing the same local_path
-	// could be inserted between the file collection and the row deletion,
-	// causing us to unlink a file that is still live.
-	var artifactFiles []string
+	if err := s.ensureFileCaptureTable(); err != nil {
+		return err
+	}
+	// Keep optional-cache validation ahead of artifact retention. Artifact
+	// cleanup itself uses bounded pages and an explicit filesystem policy.
 	if err := func() error {
+		s.captureMu.Lock()
+		defer s.captureMu.Unlock()
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
 		tx, err := s.db.Begin()
@@ -1413,62 +1417,11 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 			}
 		}
 
-		// Artifact evidence is reference-counted by local_path. Select expired
-		// rows by parsed instant, then delete those exact IDs in this transaction
-		// before checking whether each file still has a live reference.
-		// Retention follows observation recency, not immutable fetch provenance.
-		// Redelivery keeps evidence alive without making an old fetch shareable.
-		rows, err := tx.Query(`SELECT id,COALESCE(last_seen_at,ts,created_at,''),COALESCE(local_path,'') FROM artifacts`)
-		if err != nil {
-			return err
-		}
-		var expiredArtifactIDs []int64
-		for rows.Next() {
-			var id int64
-			var ts, path string
-			if err := rows.Scan(&id, &ts, &path); err != nil {
-				rows.Close()
-				return err
-			}
-			parsed, err := time.Parse(time.RFC3339Nano, ts)
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("artifact %d timestamp: %w", id, err)
-			}
-			if parsed.Before(cutoffTime) {
-				expiredArtifactIDs = append(expiredArtifactIDs, id)
-				if path != "" {
-					artifactFiles = append(artifactFiles, path)
-				}
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-		if err := deleteRowsByID(tx, "artifacts", expiredArtifactIDs); err != nil {
-			return err
-		}
-
-		// After deleting expired rows, check which paths are still referenced
-		// by remaining live artifacts. Only unlink zero-reference paths.
-		safeToUnlink := artifactFiles[:0]
-		for _, p := range artifactFiles {
-			var n int
-			if err := tx.QueryRow(
-				`SELECT COUNT(1) FROM artifacts WHERE local_path=?`, p).Scan(&n); err != nil {
-				// If we can't check, keep the file (safe default).
-				continue
-			}
-			if n == 0 {
-				safeToUnlink = append(safeToUnlink, p)
-			}
-		}
-		artifactFiles = safeToUnlink
-
 		return tx.Commit()
 	}(); err != nil {
+		return err
+	}
+	if err := s.purgeArtifacts(cutoffTime); err != nil {
 		return err
 	}
 
@@ -1513,9 +1466,23 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 		}
 		rows.Close()
 		if len(expiredEventIDs) > 0 {
-			if err := s.WithTx(func(tx *sql.Tx) error {
-				return deleteRowsByID(tx, "events", expiredEventIDs)
-			}); err != nil {
+			if err := func() error {
+				s.captureMu.Lock()
+				defer s.captureMu.Unlock()
+				return s.WithTx(func(tx *sql.Tx) error {
+					ceiling, err := s.captureEventCeilingTx(tx)
+					if err != nil {
+						return err
+					}
+					eligible := expiredEventIDs[:0]
+					for _, id := range expiredEventIDs {
+						if id <= ceiling {
+							eligible = append(eligible, id)
+						}
+					}
+					return deleteRowsByID(tx, "events", eligible)
+				})
+			}(); err != nil {
 				return err
 			}
 		}
@@ -1536,12 +1503,8 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 	//   - last_seen < cutoff, so an actor the ingest tick created moments ago
 	//     (its events not yet visible to this transaction) is never raced away;
 	//   - no surviving events, an index probe on the (actor_id, ts) composite;
-	//   - no operator annotation, which means `campaigns` ONLY. `notes` looks
-	//     like the same kind of field but is machine-generated — actor.builder
-	//     rewrites it on every rebuild ("2 events, 0 usernames") — so every
-	//     actor on a live deployment carries one, and including it here made
-	//     the sweep a silent no-op (prod: 6,716 of 6,716 rows had a generated
-	//     note, so 0 of the 103 real orphans would have been removed).
+	//   - no operator annotation. Since v23, generated summaries have their
+	//     own column; Notes is preserved even when legacy text looks generated.
 	//
 	// Unlike events this is NOT chunked: actors is bounded by the number of
 	// distinct attacker identities (thousands, against a million events), so
@@ -1557,7 +1520,7 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 		}
 		defer tx.Rollback()
 		rows, err := tx.Query(`SELECT id,last_seen FROM actors
-WHERE COALESCE(campaigns,'')=''
+WHERE COALESCE(campaigns,'')='' AND COALESCE(notes,'')=''
   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor_id=actors.id)`)
 		if err != nil {
 			return err
@@ -1596,6 +1559,10 @@ WHERE COALESCE(campaigns,'')=''
 		return err
 	}
 
+	if err := s.purgeCaptureDiagnostics(cutoffTime); err != nil {
+		return err
+	}
+
 	// Reclaim WAL space the chunked deletes accumulated, then refresh the query
 	// planner's stats. A large purge changes table/index cardinality enough to
 	// flip a plan; running optimize here (on the same 24h maintenance cadence)
@@ -1607,14 +1574,6 @@ WHERE COALESCE(campaigns,'')=''
 		_, _ = s.db.Exec(`PRAGMA optimize`)
 	}()
 
-	// Unlink the evidence files now that their rows are gone. Best-effort: an
-	// unremovable file is logged-by-omission (a later run / quota sweep retries)
-	// rather than failing the purge. The ".txt" sibling is the rendered TTY
-	// transcript written next to the raw capture.
-	for _, p := range artifactFiles {
-		_ = os.Remove(p)
-		_ = os.Remove(p + ".txt")
-	}
 	return nil
 }
 

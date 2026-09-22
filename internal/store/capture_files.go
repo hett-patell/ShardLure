@@ -133,6 +133,8 @@ func (s *Store) DiscoverFileCaptures(ctx context.Context, limit int) (int, error
 	if err := s.ensureFileCaptureTable(); err != nil {
 		return 0, err
 	}
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
 	queued := 0
 	err := s.WithTx(func(tx *sql.Tx) error {
 		// First acquire the SQLite writer, not a deferred read snapshot: separate

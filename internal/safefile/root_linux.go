@@ -3,13 +3,17 @@
 package safefile
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
@@ -19,6 +23,189 @@ type Root struct {
 	mu   sync.RWMutex
 	dir  *os.File
 	path string
+}
+
+// RemoveIfUnchanged first moves the selected entry into a private holding
+// directory, then checks its identity again before unlinking. A raced-in file
+// is restored without replacing any newer source entry; if restoration is
+// impossible, its bytes remain in the private holding directory for recovery.
+func (r *Root) RemoveIfUnchanged(name string, expected fs.FileInfo) error {
+	if !validRelative(name) || filepath.Base(name) != name || expected == nil {
+		return ErrUnsafePath
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return ErrClosed
+	}
+	parent := int(r.dir.Fd())
+	fd, st, err := probeAt(parent, name)
+	if err != nil {
+		return err
+	}
+	probe := os.NewFile(uintptr(fd), "confined-retention")
+	before, statErr := probe.Stat()
+	probe.Close()
+	if statErr != nil {
+		return ErrIO
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || !SameFileState(expected, before) {
+		return ErrChanged
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return ErrIO
+	}
+	holdName := ".shardlure-retention-" + hex.EncodeToString(nonce[:])
+	if err := unix.Mkdirat(parent, holdName, 0700); err != nil {
+		return safeError(err)
+	}
+	hold, err := unix.Openat2(parent, holdName, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW), Resolve: confinedResolve})
+	if err != nil {
+		return safeError(err)
+	}
+	defer unix.Close(hold)
+	var holdInfo unix.Stat_t
+	if unix.Fstat(hold, &holdInfo) != nil || holdInfo.Uid != uint32(os.Geteuid()) || holdInfo.Mode&0077 != 0 {
+		return ErrPermission
+	}
+	defer func() {
+		current, currentInfo, err := probeAt(parent, holdName)
+		if err == nil {
+			unix.Close(current)
+			if sameObject(holdInfo, currentInfo) {
+				_ = unix.Unlinkat(parent, holdName, unix.AT_REMOVEDIR)
+			}
+		}
+	}()
+	if err := unix.Renameat2(parent, name, hold, "entry", unix.RENAME_NOREPLACE); err != nil {
+		return safeError(err)
+	}
+	moved, movedInfo, err := probeAt(hold, "entry")
+	if err == nil {
+		unix.Close(moved)
+	}
+	// Rename changes ctime; all other identity/content metadata must match the
+	// descriptor checked immediately before moving the entry.
+	unchanged := err == nil && sameObject(st, movedInfo) && st.Mode == movedInfo.Mode && st.Nlink == movedInfo.Nlink && st.Size == movedInfo.Size && st.Mtim == movedInfo.Mtim
+	if !unchanged {
+		_ = unix.Renameat2(hold, "entry", parent, name, unix.RENAME_NOREPLACE)
+		_ = unix.Fsync(hold)
+		_ = unix.Fsync(parent)
+		return ErrChanged
+	}
+	if err := unix.Unlinkat(hold, "entry", 0); err != nil {
+		return safeError(err)
+	}
+	if unix.Fsync(hold) != nil || unix.Fsync(parent) != nil {
+		return ErrSync
+	}
+	return nil
+}
+
+// ReadNames streams names only. DirEntry.Info would reopen through a pathname
+// and lose descriptor confinement; callers use OpenRegular for authoritative
+// metadata and bytes instead.
+func (r *Root) ReadNames(limit int) ([]string, error) {
+	if limit <= 0 || limit > 256 {
+		limit = 64
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return nil, ErrClosed
+	}
+	names, err := r.dir.Readdirnames(limit)
+	if err == io.EOF {
+		return names, io.EOF
+	}
+	return names, safeError(err)
+}
+
+// EnsureDirectory creates missing owner-only directories through protected
+// parent descriptors. It never follows a supplied symlink or chmods an existing
+// foreign/shared directory to make it acceptable.
+func EnsureDirectory(path string) (*Root, error) {
+	if path == "" || strings.ContainsRune(path, 0) || !utf8.ValidString(path) {
+		return nil, ErrUnsafePath
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, ErrUnsafePath
+	}
+	if r, err := OpenRoot(abs); err == nil {
+		if err := r.CheckOutput(); err != nil {
+			r.Close()
+			return nil, err
+		}
+		return r, nil
+	} else if !errors.Is(err, ErrNotExist) {
+		return nil, err
+	}
+	parentPath := filepath.Dir(abs)
+	if parentPath == abs {
+		return nil, ErrUnsafePath
+	}
+	parent, err := EnsureDirectory(parentPath)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	parent.mu.RLock()
+	defer parent.mu.RUnlock()
+	if err := parent.checkOutputLocked(); err != nil {
+		return nil, err
+	}
+	if err := unix.Mkdirat(int(parent.dir.Fd()), filepath.Base(abs), 0700); err != nil && !errors.Is(err, unix.EEXIST) {
+		return nil, safeError(err)
+	}
+	if err := unix.Fsync(int(parent.dir.Fd())); err != nil {
+		return nil, ErrSync
+	}
+	r, err := OpenRoot(abs)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.CheckOutput(); err != nil {
+		r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// RemoveCreated removes only a caller-created temporary entry in a protected
+// output directory. A replacement entry is never deleted as cleanup.
+func (r *Root) RemoveCreated(name string, created fs.FileInfo) error {
+	if !validRelative(name) || filepath.Base(name) != name || created == nil {
+		return ErrUnsafePath
+	}
+	expected, ok := created.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ErrUnsupported
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return ErrClosed
+	}
+	if err := r.checkOutputLocked(); err != nil {
+		return err
+	}
+	fd, st, err := probeAt(int(r.dir.Fd()), name)
+	if errors.Is(err, ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || st.Uid != uint32(os.Geteuid()) || st.Dev != uint64(expected.Dev) || st.Ino != uint64(expected.Ino) {
+		return ErrChanged
+	}
+	if err := unix.Unlinkat(int(r.dir.Fd()), name, 0); err != nil {
+		return safeError(err)
+	}
+	return nil
 }
 
 const confinedResolve = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV
@@ -101,6 +288,22 @@ func probeAt(root int, rel string) (int, unix.Stat_t, error) {
 
 func sameObject(a, b unix.Stat_t) bool {
 	return a.Dev == b.Dev && a.Ino == b.Ino && a.Mode&unix.S_IFMT == b.Mode&unix.S_IFMT && a.Uid == b.Uid && a.Gid == b.Gid
+}
+
+// SameFileState detects in-place changes even when an mtime is restored.
+func SameFileState(a, b fs.FileInfo) bool {
+	if a == nil || b == nil || !os.SameFile(a, b) || a.Size() != b.Size() || a.Mode() != b.Mode() || !a.ModTime().Equal(b.ModTime()) {
+		return false
+	}
+	x, ok := a.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	y, ok := b.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	return x.Ctim == y.Ctim && x.Nlink == y.Nlink && x.Uid == y.Uid && x.Gid == y.Gid
 }
 
 func unchangedFile(a, b unix.Stat_t) bool {
@@ -296,6 +499,10 @@ func PublishNoReplace(parent, stagedName, finalName string) error {
 		return err
 	}
 	defer r.Close()
+	return r.publishNoReplace(stagedName, finalName, unix.Fsync)
+}
+
+func (r *Root) PublishNoReplace(stagedName, finalName string) error {
 	return r.publishNoReplace(stagedName, finalName, unix.Fsync)
 }
 

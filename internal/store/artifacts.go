@@ -153,16 +153,43 @@ func (s *Store) UpsertArtifact(a Artifact) error {
 
 // RecordArtifact inserts a new artifact row (no update on conflict).
 func (s *Store) RecordArtifact(a Artifact) error {
+	return s.recordArtifact(a, false)
+}
+
+// RecordArtifactObservation records locally observed bytes without asserting
+// when a remote fetch succeeded. Used by raw-directory recovery scans, which
+// lack a file-download event tying the hash to a remote observation.
+func (s *Store) RecordArtifactObservation(a Artifact) error {
+	return s.recordArtifact(a, true)
+}
+
+func (s *Store) recordArtifact(a Artifact, observationOnly bool) error {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err
 	}
 	ts, first, seen, attempted, fetched := artifactTimes(a)
+	if observationOnly {
+		attempted, fetched = nil, nil
+	}
 	_, err := s.execWrite(`
 INSERT OR IGNORE INTO artifacts (ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes, origin, status, detail, created_at, first_observed_at, last_seen_at, last_fetch_attempt_at, last_successful_fetch_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, a.SrcIP, a.SessionID, a.ActorID, a.URL, a.LocalPath, a.SHA256, a.SizeBytes,
 		a.Origin, a.Status, a.Detail, captureTime(time.Now()), first, seen, attempted, fetched)
 	return err
+}
+
+// ArtifactCaptureRecord provides the durable dedup/session state for a raw
+// capture source. No process memo may hide a row removed by retention.
+func (s *Store) ArtifactCaptureRecord(url string) (exists bool, session string, err error) {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return false, "", err
+	}
+	err = s.db.QueryRow("SELECT COALESCE(session_id,'') FROM artifacts WHERE url=?", url).Scan(&session)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "", nil
+	}
+	return err == nil, session, err
 }
 
 func artifactTimes(a Artifact) (ts, first, seen string, attempted, fetched any) {
