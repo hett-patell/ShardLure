@@ -43,6 +43,7 @@ type Store struct {
 	onceURLhaus      sync.Once
 	onceThreatFox    sync.Once
 	oncePayloadIntel sync.Once
+	onceFileCapture  sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
 	errArtifacts    error
 	errEnrich       error
@@ -54,6 +55,7 @@ type Store struct {
 	errURLhaus      error
 	errThreatFox    error
 	errPayloadIntel error
+	errFileCapture  error
 }
 
 type sqlExecer interface {
@@ -715,6 +717,11 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 	}
 	if current < 23 {
 		if err := s.migrateJournalSummaries(now); err != nil {
+			return err
+		}
+	}
+	if current < 24 {
+		if err := s.migrateFileCaptures(now); err != nil {
 			return err
 		}
 	}
