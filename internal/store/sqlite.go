@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,10 +73,29 @@ type sqlQueryer interface {
 }
 
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	return openWithOwnerCheck(path, CheckDatabaseOwner)
+}
+
+func openWithOwnerCheck(path string, checkOwner func(string) error) (*Store, error) {
+	if err := checkOwner(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, ErrDatabaseUnsafe
+	}
+	path = abs
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, ErrDatabaseAccess
+	}
+	if err := checkOwner(path); err != nil {
+		return nil, err
+	}
+	dsn, err := sqliteFileURI(path, url.Values{"_pragma": []string{"journal_mode(WAL)", "busy_timeout(5000)"}})
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -107,9 +127,19 @@ func Open(path string) (*Store, error) {
 		_ = err
 	}
 	// Honeypot DBs can contain attacker-supplied passwords; restrict to owner.
+	if err := checkOwner(path); err != nil {
+		db.Close()
+		return nil, err
+	}
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
 		if _, err := os.Stat(p); err == nil {
-			_ = os.Chmod(p, 0o600)
+			if err := os.Chmod(p, 0o600); err != nil {
+				db.Close()
+				return nil, ErrDatabaseAccess
+			}
+		} else if !os.IsNotExist(err) {
+			db.Close()
+			return nil, ErrDatabaseAccess
 		}
 	}
 	return s, nil
