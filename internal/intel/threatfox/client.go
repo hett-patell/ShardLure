@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"net/http"
 	"strings"
 	"time"
@@ -130,7 +131,19 @@ var (
 // failed submission is never recorded as if it had landed. A "duplicate"
 // outcome is NOT an error — it means the IOC is already in the dataset, which
 // is a successful contribution, so it returns a Result with Duplicate=true.
-func (c *Client) Submit(ctx context.Context, apiKey string, s Submission) (*Result, error) {
+func (c *Client) Submit(ctx context.Context, apiKey string, s Submission) (result *Result, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.ThreatFox, observability.Submit)
+	defer func() {
+		if errors.Is(resultErr, ErrUnauthorized) {
+			trace.Finish(resultErr, observability.Unauthorized)
+			return
+		}
+		if result != nil && result.Ignored {
+			trace.Finish(resultErr, observability.Rejected)
+			return
+		}
+		trace.Finish(resultErr)
+	}()
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, ErrMissingAPIKey
 	}
@@ -162,7 +175,9 @@ func (c *Client) Submit(ctx context.Context, apiKey string, s Submission) (*Resu
 	req.Header.Set("Auth-Key", apiKey)
 	req.Header.Set("Accept", "application/json")
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
 		return nil, intelutil.SafeRequestError("threatfox", "post", err)
 	}

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"io"
 	"net/http"
 	"net/url"
@@ -73,7 +74,9 @@ type Result struct {
 // is a caller bug (returns an error before any network IO). A 429 is returned
 // as (Result{RateLimited:true}, nil) — an expected operational state, not an
 // error; any other non-2xx is an error.
-func (c *Client) Submit(ctx context.Context, authKey string, rep Submission) (*Result, error) {
+func (c *Client) Submit(ctx context.Context, authKey string, rep Submission) (result *Result, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.AbuseIPDB, observability.Submit)
+	defer func() { ; trace.Finish(resultErr) }()
 	if strings.TrimSpace(authKey) == "" {
 		return nil, errors.New("abuseipdb: missing API key")
 	}
@@ -102,7 +105,9 @@ func (c *Client) Submit(ctx context.Context, authKey string, rep Submission) (*R
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
 		return nil, safeRequestError("post", err)
 	}

@@ -3,6 +3,7 @@ package urlhaus
 import (
 	"context"
 	"errors"
+	"github.com/networkshard/shardlure/internal/observability"
 	"strings"
 	"time"
 
@@ -212,6 +213,7 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 		ledgerFailed := false
 		for _, p := range batch {
 			if err := rec.RecordURLhausSubmission(p.cand.URL, status, time.Now()); err != nil {
+				observability.DurableShare(ctx, observability.URLhaus, err, 1)
 				firstErr = errors.Join(firstErr, err)
 				ledgerFailed = true
 				if opts.OnProgress != nil {
@@ -220,6 +222,7 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 				continue
 			}
 			submitted++
+			observability.DurableShare(ctx, observability.URLhaus, nil, 1)
 			if opts.OnProgress != nil {
 				opts.OnProgress(p.cand, true, status)
 			}

@@ -2,6 +2,7 @@ package journal
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"os"
 	"strings"
@@ -73,11 +74,20 @@ func looksLikeSSHD(line string) bool {
 }
 
 func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
+	return persistJournalEventsContext(context.Background(), st, events, adminIPs, replace)
+}
+func persistJournalEventsContext(ctx context.Context, st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	admin := actor.AdminSet(adminIPs)
 	skippedAdmin := 0
 	stored := make([]*models.Event, 0, len(events))
 	attack := make([]*models.Event, 0, len(events))
 	for _, e := range events {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if e.Kind == models.KindAccepted && admin.Has(e.SrcIP) {
 			skippedAdmin++
 			continue
@@ -128,7 +138,7 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 		touched := map[string]struct{}{}
 		for start := 0; start < len(freshStored); start += 500 {
 			page := freshStored[start:min(start+500, len(freshStored))]
-			n, err := st.AppendJournalEventsAtomic(page)
+			n, err := st.AppendJournalEventsAtomicContext(ctx, page)
 			if err != nil {
 				return nil, err
 			}

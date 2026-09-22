@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"net/http"
 	"strings"
 	"time"
@@ -87,7 +88,15 @@ var (
 //
 // A non-2xx response or an auth-failure status is returned as an error so
 // callers never record a failed submission as if it had landed.
-func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, anonymous bool) (*Result, error) {
+func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, anonymous bool) (result *Result, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.URLhaus, observability.Submit)
+	defer func() {
+		if errors.Is(resultErr, ErrUnauthorized) {
+			trace.Finish(resultErr, observability.Unauthorized)
+			return
+		}
+		trace.Finish(resultErr)
+	}()
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, ErrMissingAPIKey
 	}
@@ -110,7 +119,9 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 	req.Header.Set("Auth-Key", apiKey)
 	req.Header.Set("Accept", "application/json")
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
 		return nil, intelutil.SafeRequestError("urlhaus", "post", err)
 	}

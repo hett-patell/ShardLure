@@ -19,6 +19,8 @@ import (
 )
 
 type FileWorker struct {
+	// Set before Run; callbacks describe real cycles, including idle cycles.
+	OnCycle                     func(bool, error)
 	st                          *store.Store
 	downloadsRoot, evidenceRoot string
 	maxBytes                    int64
@@ -32,7 +34,13 @@ func NewFileWorker(st *store.Store, downloadsRoot, evidenceRoot string, maxBytes
 
 func (w *FileWorker) Run(ctx context.Context) {
 	for ctx.Err() == nil {
+		if w.OnCycle != nil {
+			w.OnCycle(true, nil)
+		}
 		n, err := w.tick(ctx)
+		if w.OnCycle != nil {
+			w.OnCycle(false, err)
+		}
 		if err != nil && ctx.Err() == nil {
 			log.Print("file-capture: operation failed")
 		}

@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"io"
 	"net/http"
 	"strings"
@@ -184,7 +185,9 @@ func isSHA256(s string) bool {
 
 // Lookup fetches the verdict for one sha256. A 404 returns a Verdict with
 // Found=false and no error — "VT has never seen this" is a real answer.
-func (c *Client) Lookup(ctx context.Context, apiKey, sha string) (*Verdict, error) {
+func (c *Client) Lookup(ctx context.Context, apiKey, sha string) (result *Verdict, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.VirusTotal, observability.HashLookup)
+	defer func() { ; trace.Finish(resultErr) }()
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if !isSHA256(sha) {
 		return nil, ErrBadHash
@@ -200,7 +203,9 @@ func (c *Client) Lookup(ctx context.Context, apiKey, sha string) (*Verdict, erro
 	req.Header.Set("x-apikey", apiKey)
 	req.Header.Set("Accept", "application/json")
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
 		return nil, fmt.Errorf("vt: get: %w", err)
 	}

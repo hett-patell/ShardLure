@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -123,7 +124,15 @@ func (r Result) IsAccepted() bool {
 //
 // authKey is the abuse.ch Auth-Key. Passing an empty string is a
 // caller bug: returns an error before any network IO.
-func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha256 string, sub Submission) (*Result, error) {
+func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha256 string, sub Submission) (result *Result, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.MalwareBazaar, observability.Upload)
+	defer func() {
+		if result != nil && !result.IsAccepted() {
+			trace.Finish(resultErr, observability.Rejected)
+			return
+		}
+		trace.Finish(resultErr)
+	}()
 	if strings.TrimSpace(authKey) == "" {
 		return nil, errors.New("bazaar: missing Auth-Key")
 	}
@@ -193,7 +202,9 @@ func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha
 	req.Header.Set("Auth-Key", authKey)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
 		return nil, intelutil.SafeRequestError("bazaar", "post", err)
 	}

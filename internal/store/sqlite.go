@@ -17,8 +17,10 @@ import (
 )
 
 type Store struct {
-	db   *sql.DB
-	path string // canonical database name; never a retention target
+	observerMu     sync.RWMutex
+	ingestObserver func(models.Source, int, error)
+	db             *sql.DB
+	path           string // canonical database name; never a retention target
 	// writeMu serializes WRITES at the application layer. SQLite allows only
 	// one writer, and live mode has several writer goroutines (journal tail,
 	// cowrie ticker, retention purge) plus the web server sharing this db; with

@@ -3,6 +3,7 @@ package threatfox
 import (
 	"context"
 	"errors"
+	"github.com/networkshard/shardlure/internal/observability"
 	"strings"
 	"time"
 
@@ -227,12 +228,14 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 				status = "duplicate"
 			}
 			if rerr := rec.RecordThreatFoxSubmission(ioc.Value, ioc.Type, malware, status, time.Now().UTC()); rerr != nil {
+				observability.DurableShare(ctx, observability.ThreatFox, rerr, 1)
 				finishCandidate("accepted upstream; local ledger write failed")
 				// A missing ledger row makes this accepted IOC eligible for a later
 				// duplicate submission. Stop before posting any more IOCs.
 				return submitted, skipped, errors.Join(firstErr, rerr)
 			}
 			sentCount++
+			observability.DurableShare(ctx, observability.ThreatFox, nil, 1)
 		}
 
 		outcomeReason := ""

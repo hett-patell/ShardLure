@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/observability"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 )
@@ -48,6 +50,7 @@ type geoEntry struct {
 }
 
 type geoResolver struct {
+	monitor  *observability.Monitor
 	mu       sync.Mutex
 	cache    map[string]*geoEntry
 	lru      *list.List // front = most recent insert/touch
@@ -435,8 +438,22 @@ func (g *geoResolver) fetch(ctx context.Context, ip string) {
 		g.mu.Unlock()
 		return
 	}
+	ctx, trace := observability.TraceRequest(observability.WithMonitor(ctx, g.monitor), observability.IPAPI, observability.IPLookup)
+	req = req.WithContext(ctx)
+	outcome := observability.InvalidResponse
+	var requestErr error
+	defer func() {
+		if requestErr != nil {
+			trace.Finish(requestErr)
+		} else {
+			trace.Finish(nil, outcome)
+		}
+	}()
+	observability.StartHTTP(ctx)
 	resp, err := g.http.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
+		requestErr = err
 		g.mu.Lock()
 		delete(g.inflight, ip)
 		if ctx.Err() == nil {
@@ -446,6 +463,9 @@ func (g *geoResolver) fetch(ctx context.Context, ip string) {
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		requestErr = errors.New("geo request rejected")
+	}
 
 	var out struct {
 		Status  string  `json:"status"`
@@ -473,6 +493,11 @@ func (g *geoResolver) fetch(ctx context.Context, ip string) {
 		Country: out.Country,
 		City:    out.City,
 		CC:      out.CC,
+	}
+	if ent.OK {
+		outcome = observability.Success
+	} else {
+		outcome = observability.Rejected
 	}
 	if ent.OK {
 		ent.Expiry = g.now().Add(24 * time.Hour)

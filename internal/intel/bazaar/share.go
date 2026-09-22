@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +293,7 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 		} else {
 			if res.IsAccepted() {
 				if rerr := rec.RecordBazaarUpload(cand.SHA256, res.Status, res.SampleURL, time.Now().UTC()); rerr != nil {
+					observability.DurableShare(ctx, observability.MalwareBazaar, rerr, 1)
 					if opts.OnProgress != nil {
 						opts.OnProgress(cand, cls, res, rerr)
 					}
@@ -300,6 +302,7 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 					return uploaded, skipped, errors.Join(firstErr, rerr)
 				}
 				uploaded++
+				observability.DurableShare(ctx, observability.MalwareBazaar, nil, 1)
 			}
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, cls, res, nil)

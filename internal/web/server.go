@@ -37,10 +37,11 @@ func httpError(w http.ResponseWriter, where string, err error, code int) {
 }
 
 type Server struct {
-	monitor *observability.Monitor
-	st      *store.Store
-	addr    string
-	geo     *geoResolver
+	onListening func(net.Addr)
+	monitor     *observability.Monitor
+	st          *store.Store
+	addr        string
+	geo         *geoResolver
 	// keys is the live runtime keystore. Secrets (dashboard token, bazaar +
 	// abuseipdb API keys) and the tunable knobs below are read THROUGH it at
 	// request time so a value saved from the Settings panel takes effect
@@ -643,6 +644,8 @@ func (s *Server) topCountriesCached() []topCountryRow {
 }
 
 type Options struct {
+	// OnListening announces successful binding before long application seeding.
+	OnListening     func(net.Addr)
 	Monitor         *observability.Monitor
 	HomeLat         float64
 	HomeLon         float64
@@ -760,7 +763,8 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	if abuseRewindow <= 0 {
 		abuseRewindow = 24 * time.Hour
 	}
-	return &Server{
+	server := &Server{
+		onListening:           firstOpt.OnListening,
 		monitor:               firstOpt.Monitor,
 		st:                    st,
 		addr:                  addr,
@@ -789,6 +793,8 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		tailscaleMode:            firstOpt.TailscaleMode,
 		startedAt:                time.Now(),
 	}
+	server.geo.monitor = firstOpt.Monitor
+	return server
 }
 
 // ---- live setting accessors ---------------------------------------------
@@ -918,6 +924,11 @@ func (s *Server) homeLive() homePoint {
 
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
 func (s *Server) RunContext(ctx context.Context) error {
+	defer func() {
+		if s.geo != nil {
+			s.geo.mmdb.close()
+		}
+	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.guardOperationalRead(s.handleHealth))
 	mux.HandleFunc("/readyz", s.guardOperationalRead(s.handleReady))
@@ -1076,8 +1087,10 @@ func (s *Server) RunContext(ctx context.Context) error {
 
 	var handlers handlerDrain
 	srv := &http.Server{
-		Addr:        s.addr,
-		Handler:     handlers.wrap(securityHeaders(mux)),
+		Addr: s.addr,
+		Handler: handlers.wrap(securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mux.ServeHTTP(w, r.WithContext(observability.WithMonitor(r.Context(), s.monitor)))
+		}))),
 		ReadTimeout: 10 * time.Second,
 		// 60s rather than 20s so /debug/pprof/profile?seconds=30 can
 		// complete. No handler is supposed to take longer than a few
@@ -1092,8 +1105,19 @@ func (s *Server) RunContext(ctx context.Context) error {
 	}
 
 	errCh := make(chan error, 1)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	if s.onListening != nil {
+		s.onListening(listener.Addr())
+	}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
@@ -1106,9 +1130,6 @@ func (s *Server) RunContext(ctx context.Context) error {
 		// out. Join handlers before closing their shared resources.
 		_ = srv.Close()
 		handlers.wait()
-		if s.geo != nil {
-			s.geo.mmdb.close()
-		}
 	}()
 	select {
 	case <-ctx.Done():
@@ -1133,6 +1154,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.applicationAvailable(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1716,19 +1740,28 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // caller to believe the verb carries meaning, and every write endpoint here
 // already rejects the wrong verb, so the two halves of the API should agree.
 func (s *Server) guardRead(h http.HandlerFunc) http.HandlerFunc {
-	return s.guard(func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireDashboardAuth(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !s.applicationAvailable(w, r) {
+			return
+		}
 		h(w, r)
-	})
+	}
 }
 
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireDashboardAuth(w, r) {
+			return
+		}
+		if !s.applicationAvailable(w, r) {
 			return
 		}
 		h(w, r)

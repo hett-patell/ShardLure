@@ -105,6 +105,9 @@ func (s *Server) handleIntelPage(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePageAuth(w, r) {
 		return
 	}
+	if !s.applicationAvailable(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(intelHTML))
 }

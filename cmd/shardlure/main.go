@@ -8,17 +8,14 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
-	"github.com/networkshard/shardlure/internal/capture"
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/ingest/cowrie"
 	"github.com/networkshard/shardlure/internal/ingest/journal"
@@ -50,6 +47,8 @@ func main() {
 		return
 	}
 
+	ctx, cancel := newCommandContext(context.Background())
+	defer cancel()
 	path := *cfgPath
 	if path == "" {
 		path = os.Getenv("SHARDLURE_CONFIG")
@@ -57,8 +56,6 @@ func main() {
 	// Recovery inspection/restoration must not load the normal config, create
 	// a data directory, open/migrate a Store, or seed any runtime settings.
 	if args[0] == "backup" {
-		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer cancel()
 		if err := runBackup(ctx, path, args[1:], os.Stdout); err != nil {
 			fatal(err)
 		}
@@ -130,22 +127,14 @@ func main() {
 		if tailscaleHint {
 			printTailscaleURL(addr)
 		}
-		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer cancel()
-		var workers sync.WaitGroup
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			runStoreBackfills(ctx, st)
-		}()
-		err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx)
-		cancel()
-		workers.Wait()
+		err := runRuntime(ctx, st, keys, cfg, runtimeOptions{Addr: addr, Tailscale: tailscaleHint})
 		if err != nil {
 			fatal(err)
 		}
 	case "live":
-		cmdLive(st, keys, cfg, args[1:])
+		if err := cmdLive(ctx, st, keys, cfg, args[1:]); err != nil {
+			fatal(err)
+		}
 	case "run":
 		// syscall.Exec below replaces this process, so the deferred st.Close()
 		// in main() would never run; close the store now (the wrapper re-opens
@@ -223,183 +212,44 @@ func cmdIngest(st *store.Store, cfg config.Config, args []string) {
 	}
 }
 
-func cmdLive(st *store.Store, keys *settings.Keystore, cfg config.Config, args []string) {
-	addr := "127.0.0.1:8080"
+func cmdLive(ctx context.Context, st *store.Store, keys *settings.Keystore, cfg config.Config, args []string) error {
+	opts := runtimeOptions{Addr: "127.0.0.1:8080", Live: true, Journal: true, CowriePath: cfg.Cowrie.JSONLog, Interval: 5 * time.Second}
 	if cfg.Dashboard.Port > 0 {
-		addr = fmt.Sprintf(":%d", cfg.Dashboard.Port)
+		opts.Addr = fmt.Sprintf(":%d", cfg.Dashboard.Port)
 	}
-	cowriePath := cfg.Cowrie.JSONLog
-	if cowriePath == "" {
-		cowriePath = "/var/log/cowrie/cowrie.json"
-	}
-	interval := 5 * time.Second
-	journalSSH := true
-	tailscaleHint := false
-	for _, a := range args {
+	for _, arg := range args {
 		switch {
-		case a == "" || a == " ":
-			continue
-		case a == "--no-journal":
-			journalSSH = false
-		case a == "--tailscale":
-			tailscaleHint = true
-		case strings.HasPrefix(a, "--cowrie="):
-			cowriePath = strings.TrimPrefix(a, "--cowrie=")
-		case strings.HasPrefix(a, "--interval="):
-			v := strings.TrimPrefix(a, "--interval=")
-			if d, err := time.ParseDuration(v); err == nil && d > 0 {
-				interval = d
+		case arg == "" || arg == " ":
+		case arg == "--no-journal":
+			opts.Journal = false
+		case arg == "--tailscale":
+			opts.Tailscale = true
+		case strings.HasPrefix(arg, "--cowrie="):
+			opts.CowriePath = strings.TrimPrefix(arg, "--cowrie=")
+		case strings.HasPrefix(arg, "--interval="):
+			value, err := time.ParseDuration(strings.TrimPrefix(arg, "--interval="))
+			if err != nil || value <= 0 {
+				return fmt.Errorf("invalid live interval")
 			}
-		case strings.HasPrefix(a, "--"):
-			fatal(fmt.Errorf("unknown live flag: %q (supported: --no-journal --tailscale --cowrie=PATH --interval=DUR)", a))
+			opts.Interval = value
+		case strings.HasPrefix(arg, "--"):
+			return fmt.Errorf("unknown live option")
 		default:
-			// Positional listen address. `web` accepts the same shape; keep
-			// them consistent — previously `live 8080` was silently ignored
-			// while `web 8080` worked.
-			addr = a
+			opts.Addr = arg
 		}
 	}
-	if cowriePath == "" {
-		fatal(fmt.Errorf("cowrie path missing; set in config cowrie.json_log or pass --cowrie=<path>"))
+	if opts.CowriePath == "" {
+		return fmt.Errorf("cowrie path missing")
 	}
-	// Bind only the private interface. A flag cannot make wildcard sockets
-	// private; missing Tailscale must be a startup failure, not public fallback.
-	if tailscaleHint {
-		var err error
-		addr, err = tailscaleBindAddress(addr, tailscaleIPv4())
+	if opts.Tailscale {
+		addr, err := tailscaleBindAddress(opts.Addr, tailscaleIPv4())
 		if err != nil {
-			fatal(err)
+			return err
 		}
+		opts.Addr = addr
 	}
-	dashURL := addr
-	if p := addrPort(addr); p > 0 && !tailscaleHint {
-		dashURL = fmt.Sprintf("http://127.0.0.1:%d", p)
-	}
-	fmt.Printf("live wrapper: cowrie=%s journal=%v interval=%s dashboard=%s\n", cowriePath, journalSSH, interval, dashURL)
-	if tailscaleHint {
-		printTailscaleURL(addr)
-	}
-
-	if journalSSH {
-		if _, err := journal.IngestJournalctl(st, cfg.Journal.Unit, "30 days ago", cfg.AdminIPs, false); err != nil {
-			fmt.Fprintf(os.Stderr, "journal seed warning: %v\n", err)
-		}
-	}
-	cowrie.BackfillRotatedLogs(st, cowriePath, cfg.AdminIPs)
-	if _, err := cowrie.IngestFileAppend(st, cowriePath, cfg.AdminIPs); err != nil {
-		fatal(fmt.Errorf("initial cowrie ingest: %w", err))
-	}
-	capRunner := capture.NewRunner(st, cfg)
-	if n, err := capRunner.Run(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "capture warning: %v\n", err)
-	} else if n > 0 {
-		fmt.Printf("captured %d payload artifact(s) -> %s\n", n, cfg.CaptureEvidenceDir())
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	var workers sync.WaitGroup
-	startWorker := func(fn func()) {
-		workers.Add(1)
-		go func() { defer workers.Done(); fn() }()
-	}
-
-	// Start the artifact retry worker in the background. It polls for failed
-	// captures and retries them with exponential backoff, bounded by the
-	// configured max attempts.
-	artWorker := capture.NewArtifactWorker(st, capRunner.Fetch(), 5, 2*time.Minute)
-	if cfg.Capture.Enabled && cfg.Capture.QuarantineFetch {
-		startWorker(func() { artWorker.Run(ctx) })
-	}
-	if cfg.Capture.Enabled {
-		fileWorker := capRunner.FileWorker()
-		startWorker(func() { fileWorker.Run(ctx) })
-	}
-	startWorker(func() { runStoreBackfills(ctx, st) })
-
-	if journalSSH {
-		startWorker(func() {
-			// Restart the tail on failure with capped backoff. A scanner error
-			// (e.g. an oversized journal line) or journalctl exiting would
-			// otherwise end journal ingestion silently for the daemon's whole
-			// lifetime — and since the process keeps running, Restart=always
-			// never kicks in.
-			backoff := time.Second
-			for ctx.Err() == nil {
-				err := journal.TailFollow(ctx, st, cfg.Journal.Unit, cfg.AdminIPs)
-				if ctx.Err() != nil {
-					return
-				}
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "journal tail stopped: %v (restarting in %s)\n", err, backoff)
-				}
-				timer := time.NewTimer(backoff)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-				if backoff < 30*time.Second {
-					backoff *= 2
-				}
-			}
-		})
-	}
-	startWorker(func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if _, err := cowrie.IngestFileAppend(st, cowriePath, cfg.AdminIPs); err != nil {
-					fmt.Fprintf(os.Stderr, "live ingest warning: %v\n", err)
-				}
-				if _, err := capRunner.Run(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "capture warning: %v\n", err)
-				}
-			}
-		}
-	})
-	// Periodic data retention purge — deletes old events,
-	// enrichments, artifacts, and TTY transcripts past the
-	// configured retention window. Fires once at startup
-	// and then every 24h.
-	startWorker(func() {
-		t := time.NewTicker(24 * time.Hour)
-		defer t.Stop()
-		runPurge := func() {
-			if err := st.MaintenancePurge(cfg.RetentionDays); err != nil {
-				fmt.Fprintf(os.Stderr, "maintenance purge: %v\n", err)
-			}
-			// Also clean Cowrie's own source dirs so they don't grow without
-			// bound and so purged artifacts can't be re-archived from the
-			// surviving source file on the next tick.
-			if _, err := capRunner.PurgeOldSourceFilesContext(ctx, cfg.RetentionDays); err != nil && ctx.Err() == nil {
-				fmt.Fprintln(os.Stderr, "capture source retention failed")
-			}
-		}
-		runPurge()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				runPurge()
-			}
-		}
-	})
-
-	err := web.New(st, keys, addr, webOptionsWithTailscale(cfg, tailscaleHint)).RunContext(ctx)
-	cancel()
-	workers.Wait()
-	if err != nil {
-		fatal(err)
-	}
+	return runRuntime(ctx, st, keys, cfg, opts)
 }
-
 func runStoreBackfills(ctx context.Context, st *store.Store) {
 	const (
 		batchSize = 1000

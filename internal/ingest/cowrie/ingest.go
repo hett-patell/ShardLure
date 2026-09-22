@@ -2,6 +2,7 @@ package cowrie
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -95,6 +96,13 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 }
 
 func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result, error) {
+	return IngestFileAppendContext(context.Background(), st, path, adminIPs)
+}
+
+func IngestFileAppendContext(ctx context.Context, st *store.Store, path string, adminIPs []string) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := st.RepairCanonicalHASSHBatch(2000); err != nil {
 		return nil, err
 	}
@@ -106,6 +114,13 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		return nil, err
 	}
 	defer f.Close()
+	closed := make(chan struct{})
+	stopClose := context.AfterFunc(ctx, func() { defer close(closed); _ = f.Close() })
+	defer func() {
+		if !stopClose() {
+			<-closed
+		}
+	}()
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -129,7 +144,9 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	startOffset := prev.Offset
 	rotatedInPlace := prev.Inode == inode && prev.HeadSig != "" && headSig != "" && prev.HeadSig != headSig
 	if (prev.Inode != 0 && prev.Inode != inode) || rotatedInPlace {
-		backfillRotatedLogs(st, path, adminIPs)
+		if err := BackfillRotatedLogsContext(ctx, st, path, adminIPs); err != nil {
+			return nil, err
+		}
 	}
 	if prev.Inode != inode || fi.Size() < startOffset || rotatedInPlace {
 		startOffset = 0
@@ -140,12 +157,18 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 
 	// Incremental tail: hold back an unterminated final line (cowrie may be
 	// mid-write) so we don't consume past it and lose the event.
-	events, skipped, consumed, bindings, err := parseReader(f, false)
+	events, skipped, consumed, bindings, err := parseReader(contextReader{ctx, f}, false)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
 	if err := persistBindings(st, bindings); err != nil {
 		return nil, err
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	// Stamp HASSH before dedup/cluster so actor IDs are keyed by fingerprint,
 	// not IP. Persisted first so a session whose kex landed in an earlier tail
@@ -176,13 +199,16 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	if err != nil {
 		return nil, err
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if len(fresh) == 0 {
 		if err := st.SetIngestState(newState); err != nil {
 			return nil, err
 		}
 		return &Result{Skipped: skipped}, nil
 	}
-	res, err := syncCowrieActors(st, fresh, adminIPs)
+	res, err := syncCowrieActorsContext(ctx, st, fresh, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
 	}
@@ -338,22 +364,57 @@ func BackfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string)
 
 // backfillRotatedLogs ingests cowrie.json.YYYY-MM-DD siblings when the active log rotates.
 func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string) {
+	if err := BackfillRotatedLogsContext(context.Background(), st, currentPath, adminIPs); err != nil {
+		log.Print("cowrie rotated backfill failed")
+	}
+}
+
+func BackfillRotatedLogsContext(ctx context.Context, st *store.Store, currentPath string, adminIPs []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dir := filepath.Dir(currentPath)
 	base := filepath.Base(currentPath)
 	matches, err := filepath.Glob(filepath.Join(dir, base+".*"))
 	if err != nil {
-		return
+		return err
 	}
+	var firstErr error
 	for _, p := range matches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if p == currentPath {
 			continue
 		}
 		// Best-effort, but surface failures: a corrupt or unreadable rotated
 		// log was previously swallowed silently, hiding lost telemetry.
-		if _, err := IngestFileAppend(st, p, adminIPs); err != nil {
-			log.Printf("cowrie backfill: ingest %s failed: %v", p, err)
+		if _, err := IngestFileAppendContext(ctx, st, p, adminIPs); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
+	return firstErr
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if r.ctx.Err() != nil {
+		return n, r.ctx.Err()
+	}
+	return n, err
 }
 
 // syncCowrieActors re-aggregates only the cowrie actors the fresh batch
@@ -368,6 +429,12 @@ func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string)
 // touched-ID set is exactly the actors whose aggregate can change. Admin
 // events get a blank ActorID and are excluded.
 func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string) (*Result, error) {
+	return syncCowrieActorsContext(context.Background(), st, fresh, adminIPs)
+}
+func syncCowrieActorsContext(ctx context.Context, st *store.Store, fresh []*models.Event, adminIPs []string) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	admin := actor.AdminSet(adminIPs)
 	actor.AssignCowrieActorIDs(fresh, admin)
 
@@ -375,7 +442,7 @@ func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string)
 	if len(touched) == 0 {
 		// Only admin/skipped events in this batch — persist them but touch no
 		// actors. (Events are still recorded for telemetry completeness.)
-		if err := st.AppendEventsAndUpsertActorsAgg(fresh, nil); err != nil {
+		if err := st.AppendEventsAndUpsertActorsAggContext(ctx, fresh, nil); err != nil {
 			return nil, err
 		}
 		return &Result{Events: len(fresh), Actors: 0}, nil
@@ -385,7 +452,7 @@ func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string)
 	if err != nil {
 		return nil, err
 	}
-	if err := st.AppendEventsAndUpsertActorsAgg(fresh, actors); err != nil {
+	if err := st.AppendEventsAndUpsertActorsAggContext(ctx, fresh, actors); err != nil {
 		return nil, err
 	}
 	return &Result{Events: len(fresh), Actors: len(actors)}, nil

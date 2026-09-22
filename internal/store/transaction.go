@@ -1,12 +1,58 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+// WithTxContext also bounds admission to the single writer. Cancelling only
+// SQLite after an uninterruptible mutex wait would still hang startup/shutdown.
+func (s *Store) WithTxContext(ctx context.Context, fn func(*sql.Tx) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !s.writeMu.TryLock() {
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-tick.C:
+			}
+			if s.writeMu.TryLock() {
+				break
+			}
+		}
+	}
+	defer s.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	err = tx.Commit()
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
 
 func (s *Store) WithTx(fn func(*sql.Tx) error) error {
 	// Serialize write transactions (single SQLite writer) while leaving reads
@@ -75,7 +121,10 @@ func (s *Store) AppendEventsAndReplaceActorsAgg(source models.Source, fresh []*m
 // arbitrary rebuilds we clear the touched actors' child rows first, then
 // rewrite them from the fresh aggregate.
 func (s *Store) AppendEventsAndUpsertActorsAgg(fresh []*models.Event, actors []*models.AggregatedActor) error {
-	return s.WithTx(func(tx *sql.Tx) error {
+	return s.AppendEventsAndUpsertActorsAggContext(context.Background(), fresh, actors)
+}
+func (s *Store) AppendEventsAndUpsertActorsAggContext(ctx context.Context, fresh []*models.Event, actors []*models.AggregatedActor) error {
+	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
 		for _, e := range fresh {
 			if err := insertEvent(tx, e); err != nil {
 				return err
@@ -88,6 +137,18 @@ func (s *Store) AppendEventsAndUpsertActorsAgg(fresh []*models.Event, actors []*
 		}
 		return writeActorsTx(tx, actors)
 	})
+	for _, source := range []models.Source{models.SourceCowrie, models.SourceJournal} {
+		n := 0
+		for _, event := range fresh {
+			if event != nil && event.Source == source {
+				n++
+			}
+		}
+		if n > 0 {
+			s.observeIngest(source, n, err)
+		}
+	}
+	return err
 }
 
 // deleteActorChildrenTx removes the actor_ips / actor_users rows for a single
@@ -156,6 +217,13 @@ type JournalActorUpdate struct {
 // writes the event plus its optional actor roll-up in one transaction. Event
 // IDs are published to the caller only after the transaction commits.
 func (s *Store) AppendJournalEventAtomic(e *models.Event, update *JournalActorUpdate) (inserted bool, err error) {
+	defer func() {
+		n := 0
+		if inserted && err == nil {
+			n = 1
+		}
+		s.observeIngest(models.SourceJournal, n, err)
+	}()
 	if e == nil {
 		return false, errors.New("store: nil journal event")
 	}
@@ -185,7 +253,11 @@ func (s *Store) AppendJournalEventAtomic(e *models.Event, update *JournalActorUp
 // AppendJournalEventsAtomic appends one bounded batch without reconstructing
 // lifetime counters from retention-limited events. Replays and concurrent live
 // appends share the same transaction-local identity/counter code.
-func (s *Store) AppendJournalEventsAtomic(events []*models.Event) (int, error) {
+func (s *Store) AppendJournalEventsAtomic(events []*models.Event) (count int, resultErr error) {
+	return s.AppendJournalEventsAtomicContext(context.Background(), events)
+}
+func (s *Store) AppendJournalEventsAtomicContext(ctx context.Context, events []*models.Event) (count int, resultErr error) {
+	defer func() { s.observeIngest(models.SourceJournal, count, resultErr) }()
 	if len(events) > 500 {
 		return 0, errors.New("journal batch exceeds 500 events")
 	}
@@ -198,7 +270,7 @@ func (s *Store) AppendJournalEventsAtomic(events []*models.Event) (int, error) {
 		stored[i].ID = 0
 	}
 	inserted := 0
-	err := s.WithTx(func(tx *sql.Tx) error {
+	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
 		for i := range stored {
 			e := &stored[i]
 			ok, err := appendJournalEventTx(tx, e, e.ActorID != "" && e.Kind != models.KindAccepted)

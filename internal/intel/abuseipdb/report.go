@@ -3,6 +3,7 @@ package abuseipdb
 import (
 	"context"
 	"errors"
+	"github.com/networkshard/shardlure/internal/observability"
 	"strings"
 	"time"
 
@@ -213,6 +214,7 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 			return reported, skipped, errors.Join(firstErr, ErrRateLimited)
 		}
 		if rerr := rec.RecordAbuseIPDBReport(cand.SrcIP, "reported", res.Score, opts.Categories, time.Now().UTC()); rerr != nil {
+			observability.DurableShare(ctx, observability.AbuseIPDB, rerr, 1)
 			releaseTarget()
 			if opts.OnProgress != nil {
 				opts.OnProgress(cand, res, rerr)
@@ -224,6 +226,7 @@ func Report(ctx context.Context, rec ReportRecorder, candidates []ReportCandidat
 		}
 		releaseTarget()
 		reported++
+		observability.DurableShare(ctx, observability.AbuseIPDB, nil, 1)
 		if opts.OnProgress != nil {
 			opts.OnProgress(cand, res, nil)
 		}
