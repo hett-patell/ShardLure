@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 	"github.com/networkshard/shardlure/internal/observability"
 	"github.com/networkshard/shardlure/internal/store"
 )
@@ -387,7 +388,7 @@ func isHTTPStatus(err error, code int) bool {
 func httpJSON(ctx context.Context, hc *http.Client, url string, headers map[string]string, out any) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, intelutil.SafeRequestError("enrichment", "build request", err)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -397,15 +398,15 @@ func httpJSON(ctx context.Context, hc *http.Client, url string, headers map[stri
 	resp, err := hc.Do(req)
 	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
-		return nil, err
+		return nil, intelutil.SafeRequestError("enrichment", "get", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
 	if err != nil {
-		return nil, err
+		return nil, intelutil.SafeRequestError("enrichment", "read response", err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return body, &statusError{Code: resp.StatusCode, Status: resp.Status}
+		return body, &statusError{Code: resp.StatusCode, Status: http.StatusText(resp.StatusCode)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(body, out); err != nil {

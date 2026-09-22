@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -976,7 +975,7 @@ func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
 		MinBytes: bazaar.MinSampleBytes,
 		Origins:  bazaar.ShareableOrigins(),
 	}); serr != nil {
-		log.Printf("payload detail: shareable lookup for %s: %v", a.SHA256, serr)
+		logOperationError("payload shareable lookup", serr)
 	} else {
 		resp.Shareable = ok
 	}
@@ -1109,7 +1108,7 @@ func (s *Server) handleIOCCSV(w http.ResponseWriter, r *http.Request) {
 	if err := ioc.WriteCSVWithCoverage(w, indicators, cov); err != nil {
 		// Best-effort: header already written, so nothing can be surfaced
 		// to the browser — log for the operator instead.
-		log.Printf("api_intel: ioc csv write: %v", err)
+		logOperationError("ioc csv write", err)
 	}
 }
 
@@ -1137,7 +1136,7 @@ func (s *Server) handleIOCSTIX(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
 	if err := ioc.WriteSTIXWithCoverage(w, indicators, cov); err != nil {
 		// Header already written; log-only, same as the CSV handler.
-		log.Printf("api_intel: ioc stix write: %v", err)
+		logOperationError("ioc stix write", err)
 	}
 }
 
@@ -1364,7 +1363,7 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 		// Log the real upstream (MalwareBazaar) error server-side; return a
 		// generic message so an admin-API response can't leak API tokens,
 		// internal URLs, or upstream internals echoed back in an error string.
-		log.Printf("web: bazaar share: %v", shareErr)
+		logOperationError("bazaar share", shareErr)
 		resp.Status = "error"
 		resp.Error = "share failed — see server logs"
 	} else {
@@ -1591,7 +1590,7 @@ func (s *Server) handleAbuseIPDBReport(w http.ResponseWriter, r *http.Request) {
 		if ferr == nil {
 			ferr = reportErr
 		}
-		log.Printf("web: abuseipdb report: %v", ferr)
+		logOperationError("abuseipdb report", ferr)
 		resp.Status = "error"
 		resp.Error = "report failed — see server logs"
 	default:
@@ -1689,7 +1688,7 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 
 	resp := reportAllResponse{Status: "ok", Reported: reported, Skipped: skipped}
 	if errors.Is(ferr, abuseipdb.ErrRateLimited) {
-		log.Printf("web: abuseipdb report-all: %v", ferr)
+		logOperationError("abuseipdb report-all", ferr)
 		if reported > 0 {
 			resp.Status = "partial"
 		} else {
@@ -1697,7 +1696,7 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		}
 		resp.Error = "AbuseIPDB rate limit reached; batch stopped before completion"
 	} else if ferr != nil {
-		log.Printf("web: abuseipdb report-all: %v", ferr)
+		logOperationError("abuseipdb report-all", ferr)
 		resp.Status = "partial"
 		resp.Error = "some reports failed — see server logs"
 	}

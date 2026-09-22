@@ -27,13 +27,23 @@ import (
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
-// httpError logs the real (possibly DB-internal) error server-side and returns
-// a generic message to the client, so store/SQL internals aren't exposed over
-// HTTP. All these endpoints are auth-gated, but leaking schema/error detail is
-// still poor hygiene. `where` is a short handler tag for the server log.
+// httpError emits only a fixed failure category and an internal operation tag.
+// Neither the response nor the log may disclose a raw underlying error.
 func httpError(w http.ResponseWriter, where string, err error, code int) {
-	log.Printf("web: %s: %v", where, err)
+	logOperationError(where, err)
 	http.Error(w, http.StatusText(code), code)
+}
+
+// Only source-owned operation tags and a closed failure category reach logs.
+// Raw errors can carry SQL values, private paths and credentials.
+func logOperationError(operation string, err error) {
+	reason := "operation_failed"
+	if errors.Is(err, context.Canceled) {
+		reason = "canceled"
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		reason = "deadline_exceeded"
+	}
+	log.Printf("web: %s: %s", operation, reason)
 }
 
 type Server struct {

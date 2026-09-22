@@ -3,7 +3,6 @@ package web
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -266,11 +265,11 @@ func (s *Server) handleURLhausSubmit(w http.ResponseWriter, r *http.Request) {
 	resp := urlhausSubmitResponse{Status: "ok", Submitted: submitted, Skipped: skipped}
 	switch {
 	case errors.Is(ferr, urlhaus.ErrUnauthorized):
-		log.Printf("web: urlhaus submit: %v", ferr)
+		logOperationError("urlhaus submit", ferr)
 		resp.Status = "error"
 		resp.Error = "abuse.ch rejected the Auth-Key"
 	case ferr != nil:
-		log.Printf("web: urlhaus submit: %v", ferr)
+		logOperationError("urlhaus submit", ferr)
 		if submitted > 0 {
 			resp.Status = "partial"
 		} else {

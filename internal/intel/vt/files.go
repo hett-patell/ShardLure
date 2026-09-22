@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 	"github.com/networkshard/shardlure/internal/observability"
 	"io"
 	"net/http"
@@ -198,7 +199,7 @@ func (c *Client) Lookup(ctx context.Context, apiKey, sha string) (result *Verdic
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+sha, nil)
 	if err != nil {
-		return nil, fmt.Errorf("vt: build request: %w", err)
+		return nil, intelutil.SafeRequestError("vt", "build request", err)
 	}
 	req.Header.Set("x-apikey", apiKey)
 	req.Header.Set("Accept", "application/json")
@@ -207,7 +208,7 @@ func (c *Client) Lookup(ctx context.Context, apiKey, sha string) (result *Verdic
 	resp, err := c.hc.Do(req)
 	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
-		return nil, fmt.Errorf("vt: get: %w", err)
+		return nil, intelutil.SafeRequestError("vt", "get", err)
 	}
 	defer resp.Body.Close()
 
@@ -235,7 +236,7 @@ func (c *Client) Lookup(ctx context.Context, apiKey, sha string) (result *Verdic
 	// and an unbounded decode is a memory-exhaustion vector.
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, fmt.Errorf("vt: read body: %w", err)
+		return nil, intelutil.SafeRequestError("vt", "read response", err)
 	}
 	return ParseFileReport(raw, sha)
 }
