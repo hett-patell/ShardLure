@@ -64,6 +64,13 @@ var snapshotTables = [...]struct {
 
 const latestSnapshotSchema = 24
 
+func snapshotContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, 30*time.Minute)
+}
+
 type snapshotQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
@@ -217,7 +224,7 @@ func copyLiveSQLite(ctx context.Context, source, destination string) error {
 // backup API, without migrations, capture, or source backfills. Its destination
 // must not exist. Failed staging is retained for recovery, never overwritten.
 func SnapshotDatabase(ctx context.Context, source, destination string) (SnapshotInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := snapshotContext(ctx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return SnapshotInfo{}, err
@@ -443,7 +450,7 @@ func InspectSnapshot(ctx context.Context, path string) (SnapshotInfo, error) {
 }
 
 func InspectSnapshotFile(ctx context.Context, file *os.File) (SnapshotInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := snapshotContext(ctx)
 	defer cancel()
 	var info SnapshotInfo
 	err := withSnapshotFile(ctx, file, func(db *sql.DB) error { var err error; info, err = readSnapshotInfo(ctx, db); return err })
@@ -451,7 +458,7 @@ func InspectSnapshotFile(ctx context.Context, file *os.File) (SnapshotInfo, erro
 }
 
 func IterateSnapshotEvidence(ctx context.Context, file *os.File, visit func(EvidenceReference) error) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := snapshotContext(ctx)
 	defer cancel()
 	if visit == nil {
 		return ErrSnapshotOperation

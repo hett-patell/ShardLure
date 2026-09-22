@@ -35,6 +35,7 @@ type plannedFile struct {
 	entry        Entry
 	expectedHash string
 	expectedSize int64
+	appendable   bool
 }
 type inventory struct {
 	files     []plannedFile
@@ -107,7 +108,7 @@ func (p *inventory) add(source *sourceRoot, name, relative, role string, expecte
 		return ErrManifestLimit
 	}
 	p.names[relative] = len(p.files)
-	p.files = append(p.files, plannedFile{source, name, info, entry, expectedHash, expectedSize})
+	p.files = append(p.files, plannedFile{source, name, info, entry, expectedHash, expectedSize, role == "cowrie-logs"})
 	p.bytes += info.Size()
 	return nil
 }
@@ -133,7 +134,7 @@ func Create(ctx context.Context, opts CreateOptions) (Manifest, error) {
 }
 
 func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOperations) (manifest Manifest, result error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := operationContext(ctx)
 	defer cancel()
 	stagePath := ""
 	defer func() {
@@ -498,15 +499,18 @@ func copyPlanned(ctx context.Context, stage *safefile.Root, file plannedFile, op
 	if err != nil {
 		return entry, err
 	}
-	appendable := entry.Role == "cowrie-logs"
+	appendable := file.appendable
 	if !os.SameFile(file.info, before) || before.Size() < entry.Bytes || (!appendable && !safefile.SameFileState(file.info, before)) {
 		return entry, ErrSourceChanged
 	}
-	parent, err := ensureRelativeDirectory(stage, path.Dir(entry.Path))
-	if err != nil {
-		return entry, err
+	parent := stage
+	if dir := path.Dir(entry.Path); dir != "." {
+		parent, err = ensureRelativeDirectory(stage, dir)
+		if err != nil {
+			return entry, err
+		}
+		defer parent.Close()
 	}
-	defer parent.Close()
 	out, err := parent.CreateExclusive(path.Base(entry.Path), 0600)
 	if err != nil {
 		return entry, err

@@ -264,11 +264,18 @@ func applyEnvOverrides(c *Config) {
 	}
 }
 
+// ResolvePath chooses the existing deployment configuration without opening a
+// store. Recovery creation still rejects a missing resolved file explicitly.
+func ResolvePath(path string) string {
+	if path == "" {
+		return resolveConfigPath()
+	}
+	return path
+}
+
 func Load(path string) (Config, error) {
 	c := Default()
-	if path == "" {
-		path = resolveConfigPath()
-	}
+	path = ResolvePath(path)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

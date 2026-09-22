@@ -54,6 +54,16 @@ func main() {
 	if path == "" {
 		path = os.Getenv("SHARDLURE_CONFIG")
 	}
+	// Recovery inspection/restoration must not load the normal config, create
+	// a data directory, open/migrate a Store, or seed any runtime settings.
+	if args[0] == "backup" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := runBackup(ctx, path, args[1:], os.Stdout); err != nil {
+			fatal(err)
+		}
+		return
+	}
 	cfg, err := config.Load(path)
 	if err != nil {
 		fatal(err)
@@ -803,6 +813,9 @@ Usage:
   shardlure run
   shardlure status
   shardlure ioc
+  shardlure -config CONFIG backup create --output NEW_BUNDLE [--include-file FILE] [--timeout 30m]
+  shardlure backup verify --input BUNDLE [--timeout 30m]
+  shardlure backup restore --input BUNDLE --to NEW_DATA_DIR [--dry-run] [--timeout 30m]
   shardlure share bazaar [--dry-run] [--limit N] [--sha SHA] [--since 240h] [--anonymous] [--status]
   shardlure share urlhaus [--dry-run] [--limit N] [--active-days 3] [--anonymous] [--status]
   shardlure share threatfox [--dry-run] [--limit N] [--active-days 3] [--status]

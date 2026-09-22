@@ -8,7 +8,6 @@ import (
 	"path"
 	"reflect"
 	"strings"
-	"time"
 
 	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/store"
@@ -42,7 +41,7 @@ func Verify(ctx context.Context, input string) (Report, error) {
 	return verifyWithOperations(ctx, input, nativeOperations())
 }
 func verifyWithOperations(ctx context.Context, input string, ops fileOperations) (Report, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := operationContext(ctx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return Report{}, err

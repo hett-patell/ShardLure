@@ -2,7 +2,17 @@
 // It never starts services, migrates an application store, or calls providers.
 package backup
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+func operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, 30*time.Minute)
+}
 
 type CreateOptions struct {
 	ConfigPath, Output, AppVersion, AppCommit string
