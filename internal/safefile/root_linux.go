@@ -25,6 +25,115 @@ type Root struct {
 	path string
 }
 
+// Stat inspects metadata through O_PATH, never a regular data descriptor. This
+// lets backup inventory exclude active SQLite inodes before opening contents.
+func (r *Root) Stat(name string) (fs.FileInfo, error) {
+	if !validRelative(name) {
+		return nil, ErrUnsafePath
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return nil, ErrClosed
+	}
+	fd, _, err := probeAt(int(r.dir.Fd()), name)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), "confined-metadata")
+	defer f.Close()
+	info, err := f.Stat()
+	return info, safeError(err)
+}
+
+func (r *Root) Info() (fs.FileInfo, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return nil, ErrClosed
+	}
+	info, err := r.dir.Stat()
+	return info, safeError(err)
+}
+
+func (r *Root) Sync() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return ErrClosed
+	}
+	if err := r.checkOutputLocked(); err != nil {
+		return err
+	}
+	if err := unix.Fsync(int(r.dir.Fd())); err != nil {
+		return ErrSync
+	}
+	return nil
+}
+
+func (r *Root) AvailableBytes() (uint64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return 0, ErrClosed
+	}
+	var st unix.Statfs_t
+	if err := unix.Fstatfs(int(r.dir.Fd()), &st); err != nil {
+		return 0, safeError(err)
+	}
+	if st.Bsize <= 0 || uint64(st.Bavail) > ^uint64(0)/uint64(st.Bsize) {
+		return 0, ErrIO
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), nil
+}
+
+func (r *Root) OpenDirectory(name string) (*Root, error) {
+	if !validRelative(name) {
+		return nil, ErrUnsafePath
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return nil, ErrClosed
+	}
+	fd, err := unix.Openat2(int(r.dir.Fd()), name, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK), Resolve: confinedResolve})
+	if err != nil {
+		return nil, safeError(err)
+	}
+	return &Root{dir: os.NewFile(uintptr(fd), "confined-directory"), path: filepath.Join(r.path, name)}, nil
+}
+
+func (r *Root) CreateDirectory(name string) (*Root, error) {
+	if !validRelative(name) || filepath.Base(name) != name {
+		return nil, ErrUnsafePath
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dir == nil {
+		return nil, ErrClosed
+	}
+	if err := r.checkOutputLocked(); err != nil {
+		return nil, err
+	}
+	if err := unix.Mkdirat(int(r.dir.Fd()), name, 0700); err != nil {
+		return nil, safeError(err)
+	}
+	fd, err := unix.Openat2(int(r.dir.Fd()), name, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW), Resolve: confinedResolve})
+	if err != nil {
+		return nil, safeError(err)
+	}
+	child := &Root{dir: os.NewFile(uintptr(fd), "confined-directory"), path: filepath.Join(r.path, name)}
+	if err := child.CheckOutput(); err != nil {
+		child.Close()
+		return nil, err
+	}
+	if err := unix.Fsync(int(r.dir.Fd())); err != nil {
+		child.Close()
+		return nil, ErrSync
+	}
+	return child, nil
+}
+
 // RemoveIfUnchanged first moves the selected entry into a private holding
 // directory, then checks its identity again before unlinking. A raced-in file
 // is restored without replacing any newer source entry; if restoration is

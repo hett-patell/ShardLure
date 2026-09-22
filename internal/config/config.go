@@ -277,6 +277,14 @@ func Load(path string) (Config, error) {
 		}
 		return c, err
 	}
+	return Parse(b)
+}
+
+// Parse applies the same configuration semantics to already-protected bytes.
+// Recovery tooling can preserve exactly the configuration it interpreted,
+// without reopening a replaceable source path or creating a default store.
+func Parse(b []byte) (Config, error) {
+	c := Default()
 	if err := yaml.Unmarshal(b, &c); err != nil {
 		return c, err
 	}

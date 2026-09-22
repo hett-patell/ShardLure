@@ -17,6 +17,78 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestConfinedDirectoryCreationTraversalAndSpace(t *testing.T) {
+	parent := t.TempDir()
+	root, err := OpenRoot(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	child, err := root.CreateDirectory("staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	info, err := child.Info()
+	if err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("private staging mode: %v %v", info, err)
+	}
+	if _, err := root.CreateDirectory("staging"); !errors.Is(err, ErrExists) {
+		t.Fatalf("existing directory replaced: %v", err)
+	}
+	if _, err := root.CreateDirectory("../outside"); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("escaping directory accepted: %v", err)
+	}
+	f, err := child.CreateExclusive("inert", 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("inert bytes"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := child.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := root.Stat("staging/inert")
+	if err != nil || metadata.Size() != 11 {
+		t.Fatalf("confined metadata failed: %v %v", metadata, err)
+	}
+	bytes, err := child.AvailableBytes()
+	if err != nil || bytes == 0 {
+		t.Fatalf("space probe=%d %v", bytes, err)
+	}
+	if err := os.Symlink("staging", filepath.Join(parent, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.OpenDirectory("alias"); err == nil {
+		t.Fatal("directory symlink followed")
+	}
+	pinned, err := root.OpenDirectory("staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	if err := os.Rename(filepath.Join(parent, "staging"), filepath.Join(parent, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(parent, "staging"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f, err = pinned.OpenRegular("inert")
+	if err != nil {
+		t.Fatalf("directory descriptor reopened via replaced name: %v", err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
+	if err != nil || string(b) != "inert bytes" {
+		t.Fatalf("pinned bytes=%q %v", b, err)
+	}
+	if err := pinned.CheckOutput(); err == nil {
+		t.Fatal("renamed source accepted as stable output")
+	}
+}
+
 func TestConfinedRegularAndUnsafeNames(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "nested"), 0700); err != nil {

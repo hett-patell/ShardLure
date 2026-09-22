@@ -9,6 +9,14 @@ import (
 
 type Root struct{}
 
+func (*Root) Stat(string) (fs.FileInfo, error) { return nil, ErrUnsupported }
+
+func (*Root) Info() (fs.FileInfo, error)            { return nil, ErrUnsupported }
+func (*Root) Sync() error                           { return ErrUnsupported }
+func (*Root) AvailableBytes() (uint64, error)       { return 0, ErrUnsupported }
+func (*Root) OpenDirectory(string) (*Root, error)   { return nil, ErrUnsupported }
+func (*Root) CreateDirectory(string) (*Root, error) { return nil, ErrUnsupported }
+
 func (*Root) PublishNoReplace(string, string) error { return ErrUnsupported }
 
 func (*Root) RemoveIfUnchanged(string, fs.FileInfo) error { return ErrUnsupported }
