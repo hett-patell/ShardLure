@@ -341,6 +341,11 @@ class Acceptance:
                 info = Path(path).stat()
                 print(json.dumps({"diagnostic_directory": path, "uid": info.st_uid, "gid": info.st_gid,
                                   "mode": oct(stat.S_IMODE(info.st_mode))}), flush=True)
+            for unit in ("shardlure-live.service", "cowrie.service"):
+                status = run(["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "User", "-p", "Group", "-p", "ExecMainStatus"], check=False)
+                print("guest service diagnostic", unit, status.stdout, flush=True)
+                journal = run(["journalctl", "--unit", unit, "-n", "30", "--no-pager", "-o", "cat"], check=False)
+                print("guest-only inert service log", unit, journal.stdout[-6000:], flush=True)
             self.write_report(f"{type(exc).__name__}: {str(exc)[:1600]}")
             raise
         finally:
