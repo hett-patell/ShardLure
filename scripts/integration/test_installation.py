@@ -80,6 +80,14 @@ class Acceptance:
         self.report.chmod(0o644)  # Contains no keys, database, raw config or telemetry.
 
     def configure_ssh(self):
+        # Hosted images deliberately make this tool prefix world-writable for
+        # convenience. Provision a production-like trusted prefix only inside
+        # this marker-verified disposable VM; never relax the installer guard.
+        prefix = Path("/usr/local/bin")
+        info = prefix.lstat()
+        assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0
+        prefix.chmod(0o755)
+        self.record("guest-only root-owned installation prefix provisioned")
         for user in ("shardlure", "cowrie", self.operator):
             try:
                 pwd.getpwnam(user)
