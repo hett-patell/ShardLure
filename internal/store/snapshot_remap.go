@@ -35,6 +35,24 @@ func remapStoredPath(value, role string, source, target map[string]string) (stri
 	return mapped, nil
 }
 
+// Explicit one-off imports leave Cowrie checkpoints outside the live log root.
+// They are metadata, not files a restore may open or automatically replay. Keep
+// their identity (including distinct imports with the same basename), but let
+// the normal cursor update below clear the old inode/offset/head signature.
+// Only canonical absolute paths qualify; evidence and malformed paths retain
+// the strict remapping refusal. Validate both roots before allowing this case
+// so a bad destination cannot be mistaken for an unrelated historical import.
+func detachedCowrieCursor(value string, source, target map[string]string) bool {
+	from, to := source["cowrie-logs"], target["cowrie-logs"]
+	for _, p := range []string{value, from, to} {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p || len(p) > 4096 || strings.ContainsRune(p, 0) || !utf8.ValidString(p) {
+			return false
+		}
+	}
+	rel, err := filepath.Rel(from, value)
+	return err == nil && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 // RemapSnapshotPaths changes only portable storage/cursor pointers in a private,
 // standalone snapshot. It never opens a migrating Store or activates services.
 // Partial failure leaves the caller's unpublished recovery staging incomplete.
@@ -134,6 +152,9 @@ func RemapSnapshotPaths(ctx context.Context, dbPath string, sourceRoots, targetR
 					return ErrSnapshotInvalid
 				}
 				newPath, err := remapStoredPath(raw.String, target.role, sourceRoots, targetRoots)
+				if err != nil && target.table == "ingest_state" && detachedCowrieCursor(raw.String, sourceRoots, targetRoots) {
+					newPath, err = raw.String, nil
+				}
 				if err != nil {
 					rows.Close()
 					return err

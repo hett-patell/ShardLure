@@ -112,3 +112,38 @@ func TestRemapRejectsUnusableStoredDestinations(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoricalImportCursorDoesNotRelaxPathValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, destination string
+		artifact                bool
+	}{
+		{"relative", "imports/archive.json", "/new/logs", false},
+		{"unclean", "/imports/../archive.json", "/new/logs", false},
+		{"nul", "/imports/\x00archive.json", "/new/logs", false},
+		{"invalid-utf8", "/imports/\xffarchive.json", "/new/logs", false},
+		{"root-itself", "/old/logs", "/new/logs", false},
+		{"bad-destination", "/imports/archive.json", "relative/logs", false},
+		{"escaping-evidence", "/imports/blob", "/new/logs", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t, "source.db")
+			if tc.artifact {
+				if err := st.UpsertArtifact(Artifact{TS: time.Now(), URL: "inert", LocalPath: tc.path}); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := st.SetIngestState(IngestState{Source: models.SourceCowrie, Path: tc.path, Inode: 123, Offset: 999, HeadSig: "old"}); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "snapshot.db")
+			if _, err := SnapshotDatabase(context.Background(), st.path, path); err != nil {
+				t.Fatal(err)
+			}
+			src := map[string]string{"evidence": "/old/evidence", "cowrie-logs": "/old/logs"}
+			dst := map[string]string{"evidence": "/new/evidence", "cowrie-logs": tc.destination}
+			if err := RemapSnapshotPaths(context.Background(), path, src, dst); err == nil {
+				t.Fatal("historical-import exception admitted an unsafe path")
+			}
+		})
+	}
+}

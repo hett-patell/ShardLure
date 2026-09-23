@@ -246,7 +246,7 @@ func restoreWithOperations(ctx context.Context, opts RestoreOptions, ops fileOpe
 		RecoveredAt   time.Time        `json:"recoveredAt"`
 		TableCounts   map[string]int64 `json:"tableCounts"`
 		Changes       []string         `json:"changes"`
-	}{1, m.Schema, time.Now().UTC(), m.TableCounts, []string{"storage paths rebased", "Cowrie file cursors reset for deduplicated replay", "separate recovery YAML disables capture and retention; DB settings preserved"}}, "", "  ")
+	}{1, m.Schema, time.Now().UTC(), m.TableCounts, []string{"storage paths rebased", "Cowrie file cursors reset for deduplicated replay", "historical out-of-root import paths retained as inactive checkpoint metadata", "separate recovery YAML disables capture and retention; DB settings preserved"}}, "", "  ")
 	if err != nil {
 		return report, err
 	}

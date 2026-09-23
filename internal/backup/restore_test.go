@@ -75,6 +75,15 @@ func TestBackupHonorsExplicitOperationDeadline(t *testing.T) {
 
 func TestRestoreRoundTripPreservesLogicalData(t *testing.T) {
 	f := newFixture(t)
+	// A one-off import can leave a checkpoint outside the configured live-log
+	// root. It is historical metadata, not a source the restore may open or a
+	// reason to make an otherwise complete evidence backup unrestorable.
+	imports := []string{filepath.Join(t.TempDir(), "archive.json"), filepath.Join(t.TempDir(), "archive.json")}
+	for _, path := range imports {
+		if err := f.Store.SetIngestState(store.IngestState{Source: "cowrie", Path: path, Inode: 123, Offset: 999, HeadSig: "old"}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	bundle := filepath.Join(t.TempDir(), "backup")
 	m, err := Create(context.Background(), CreateOptions{ConfigPath: f.Config, Output: bundle})
 	if err != nil {
@@ -94,6 +103,13 @@ func TestRestoreRoundTripPreservesLogicalData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	for _, path := range imports {
+		var inode, offset int64
+		var head string
+		if err := db.QueryRow("SELECT inode,offset,head_sig FROM ingest_state WHERE source='cowrie' AND path=?", path).Scan(&inode, &offset, &head); err != nil || inode != 0 || offset != 0 || head != "" {
+			t.Fatalf("historical import checkpoint lost or left active: inode=%d offset=%d head=%q err=%v", inode, offset, head, err)
+		}
+	}
 	var note, value, local string
 	var events, ledger int
 	if err := db.QueryRow("SELECT notes FROM actors").Scan(&note); err != nil || note != "operator note" {
