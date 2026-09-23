@@ -43,7 +43,7 @@ def run(args, *, timeout=120, check=True, **kwargs):
     result = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout, **kwargs)
     if check and result.returncode:
         # Test keys, telemetry and environment are never included in a report.
-        raise RuntimeError(f"{Path(str(args[0])).name} failed ({result.returncode}): {result.stderr[-1600:]}")
+        raise RuntimeError(f"{Path(str(args[0])).name} failed ({result.returncode}): {result.stderr[-1600:]}\nlast progress: {result.stdout[-1200:]}")
     return result
 
 
@@ -329,6 +329,10 @@ class Acceptance:
             self.shell_adoption()
             self.record("all real guest checks passed")
         except BaseException as exc:
+            for path in ("/", "/srv", "/usr", "/usr/local", "/usr/local/bin", "/etc", "/etc/systemd", "/etc/systemd/system", "/tmp"):
+                info = Path(path).stat()
+                print(json.dumps({"diagnostic_directory": path, "uid": info.st_uid, "gid": info.st_gid,
+                                  "mode": oct(stat.S_IMODE(info.st_mode))}), flush=True)
             self.write_report(f"{type(exc).__name__}: {str(exc)[:1600]}")
             raise
         finally:
