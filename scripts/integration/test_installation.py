@@ -193,6 +193,7 @@ class Acceptance:
         return root
 
     def shell_install(self, data, cowrie):
+        self.current_data, self.current_cowrie = data, cowrie
         env = dict(os.environ, PATH=str(self.release_bin)+":"+os.environ["PATH"],
                    ADMIN_PORT=str(self.new_admin if cowrie else self.admin))
         args = ["bash", ROOT / "scripts/install.sh", "--tag", "v-integration-fixture", "--data-dir", data,
@@ -346,6 +347,18 @@ class Acceptance:
                 print("guest service diagnostic", unit, status.stdout, flush=True)
                 journal = run(["journalctl", "--unit", unit, "-n", "30", "--no-pager", "-o", "cat"], check=False)
                 print("guest-only inert service log", unit, journal.stdout[-6000:], flush=True)
+            if hasattr(self, "current_data"):
+                try:
+                    run(["systemctl", "stop", "shardlure-live.service"], check=False)
+                    self.installer.installer_safety.prepare_accounts(self.current_data, Path("/etc/systemd/system"),
+                                                                    "cowrie" if self.current_cowrie else None)
+                    probe = self.work / "fsprobe"
+                    run(["go", "build", "-o", probe, "./scripts/integration/fsprobe"], cwd=ROOT, timeout=240)
+                    probe.chmod(0o755)
+                    result = run(["runuser", "-u", "shardlure", "--", probe, self.current_data / "evidence/guest-probe"], check=False)
+                    print("guest direct filesystem probe", result.stdout, result.stderr, flush=True)
+                except Exception as diagnostic:
+                    print("guest filesystem diagnostic unavailable", type(diagnostic).__name__, str(diagnostic)[:800], flush=True)
             self.write_report(f"{type(exc).__name__}: {str(exc)[:1600]}")
             raise
         finally:
