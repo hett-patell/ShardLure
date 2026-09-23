@@ -41,19 +41,28 @@ err() { printf '\033[1;31m[shardlure-install]\033[0m %s\n' "$*" >&2; exit 1; }
 
 initialize_data_paths() {
   local data_dir_physical
-
-  if ! mkdir -p -- "$DATA_DIR"; then
-    err "could not create data directory: $DATA_DIR"
-  fi
-  if ! data_dir_physical=$(cd -P -- "$DATA_DIR" && pwd -P); then
-    err "could not resolve data directory: $DATA_DIR"
-  fi
+  data_dir_physical="$(installer_safety begin)" || err "could not initialize safe data paths"
   DATA_DIR="$data_dir_physical"
   COWRIE_HOME="$DATA_DIR/cowrie"
   COWRIE_LOG="$COWRIE_HOME/var/log/cowrie/cowrie.json"
-  if ! mkdir -p -- "$DATA_DIR/captures" "$DATA_DIR/evidence" "$DATA_DIR/payloads"; then
-    err "could not create data subdirectories beneath $DATA_DIR"
-  fi
+}
+
+installer_safety() {
+  local helper="${INSTALL_SAFETY_HELPER:-${BASH_SOURCE[0]%/*}/installer_safety.py}"
+  local binary_dir="${DEST:-/usr/local/bin/shardlure}"
+  binary_dir="${binary_dir%/*}"
+  [[ -f "$helper" && ! -L "$helper" ]] || err "verified installer safety helper unavailable"
+  python3 "$helper" "$@" --data-dir "$DATA_DIR" \
+    --systemd-dir "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}" \
+    --bin-dir "$binary_dir" --cowrie "$COWRIE"
+}
+
+yaml_scalar() {
+  local value="$1"
+  [[ ! "$value" =~ [[:cntrl:]] ]] || err "unsupported control character in YAML value"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
 }
 
 resolve_cowrie_commit() {
@@ -247,61 +256,7 @@ validate_service_path() {
 }
 
 prepare_service_account() {
-  # DATA_DIR is shared with Cowrie. Only explicitly owned daemon paths change
-  # ownership; a blanket recursive chown would break the honeypot boundary.
-  case "$DATA_DIR" in
-    /var/lib/*|/srv/*|/opt/*|/mnt/*/*|/tmp/*/*) ;;
-    *) err "use a dedicated service data directory under /var/lib, /srv or /opt" ;;
-  esac
-  local service_path
-  local -a owned=("$DATA_DIR/evidence" "$DATA_DIR/artifacts" "$DATA_DIR/logs")
-  local -a cowrie_read=() retention_dirs=()
-  validate_service_path "$DATA_DIR/shardlure.yaml"
-  for service_path in "$DATA_DIR/shardlure.db" "$DATA_DIR/shardlure.db-wal" "$DATA_DIR/shardlure.db-shm"; do
-    [[ ! -e "$service_path" && ! -L "$service_path" ]] || owned+=("$service_path")
-  done
-  if [[ "$COWRIE" -eq 1 ]]; then
-    cowrie_read=("$COWRIE_HOME/var/log/cowrie" "$COWRIE_HOME/var/lib/cowrie/downloads" "$COWRIE_HOME/var/lib/cowrie/tty")
-    retention_dirs=("$COWRIE_HOME/var/lib/cowrie/downloads" "$COWRIE_HOME/var/lib/cowrie/tty")
-  fi
-  for service_path in "${owned[@]}" "${cowrie_read[@]}"; do
-    validate_service_path "$service_path"
-  done
-  if ! id -u shardlure &>/dev/null; then
-    useradd --system --user-group --no-create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin shardlure
-  fi
-  local service_groups=systemd-journal service_data_group=shardlure
-  if [[ "$COWRIE" -eq 1 ]]; then
-    service_groups+=,cowrie
-    service_data_group=cowrie
-  fi
-  usermod -a -G "$service_groups" shardlure
-  chown -- "shardlure:$service_data_group" "$DATA_DIR"
-  chmod 0710 -- "$DATA_DIR"
-  for service_path in "${owned[@]}"; do
-    [[ -e "$service_path" ]] || mkdir -- "$service_path"
-    chown -hR -- shardlure:shardlure "$service_path"
-    find "$service_path" -xdev -type d -exec chmod 0700 -- {} +
-    find "$service_path" -xdev -type f -exec chmod 0600 -- {} +
-  done
-  if [[ -e "$DATA_DIR/shardlure.yaml" ]]; then
-    chown -- root:shardlure "$DATA_DIR/shardlure.yaml"
-    chmod 0640 -- "$DATA_DIR/shardlure.yaml"
-  fi
-  if [[ "$COWRIE" -eq 1 ]]; then
-    for service_path in "$COWRIE_HOME" "$COWRIE_HOME/var" "$COWRIE_HOME/var/lib" "$COWRIE_HOME/var/lib/cowrie" "$COWRIE_HOME/var/log"; do
-      chgrp -- cowrie "$service_path"
-      chmod g+rx,g-w,o-rwx -- "$service_path"
-    done
-    for service_path in "${cowrie_read[@]}"; do
-      mkdir -p -- "$service_path"
-      chown -hR -- cowrie:cowrie "$service_path"
-      find "$service_path" -xdev -type d -exec chmod 0750 -- {} +
-      find "$service_path" -xdev -type f -exec chmod 0640 -- {} +
-    done
-    # Retention may unlink old captures, but cannot modify code or keys.
-    chmod 0770 -- "${retention_dirs[@]}"
-  fi
+  installer_safety prepare
 }
 
 apply_cowrie_capture_patch() {
@@ -312,21 +267,64 @@ apply_cowrie_capture_patch() {
   python3 "$DL_COWRIE_PATCH" "$COWRIE_HOME" || err "Cowrie capture patch failed; refusing unreadable captures"
 }
 
-systemd_exec_arg() {
-  # Escape systemd syntax/expansions, not shell syntax. The result is one word
-  # in an Exec* line; shell commands receive it as a positional argument.
+validate_existing_accounts() {
+  local account_name account_record account_uid account_gid account_home account_shell account_group
+  local -a account_names=(shardlure)
+  if [[ "$COWRIE" -eq 1 ]]; then account_names+=(cowrie); fi
+  for account_name in "${account_names[@]}"; do
+    account_record="$(getent passwd "$account_name")" || continue
+    IFS=: read -r account_name _ account_uid account_gid _ account_home account_shell <<<"$account_record"
+    [[ "$account_uid" != 0 && "$account_gid" != 0 ]] || err "service account conflicts with this installation"
+    account_group="$(getent group "$account_gid")" || err "service account has no primary group"
+    [[ "${account_group%%:*}" == "$account_name" ]] || err "service account conflicts with this installation"
+    if [[ "$account_name" == shardlure ]]; then
+      [[ "$account_home" == "$DATA_DIR" ]] || err "service account conflicts with this installation"
+      case "$account_shell" in /usr/sbin/nologin|/sbin/nologin|/bin/false) ;; *) err "service account conflicts with this installation";; esac
+    else
+      [[ "$account_home" == "$DATA_DIR/cowrie" || "$account_home" == /home/cowrie ]] || err "service account conflicts with this installation"
+      case "$account_shell" in /usr/sbin/nologin|/sbin/nologin|/bin/false|/bin/bash|/bin/sh) ;; *) err "service account conflicts with this installation";; esac
+    fi
+  done
+}
+
+systemd_value() {
   local value="$1"
+  [[ ! "$value" =~ [[:cntrl:]] ]] || err "unsupported control character in service value"
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   value="${value//%/%%}"
-  value="${value//\$/\$\$}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
   printf '"%s"' "$value"
 }
 
+systemd_exec_arg() {
+  local encoded
+  encoded="$(systemd_value "$1")" || return
+  printf '%s' "${encoded//\$/\$\$}"
+}
+
+systemd_environment() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || err "invalid service environment name"
+  systemd_value "$1=$2"
+}
+
+preflight_installation() {
+  [[ "$DATA_DIR" == /* ]] || err "service data directory must be absolute"
+  systemd_value "$DATA_DIR" >/dev/null
+  systemd_value "$DASH_TOKEN" >/dev/null
+  [[ "$COWRIE" == 0 || "$COWRIE" == 1 ]] || err "COWRIE must be 0 or 1"
+  local port
+  for port in "$HONEYPOT_PORT" "$ADMIN_PORT" "$DASH_PORT"; do
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || err "ports must be integers from 1 to 65535"
+  done
+  command -v python3 >/dev/null || err "python3 is required for safe ownership preflight (no third-party packages needed)"
+  validate_existing_accounts
+}
+
 render_live_service() {
+  local service_value
+  for service_value in "$DATA_DIR" "$DEST" "${COWRIE_HOME:-}" "${COWRIE_LOG:-}" "$DASH_TOKEN"; do
+    systemd_value "$service_value" >/dev/null || return
+  done
   local service_groups=systemd-journal service_cowrie_args="" service_cowrie_units=""
   local service_tailscale_units="" service_tailscale_prestart=""
 	local service_listen="127.0.0.1:$DASH_PORT"
@@ -344,7 +342,7 @@ render_live_service() {
 	fi
   if [[ "$COWRIE" -eq 1 ]]; then
     service_groups+=" cowrie"
-    service_cowrie_args="--cowrie=$COWRIE_LOG"
+    service_cowrie_args="$(systemd_exec_arg "--cowrie=$COWRIE_LOG")"
     service_cowrie_units="Wants=cowrie.service"
   fi
   cat <<SVC
@@ -370,19 +368,19 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=$DATA_DIR
+ReadWritePaths=$(systemd_value "$DATA_DIR")
 MemoryMax=1G
 TasksMax=256
 TimeoutStopSec=45
-Environment=SHARDLURE_CONFIG=$DATA_DIR/shardlure.yaml
-Environment=SHARDLURE_DASH_TOKEN=$DASH_TOKEN
+Environment=$(systemd_environment SHARDLURE_CONFIG "$DATA_DIR/shardlure.yaml")
+Environment=$(systemd_environment SHARDLURE_DASH_TOKEN "$DASH_TOKEN")
 $service_tailscale_prestart
-ExecStart=$DEST live $service_listen $service_cowrie_args
+ExecStart=$(systemd_exec_arg "$DEST") live $service_listen $service_cowrie_args
 Restart=always
 RestartSec=5
 SVC
   if [[ "$COWRIE" -eq 1 ]]; then
-    printf 'ReadOnlyPaths=%s\nReadWritePaths=%s/var/lib/cowrie/downloads %s/var/lib/cowrie/tty\n' "$COWRIE_HOME" "$COWRIE_HOME" "$COWRIE_HOME"
+    printf 'ReadOnlyPaths=%s\nReadWritePaths=%s %s\n' "$(systemd_value "$COWRIE_HOME")" "$(systemd_value "$COWRIE_HOME/var/lib/cowrie/downloads")" "$(systemd_value "$COWRIE_HOME/var/lib/cowrie/tty")"
   fi
   printf '[Install]\nWantedBy=multi-user.target\n'
 }
@@ -410,6 +408,8 @@ done
 if [[ $(id -u) -ne 0 ]]; then
   err "must run as root (use sudo or pipe to sudo bash)"
 fi
+
+preflight_installation
 
 # -- architecture detection ------------------------------------------------
 ARCH=$(uname -m)
@@ -441,7 +441,22 @@ DL_SUMS="$(mktemp /tmp/shardlure-sums.XXXXXX)"
 DL_ERR="$(mktemp /tmp/shardlure-curlerr.XXXXXX)"
 DL_COWRIE_PIN="$(mktemp /tmp/shardlure-cowrie-pin.XXXXXX)"
 DL_COWRIE_PATCH="$(mktemp /tmp/shardlure-cowrie-patch.XXXXXX)"
-trap 'rm -f "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN" "$DL_COWRIE_PATCH"' EXIT
+DL_SAFETY="$(mktemp /tmp/shardlure-safety.XXXXXX)"
+DL_CONFIG="$(mktemp /tmp/shardlure-config.XXXXXX)"
+UNIT_STAGE="$(mktemp -d /tmp/shardlure-units.XXXXXX)"
+DL_LIVE_UNIT="$UNIT_STAGE/shardlure-live.service"
+DL_COWRIE_UNIT="$UNIT_STAGE/cowrie.service"
+INSTALL_MAINTENANCE=0
+cleanup_install() {
+  local result=$?
+  if [[ "$INSTALL_MAINTENANCE" == 1 ]]; then
+    installer_safety unseal --owner-pid "$$" || result=1
+  fi
+  rm -f -- "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN" "$DL_COWRIE_PATCH" "$DL_SAFETY" "$DL_CONFIG" "$DL_LIVE_UNIT" "$DL_COWRIE_UNIT"
+  rmdir -- "$UNIT_STAGE" || result=1
+  return "$result"
+}
+trap cleanup_install EXIT
 log "downloading $URL …"
 # `if !` form: under set -e a bare failing curl would abort before our
 # friendly error message could print.
@@ -449,11 +464,7 @@ if ! curl -fsSL "$URL" -o "$DL_BIN" 2>"$DL_ERR" || [[ ! -s "$DL_BIN" ]]; then
   err "download failed (URL: $URL). $(cat "$DL_ERR" 2>/dev/null || true)"
 fi
 
-# Download the checksum manifest and verify the binary before installing
-# as root. If the checksum file is missing (e.g. manually cut release
-# without CI), print a warning but continue — better than blocking a
-# deployment. If it exists, enforce a strict match. (`|| true` because under
-# set -e a missing manifest would otherwise abort instead of warning.)
+# Verify both executable inputs before any installation mutation.
 CHKSUM_URL="https://github.com/$REPO/releases/download/$TAG/SHA256SUMS"
 curl -fsSL "$CHKSUM_URL" -o "$DL_SUMS" 2>/dev/null || true
 if [[ -s "$DL_SUMS" ]]; then
@@ -463,21 +474,29 @@ if [[ -s "$DL_SUMS" ]]; then
   expected=$(grep -F "  $BIN_NAME" "$DL_SUMS" | awk -v b="$BIN_NAME" '$2==b {print $1}' | head -1)
   actual=$(sha256sum "$DL_BIN" | awk '{print $1}')
   if [[ -z "$expected" ]]; then
-    log "WARNING: no checksum entry for $BIN_NAME in SHA256SUMS — binary not verified"
+    err "no checksum entry for $BIN_NAME in SHA256SUMS"
   elif [[ "$expected" != "$actual" ]]; then
     err "checksum mismatch for $BIN_NAME. Expected: $expected, got: $actual. Do not proceed — the binary may be tampered."
   else
     log "checksum verified: $BIN_NAME ($actual)"
   fi
 else
-  log "WARNING: SHA256SUMS not found at $CHKSUM_URL — binary not verified"
+  err "SHA256SUMS is required; no installation changes made"
 fi
 
-install -m 755 "$DL_BIN" "$DEST"
-log "installed $DEST ($(wc -c < "$DEST") bytes)"
+curl -fsSL "https://github.com/$REPO/releases/download/$TAG/installer_safety.py" -o "$DL_SAFETY" || err "release lacks the safety helper; use the installer matching that release"
+expected=$(awk '$2=="installer_safety.py" {print $1}' "$DL_SUMS")
+actual=$(sha256sum "$DL_SAFETY" | awk '{print $1}')
+[[ "$expected" =~ ^[0-9a-f]{64}$ && "$expected" == "$actual" ]] || err "installer safety helper checksum mismatch"
+INSTALL_SAFETY_HELPER="$DL_SAFETY"
+installer_safety preflight
 
 # -- config ----------------------------------------------------------------
 initialize_data_paths
+installer_safety seal --owner-pid "$$"
+INSTALL_MAINTENANCE=1
+installer_safety publish --path "$DEST" --source "$DL_BIN" --mode 755
+log "installed verified binary $DEST"
 
 # Detect tailscale IP for admin_ips
 ADMIN_IPS=""
@@ -492,8 +511,8 @@ if [[ -z "$ADMIN_IPS" ]]; then
   ADMIN_IPS="127.0.0.1"
 fi
 
-cat > "$DATA_DIR/shardlure.yaml" <<YAML
-data_dir: $DATA_DIR
+cat > "$DL_CONFIG" <<YAML
+data_dir: $(yaml_scalar "$DATA_DIR")
 admin_ips:
   - $ADMIN_IPS
 ssh:
@@ -509,11 +528,11 @@ dashboard:
 journal:
   unit: ssh
 cowrie:
-  home: $DATA_DIR/cowrie
-  json_log: $DATA_DIR/cowrie/var/log/cowrie/cowrie.json
+  home: $(yaml_scalar "$DATA_DIR/cowrie")
+  json_log: $(yaml_scalar "$DATA_DIR/cowrie/var/log/cowrie/cowrie.json")
 capture:
   enabled: true
-  evidence_dir: $DATA_DIR/evidence
+  evidence_dir: $(yaml_scalar "$DATA_DIR/evidence")
   quarantine_fetch: true
   max_bytes: 52428800
   timeout_sec: 45
@@ -521,7 +540,8 @@ geoip:
   enabled: true
   insecure_http: true
 YAML
-log "config written to $DATA_DIR/shardlure.yaml"
+installer_safety config --source "$DL_CONFIG"
+log "configuration preserved or created at $DATA_DIR/shardlure.yaml"
 
 # -- systemd services ------------------------------------------------------
 # The cowrie.service unit is written AFTER cowrie itself is installed, since
@@ -531,6 +551,7 @@ log "config written to $DATA_DIR/shardlure.yaml"
 
 
 # -- cowrie installation ---------------------------------------------------
+FRESH_COWRIE=0
 if [[ "$COWRIE" -eq 1 ]]; then
   # Resolve the required immutable commit before inspecting an existing
   # checkout. This prevents an existing .git directory from bypassing either
@@ -552,12 +573,14 @@ if [[ "$COWRIE" -eq 1 ]]; then
     validate_existing_cowrie_checkout
   else
     checkout_fresh_cowrie
+    FRESH_COWRIE=1
 
     if ! id cowrie &>/dev/null; then
-      useradd -r -s /bin/false -d "$COWRIE_HOME" cowrie
+      useradd --system --user-group --no-create-home --shell /usr/sbin/nologin --home-dir "$COWRIE_HOME" cowrie
+      installer_safety remember-account --name cowrie --created
     fi
     python3 -m venv "$COWRIE_HOME/venv"
-    "$COWRIE_HOME/venv/bin/pip" install -q --upgrade pip setuptools wheel
+    "$COWRIE_HOME/venv/bin/python" -m pip install -q --upgrade pip setuptools wheel
 
     # Cowrie's install model changed: the modern (post-2024) layout uses
     # 'pip install -e .' (creates a console_script at venv/bin/cowrie),
@@ -565,24 +588,24 @@ if [[ "$COWRIE" -eq 1 ]]; then
     # 'pip install -r requirements.txt'. Prefer the modern path, fall back
     # to the legacy one.
     if [[ -f "$COWRIE_HOME/pyproject.toml" ]]; then
-      "$COWRIE_HOME/venv/bin/pip" install -q -e "$COWRIE_HOME" \
-        || "$COWRIE_HOME/venv/bin/pip" install -q -r "$COWRIE_HOME/requirements.txt"
+      "$COWRIE_HOME/venv/bin/python" -m pip install -q -e "$COWRIE_HOME" \
+        || "$COWRIE_HOME/venv/bin/python" -m pip install -q -r "$COWRIE_HOME/requirements.txt"
     else
-      "$COWRIE_HOME/venv/bin/pip" install -q -r "$COWRIE_HOME/requirements.txt"
+      "$COWRIE_HOME/venv/bin/python" -m pip install -q -r "$COWRIE_HOME/requirements.txt"
     fi
 
     # Authbind — allow cowrie user to bind to low ports
-    touch /etc/authbind/byport/"$HONEYPOT_PORT"
-    chown cowrie:cowrie /etc/authbind/byport/"$HONEYPOT_PORT"
-    chmod 500 /etc/authbind/byport/"$HONEYPOT_PORT"
-
-    chown -R cowrie:cowrie "$COWRIE_HOME"
+    installer_safety authbind --port "$HONEYPOT_PORT"
     log "cowrie installed at $COWRIE_HOME"
   fi
 
   # New SFTP captures must remain readable after the one-time account migration.
   # Run on both fresh and matching existing checkouts; the patch is idempotent.
-  apply_cowrie_capture_patch
+  if [[ "$FRESH_COWRIE" == 1 ]]; then
+    apply_cowrie_capture_patch
+  else
+    log "existing Cowrie source/config preserved; use the dedicated patch workflow for source changes"
+  fi
 
   # -- cowrie.cfg override --------------------------------------------------
   # Without this, cowrie falls back to cowrie.cfg.dist defaults: port 2222
@@ -592,7 +615,7 @@ if [[ "$COWRIE" -eq 1 ]]; then
   # absent or when we own it (marker), so hand-edits survive re-runs.
   COWRIE_CFG="$COWRIE_HOME/etc/cowrie.cfg"
   CFG_MARKER="# managed by shardlure install.sh"
-  if [[ ! -f "$COWRIE_CFG" ]] || grep -qF "$CFG_MARKER" "$COWRIE_CFG"; then
+  if [[ "$FRESH_COWRIE" == 1 ]]; then
     cat > "$COWRIE_CFG" <<CFG
 $CFG_MARKER
 # Hand-edit freely, but remove the marker line above so re-running the
@@ -605,12 +628,14 @@ listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0
 enabled = true
 logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json
 CFG
-    chown cowrie:cowrie "$COWRIE_CFG"
     log "cowrie.cfg written (ssh port $HONEYPOT_PORT, jsonlog enabled)"
   else
     log "cowrie.cfg exists and is not managed by this installer — leaving it alone."
     log "  ensure it contains: [ssh] listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0"
     log "  and [output_jsonlog] logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json"
+  fi
+  if [[ "$FRESH_COWRIE" == 1 ]]; then
+    installer_safety cowrie-permissions
   fi
 fi
 
@@ -625,17 +650,17 @@ if [[ -x "$COWRIE_HOME/venv/bin/cowrie" ]]; then
   # Modern layout. AUTHBIND_ENABLED=yes is read by the cowrie launcher and
   # tells it to invoke twistd via authbind when binding low ports.
   COWRIE_EXEC="Environment=AUTHBIND_ENABLED=yes
-ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/cowrie start -n --umask=0027"
+ExecStart=/usr/bin/authbind --deep $(systemd_exec_arg "$COWRIE_HOME/venv/bin/python") $(systemd_exec_arg "$COWRIE_HOME/venv/bin/cowrie") start -n --umask=0027"
 elif [[ -x "$COWRIE_HOME/bin/cowrie" ]]; then
   # Legacy layout.
-  COWRIE_EXEC="ExecStart=/usr/bin/authbind --deep $COWRIE_HOME/venv/bin/python3 $COWRIE_HOME/bin/cowrie start -n --umask=0027"
+  COWRIE_EXEC="ExecStart=/usr/bin/authbind --deep $(systemd_exec_arg "$COWRIE_HOME/venv/bin/python3") $(systemd_exec_arg "$COWRIE_HOME/bin/cowrie") start -n --umask=0027"
 fi
 
 if [[ "$COWRIE" -eq 1 ]]; then
   if [[ -z "$COWRIE_EXEC" ]]; then
     err "could not locate cowrie entry point at $COWRIE_HOME/venv/bin/cowrie or $COWRIE_HOME/bin/cowrie. The checkout may have failed or upstream layout changed again."
   fi
-  cat > /etc/systemd/system/cowrie.service <<SVC
+  cat > "$DL_COWRIE_UNIT" <<SVC
 [Unit]
 Description=Cowrie SSH honeypot (ShardLure)
 After=network.target
@@ -643,7 +668,7 @@ After=network.target
 Type=simple
 User=cowrie
 Group=cowrie
-WorkingDirectory=$COWRIE_HOME
+WorkingDirectory=$(systemd_value "$COWRIE_HOME")
 # TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
 # 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
 # host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.
@@ -660,10 +685,17 @@ fi
 
 # -- start services --------------------------------------------------------
 prepare_service_account
-render_live_service > /etc/systemd/system/shardlure-live.service
-chmod 0600 /etc/systemd/system/shardlure-live.service
+render_live_service > "$DL_LIVE_UNIT"
+unit_files=("$DL_LIVE_UNIT")
+if [[ "$COWRIE" == 1 ]]; then unit_files+=("$DL_COWRIE_UNIT"); fi
+systemd-analyze verify "${unit_files[@]}" || err "generated unit validation failed; units were not published"
+installer_safety publish --path "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}/shardlure-live.service" --source "$DL_LIVE_UNIT" --mode 600
+if [[ "$COWRIE" == 1 ]]; then
+  installer_safety publish --path "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}/cowrie.service" --source "$DL_COWRIE_UNIT" --mode 600
+fi
 log "unprivileged systemd unit written (private dashboard binding)"
 systemctl daemon-reload
+installer_safety verify-units
 UNITS=("shardlure-live.service")
 [[ "$COWRIE" -eq 1 ]] && UNITS+=("cowrie.service")
 systemctl enable "${UNITS[@]}"
@@ -684,10 +716,12 @@ fi
 
 sleep 2
 echo
-systemctl is-active "${UNITS[@]}" 2>&1 || true
+systemctl is-active "${UNITS[@]}" || err "service activation failed; recovery metadata retained"
 echo
 log "dashboard: http://${TSIP:-127.0.0.1}:$DASH_PORT (use an SSH tunnel for loopback)"
 if [[ -n "$DASH_TOKEN" ]]; then
   log "auth token: (set, ${#DASH_TOKEN} chars)"
 fi
+installer_safety finish
+INSTALL_MAINTENANCE=0
 log "done."

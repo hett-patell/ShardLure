@@ -1,0 +1,48 @@
+name: Disposable Ubuntu installer integration
+
+"on":
+  workflow_call:
+    inputs:
+      artifact-name:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-guest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: native
+      - name: Provision disposable-guest marker
+        env:
+          RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          sudo install -d -m 700 /run/shardlure-integration
+          sudo --preserve-env=RUN_ID,REPOSITORY,COMMIT python3 -c 'import json,os; p="/run/shardlure-integration/disposable.json"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); f=os.fdopen(fd,"w"); json.dump({"run":os.environ["RUN_ID"],"repo":os.environ["REPOSITORY"],"commit":os.environ["COMMIT"]},f); f.flush(); os.fsync(f.fileno()); f.close()'
+      - name: Real systemd and SSH integration
+        run: |
+          chmod 755 native/shardlure-linux-amd64
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_RUN_ID,GITHUB_REPOSITORY,GITHUB_SHA \
+            bash scripts/integration/ubuntu-guest.sh \
+            "$PWD/native/shardlure-linux-amd64" "$PWD/installer-integration-report.json"
+      - name: Upload redacted integration receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-integration-receipt
+          path: installer-integration-report.json
+          if-no-files-found: warn
+          retention-days: 14

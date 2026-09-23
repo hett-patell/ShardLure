@@ -4,12 +4,13 @@ import re
 import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.test_shardlure import (
-    check_service_unit, daemon_fixture, run_service_prestart, service_command, tailscale_fixture,
+    check_service_unit, daemon_fixture, run_service_prestart, service_command, service_values, tailscale_fixture,
 )
 
 
@@ -25,6 +26,53 @@ PRODUCT_PATH = ROOT / "PRODUCT.md"
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def _safety_fixture(self, root: Path) -> dict[str, str]:
+        """Real descriptor operations; fake only NSS and privileged commands."""
+        helper = root / "fixture-safety.py"
+        units = root / "fixture-units"
+        units.mkdir(mode=0o700, exist_ok=True)
+        helper.write_text(
+            "import os,pwd,subprocess,sys\n"
+            f"sys.path.insert(0,{str(ROOT)!r})\n"
+            "from scripts import installer_safety as s\n"
+            "def account(name):\n"
+            " return pwd.struct_passwd((name,'x',os.getuid(),os.getgid(),'',os.environ['TEST_DATA'],'/bin/false'))\n"
+            "s.validate_accounts=lambda *a,**kw: {'shardlure':account('shardlure'),'cowrie':account('cowrie')}\n"
+            "s.pwd.getpwnam=account\n"
+            "def fake_run(args,**kwargs):\n"
+            " assert args[0] in ('systemctl','useradd','usermod'), 'unexpected host command refused'\n"
+            " return subprocess.CompletedProcess(args,0,'inactive\\n' if 'systemctl'==args[0] else '', '')\n"
+            "s.subprocess.run=fake_run\n"
+            "raise SystemExit(s.main())\n"
+        )
+        return {"INSTALL_SAFETY_HELPER": str(helper), "SHARDLURE_SYSTEMD_DIR": str(units)}
+
+    def test_release_account_conflict_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            getent = root / "getent"
+            getent.write_text('#!/bin/sh\ncase "$1" in passwd) echo "shardlure:x:123:123::/unrelated/home:/usr/sbin/nologin";; group) echo "shardlure:x:123:";; esac\n')
+            getent.chmod(0o755)
+            result = subprocess.run(["bash", "-c", 'source "$INSTALLER"; DATA_DIR=/srv/inert; COWRIE=0; validate_existing_accounts'],
+                env=dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", INSTALLER=str(INSTALLER_PATH), PATH=str(root)+":/usr/bin:/bin"), capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("account conflicts", result.stderr)
+
+    def test_release_service_paths_are_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / 'data "quote" $VALUE %n apostrophe\'s \\ back'
+            data.mkdir()
+            executable = daemon_fixture(data)
+            result = subprocess.run(
+                ["bash", "-c", 'source "$INSTALLER"; DATA_DIR="$TEST_DATA"; DEST="$TEST_DEST"; COWRIE=1; COWRIE_HOME="$DATA_DIR/cowrie"; COWRIE_LOG="$COWRIE_HOME/cowrie.json"; DASH_PORT=8080; DASH_TOKEN=inert; TSIP=; render_live_service'],
+                env=dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", INSTALLER=str(INSTALLER_PATH), TEST_DATA=str(data), TEST_DEST=str(executable)),
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = service_command(result.stdout, "ExecStart")
+            executed = subprocess.run(args, capture_output=True, text=True, check=True)
+            self.assertEqual(executed.stdout.splitlines(), ["live", "127.0.0.1:8080", "--cowrie=" + str(data / "cowrie/cowrie.json")])
+
     def test_installer_applies_release_capture_patch_idempotently(self) -> None:
         patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
         blocks = runpy.run_path(str(patch))
@@ -92,12 +140,14 @@ class ReleaseContractTests(unittest.TestCase):
                 "User=shardlure", "Group=shardlure", "UMask=0077",
                 "SupplementaryGroups=systemd-journal cowrie", "ProtectSystem=strict",
                 "NoNewPrivileges=true", "CapabilityBoundingSet=\n",
-                "ReadOnlyPaths=/srv/shardlure/cowrie",
-                "ReadWritePaths=/srv/shardlure/cowrie/var/lib/cowrie/downloads /srv/shardlure/cowrie/var/lib/cowrie/tty",
                 "MemoryMax=1G", "TasksMax=256", "TimeoutStopSec=45",
                 " live 127.0.0.1:8080 ",
             ):
                 self.assertIn(required, result.stdout)
+
+            self.assertIn("/srv/shardlure/cowrie", service_values(result.stdout, "ReadOnlyPaths"))
+            self.assertIn("/srv/shardlure/cowrie/var/lib/cowrie/downloads", service_values(result.stdout, "ReadWritePaths"))
+            self.assertIn("/srv/shardlure/cowrie/var/lib/cowrie/tty", service_values(result.stdout, "ReadWritePaths"))
 
     def test_no_cowrie_service_needs_neither_cowrie_group_nor_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,11 +237,10 @@ class ReleaseContractTests(unittest.TestCase):
                 'usermod() { printf "usermod %s\\n" "$*"; }\n'
                 'chown() { printf "chown %s\\n" "$*"; }\n'
                 'prepare_service_account\n',
-                extra={"TEST_DATA": str(data)},
+                extra={"TEST_DATA": str(data), **self._safety_fixture(root)},
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("shardlure:shardlure", result.stdout)
-            self.assertIn("root:shardlure", result.stdout)
+            self.assertEqual((data / "shardlure.db").stat().st_uid, os.getuid())
             self.assertNotIn(str(unrelated), result.stdout)
             self.assertEqual(evidence.stat().st_mode & 0o777, 0o700)
             self.assertEqual((data / "shardlure.db").stat().st_mode & 0o777, 0o600)
@@ -207,7 +256,7 @@ class ReleaseContractTests(unittest.TestCase):
                 'DATA_DIR="$TEST_DATA"\nCOWRIE=0\n'
                 'id() { printf "MUTATION\\n"; return 0; }\n'
                 'prepare_service_account\n',
-                extra={"TEST_DATA": str(data)},
+                extra={"TEST_DATA": str(data), **self._safety_fixture(root)},
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("MUTATION", result.stdout)
@@ -880,8 +929,8 @@ class ReleaseContractTests(unittest.TestCase):
             'COWRIE_LOG="$COWRIE_HOME/var/log/cowrie/cowrie.json"', helper
         )
         for derivative in (
-            'cat > "$DATA_DIR/shardlure.yaml"',
-            "render_live_service > /etc/systemd/system/shardlure-live.service",
+            'cat > "$DL_CONFIG"',
+            'render_live_service > "$DL_LIVE_UNIT"',
             "# -- cowrie installation",
         ):
             with self.subTest(derivative=derivative):
@@ -922,7 +971,7 @@ class ReleaseContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "top-level call immediately"):
             self._assert_data_path_initialization_wired(mutated)
 
-    def test_installer_function_pins_data_path_derivatives_before_parent_repoint(
+    def test_installer_refuses_data_symlink_before_initialization(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -948,23 +997,20 @@ LIVE_UNIT="ExecStart=/usr/local/bin/shardlure -config $DATA_DIR/shardlure.yaml l
 printf '%s\n' "$LIVE_UNIT"
 """,
                 extra={
+                    **self._safety_fixture(root),
+                    "TEST_DATA": str(data_link),
                     "TEST_DATA_DIR": str(data_link),
                     "TEST_SWAPPED_DATA_DIR": str(swapped_data),
                 },
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                (physical_data / "shardlure.yaml").read_text(encoding="utf-8"),
-                "config\n",
-            )
-            physical_log = physical_data / "cowrie" / "var" / "log" / "cowrie" / "cowrie.json"
-            self.assertEqual(physical_log.read_text(encoding="utf-8"), "event\n")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((physical_data / "shardlure.yaml").exists())
+            self.assertFalse((physical_data / "cowrie").exists())
             self.assertFalse((swapped_data / "shardlure.yaml").exists())
             self.assertFalse((swapped_data / "cowrie").exists())
-            self.assertIn(f"-config {physical_data}/shardlure.yaml", result.stdout)
-            self.assertIn(f"--cowrie={physical_log}", result.stdout)
-            self.assertNotIn(str(data_link), result.stdout)
+            self.assertTrue(data_link.is_symlink())
+            self.assertEqual(data_link.readlink(), physical_data)
 
     def test_installer_functions_fetch_release_pin_and_detach_exact_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

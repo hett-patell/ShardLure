@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import getpass
+import json
 import glob
 import os
+import pwd
+import grp
 import re
 import shutil
 import stat
@@ -12,6 +15,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+if __package__:
+    from . import installer_safety
+    from . import ssh_transition
+else:
+    import installer_safety
+    import ssh_transition
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("SHARDLURE_DATA", "/var/lib/shardlure"))
@@ -214,32 +224,11 @@ def _looks_like_ssh_pubkey(line: str) -> bool:
 
 
 def _install_pubkey(pubkey: str) -> None:
-    """Install a pasted public key into the right account's authorized_keys.
-
-    Targets the SSH_CONNECTION user when we can resolve it (the human running
-    `sudo`), else falls back to root. Creates ~/.ssh with correct perms+owner."""
+    """Update only the selected account's descriptor-validated key file."""
     user = os.environ.get("SUDO_USER") or "root"
-    if user == "root":
-        home = Path("/root")
-    else:
-        home = Path(f"/home/{user}")
-        if not home.is_dir():
-            home, user = Path("/root"), "root"
-    ssh_dir = home / ".ssh"
-    ssh_dir.mkdir(parents=True, exist_ok=True)
-    ak = ssh_dir / "authorized_keys"
-    existing = ak.read_text() if ak.is_file() else ""
-    if pubkey.strip() not in existing:
-        with ak.open("a") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write(pubkey.strip() + "\n")
-    # Lock down perms + ownership so sshd accepts the key.
-    ssh_dir.chmod(0o700)
-    ak.chmod(0o600)
-    if user != "root":
-        run(["chown", "-R", f"{user}:{user}", str(ssh_dir)])
-    log(f"installed your public key into {ak} (account: {user})")
+    account = pwd.getpwnam(user)
+    path = ssh_transition.append_public_key(account, pubkey)
+    log(f"installed public key for account {user} at {path}")
 
 
 def ensure_admin_ssh_keys() -> None:
@@ -325,72 +314,17 @@ def _reload_ssh(socket_activated: bool) -> None:
             run(["systemctl", "reload", "sshd"]).check_returncode()
 
 
+def _ssh_transition() -> ssh_transition.SSHTransition:
+    state = installation_state().load()
+    return ssh_transition.SSHTransition(SSHD_CONFIG, SSHD_DROPIN, SSH_SOCKET_DROPIN,
+        runner=run, socket_activated=ssh_is_socket_activated(), reloader=_reload_ssh,
+        install_id=state["stamp"])
+
+
 def _apply_ssh_ports(admin_port: int, *, final: bool):
-    if not 1 <= admin_port <= 65535:
-        raise ValueError("admin port must be 1-65535")
-    previous_ports = _ssh_ports(_effective_ssh_config())
-    if not previous_ports:
-        die("cannot determine current SSH ports; refusing to change access")
-    ports = {admin_port} if final else previous_ports | {admin_port}
-    socket_activated = ssh_is_socket_activated()
-    paths = (SSHD_CONFIG, SSHD_DROPIN, SSH_SOCKET_DROPIN)
-    snapshot = {p: (p.read_bytes(), p.stat().st_mode & 0o777) if p.exists() else None for p in paths}
-
-    def rollback() -> None:
-        for path, saved in snapshot.items():
-            if saved is None:
-                path.unlink(missing_ok=True)
-            else:
-                path.write_bytes(saved[0])
-                path.chmod(saved[1])
-        run(["sshd", "-t"]).check_returncode()
-        _reload_ssh(socket_activated)
-
-    # Keep the original backup for uninstall, but rollback THIS attempt to
-    # its exact immediate predecessor (including pre-existing drop-ins).
-    backup = SSHD_CONFIG.with_name("sshd_config.shardlure-bak")
-    if SSHD_CONFIG.exists() and not backup.exists():
-        shutil.copy2(SSHD_CONFIG, backup)
-    try:
-        if SSHD_CONFIG.exists():
-            text = SSHD_CONFIG.read_text()
-            text = re.sub(r"(?im)^(\s*Port\s+.*)$", r"#\1", text)
-            SSHD_CONFIG.write_text(text)
-        SSHD_DROPIN.parent.mkdir(parents=True, exist_ok=True)
-        saved_policy = snapshot[SSHD_DROPIN]
-        policy = re.sub(r"(?im)^\s*Port[ \t]+[^\n]*\n?", "", saved_policy[0].decode()) if saved_policy else ""
-        if final:
-            policy = ("PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
-                      "ChallengeResponseAuthentication no\nPubkeyAuthentication yes\n"
-                      "PermitRootLogin prohibit-password\n")
-        SSHD_DROPIN.write_text("# Managed by ShardLure\n" +
-                              "".join(f"Port {port}\n" for port in sorted(ports)) + policy)
-        if socket_activated:
-            SSH_SOCKET_DROPIN.parent.mkdir(parents=True, exist_ok=True)
-            if final:
-                socket_text = "# Managed by ShardLure\n[Socket]\nBindIPv6Only=ipv6-only\nListenStream=\n"
-            else:
-                # Do not reset inherited ListenStream entries during staging.
-                # Preserve a previous override too (repeat install/custom port).
-                saved = snapshot[SSH_SOCKET_DROPIN]
-                socket_text = saved[0].decode() if saved else "# Managed by ShardLure\n"
-                socket_text += "\n[Socket]\nBindIPv6Only=ipv6-only\n"
-            for port in sorted(ports if final else {admin_port} - previous_ports):
-                socket_text += f"ListenStream=0.0.0.0:{port}\nListenStream=[::]:{port}\n"
-            SSH_SOCKET_DROPIN.write_text(socket_text)
-        run(["sshd", "-t"]).check_returncode()
-        effective = _effective_ssh_config()
-        if _ssh_ports(effective) != ports:
-            raise RuntimeError("other SSH includes override the requested ports")
-        if final:
-            values = dict(line.lower().split(None, 1) for line in effective.splitlines() if len(line.split(None, 1)) == 2)
-            if values.get("passwordauthentication") != "no" or values.get("kbdinteractiveauthentication") != "no" or values.get("pubkeyauthentication") != "yes":
-                raise RuntimeError("other SSH includes override the key-only policy")
-        _reload_ssh(socket_activated)
-    except BaseException:
-        rollback()
-        raise
-    return rollback
+    transition = _ssh_transition()
+    transition.stage(admin_port, final=final)
+    return transition.rollback
 
 
 def migrate_sshd(admin_port: int):
@@ -432,25 +366,19 @@ def migrate_ssh_safely(admin_port: int) -> None:
 
 
 def ensure_cowrie_user() -> None:
+    validate_existing_accounts()
     if subprocess.run(["id", COWRIE_USER], capture_output=True).returncode != 0:
-        run(["useradd", "-r", "-m", "-d", f"/home/{COWRIE_USER}", "-s", "/bin/bash", COWRIE_USER]).check_returncode()
+        run(["useradd", "--system", "--user-group", "--no-create-home", "--home-dir", str(COWRIE_HOME), "--shell", "/usr/sbin/nologin", COWRIE_USER]).check_returncode()
+        installation_state().remember_account(pwd.getpwnam(COWRIE_USER), True)
 
 
 def setup_authbind(honeypot_port: int) -> None:
     if honeypot_port >= 1024:
         return
     log(f"configuring authbind for port {honeypot_port}")
-    if shutil.which("authbind"):
-        p = Path(f"/etc/authbind/byport/{honeypot_port}")
-        p.touch()
-        shutil.chown(p, COWRIE_USER, COWRIE_USER)
-        p.chmod(0o500)
-        return
-    py = COWRIE_HOME / "venv/bin/python3"
-    log("authbind not found; applying setcap on python")
-    cp = run(["setcap", "cap_net_bind_service=+ep", str(py)])
-    if cp.returncode != 0:
-        die(f"need authbind or setcap to bind honeypot port {honeypot_port}")
+    if not shutil.which("authbind"):
+        die("authbind is required for low ports; refusing to change shared interpreter capabilities")
+    installer_safety.ensure_authbind(honeypot_port, COWRIE_USER)
 
 
 def install_cowrie(honeypot_port: int) -> None:
@@ -459,13 +387,17 @@ def install_cowrie(honeypot_port: int) -> None:
     except (OSError, ValueError) as exc:
         die(f"cannot load tested Cowrie commit: {exc}")
     log(f"installing Cowrie into {COWRIE_HOME}")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    existing = COWRIE_HOME.exists()
     ensure_cowrie_checkout(COWRIE_HOME, pin)
+    if existing:
+        log("existing Cowrie source, environment, host keys and configuration preserved; use the dedicated patch workflow for source changes")
+        return
     run([sys.executable, "-m", "venv", str(COWRIE_HOME / "venv")]).check_returncode()
-    pip = COWRIE_HOME / "venv/bin/pip"
-    run([str(pip), "install", "--upgrade", "pip", "wheel"]).check_returncode()
-    run([str(pip), "install", "-r", str(COWRIE_HOME / "requirements.txt")]).check_returncode()
-    run([str(pip), "install", "-e", "."], cwd=str(COWRIE_HOME)).check_returncode()
+    pip = [str(COWRIE_HOME / "venv/bin/python"), "-m", "pip"]
+    run([*pip, "install", "--upgrade", "pip", "wheel"]).check_returncode()
+    run([*pip, "install", "-r", str(COWRIE_HOME / "requirements.txt")]).check_returncode()
+    run([*pip, "install", "-e", "."], cwd=str(COWRIE_HOME)).check_returncode()
     for d in ["var/log/cowrie", "var/lib/cowrie/downloads", "etc"]:
         (COWRIE_HOME / d).mkdir(parents=True, exist_ok=True)
     cfg = COWRIE_HOME / "etc/cowrie.cfg"
@@ -493,7 +425,7 @@ def install_cowrie(honeypot_port: int) -> None:
     # duplicate block here.
     cfg.write_text(patch_cowrie_cfg(cfg.read_text(), honeypot_port))
     apply_stealth_persona(honeypot_port)
-    run(["chown", "-R", f"{COWRIE_USER}:{COWRIE_USER}", str(COWRIE_HOME)])
+    installer_safety.prepare_cowrie_tree(DATA_DIR, COWRIE_USER)
     setup_authbind(honeypot_port)
 
 
@@ -797,21 +729,24 @@ def build_shardlure() -> None:
         cp = run(["go", "build", "-o", str(out), "./cmd/shardlure"], cwd=str(ROOT))
         if cp.returncode != 0:
             die("go build failed")
-        out.chmod(0o755)
-        os.replace(out, BIN_DIR / "shardlure")
+        installation_state().publish(BIN_DIR / "shardlure", installer_safety.read_regular(out, 128 << 20), 0o755)
     finally:
         out.unlink(missing_ok=True)
 
 
 def write_config(admin_ips: list[str], admin_port: int, honeypot_port: int, dash_port: int) -> None:
     log(f"writing {CONFIG_FILE}")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if CONFIG_FILE.exists() or CONFIG_FILE.is_symlink():
+        installer_safety.read_regular(CONFIG_FILE, 4 << 20)
+        log("existing configuration preserved; edit it explicitly to change policy")
+        return
+    DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     lines = [
-        f"data_dir: {DATA_DIR}",
+        f"data_dir: {json.dumps(str(DATA_DIR), ensure_ascii=False)}",
         "admin_ips:",
     ]
     for ip in admin_ips:
-        lines.append(f"  - {ip}")
+        lines.append(f"  - {json.dumps(ip)}")
     lines.extend([
         "ssh:",
         f"  admin_port: {admin_port}",
@@ -826,8 +761,8 @@ def write_config(admin_ips: list[str], admin_port: int, honeypot_port: int, dash
         "journal:",
         "  unit: ssh",
         "cowrie:",
-        f"  home: {COWRIE_HOME}",
-        f"  json_log: {COWRIE_LOG}",
+        f"  home: {json.dumps(str(COWRIE_HOME), ensure_ascii=False)}",
+        f"  json_log: {json.dumps(str(COWRIE_LOG), ensure_ascii=False)}",
         # config.Default() leaves geoip disabled; without this section a box
         # installed via this script had the globe/country stats silently off
         # while install.sh boxes had them on.
@@ -835,84 +770,104 @@ def write_config(admin_ips: list[str], admin_port: int, honeypot_port: int, dash
         "  enabled: true",
         "  insecure_http: true",
     ])
-    CONFIG_FILE.write_text("\n".join(lines) + "\n")
+    installer_safety.atomic_create(CONFIG_FILE, ("\n".join(lines) + "\n").encode())
 
 
 def prepare_service_account() -> None:
-    """Migrate only daemon-owned state, leaving the Cowrie checkout read-only.
-
-    Refuse symlinks/hardlinks before host mutations. Never recursively chown
-    DATA_DIR: it also contains Cowrie's separately owned code and secrets.
-    """
-    def checked(path: Path) -> None:
-        if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
-            die(f"service access path must be absolute and symlink-free: {path}")
-        if path.exists():
-            info = path.stat()
-            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
-                die(f"unsupported service access target: {path}")
-            if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
-                die(f"refusing hard-linked service data: {path}")
-
-    if (len(DATA_DIR.parts) < 3 or DATA_DIR == Path.home() or
-            DATA_DIR in (Path("/var/lib"), Path("/var/log"), Path("/usr/local")) or
-            (DATA_DIR.parent == Path("/home"))):
-        die("service data must use a dedicated directory, not a system or home directory")
-    owned = [DATA_DIR / name for name in ("evidence", "artifacts", "logs")]
-    for directory in list(owned):
-        checked(directory)
-        if directory.exists():
-            owned.extend(directory.rglob("*"))
-    owned.extend(DATA_DIR / name for name in ("shardlure.db", "shardlure.db-wal", "shardlure.db-shm")
-                 if (DATA_DIR / name).exists() or (DATA_DIR / name).is_symlink())
-    retention_dirs = {COWRIE_HOME / "var/lib/cowrie/downloads", COWRIE_HOME / "var/lib/cowrie/tty"}
-    cowrie_paths = [COWRIE_HOME, COWRIE_HOME / "var", COWRIE_HOME / "var/log",
-                   COWRIE_HOME / "var/lib", COWRIE_HOME / "var/lib/cowrie"]
-    for directory in (COWRIE_HOME / "var/log/cowrie", *sorted(retention_dirs)):
-        checked(directory)
-        if directory.exists():
-            cowrie_paths.append(directory)
-            cowrie_paths.extend(directory.rglob("*"))
-    for path in [DATA_DIR, CONFIG_FILE, *owned, *cowrie_paths, *retention_dirs]:
-        checked(path)
-
-    if run(["id", "-u", "shardlure"], capture_output=True).returncode != 0:
-        run(["useradd", "--system", "--user-group", "--no-create-home",
-             "--home-dir", str(DATA_DIR), "--shell", "/usr/sbin/nologin", "shardlure"]).check_returncode()
-    run(["usermod", "-a", "-G", f"systemd-journal,{COWRIE_USER}", "shardlure"]).check_returncode()
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    run(["chown", "--", f"shardlure:{COWRIE_USER}", str(DATA_DIR)]).check_returncode()
-    DATA_DIR.chmod(0o710)  # Cowrie can traverse, but cannot list daemon data.
-    for path in owned:
-        if not path.exists():
-            path.mkdir()
-        run(["chown", "--", "shardlure:shardlure", str(path)]).check_returncode()
-        path.chmod(0o700 if path.is_dir() else 0o600)
-    if CONFIG_FILE.exists():
-        run(["chown", "--", "root:shardlure", str(CONFIG_FILE)]).check_returncode()
-        CONFIG_FILE.chmod(0o640)
-    for path in cowrie_paths:
-        if path.exists():
-            run(["chgrp", "--", COWRIE_USER, str(path)]).check_returncode()
-            path.chmod((path.stat().st_mode & 0o750) | (0o050 if path.is_dir() else 0o040))
-    # Retention needs unlink rights on these two directories, not write access
-    # to existing payload bytes, private keys, configuration or executable code.
-    for path in sorted(retention_dirs):
-        path.mkdir(parents=True, exist_ok=True)
-        run(["chown", "--", f"{COWRIE_USER}:{COWRIE_USER}", str(path)]).check_returncode()
-        path.chmod(0o770)
+    """Preflight all selected objects, then change only pinned descriptors."""
+    validate_existing_accounts()
+    if COWRIE_HOME != DATA_DIR / "cowrie" or CONFIG_FILE != DATA_DIR / "shardlure.yaml":
+        die("service state paths must remain inside the selected data directory")
+    try:
+        installer_safety.prepare_accounts(DATA_DIR, SYSTEMD_DIR, COWRIE_USER, runner=run)
+    except (OSError, ValueError):
+        die("unsafe or changed service data; ownership migration refused")
 
 
-def systemd_exec_arg(value: str) -> str:
-    """Quote one literal Exec* argument, including systemd's own expansions."""
-    escaped = (value.replace("\\", "\\\\").replace('"', '\\"')
-               .replace("%", "%%").replace("$", "$$")
-               .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+def validate_existing_accounts() -> None:
+    """Read-only identity preflight shared with the release installer."""
+    try:
+        for path in (DATA_DIR, COWRIE_HOME, COWRIE_LOG, CONFIG_FILE, BIN_DIR, SYSTEMD_DIR):
+            systemd_value(str(path))
+            installer_safety.checked_absolute(path)
+        installer_safety.validate_accounts(DATA_DIR, COWRIE_USER)
+    except (OSError, ValueError) as exc:
+        die(f"service account/path preflight refused: {exc}")
+
+
+def installation_state():
+    return installer_safety.InstallationState(DATA_DIR, SYSTEMD_DIR)
+
+
+def managed_resource_paths() -> list[Path]:
+    return [SYSTEMD_DIR / "shardlure-live.service", SYSTEMD_DIR / "cowrie.service", BIN_DIR / "shardlure"]
+
+
+def validate_installation() -> None:
+    """Read-only preflight before packages, SSH changes or filesystem writes."""
+    try:
+        installer_safety.preflight(DATA_DIR, SYSTEMD_DIR, BIN_DIR, COWRIE_USER, runner=run)
+    except (OSError, ValueError) as exc:
+        die(f"installation preflight refused: {exc}")
+
+
+def begin_installation() -> None:
+    owners = set()
+    for name in ("shardlure", COWRIE_USER):
+        try:
+            owners.add(pwd.getpwnam(name).pw_uid)
+        except KeyError:
+            pass
+    with installer_safety.PermissionPlan(DATA_DIR, owners):
+        pass
+    installation_state().begin()
+
+
+def validate_purge_target() -> None:
+    """Require installer-owned directory identity before any uninstall mutation."""
+    if (not DATA_DIR.is_absolute() or len(DATA_DIR.parts) < 3 or
+            DATA_DIR == Path.home() or DATA_DIR in (Path("/var/lib"), Path("/var/log"), Path("/usr/local")) or
+            DATA_DIR.parent == Path("/home") or
+            any(p.is_symlink() for p in (DATA_DIR, *DATA_DIR.parents))):
+        die("refusing broad or unsafe purge target")
+    try:
+        installation_state().load()
+    except (OSError, ValueError, TypeError):
+        die("purge requires verified installation provenance; legacy data is preserved")
+
+
+def record_installation() -> None:
+    state = installation_state()
+    state.begin()
+    state.finish()
+
+
+def systemd_value(value: str) -> str:
+    """Encode a literal directive value without Exec-only dollar expansion."""
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("unsupported control character in service value")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
     return f'"{escaped}"'
 
 
-def install_services(honeypot_port: int, dash_port: int) -> None:
-    log("installing systemd services")
+def systemd_exec_arg(value: str) -> str:
+    return systemd_value(value).replace("$", "$$")
+
+
+def systemd_environment(key: str, value: str) -> str:
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
+        raise ValueError("invalid environment variable name")
+    return systemd_value(key + "=" + value)
+
+
+def render_services(honeypot_port: int, dash_port: int) -> dict[str, str]:
+    # Validate the complete input set before writing either unit.
+    for value in (DATA_DIR, COWRIE_HOME, COWRIE_LOG, CONFIG_FILE, BIN_DIR, SYSTEMD_DIR):
+        systemd_value(str(value))
+        if not value.is_absolute():
+            raise ValueError("service paths must be absolute")
+    if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", COWRIE_USER) is None:
+        raise ValueError("invalid Cowrie service account")
     tailscale = _tailscale_iface()
     listen = f":{dash_port} --tailscale" if tailscale else f"127.0.0.1:{dash_port}"
     tailscale_unit = ""
@@ -936,15 +891,15 @@ def install_services(honeypot_port: int, dash_port: int) -> None:
         )
     py = COWRIE_HOME / "venv/bin/python"
     twistd = COWRIE_HOME / "venv/bin/twistd"
-    if honeypot_port < 1024 and shutil.which("authbind"):
+    authbind_bin = shutil.which("authbind")
+    if honeypot_port < 1024 and authbind_bin:
         cowrie_exec = (
-            f"/usr/bin/authbind --deep {py} {twistd} "
+            f"{systemd_exec_arg(os.path.abspath(authbind_bin))} --deep {systemd_exec_arg(str(py))} {systemd_exec_arg(str(twistd))} "
             f"--umask 0027 --nodaemon --pidfile= -l - cowrie"
         )
     else:
-        cowrie_exec = f"{py} {twistd} --umask 0027 --nodaemon --pidfile= -l - cowrie"
-    (SYSTEMD_DIR / "cowrie.service").write_text(
-        f"""[Unit]
+        cowrie_exec = f"{systemd_exec_arg(str(py))} {systemd_exec_arg(str(twistd))} --umask 0027 --nodaemon --pidfile= -l - cowrie"
+    cowrie_text = f"""[Unit]
 Description=Cowrie SSH honeypot (ShardLure)
 After=network.target
 
@@ -952,9 +907,9 @@ After=network.target
 Type=simple
 User={COWRIE_USER}
 Group={COWRIE_USER}
-WorkingDirectory={COWRIE_HOME}
-Environment=PYTHONPATH={COWRIE_HOME}/src
-Environment=PATH={COWRIE_HOME}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory={systemd_value(str(COWRIE_HOME))}
+Environment={systemd_environment("PYTHONPATH",str(COWRIE_HOME / "src"))}
+Environment={systemd_environment("PATH",str(COWRIE_HOME / "venv/bin")+":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
 Environment=TZ=UTC
 UMask=0027
 ExecStart={cowrie_exec}
@@ -964,9 +919,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 """
-    )
-    (SYSTEMD_DIR / "shardlure-live.service").write_text(
-        f"""[Unit]
+    live_text = f"""[Unit]
 Description=ShardLure live dashboard + telemetry ingest
 After=network.target cowrie.service
 Wants=cowrie.service
@@ -989,25 +942,47 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths={DATA_DIR}
-ReadOnlyPaths={COWRIE_HOME}
-ReadWritePaths={COWRIE_HOME}/var/lib/cowrie/downloads {COWRIE_HOME}/var/lib/cowrie/tty
+ReadWritePaths={systemd_value(str(DATA_DIR))}
+ReadOnlyPaths={systemd_value(str(COWRIE_HOME))}
+ReadWritePaths={systemd_value(str(COWRIE_HOME / "var/lib/cowrie/downloads"))} {systemd_value(str(COWRIE_HOME / "var/lib/cowrie/tty"))}
 MemoryMax=1G
 TasksMax=256
 TimeoutStopSec=45
-Environment=SHARDLURE_CONFIG={CONFIG_FILE}
-{tailscale_prestart}ExecStart={BIN_DIR}/shardlure live {listen} --cowrie={COWRIE_LOG}
+Environment={systemd_environment("SHARDLURE_CONFIG",str(CONFIG_FILE))}
+{tailscale_prestart}ExecStart={systemd_exec_arg(str(BIN_DIR / "shardlure"))} live {listen} {systemd_exec_arg("--cowrie="+str(COWRIE_LOG))}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 """
-    )
+    return {"cowrie.service": cowrie_text, "shardlure-live.service": live_text}
+
+
+def install_services(honeypot_port: int, dash_port: int) -> None:
+    units = render_services(honeypot_port, dash_port)
+    log("validating and publishing systemd services")
+    state = installation_state()
+    state.check_resources([SYSTEMD_DIR / name for name in units])
+    with tempfile.TemporaryDirectory(prefix=".shardlure-units-", dir=SYSTEMD_DIR) as staging:
+        paths = []
+        for name, text in units.items():
+            path = Path(staging) / name
+            path.write_text(text)
+            paths.append(str(path))
+        run(["systemd-analyze", "verify", *paths], capture_output=True, text=True).check_returncode()
+        for name, text in units.items():
+            state.publish(SYSTEMD_DIR / name, text.encode(), 0o600)
     run(["systemctl", "daemon-reload"]).check_returncode()
+    installer_safety.verify_unit_accounts(COWRIE_USER, runner=run)
     run(["systemctl", "enable", "cowrie.service", "shardlure-live.service"]).check_returncode()
-    run(["systemctl", "restart", "cowrie.service"]).check_returncode()
-    run(["systemctl", "restart", "shardlure-live.service"]).check_returncode()
+    try:
+        run(["systemctl", "restart", "cowrie.service"]).check_returncode()
+        run(["systemctl", "restart", "shardlure-live.service"]).check_returncode()
+        run(["systemctl", "is-active", "--quiet", "cowrie.service", "shardlure-live.service"]).check_returncode()
+    except BaseException:
+        run(["systemctl", "stop", "shardlure-live.service", "cowrie.service"]).check_returncode()
+        raise
 
 
 def open_firewall(honeypot_port: int, admin_port: int, dash_port: int) -> None:
@@ -1173,7 +1148,7 @@ def intro() -> None:
         die("aborted by user (nothing changed)")
 
 
-def verify_admin_ssh_gate(admin_port: int) -> None:
+def verify_admin_ssh_gate(admin_port: int, *, key_only: bool = True) -> None:
     """Pause after migrating sshd so the user proves they can still get in on the
     new port BEFORE the install proceeds (and before they close this session)."""
     user = os.environ.get("SUDO_USER") or getpass.getuser()
@@ -1183,14 +1158,15 @@ def verify_admin_ssh_gate(admin_port: int) -> None:
         parts = conn.split()
         if len(parts) >= 3:
             host = parts[2]  # the server-side IP of the current SSH connection
+    auth_options = ("-o PreferredAuthentications=publickey -o PasswordAuthentication=no "
+                    "-o KbdInteractiveAuthentication=no ") if key_only else ""
     print(
         "\n  -------------------------------------------------------------\n"
         f"  Real SSH also listens on port {admin_port}; old SSH ports remain open.\n"
-        "  >>> In a SEPARATE terminal, confirm a PUBLIC-KEY login with this command:\n"
-        f"        ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no "
-        f"-o KbdInteractiveAuthentication=no -p {admin_port} {user}@{host}\n"
+        "  >>> In a SEPARATE terminal, confirm a NEW authenticated login:\n"
+        f"        ssh -o ControlMaster=no -o ControlPath=none {auth_options}-p {admin_port} {user}@{host}\n"
         "  Do NOT close this session until that works.\n"
-        "  Only after confirmation will old ports close and password login be disabled.\n"
+        "  No unverified listener retirement is allowed; restoration keeps original policy.\n"
         "  If it fails, Ctrl-C here to restore the previous SSH configuration.\n"
         "  -------------------------------------------------------------\n"
     )
@@ -1205,111 +1181,95 @@ def verify_admin_ssh_gate(admin_port: int) -> None:
 
 def cmd_run() -> None:
     need_root()
+    validate_existing_accounts()
+    validate_installation()
     intro()
     install_deps()
     honeypot, admin, dash = prompt_config()
     admin_ips = collect_admin_ips()
-    migrate_ssh_safely(admin)
-    ensure_cowrie_user()
-    install_cowrie(honeypot)
-    build_shardlure()
-    write_config(admin_ips, admin, honeypot, dash)
-    open_firewall(honeypot, admin, dash)
-    prepare_service_account()
-    install_services(honeypot, dash)
+    begin_installation()
+    state = installation_state()
+    state.seal()
+    try:
+        migrate_ssh_safely(admin)
+        ensure_cowrie_user()
+        install_cowrie(honeypot)
+        build_shardlure()
+        write_config(admin_ips, admin, honeypot, dash)
+        open_firewall(honeypot, admin, dash)
+        prepare_service_account()
+        install_services(honeypot, dash)
+        record_installation()
+    finally:
+        state.unseal()
     print_summary(admin, honeypot, dash)
 
 
 def cmd_finish() -> None:
     """Resume setup after Cowrie/SSH steps (e.g. go build failed on corrupted sources)."""
     need_root()
+    validate_existing_accounts()
+    validate_installation()
+    begin_installation()
     honeypot, admin, dash = load_finish_ports()
     admin_ips = collect_admin_ips_quiet()
     if not admin_ips:
         admin_ips = collect_admin_ips()
     log(f"finish: honeypot={honeypot} admin={admin} dashboard={dash}")
-    build_shardlure()
-    write_config(admin_ips, admin, honeypot, dash)
-    open_firewall(honeypot, admin, dash)
-    prepare_service_account()
-    install_services(honeypot, dash)
+    state = installation_state()
+    state.seal()
+    try:
+        build_shardlure()
+        write_config(admin_ips, admin, honeypot, dash)
+        open_firewall(honeypot, admin, dash)
+        prepare_service_account()
+        install_services(honeypot, dash)
+        record_installation()
+    finally:
+        state.unseal()
     print_summary(admin, honeypot, dash)
 
 
-def restore_sshd() -> None:
-    """Undo migrate_sshd: remove the ShardLure drop-in and restore the original
-    sshd_config from the backup, validated before reload. Done FIRST during
-    uninstall so a botched teardown can never leave you locked out.
+def restore_sshd() -> set[int]:
+    """Restore verified SSH state without retiring unverified management access."""
+    transition = _ssh_transition()
+    if not transition.receipt.exists():
+        if any(p.exists() or p.is_symlink() for p in (SSHD_DROPIN, SSH_SOCKET_DROPIN, transition.backup)):
+            die("SSH recovery provenance is missing; existing configuration and listeners were preserved")
+        log("this installation did not change SSH; leaving it untouched")
+        return transition.before_ports
 
-    If no backup exists (e.g. partial install) we still remove the drop-in and
-    re-test; an invalid resulting config aborts the reload rather than risk the
-    running sshd."""
-    dropin = Path("/etc/ssh/sshd_config.d/99-shardlure-admin.conf")
-    main_cfg = Path("/etc/ssh/sshd_config")
-    bak = Path("/etc/ssh/sshd_config.shardlure-bak")
-    socket_dropin = Path("/etc/systemd/system/ssh.socket.d/zz-shardlure-admin.conf")
-    changed = False
-    socket_restored = False
-    if socket_dropin.exists():
-        # Remove the socket-activation override so ssh.socket reverts to its
-        # packaged ListenStream (port 22). Done before the sshd_config reload so
-        # the box is reachable on 22 again under the restored config.
-        log("removing ShardLure ssh.socket drop-in")
-        socket_dropin.unlink()
-        socket_restored = True
-        changed = True
-    if bak.exists():
-        log("restoring original sshd_config from backup")
-        shutil.copy2(bak, main_cfg)
-        changed = True
-    elif main_cfg.exists():
-        # No backup: best-effort un-comment of the Port line we commented at
-        # install time (install did `sed 's/^Port /#Port /'`). Only the FIRST
-        # such line is restored — sshd honours a single active Port, and a user
-        # may have their own unrelated "#Port ..." comments we must not touch.
-        out, restored = [], False
-        for line in main_cfg.read_text().splitlines():
-            if not restored and line.startswith("#Port "):
-                out.append(line[1:])
-                restored = True
-                log(f"un-commented '{line[1:]}' in sshd_config (no backup present)")
-            else:
-                out.append(line)
-        if restored:
-            main_cfg.write_text("\n".join(out) + "\n")
-            changed = True
-    if dropin.exists():
-        log("removing ShardLure sshd drop-in")
-        dropin.unlink()
-        changed = True
-    if not changed:
-        log("no ShardLure sshd changes found; leaving ssh config untouched")
-        return
-    cp = run(["sshd", "-t"])
-    if cp.returncode != 0:
-        die("restored sshd config failed sshd -t; NOT reloading. "
-            "Inspect /etc/ssh/sshd_config before reloading ssh manually.")
-    run(["systemctl", "daemon-reload"])
-    if socket_restored:
-        # Rebind the socket to its packaged port (22) before reloading sshd.
-        run(["systemctl", "restart", "ssh.socket"])
-    if run(["systemctl", "reload", "ssh"]).returncode != 0:
-        run(["systemctl", "reload", "sshd"])
-    if bak.exists():
-        bak.unlink(missing_ok=True)
-    log("real SSH restored to its pre-ShardLure configuration")
+    def stop_conflicting(ports):
+        honeypot, _, _ = load_ports_from_config()
+        if honeypot not in ports:
+            return False
+        status = run(["systemctl", "is-active", "cowrie.service"], capture_output=True, text=True)
+        if (status.stdout or "").strip() != "active":
+            return False
+        installation_state().check_resources([SYSTEMD_DIR / "cowrie.service"])
+        run(["systemctl", "stop", "cowrie.service"]).check_returncode()
+        return True
+
+    restored = transition.restore(
+        lambda port: verify_admin_ssh_gate(port, key_only=False),
+        stop_conflicting=stop_conflicting,
+        restart_conflicting=lambda: run(["systemctl", "start", "cowrie.service"]).check_returncode())
+    log("SSH restoration verified; original recovery material retained")
+    return restored
 
 
 def remove_services() -> None:
     log("stopping and removing systemd services")
-    run(["systemctl", "stop", "shardlure-live.service", "cowrie.service"])
-    run(["systemctl", "disable", "shardlure-live.service", "cowrie.service"])
-    for unit in ("shardlure-live.service", "cowrie.service"):
+    state = installation_state()
+    state.check_resources(managed_resource_paths())
+    units = [name for name in ("shardlure-live.service", "cowrie.service") if (SYSTEMD_DIR / name).exists()]
+    if units:
+        run(["systemctl", "stop", *units]).check_returncode()
+        run(["systemctl", "disable", *units]).check_returncode()
+    for unit in units:
         p = SYSTEMD_DIR / unit
-        if p.exists():
-            p.unlink()
-    run(["systemctl", "daemon-reload"])
-    run(["systemctl", "reset-failed"])
+        state.remove(p)
+    run(["systemctl", "daemon-reload"]).check_returncode()
 
 
 def remove_firewall_rules(honeypot_port: int, admin_port: int, dash_port: int) -> None:
@@ -1335,6 +1295,13 @@ def cmd_uninstall() -> None:
     later step fails."""
     need_root()
     purge = "--purge" in sys.argv[2:]
+    # Preserving data is not permission to remove an unrelated binary or unit.
+    # Legacy installations need an explicit ownership review before teardown.
+    validate_purge_target()
+    try:
+        installation_state().check_resources(managed_resource_paths())
+    except (OSError, ValueError):
+        die("uninstall ownership check failed; customized or unrelated resources are preserved")
     # Use the persisted install config so firewall/authbind cleanup and the
     # lockout-verification hint target the ports this install ACTUALLY used,
     # not the env defaults (env vars/SHARDLURE_*_PORT still override).
@@ -1343,7 +1310,7 @@ def cmd_uninstall() -> None:
 
     log("ShardLure uninstall starting")
     log("step 1/5: restore real SSH (before anything else, to avoid lockout)")
-    restore_sshd()
+    restored_ports = restore_sshd()
 
     log("step 2/5: stop + remove systemd services")
     remove_services()
@@ -1351,15 +1318,14 @@ def cmd_uninstall() -> None:
     log("step 3/5: remove the shardlure binary")
     binp = BIN_DIR / "shardlure"
     if binp.exists():
-        binp.unlink()
+        installation_state().remove(binp)
         log(f"removed {binp}")
 
     log("step 4/5: remove authbind byport file (if any)")
     if honeypot < 1024:
         ab = Path(f"/etc/authbind/byport/{honeypot}")
         if ab.exists():
-            ab.unlink()
-            log(f"removed {ab}")
+            log("authbind rule retained; review shared port ownership before manual removal")
 
     log("step 5/5: firewall + data")
     remove_firewall_rules(honeypot, admin, dash)
@@ -1367,18 +1333,17 @@ def cmd_uninstall() -> None:
     if purge:
         log(f"--purge: deleting data dir {DATA_DIR} (cowrie clone, DB, evidence, config)")
         if DATA_DIR.exists():
-            shutil.rmtree(DATA_DIR, ignore_errors=True)
-        if subprocess.run(["id", COWRIE_USER], capture_output=True).returncode == 0:
-            log(f"--purge: removing system user {COWRIE_USER}")
-            run(["userdel", "-r", COWRIE_USER])
+            validate_purge_target()
+            installation_state().purge()
+        log("service accounts retained; review shared ownership before manual removal")
     else:
         log(f"data preserved at {DATA_DIR} (captured intel, DB, config).")
-        log(f"  to also delete it and the '{COWRIE_USER}' user, re-run with --purge:")
+        log("  to also delete verified installation data, re-run with --purge (accounts are retained):")
         log("  sudo python3 scripts/shardlure.py uninstall --purge")
 
     print("\nShardLure uninstalled\n=====================")
-    print(f"Real SSH restored. VERIFY before logging out: ssh -p {admin} <user>@<host>")
-    print("  (If the backup was missing, double-check /etc/ssh/sshd_config by hand.)")
+    print("Verified SSH ports: " + ", ".join(str(p) for p in sorted(restored_ports)))
+    print("  Original SSH recovery material is retained for operator review.")
     if not purge:
         print(f"Data kept at {DATA_DIR}. Re-run with --purge to remove it.")
 
