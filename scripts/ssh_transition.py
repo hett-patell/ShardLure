@@ -55,7 +55,7 @@ def socket_text(bindings: set[tuple[str, int]]) -> bytes:
     lines = ["# Managed by ShardLure", "[Socket]", "BindIPv6Only=ipv6-only", "ListenStream="]
     for host, port in sorted(bindings):
         value = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-        lines.append('ListenStream="' + value.replace("%", "%%") + '"')
+        lines.append('ListenStream=' + value.replace("%", "%%"))
     return ("\n".join(lines) + "\n").encode()
 
 
