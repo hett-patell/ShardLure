@@ -29,7 +29,12 @@ func main() {
 	}
 	r, err := safefile.EnsureDirectory(path)
 	if err != nil {
-		fmt.Printf("guest EnsureDirectory category: %v\n", err)
+		fmt.Printf("guest EnsureDirectory failed: %s\n", safefile.Category(err))
+		os.Exit(1)
+	}
+	if err := r.CheckOutput(); err != nil {
+		fmt.Printf("guest CheckOutput failed: %s\n", safefile.Category(err))
+		r.Close()
 		os.Exit(1)
 	}
 	r.Close()
