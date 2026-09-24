@@ -397,7 +397,12 @@ def install_cowrie(honeypot_port: int) -> None:
     pip = [str(COWRIE_HOME / "venv/bin/python"), "-m", "pip"]
     run([*pip, "install", "--upgrade", "pip", "wheel"]).check_returncode()
     run([*pip, "install", "-r", str(COWRIE_HOME / "requirements.txt")]).check_returncode()
-    run([*pip, "install", "-e", "."], cwd=str(COWRIE_HOME)).check_returncode()
+    # Non-editable install avoids setuptools' editable-wheel build, which calls
+    # distutils.command.install.expand_basedirs -> subst_vars on the venv prefix.
+    # When the data directory contains $ or % characters (tested by the
+    # integration suite), subst_vars raises ValueError on the unrecognised
+    # variable.  A regular wheel build + install uses a different code path.
+    run([*pip, "install", "."], cwd=str(COWRIE_HOME)).check_returncode()
     for d in ["var/log/cowrie", "var/lib/cowrie/downloads", "etc"]:
         (COWRIE_HOME / d).mkdir(parents=True, exist_ok=True)
     cfg = COWRIE_HOME / "etc/cowrie.cfg"
