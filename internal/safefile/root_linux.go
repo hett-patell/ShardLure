@@ -393,6 +393,9 @@ func OpenRoot(path string) (*Root, error) {
 	}
 	fd, err := unix.Openat2(unix.AT_FDCWD, abs, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK), Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
 	if err != nil {
+		// Temporary diagnostic: log the raw errno from openat2 to identify
+		// why path resolution fails under systemd's ProtectSystem=strict namespace.
+		log.Printf("safefile: OpenRoot openat2 failed errno=%d path-hidden", int(err.(unix.Errno)))
 		return nil, safeError(err)
 	}
 	if err := supportedFilesystem(fd); err != nil {
