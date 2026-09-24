@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -368,6 +369,9 @@ func supportedFilesystem(fd int) error {
 	if err := unix.Fstatfs(fd, &st); err != nil {
 		return safeError(err)
 	}
+	// Temporary diagnostic: log the filesystem magic number so we can identify
+	// what type systemd's mount namespace presents under ProtectSystem=strict.
+	log.Printf("safefile: filesystem magic=0x%x path-fd=%d", uint64(uint32(st.Type)), fd)
 	// The supported Linux deployment/test filesystems implement descriptor
 	// access, exclusive creation, renameat2(NOREPLACE), and directory fsync.
 	// In particular, never silently accept procfs, sysfs, NFS or FUSE inputs.
