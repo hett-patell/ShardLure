@@ -397,12 +397,48 @@ def install_cowrie(honeypot_port: int) -> None:
     pip = [str(COWRIE_HOME / "venv/bin/python"), "-m", "pip"]
     run([*pip, "install", "--upgrade", "pip", "wheel"]).check_returncode()
     run([*pip, "install", "-r", str(COWRIE_HOME / "requirements.txt")]).check_returncode()
-    # Non-editable install avoids setuptools' editable-wheel build, which calls
-    # distutils.command.install.expand_basedirs -> subst_vars on the venv prefix.
-    # When the data directory contains $ or % characters (tested by the
-    # integration suite), subst_vars raises ValueError on the unrecognised
-    # variable.  A regular wheel build + install uses a different code path.
-    run([*pip, "install", "."], cwd=str(COWRIE_HOME)).check_returncode()
+    # Build Cowrie from a sanitized path. Its vcs_versioning backend performs
+    # variable substitution on the checkout path, so paths containing `$` or
+    # `%` can fail during wheel metadata generation.  Build from a safe
+    # temporary copy (preserving .git so the version backend can still derive
+    # the pinned commit), then install the resulting wheel into the real venv.
+    with tempfile.TemporaryDirectory(prefix="cowrie-build-") as build_root:
+        build_root = Path(build_root)
+        build_checkout = build_root / "cowrie"
+
+        # Copy the source checkout without the venv and generated runtime data.
+        shutil.copytree(
+            COWRIE_HOME,
+            build_checkout,
+            ignore=shutil.ignore_patterns(
+                "venv",
+                "var",
+                "honeyfs",
+                "__pycache__",
+                "*.pyc",
+            ),
+        )
+
+        wheel_dir = build_root / "wheel"
+        wheel_dir.mkdir()
+
+        run(
+            [
+                *pip,
+                "wheel",
+                "--no-deps",
+                "--wheel-dir",
+                str(wheel_dir),
+                ".",
+            ],
+            cwd=str(build_checkout),
+        ).check_returncode()
+
+        wheels = sorted(wheel_dir.glob("cowrie-*.whl"))
+        if len(wheels) != 1:
+            die(f"expected one Cowrie wheel, found: {wheels}")
+
+        run([*pip, "install", str(wheels[0])]).check_returncode()
     for d in ["var/log/cowrie", "var/lib/cowrie/downloads", "etc"]:
         (COWRIE_HOME / d).mkdir(parents=True, exist_ok=True)
     cfg = COWRIE_HOME / "etc/cowrie.cfg"
