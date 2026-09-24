@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,7 +43,15 @@ func (r *Root) CheckWritable() error {
 	if info.Mode().Perm()&0200 == 0 {
 		return ErrPermission
 	}
-	return safeError(unix.Faccessat2(int(r.dir.Fd()), ".", unix.R_OK|unix.W_OK|unix.X_OK, unix.AT_EACCESS))
+	if err := unix.Faccessat2(int(r.dir.Fd()), ".", unix.R_OK|unix.W_OK|unix.X_OK, unix.AT_EACCESS); err != nil {
+		if !errors.Is(err, unix.ENOSYS) {
+			return safeError(err)
+		}
+		// Faccessat2 blocked by seccomp: fall back to faccessat (AT_EACCESS
+		// is ignored on Linux, so the semantics are equivalent here).
+		return safeError(unix.Faccessat(int(r.dir.Fd()), ".", unix.R_OK|unix.W_OK|unix.X_OK, unix.AT_EACCESS))
+	}
+	return nil
 }
 
 // Stat inspects metadata through O_PATH, never a regular data descriptor. This
@@ -118,7 +125,7 @@ func (r *Root) OpenDirectory(name string) (*Root, error) {
 	if r.dir == nil {
 		return nil, ErrClosed
 	}
-	fd, err := unix.Openat2(int(r.dir.Fd()), name, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK), Resolve: confinedResolve})
+	fd, err := openDirConfined(int(r.dir.Fd()), name, unix.O_NONBLOCK, confinedResolve)
 	if err != nil {
 		return nil, safeError(err)
 	}
@@ -140,7 +147,7 @@ func (r *Root) CreateDirectory(name string) (*Root, error) {
 	if err := unix.Mkdirat(int(r.dir.Fd()), name, 0700); err != nil {
 		return nil, safeError(err)
 	}
-	fd, err := unix.Openat2(int(r.dir.Fd()), name, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW), Resolve: confinedResolve})
+	fd, err := openDirConfined(int(r.dir.Fd()), name, 0, confinedResolve)
 	if err != nil {
 		return nil, safeError(err)
 	}
@@ -191,7 +198,7 @@ func (r *Root) RemoveIfUnchanged(name string, expected fs.FileInfo) error {
 	if err := unix.Mkdirat(parent, holdName, 0700); err != nil {
 		return safeError(err)
 	}
-	hold, err := unix.Openat2(parent, holdName, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW), Resolve: confinedResolve})
+	hold, err := openDirConfined(parent, holdName, 0, confinedResolve)
 	if err != nil {
 		return safeError(err)
 	}
@@ -364,14 +371,76 @@ func safeError(err error) error {
 	}
 }
 
+// openDirConfined opens a directory using openat2 with the given resolve flags,
+// falling back to a component-by-component openat walk on ENOSYS (seccomp) or
+// EXDEV (mount-boundary crossing under RESOLVE_BENEATH).  The fallback uses
+// O_NOFOLLOW on every component to replicate RESOLVE_NO_SYMLINKS semantics.
+func openDirConfined(dirfd int, path string, extraFlags int, resolve uint64) (int, error) {
+	flags := uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | extraFlags)
+	fd, err := unix.Openat2(dirfd, path, &unix.OpenHow{Flags: flags, Resolve: resolve})
+	if err == nil {
+		return fd, nil
+	}
+	if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EXDEV) {
+		return -1, err
+	}
+	return openatNoFollow(dirfd, path, int(flags), 0)
+}
+
+// openatNoFollow opens path relative to dirfd, walking each intermediate
+// component with O_NOFOLLOW to reject intermediate symlinks (matching the
+// RESOLVE_NO_SYMLINKS semantics of openat2).  The final component is also
+// opened with O_NOFOLLOW.
+func openatNoFollow(dirfd int, path string, flags, mode int) (int, error) {
+	clean := filepath.Clean(path)
+	if filepath.IsAbs(clean) {
+		dirfd = unix.AT_FDCWD
+	}
+	parts := strings.Split(clean, string(filepath.Separator))
+	var nonEmpty []string
+	for _, p := range parts {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		nonEmpty = []string{"."}
+	}
+	cur := dirfd
+	owned := false
+	for i, name := range nonEmpty {
+		isLast := i == len(nonEmpty)-1
+		f := flags
+		if !isLast {
+			f = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+		}
+		fd, err := unix.Openat(cur, name, f, uint32(mode))
+		if err != nil {
+			if owned {
+				unix.Close(cur)
+			}
+			return -1, err
+		}
+		if isLast {
+			if owned {
+				unix.Close(cur)
+			}
+			return fd, nil
+		}
+		if owned {
+			unix.Close(cur)
+		}
+		cur = fd
+		owned = true
+	}
+	return -1, unix.EINVAL
+}
+
 func supportedFilesystem(fd int) error {
 	var st unix.Statfs_t
 	if err := unix.Fstatfs(fd, &st); err != nil {
 		return safeError(err)
 	}
-	// Temporary diagnostic: log the filesystem magic number so we can identify
-	// what type systemd's mount namespace presents under ProtectSystem=strict.
-	log.Printf("safefile: filesystem magic=0x%x path-fd=%d", uint64(uint32(st.Type)), fd)
 	// The supported Linux deployment/test filesystems implement descriptor
 	// access, exclusive creation, renameat2(NOREPLACE), and directory fsync.
 	// In particular, never silently accept procfs, sysfs, NFS or FUSE inputs.
@@ -391,11 +460,8 @@ func OpenRoot(path string) (*Root, error) {
 	if err != nil {
 		return nil, ErrUnsafePath
 	}
-	fd, err := unix.Openat2(unix.AT_FDCWD, abs, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK), Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+	fd, err := openDirConfined(unix.AT_FDCWD, abs, unix.O_NONBLOCK, unix.RESOLVE_NO_SYMLINKS|unix.RESOLVE_NO_MAGICLINKS)
 	if err != nil {
-		// Temporary diagnostic: log the raw errno from openat2 to identify
-		// why path resolution fails under systemd's ProtectSystem=strict namespace.
-		log.Printf("safefile: OpenRoot openat2 failed errno=%d path-hidden", int(err.(unix.Errno)))
 		return nil, safeError(err)
 	}
 	if err := supportedFilesystem(fd); err != nil {
@@ -410,9 +476,37 @@ func validRelative(rel string) bool {
 		!strings.HasPrefix(rel, "../") && !strings.ContainsRune(rel, 0) && utf8.ValidString(rel) && len(rel) <= 4096
 }
 
+// openCreate is the file-creating analogue of openDirConfined: prefers
+// openat2 with confinement, falls back to openatNoFollow on ENOSYS/EXDEV.
+func openCreate(dirfd int, path string, mode os.FileMode, resolve uint64) (int, error) {
+	flags := uint64(unix.O_RDWR | unix.O_CLOEXEC | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW)
+	fd, err := unix.Openat2(dirfd, path, &unix.OpenHow{Flags: flags, Mode: uint64(mode.Perm()), Resolve: resolve})
+	if err == nil {
+		return fd, nil
+	}
+	if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EXDEV) {
+		return -1, err
+	}
+	return openatNoFollow(dirfd, path, int(flags), int(mode.Perm()))
+}
+
+// openPath is the O_PATH analogue of openDirConfined: prefers openat2
+// with confinement, falls back to openatNoFollow on ENOSYS/EXDEV.
+func openPath(dirfd int, path string, resolve uint64) (int, error) {
+	flags := uint64(unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW)
+	fd, err := unix.Openat2(dirfd, path, &unix.OpenHow{Flags: flags, Resolve: resolve})
+	if err == nil {
+		return fd, nil
+	}
+	if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EXDEV) {
+		return -1, err
+	}
+	return openatNoFollow(dirfd, path, int(flags), 0)
+}
+
 func probeAt(root int, rel string) (int, unix.Stat_t, error) {
 	var st unix.Stat_t
-	fd, err := unix.Openat2(root, rel, &unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW), Resolve: confinedResolve})
+	fd, err := openPath(root, rel, confinedResolve)
 	if err != nil {
 		return -1, st, safeError(err)
 	}
@@ -530,7 +624,7 @@ func (r *Root) CreateExclusive(rel string, mode fs.FileMode) (*os.File, error) {
 	if err := r.checkOutputLocked(); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Openat2(int(r.dir.Fd()), rel, &unix.OpenHow{Flags: uint64(unix.O_RDWR | unix.O_CLOEXEC | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW), Mode: uint64(mode.Perm()), Resolve: confinedResolve})
+	fd, err := openCreate(int(r.dir.Fd()), rel, mode, confinedResolve)
 	if err != nil {
 		return nil, safeError(err)
 	}
@@ -587,7 +681,7 @@ func (r *Root) checkOutputLocked() error {
 	}
 	// Reads keep their original descriptor capability after a rename. Outputs
 	// additionally require their published pathname to still name that root.
-	fd, err := unix.Openat2(unix.AT_FDCWD, r.path, &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK), Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+	fd, err := openDirConfined(unix.AT_FDCWD, r.path, unix.O_NONBLOCK, unix.RESOLVE_NO_SYMLINKS|unix.RESOLVE_NO_MAGICLINKS)
 	if err != nil {
 		return ErrChanged
 	}

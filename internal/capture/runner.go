@@ -63,11 +63,9 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	for _, sub := range []string{"quarantine", "cowrie", "cowrie-tty", "meta"} {
 		root, err := safefile.EnsureDirectory(filepath.Join(r.fetch.EvidenceDir, sub))
 		if err != nil {
-			log.Printf("capture init: EnsureDirectory %s: %s", sub, safefile.Category(err))
 			return 0, safeCaptureError(err, "capture output initialization failed")
 		}
 		if err := root.Close(); err != nil {
-			log.Printf("capture init: root.Close %s: %s", sub, safefile.Category(err))
 			return 0, safeCaptureError(err, "capture output initialization failed")
 		}
 	}
