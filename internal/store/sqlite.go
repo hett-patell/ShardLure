@@ -1505,8 +1505,8 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 	//   - last_seen < cutoff, so an actor the ingest tick created moments ago
 	//     (its events not yet visible to this transaction) is never raced away;
 	//   - no surviving events, an index probe on the (actor_id, ts) composite;
-	//   - no operator annotation. Since v23, generated summaries have their
-	//     own column; Notes is preserved even when legacy text looks generated.
+	//   - no operator annotation (see isOperatorNote: builder text left in the
+	//     legacy notes column before v23 is not one).
 	//
 	// Unlike events this is NOT chunked: actors is bounded by the number of
 	// distinct attacker identities (thousands, against a million events), so
@@ -1521,18 +1521,21 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 			return err
 		}
 		defer tx.Rollback()
-		rows, err := tx.Query(`SELECT id,last_seen FROM actors
-WHERE COALESCE(campaigns,'')='' AND COALESCE(notes,'')=''
+		rows, err := tx.Query(`SELECT id,last_seen,COALESCE(notes,'') FROM actors
+WHERE COALESCE(campaigns,'')=''
   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor_id=actors.id)`)
 		if err != nil {
 			return err
 		}
 		var orphanIDs []string
 		for rows.Next() {
-			var id, lastSeen string
-			if err := rows.Scan(&id, &lastSeen); err != nil {
+			var id, lastSeen, notes string
+			if err := rows.Scan(&id, &lastSeen, &notes); err != nil {
 				rows.Close()
 				return err
+			}
+			if isOperatorNote(notes) {
+				continue
 			}
 			parsed, err := time.Parse(time.RFC3339Nano, lastSeen)
 			if err != nil {

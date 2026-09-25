@@ -256,22 +256,38 @@ func TestCaptureRetentionKeepsRecentArchivedJobEvidence(t *testing.T) {
 	}
 }
 
+// Operator notes pin an orphan; builder text left in the legacy notes column
+// does not. Before v23 the builder rewrote notes as "N events, M usernames"
+// (or "N distinct usernames") on every rebuild, and nothing moves that text
+// out, so on the audited prod DB all 6,716 actors carried one. Treating those
+// exact formats as annotations stopped retention from ever removing an orphan
+// (the 103 stale "unknown" actors the 2026-08-31 audit cleared).
 func TestCaptureRetentionPreservesOperatorNoteOnlyOrphan(t *testing.T) {
 	s := newTestStore(t, "retention-notes.db")
 	old := time.Now().Add(-72 * time.Hour)
-	for _, note := range []string{"operator note", "2 events, 0 usernames"} {
-		id := "cowrie:" + note
-		if err := s.UpsertActor(&models.Actor{ID: id, Source: models.SourceCowrie, FirstSeen: old, LastSeen: old, Notes: note}); err != nil {
+	notes := map[string]bool{ // note -> must survive
+		"operator note":                     true,
+		"2 events, 0 usernames - C2 reused": true,
+		"see 2 events, 0 usernames":         true,
+		"2 events, 0 usernames":             false,
+		"17 distinct usernames":             false,
+	}
+	for note := range notes {
+		if err := s.UpsertActor(&models.Actor{ID: "cowrie:" + note, Source: models.SourceCowrie, FirstSeen: old, LastSeen: old, Notes: note}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := s.MaintenancePurge(1); err != nil {
 		t.Fatal(err)
 	}
-	for _, note := range []string{"operator note", "2 events, 0 usernames"} {
-		a, err := s.GetActor("cowrie:" + note)
-		if err != nil || a.Notes != note {
-			t.Errorf("retention erased annotation: %+v err=%v", a, err)
+	// Direct SQL only: reads through GetActor may repair legacy rows.
+	for note, keep := range notes {
+		got := countRows(t, s, `SELECT COUNT(1) FROM actors WHERE id=? AND notes=?`, "cowrie:"+note, note)
+		if keep && got != 1 {
+			t.Errorf("retention erased operator annotation %q", note)
+		}
+		if !keep && countRows(t, s, `SELECT COUNT(1) FROM actors WHERE id=?`, "cowrie:"+note) != 0 {
+			t.Errorf("legacy generated note %q pinned an orphan actor", note)
 		}
 	}
 }

@@ -508,7 +508,7 @@ func (s *Store) ReconcileSessionHASSH(sessionID, newActorID, hassh string,
 				a := agg.Actor
 				// Retention is not proof that an actor has no lifetime evidence. Only
 				// a genuinely empty, unannotated aggregate may be removed.
-				if a.ID != newActorID && a.EventCount == 0 && a.Campaigns == "" && a.Notes == "" {
+				if a.ID != newActorID && a.EventCount == 0 && a.Campaigns == "" && !isOperatorNote(a.Notes) {
 					if _, err := tx.Exec("DELETE FROM actors WHERE id=?", a.ID); err != nil {
 						return err
 					}
