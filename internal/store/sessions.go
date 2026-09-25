@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -51,25 +50,6 @@ type SessionListOptions struct {
 	MinCommands int
 }
 
-// having renders the aggregate filter shared by the list and count queries, so
-// the count always describes the same population as the page it labels.
-//
-// It has to be HAVING rather than WHERE: "sessions with commands" is a property
-// of the whole session group, not of an individual row — restricting rows to
-// those with a non-empty command would drop the login/connect events and corrupt
-// every other aggregate on the summary (event counts, start time, username).
-//
-// (Described in prose rather than as SQL on purpose: a doc comment containing a
-// pair of single quotes around nothing gets rewritten to a curly quote by
-// gofmt's doc-comment pass, which then fails CI's gofmt gate.)
-func (o SessionListOptions) having() string {
-	if o.MinCommands <= 0 {
-		return ""
-	}
-	return "\nHAVING SUM(CASE WHEN command != '' THEN 1 ELSE 0 END) >= " +
-		strconv.Itoa(o.MinCommands)
-}
-
 func firstSessionOpts(opts []SessionListOptions) SessionListOptions {
 	if len(opts) > 0 {
 		return opts[0]
@@ -111,6 +91,9 @@ SELECT session_id, MAX(src_ip), COALESCE(MAX(CASE WHEN username<>'' THEN usernam
   MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END),
   COUNT(*) OVER ()
 FROM w GROUP BY session_id`
+	// HAVING, not WHERE: "has commands" is a property of the whole session.
+	// Filtering rows would drop its login/connect events and corrupt every
+	// other aggregate (event count, start time, username).
 	if minCommands > 0 {
 		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
 		args = append(args, minCommands)
@@ -305,9 +288,6 @@ func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionS
 	}
 	if err := s.stampFirstCommands(since, out); err != nil {
 		return nil, err
-	}
-	if len(out) > limit {
-		out = out[:limit]
 	}
 	// Stamp duration/arch from the side-channel. ShellSessionSummary embeds
 	// SessionSummary by value, so mutate through the embedded field in place.
