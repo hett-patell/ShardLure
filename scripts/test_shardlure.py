@@ -566,7 +566,13 @@ class ServiceSafetyTests(unittest.TestCase):
             for name in ("python", "twistd"):
                 (venv / name).write_text("#!/bin/sh\n")
                 (venv / name).chmod(0o755)
+            # Own daemon binary: the verifier checks the executable exists, and
+            # the unit must not depend on this host's /usr/local/bin.
+            bindir = root / "bin"
+            bindir.mkdir()
+            daemon_fixture(bindir)
             with (
+                mock.patch.object(shardlure, "BIN_DIR", bindir),
                 mock.patch.object(shardlure, "DATA_DIR", data),
                 mock.patch.object(shardlure, "COWRIE_HOME", data / "cowrie"),
                 mock.patch.object(shardlure, "COWRIE_LOG", data / "cowrie/var/log/cowrie/cowrie.json"),
