@@ -1,9 +1,11 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -75,75 +77,115 @@ func firstSessionOpts(opts []SessionListOptions) SessionListOptions {
 	return SessionListOptions{}
 }
 
-type sessionAccumulator struct {
-	summary        SessionSummary
-	firstCommand   string
-	firstCommandTS time.Time
-	firstCommandID int64
+// sessionWindow is the cowrie-session slice of the exact-time event branches.
+// The legacy branch MUST stay pinned to the partial legacy-timestamp index
+// (globalEventTimeBranches): with an unpinned legacy branch SQLite evaluated the
+// Go timestamp function on every cowrie row, not just unconverted ones (about
+// seven Go allocations per event in the window). The native branch remains
+// bounded by the ts index.
+func sessionWindow(since time.Time) (string, []any) {
+	return globalEventTimeBranches("id,session_id,src_ip,username,hassh,ssh_client,actor_id,command,kind", &since,
+		"source='cowrie' AND session_id<>''", nil)
 }
 
-func (s *Store) sessionSummariesSince(since time.Time, minCommands int) ([]ShellSessionSummary, error) {
-	byID := make(map[string]*sessionAccumulator)
-	err := s.IterateEventsSince(since, func(event *models.Event) error {
-		if event.Source != models.SourceCowrie || event.SessionID == "" {
-			return nil
-		}
-		acc := byID[event.SessionID]
-		if acc == nil {
-			acc = &sessionAccumulator{summary: SessionSummary{ID: event.SessionID, StartTS: event.TS, EndTS: event.TS}}
-			byID[event.SessionID] = acc
-		}
-		sum := &acc.summary
-		if event.TS.Before(sum.StartTS) {
-			sum.StartTS = event.TS
-		}
-		if event.TS.After(sum.EndTS) {
-			sum.EndTS = event.TS
-		}
-		if event.SrcIP > sum.SrcIP {
-			sum.SrcIP = event.SrcIP
-		}
-		if event.Username != "" && event.Username > sum.Username {
-			sum.Username = event.Username
-		}
-		if event.HASSH > sum.HASSH {
-			sum.HASSH = event.HASSH
-		}
-		if event.SSHClient > sum.SSHClient {
-			sum.SSHClient = event.SSHClient
-		}
-		if event.ActorID > sum.ActorID {
-			sum.ActorID = event.ActorID
-		}
-		sum.EventCount++
-		if event.Command != "" {
-			sum.CmdCount++
-			if event.Kind == models.KindCommand && (acc.firstCommandTS.IsZero() || event.TS.Before(acc.firstCommandTS) ||
-				(event.TS.Equal(acc.firstCommandTS) && event.ID < acc.firstCommandID)) {
-				acc.firstCommand = event.Command
-				acc.firstCommandTS = event.TS
-				acc.firstCommandID = event.ID
-			}
-		}
-		return nil
-	})
+// sessionSummariesSince aggregates sessions whose events fall in the window,
+// newest end time first, entirely inside SQLite, returning at most limit rows
+// (limit <= 0 means all). It used to stream EVERY event in the window through
+// Go and aggregate in a map, twice per request (list + count): on the 1.75M-
+// event prod database /api/intel/sessions at 30d/90d never answered. The
+// per-column MAX choices match the previous Go accumulator exactly.
+func (s *Store) sessionSummariesSince(since time.Time, minCommands, limit int) ([]ShellSessionSummary, error) {
+	window, args := sessionWindow(since)
+	query := `WITH w AS (` + window + `)
+SELECT session_id, MAX(src_ip), COALESCE(MAX(CASE WHEN username<>'' THEN username END),''),
+  COALESCE(MAX(hassh),''), COALESCE(MAX(ssh_client),''), COALESCE(MAX(actor_id),''),
+  MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END)
+FROM w GROUP BY session_id`
+	if minCommands > 0 {
+		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
+		args = append(args, minCommands)
+	}
+	query += ` ORDER BY MAX(exact_ts) DESC, session_id ASC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]ShellSessionSummary, 0, len(byID))
-	for _, acc := range byID {
-		if acc.summary.CmdCount < minCommands {
-			continue
+	defer rows.Close()
+	var out []ShellSessionSummary
+	for rows.Next() {
+		var sum SessionSummary
+		var srcIP sql.NullString
+		var startTS, endTS string
+		if err := rows.Scan(&sum.ID, &srcIP, &sum.Username, &sum.HASSH, &sum.SSHClient, &sum.ActorID,
+			&startTS, &endTS, &sum.EventCount, &sum.CmdCount); err != nil {
+			return nil, err
 		}
-		out = append(out, ShellSessionSummary{SessionSummary: acc.summary, FirstCommand: acc.firstCommand})
+		sum.SrcIP = srcIP.String
+		if sum.StartTS, err = time.Parse(time.RFC3339Nano, startTS); err != nil {
+			return nil, fmt.Errorf("session %s event time: %w", sum.ID, err)
+		}
+		if sum.EndTS, err = time.Parse(time.RFC3339Nano, endTS); err != nil {
+			return nil, fmt.Errorf("session %s event time: %w", sum.ID, err)
+		}
+		out = append(out, ShellSessionSummary{SessionSummary: sum})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].EndTS.Equal(out[j].EndTS) {
-			return out[i].EndTS.After(out[j].EndTS)
+	return out, rows.Err()
+}
+
+// countSessionsSince counts the same population sessionSummariesSince lists,
+// without returning rows.
+func (s *Store) countSessionsSince(since time.Time, minCommands int) (int, error) {
+	window, args := sessionWindow(since)
+	query := `WITH w AS (` + window + `) SELECT COUNT(*) FROM (SELECT session_id FROM w GROUP BY session_id`
+	if minCommands > 0 {
+		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
+		args = append(args, minCommands)
+	}
+	query += `)`
+	var n int
+	err := s.db.QueryRow(query, args...).Scan(&n)
+	return n, err
+}
+
+// stampFirstCommands fills FirstCommand for the (bounded) returned sessions:
+// the earliest in-window kind=command event, ties broken by event id.
+func (s *Store) stampFirstCommands(since time.Time, sums []ShellSessionSummary) error {
+	if len(sums) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(sums))
+	ids := make([]any, len(sums))
+	index := make(map[string]int, len(sums))
+	for i := range sums {
+		placeholders[i] = "?"
+		ids[i] = sums[i].ID
+		index[sums[i].ID] = i
+	}
+	// Pinned legacy branch for the same reason as sessionWindow.
+	window, args := globalEventTimeBranches("id,session_id,command", &since,
+		"source='cowrie' AND kind='command' AND COALESCE(command,'')<>'' AND session_id IN ("+strings.Join(placeholders, ",")+")", ids)
+	rows, err := s.db.Query(`WITH w AS (`+window+`)
+SELECT session_id, command FROM (
+  SELECT session_id, command, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY exact_ts ASC, id ASC) AS rn FROM w
+) WHERE rn=1`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, command string
+		if err := rows.Scan(&id, &command); err != nil {
+			return err
 		}
-		return out[i].ID < out[j].ID
-	})
-	return out, nil
+		if i, ok := index[id]; ok {
+			sums[i].FirstCommand = command
+		}
+	}
+	return rows.Err()
 }
 
 // ListSessions returns cowrie sessions whose latest event falls within
@@ -161,21 +203,16 @@ func (s *Store) sessionSummariesSince(since time.Time, minCommands int) ([]Shell
 // opts must match whatever ListSessions was given, or the total describes a
 // different population than the rows.
 func (s *Store) CountSessionsSince(since time.Time, opts ...SessionListOptions) (int, error) {
-	o := firstSessionOpts(opts)
-	rows, err := s.sessionSummariesSince(since, o.MinCommands)
-	return len(rows), err
+	return s.countSessionsSince(since, firstSessionOpts(opts).MinCommands)
 }
 
 func (s *Store) ListSessions(since time.Time, limit int, opts ...SessionListOptions) ([]SessionSummary, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := s.sessionSummariesSince(since, firstSessionOpts(opts).MinCommands)
+	rows, err := s.sessionSummariesSince(since, firstSessionOpts(opts).MinCommands, limit)
 	if err != nil {
 		return nil, err
-	}
-	if len(rows) > limit {
-		rows = rows[:limit]
 	}
 	out := make([]SessionSummary, len(rows))
 	for i := range rows {
@@ -231,8 +268,11 @@ func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionS
 	if limit <= 0 {
 		limit = 30
 	}
-	out, err := s.sessionSummariesSince(since, 1)
+	out, err := s.sessionSummariesSince(since, 1, limit)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.stampFirstCommands(since, out); err != nil {
 		return nil, err
 	}
 	if len(out) > limit {
