@@ -391,6 +391,14 @@ def install_cowrie(honeypot_port: int) -> None:
     existing = COWRIE_HOME.exists()
     ensure_cowrie_checkout(COWRIE_HOME, pin)
     if existing:
+        # Preserve only a complete installation. A checkout left by a run that
+        # failed before the venv/build/config finished would otherwise be
+        # "preserved" into an unstartable honeypot on every re-run.
+        missing = [rel for rel in ("venv/bin/python", "src/cowrie/_version.py", "etc/cowrie.cfg")
+                   if not (COWRIE_HOME / rel).is_file()]
+        if missing:
+            die(f"Cowrie at {COWRIE_HOME} is incomplete (missing {', '.join(missing)}), "
+                "probably from an interrupted install; move it aside and rerun. Nothing was changed")
         log("existing Cowrie source, environment, host keys and configuration preserved; use the dedicated patch workflow for source changes")
         return
     run([sys.executable, "-m", "venv", str(COWRIE_HOME / "venv")]).check_returncode()

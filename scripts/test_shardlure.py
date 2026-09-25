@@ -662,6 +662,32 @@ class ServiceSafetyTests(unittest.TestCase):
                     shardlure.install_cowrie(22022)
             self.assertEqual((home / "src/cowrie/_version.py").read_text(), generated)
 
+    def test_partial_cowrie_install_is_refused_not_silently_preserved(self) -> None:
+        # Regression (whole-branch review): a first run that cloned Cowrie and
+        # then failed (pip network blip, wheel build) left a checkout without a
+        # venv or build-generated _version.py; a re-run saw the directory,
+        # skipped every build step and published an unstartable honeypot.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "data" / "cowrie"
+            (home / "src/cowrie").mkdir(parents=True)
+            calls = []
+            with (mock.patch.object(shardlure, "DATA_DIR", home.parent),
+                  mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure, "read_cowrie_pin", return_value="0" * 40),
+                  mock.patch.object(shardlure, "ensure_cowrie_checkout"),
+                  mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0))):
+                with self.assertRaises(SystemExit):
+                    shardlure.install_cowrie(22022)
+                self.assertEqual(calls, [])
+                # A complete installation is still preserved untouched.
+                (home / "venv/bin").mkdir(parents=True)
+                (home / "venv/bin/python").write_text("")
+                (home / "src/cowrie/_version.py").write_text("")
+                (home / "etc").mkdir()
+                (home / "etc/cowrie.cfg").write_text("[honeypot]\n")
+                shardlure.install_cowrie(22022)
+                self.assertEqual(calls, [])
+
     def test_systemd_controls_reject_before_unit_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
