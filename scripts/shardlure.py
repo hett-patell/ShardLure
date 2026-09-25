@@ -397,11 +397,19 @@ def install_cowrie(honeypot_port: int) -> None:
     pip = [str(COWRIE_HOME / "venv/bin/python"), "-m", "pip"]
     run([*pip, "install", "--upgrade", "pip", "wheel"]).check_returncode()
     run([*pip, "install", "-r", str(COWRIE_HOME / "requirements.txt")]).check_returncode()
-    # Build Cowrie from a sanitized path. Its vcs_versioning backend performs
+    # Build Cowrie from a sanitized path.  Its vcs_versioning backend performs
     # variable substitution on the checkout path, so paths containing `$` or
     # `%` can fail during wheel metadata generation.  Build from a safe
     # temporary copy (preserving .git so the version backend can still derive
     # the pinned commit), then install the resulting wheel into the real venv.
+    #
+    # The build venv must also live under the sanitized path: setuptools'
+    # bdist_wheel -> install -> expand_basedirs reads config_vars from
+    # sys.prefix, so building with the real venv's Python (whose prefix
+    # contains $VALUE) triggers subst_vars -> ValueError even from a clean
+    # working directory.  The throwaway venv has a clean sys.prefix; the
+    # resulting wheel is then installed into the real venv using pip's wheel
+    # installer, which bypasses distutils entirely.
     with tempfile.TemporaryDirectory(prefix="cowrie-build-") as build_root:
         build_root = Path(build_root)
         build_checkout = build_root / "cowrie"
@@ -419,12 +427,18 @@ def install_cowrie(honeypot_port: int) -> None:
             ),
         )
 
+        # Create a throwaway build venv under the sanitized path.
+        build_venv = build_root / "venv"
+        run([sys.executable, "-m", "venv", str(build_venv)]).check_returncode()
+        build_pip = [str(build_venv / "bin/python"), "-m", "pip"]
+        run([*build_pip, "install", "--upgrade", "pip", "wheel", "setuptools"]).check_returncode()
+
         wheel_dir = build_root / "wheel"
         wheel_dir.mkdir()
 
         run(
             [
-                *pip,
+                *build_pip,
                 "wheel",
                 "--no-deps",
                 "--wheel-dir",
