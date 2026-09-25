@@ -114,6 +114,163 @@ func TestMaintenancePurgeDeletesOldRows(t *testing.T) {
 	}
 }
 
+func TestMaintenancePurgeUsesExactMixedTimestampBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "purge-mixed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.SetCaptureRetentionPolicy(CaptureRetentionPolicy{EvidenceRoot: dir})
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+	fresh := cutoff.Add(2 * time.Hour)
+	old := cutoff.Add(-2 * time.Hour)
+	freshText := fresh.In(time.FixedZone("minus-14", -14*60*60)).Format(time.RFC3339Nano)
+	oldText := old.In(time.FixedZone("plus-14", 14*60*60)).Format(time.RFC3339Nano)
+	for _, row := range []struct{ ts, ip string }{{freshText, "8.8.8.8"}, {oldText, "1.1.1.1"}} {
+		if _, err := st.db.Exec(`INSERT INTO events(ts,source,kind,src_ip) VALUES(?,?,?,?)`,
+			row.ts, "cowrie", "connect", row.ip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkfile := func(name string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("evidence"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	freshPath, oldPath := mkfile("fresh"), mkfile("old")
+	for _, row := range []struct{ ts, url, path string }{
+		{freshText, "https://example.com/fresh", freshPath},
+		{oldText, "https://example.com/old", oldPath},
+	} {
+		if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,local_path,origin,status,created_at) VALUES(?,?,?,?,?,?)`,
+			row.ts, row.url, row.path, "test", "fetched", row.ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.MaintenancePurge(30); err != nil {
+		t.Fatal(err)
+	}
+	var eventIPs []string
+	rows, err := st.db.Query(`SELECT src_ip FROM events ORDER BY src_ip`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			t.Fatal(err)
+		}
+		eventIPs = append(eventIPs, ip)
+	}
+	rows.Close()
+	if len(eventIPs) != 1 || eventIPs[0] != "8.8.8.8" {
+		t.Fatalf("remaining event IPs=%v, want fresh event only", eventIPs)
+	}
+	var artifactURL string
+	if err := st.db.QueryRow(`SELECT url FROM artifacts`).Scan(&artifactURL); err != nil || artifactURL != "https://example.com/fresh" {
+		t.Fatalf("remaining artifact=%q err=%v", artifactURL, err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("fresh evidence removed: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old evidence survived: %v", err)
+	}
+}
+
+func TestMaintenancePurgeRejectsMalformedEventTimestamp(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "purge-malformed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.db.Exec(`INSERT INTO events(ts,source,kind) VALUES('not-a-time','cowrie','connect')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MaintenancePurge(30); err == nil {
+		t.Fatal("malformed event timestamp must stop retention rather than delete by text order")
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("malformed event row count=%d err=%v", n, err)
+	}
+}
+
+func TestMaintenancePurgeSmallTablesUseExactMixedTimes(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "purge-small-times.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.EnsureEnrichmentTable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ensureCowrieTTYIndex(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ensurePayloadIntelTable(); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+	freshText := cutoff.Add(2 * time.Hour).In(time.FixedZone("minus-14", -14*60*60)).Format(time.RFC3339Nano)
+	oldText := cutoff.Add(-2 * time.Hour).In(time.FixedZone("plus-14", 14*60*60)).Format(time.RFC3339Nano)
+	for _, row := range []struct{ key, ts string }{{"fresh", freshText}, {"old", oldText}} {
+		if _, err := st.db.Exec(`INSERT INTO ip_enrichment(ip,source,payload,fetched_at) VALUES(?,?,'{}',?)`, row.key, "test", row.ts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`INSERT INTO cowrie_tty_index(sha256,session_id,ts) VALUES(?,?,?)`, row.key, row.key, row.ts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`INSERT INTO cowrie_session_hassh(session_id,hassh,observed_at) VALUES(?,?,?)`, row.key, "h", row.ts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`INSERT INTO cowrie_session_meta(session_id,observed_at) VALUES(?,?)`, row.key, row.ts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`INSERT INTO payload_intel(sha256,source,payload,fetched_at) VALUES(?,?,'{}',?)`, row.key, "test", row.ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.MaintenancePurge(30); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []struct{ table, key string }{
+		{"ip_enrichment", "ip"}, {"cowrie_tty_index", "sha256"},
+		{"cowrie_session_hassh", "session_id"}, {"cowrie_session_meta", "session_id"},
+		{"payload_intel", "sha256"},
+	} {
+		if got := countRows(t, st, "SELECT COUNT(*) FROM "+target.table); got != 1 {
+			t.Fatalf("%s rows=%d, want fresh row only", target.table, got)
+		}
+		if got := countRows(t, st, "SELECT COUNT(*) FROM "+target.table+" WHERE "+target.key+"='fresh'"); got != 1 {
+			t.Fatalf("%s kept the wrong offset row", target.table)
+		}
+	}
+}
+
+func TestMaintenancePurgeRejectsMalformedSmallTableTime(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "purge-small-malformed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.EnsureEnrichmentTable(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO ip_enrichment(ip,source,payload,fetched_at) VALUES('bad','test','{}','not-a-time')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MaintenancePurge(30); err == nil {
+		t.Fatal("malformed cache timestamp must stop retention")
+	}
+	if got := countRows(t, st, `SELECT COUNT(*) FROM ip_enrichment`); got != 1 {
+		t.Fatalf("malformed cache row count=%d, want 1", got)
+	}
+}
+
 func TestMaintenancePurgeDeletesExpiredSessionBindings(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "session-retention.db"))
 	if err != nil {
@@ -196,6 +353,7 @@ func TestMaintenancePurgeDeletesEvidenceFiles(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer s.Close()
+	s.SetCaptureRetentionPolicy(CaptureRetentionPolicy{EvidenceRoot: dir})
 
 	now := time.Now().UTC()
 	oldTS := now.AddDate(0, 0, -90)
@@ -279,6 +437,7 @@ func TestMaintenancePurgeReferenceSafe(t *testing.T) {
 	defer s.Close()
 
 	evidenceDir := filepath.Join(t.TempDir(), "evidence")
+	s.SetCaptureRetentionPolicy(CaptureRetentionPolicy{EvidenceRoot: evidenceDir})
 	if err := os.MkdirAll(evidenceDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

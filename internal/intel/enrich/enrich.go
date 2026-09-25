@@ -33,6 +33,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
+	"github.com/networkshard/shardlure/internal/observability"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -311,7 +313,30 @@ type providerSpec struct {
 // fetch is the shared provider pipeline. keyFn resolves the provider's API key
 // (from the runtime keystore or os.Getenv); it is never nil (lookup supplies
 // envKey as the fallback).
-func (s providerSpec) fetch(ctx context.Context, hc *http.Client, ip string, keyFn func(string) string) (Result, error) {
+func (s providerSpec) fetch(ctx context.Context, hc *http.Client, ip string, keyFn func(string) string) (result Result, resultErr error) {
+	p := observability.Shodan
+	switch s.envVar {
+	case "SHARDLURE_VT_KEY":
+		p = observability.VirusTotal
+	case "SHARDLURE_ABUSEIPDB_KEY":
+		p = observability.AbuseIPDB
+	case "SHARDLURE_GREYNOISE_KEY":
+		p = observability.GreyNoise
+	case "SHARDLURE_OTX_KEY":
+		p = observability.OTX
+	case "SHARDLURE_IPQS_KEY":
+		p = observability.IPQualityScore
+	case "SHARDLURE_IPINFO_KEY":
+		p = observability.IPinfo
+	}
+	ctx, trace := observability.TraceRequest(ctx, p, observability.IPLookup)
+	defer func() {
+		if result.Error != "" && resultErr == nil {
+			trace.Finish(nil, observability.InvalidResponse)
+		} else {
+			trace.Finish(resultErr)
+		}
+	}()
 	var key string
 	if s.envVar != "" {
 		key = strings.TrimSpace(keyFn(s.envVar))
@@ -363,23 +388,25 @@ func isHTTPStatus(err error, code int) bool {
 func httpJSON(ctx context.Context, hc *http.Client, url string, headers map[string]string, out any) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, intelutil.SafeRequestError("enrichment", "build request", err)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("User-Agent", "ShardLure/0.1 (+honeypot-enrichment)")
+	observability.StartHTTP(ctx)
 	resp, err := hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
-		return nil, err
+		return nil, intelutil.SafeRequestError("enrichment", "get", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
 	if err != nil {
-		return nil, err
+		return nil, intelutil.SafeRequestError("enrichment", "read response", err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return body, &statusError{Code: resp.StatusCode, Status: resp.Status}
+		return body, &statusError{Code: resp.StatusCode, Status: http.StatusText(resp.StatusCode)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(body, out); err != nil {

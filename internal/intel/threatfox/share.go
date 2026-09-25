@@ -3,6 +3,7 @@ package threatfox
 import (
 	"context"
 	"errors"
+	"github.com/networkshard/shardlure/internal/observability"
 	"strings"
 	"time"
 
@@ -29,8 +30,10 @@ type Options struct {
 	RateLimit  time.Duration
 	Reference  string // optional shared reference URL added to each submission
 
-	// OnProgress reports each candidate's outcome: submitted (with the IOC
-	// count) or skipped (with the Vet reason). Fires once per candidate.
+	// OnProgress reports each candidate's outcome: submitted (with the durable
+	// IOC count, including partial success) or skipped/failed (with a reason).
+	// Dry-run reports the number of IOCs that would be submitted.
+	// Fires once per candidate.
 	OnProgress func(c Candidate, submitted bool, iocCount int, reason string)
 
 	// MaxSubmissions bounds how many CANDIDATES this run may submit (0 =
@@ -67,7 +70,8 @@ var ErrEmptyBatch = errors.New("threatfox: no candidates to submit")
 //
 // A candidate with at least one fresh IOC counts as one submission against
 // MaxSubmissions. Returns (submitted, skipped, firstErr): submitted counts
-// candidates that sent at least one IOC (or, in dry-run, would have); skipped
+// candidates that durably recorded at least one accepted IOC (or, in dry-run,
+// would have submitted one); skipped
 // counts candidates the gate rejected or that were fully deduped. As with the
 // sibling sharers, one failing submission does not abort the run, but the first
 // error is surfaced so the CLI can exit non-zero.
@@ -87,6 +91,7 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 	}
 	tags := intelutil.SanitiseAbuseChTags(opts.ExtraTags)
 	client := NewClient(opts.Endpoint)
+	var lastAttempt time.Time
 
 	for i, cand := range candidates {
 		if ctx.Err() != nil {
@@ -154,9 +159,26 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 			continue
 		}
 
-		sentAny := false
+		sentCount := 0
 		var candErr error
-		for j, ioc := range fresh {
+		// Finalize once, including on an early stop: a later IOC failure must
+		// not erase the candidate's earlier, durably recorded submissions.
+		finishCandidate := func(reason string) {
+			if sentCount > 0 {
+				submitted++
+				if reason != "" {
+					reason = "partial submission: " + reason
+				}
+			}
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, sentCount > 0, sentCount, reason)
+			}
+		}
+		for _, ioc := range fresh {
+			if err := intelutil.WaitForProviderAttempt(ctx, lastAttempt, opts.RateLimit); err != nil {
+				finishCandidate("submission interrupted: " + err.Error())
+				return submitted, skipped, err
+			}
 			res, err := client.Submit(ctx, opts.APIKey, Submission{
 				ThreatType:      ioc.ThreatType,
 				IOCType:         ioc.Type,
@@ -167,13 +189,12 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 				Tags:            tags,
 				Comment:         buildComment(cand),
 			})
+			lastAttempt = time.Now()
 			if err != nil {
 				if errors.Is(err, ErrUnauthorized) {
 					// An auth failure fails identically for every remaining IOC
 					// and candidate — stop the whole run rather than hammering.
-					if opts.OnProgress != nil {
-						opts.OnProgress(cand, false, 0, "auth key rejected")
-					}
+					finishCandidate("auth key rejected")
 					return submitted, skipped, errors.Join(firstErr, err)
 				}
 				if candErr == nil {
@@ -202,59 +223,34 @@ func Share(ctx context.Context, rec SubmitRecorder, candidates []Candidate, opts
 				}
 				continue
 			}
-			sentAny = true
 			status := "submitted"
 			if res.Duplicate {
 				status = "duplicate"
 			}
-			if rerr := rec.RecordThreatFoxSubmission(ioc.Value, ioc.Type, malware, status, time.Now().UTC()); rerr != nil && firstErr == nil {
-				firstErr = rerr
+			if rerr := rec.RecordThreatFoxSubmission(ioc.Value, ioc.Type, malware, status, time.Now().UTC()); rerr != nil {
+				observability.DurableShare(ctx, observability.ThreatFox, rerr, 1)
+				finishCandidate("accepted upstream; local ledger write failed")
+				// A missing ledger row makes this accepted IOC eligible for a later
+				// duplicate submission. Stop before posting any more IOCs.
+				return submitted, skipped, errors.Join(firstErr, rerr)
 			}
-			// Pace between IOCs within a candidate too — each is a POST.
-			if j+1 < len(fresh) {
-				if !sleep(ctx, opts.RateLimit) {
-					return submitted, skipped, ctx.Err()
-				}
-			}
+			sentCount++
+			observability.DurableShare(ctx, observability.ThreatFox, nil, 1)
 		}
 
-		if sentAny {
-			submitted++
-			if opts.OnProgress != nil {
-				opts.OnProgress(cand, true, len(fresh), "")
-			}
-		} else {
+		outcomeReason := ""
+		if sentCount == 0 {
 			// Every IOC POST failed; report it as a non-submit with the error.
-			if opts.OnProgress != nil {
-				msg := "submit failed"
-				if candErr != nil {
-					msg = "submit failed: " + candErr.Error()
-				}
-				opts.OnProgress(cand, false, 0, msg)
+			outcomeReason = "submit failed"
+			if candErr != nil {
+				outcomeReason += ": " + candErr.Error()
 			}
+		} else if candErr != nil {
+			outcomeReason = "some IOCs failed"
 		}
-
-		// Pace between candidates unless the budget is now spent.
-		budgetSpent := opts.MaxSubmissions > 0 && submitted >= opts.MaxSubmissions
-		if i+1 < len(candidates) && !budgetSpent {
-			if !sleep(ctx, opts.RateLimit) {
-				return submitted, skipped, ctx.Err()
-			}
-		}
+		finishCandidate(outcomeReason)
 	}
 	return submitted, skipped, firstErr
-}
-
-// sleep waits d or until ctx is done; returns false if ctx was cancelled.
-func sleep(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
 }
 
 // buildComment assembles the public ThreatFox comment. It states the observed

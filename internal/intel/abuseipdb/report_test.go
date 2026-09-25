@@ -14,8 +14,10 @@ import (
 
 // fakeRecorder is an in-memory ReportRecorder for orchestrator tests.
 type fakeRecorder struct {
-	mu       sync.Mutex
-	reported map[string]time.Time
+	mu        sync.Mutex
+	reported  map[string]time.Time
+	checkErr  error
+	recordErr error
 }
 
 func newFakeRecorder() *fakeRecorder { return &fakeRecorder{reported: map[string]time.Time{}} }
@@ -23,6 +25,9 @@ func newFakeRecorder() *fakeRecorder { return &fakeRecorder{reported: map[string
 func (f *fakeRecorder) AbuseIPDBReported(ip string, within time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.checkErr != nil {
+		return false, f.checkErr
+	}
 	at, ok := f.reported[ip]
 	if !ok {
 		return false, nil
@@ -36,6 +41,9 @@ func (f *fakeRecorder) AbuseIPDBReported(ip string, within time.Duration) (bool,
 func (f *fakeRecorder) RecordAbuseIPDBReport(ip, status string, score int, cats []int, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.recordErr != nil {
+		return f.recordErr
+	}
 	f.reported[ip] = at
 	return nil
 }
@@ -54,6 +62,9 @@ func TestReportHappyPathAndDedup(t *testing.T) {
 		}
 		if r.FormValue("ip") == "" || r.FormValue("categories") == "" {
 			t.Errorf("missing ip/categories: %v", r.Form)
+		}
+		if want := vetNow.Add(-time.Hour).UTC().Format(time.RFC3339); r.FormValue("timestamp") != want {
+			t.Errorf("report timestamp = %q, want actual target observation %q", r.FormValue("timestamp"), want)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"data":{"abuseConfidenceScore":100}}`))
@@ -321,5 +332,138 @@ func TestReportMaxAgeDaysReachesVet(t *testing.T) {
 	if reported != 0 || skipped != 1 || posts != 0 {
 		t.Fatalf("reported=%d skipped=%d posts=%d, want 0/1/0: MaxAgeDays=2 should have "+
 			"rejected a 5-day-old candidate before the network", reported, skipped, posts)
+	}
+}
+
+func TestReportHooksRunOnlyForRealAttempts(t *testing.T) {
+	rec := newFakeRecorder()
+	rec.reported["8.8.4.4"] = time.Now()
+	cands := []ReportCandidate{
+		{SrcIP: "10.0.0.1", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30, LastSeen: vetNow.Add(-time.Hour)},
+		{SrcIP: "8.8.4.4", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30, LastSeen: vetNow.Add(-time.Hour)},
+		{SrcIP: "8.8.8.8", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30, LastSeen: vetNow.Add(-time.Hour)},
+	}
+	var acquired, released, waited int
+	reported, skipped, err := Report(context.Background(), rec, cands, Options{
+		DryRun: true, MinProbe: 60, Rewindow: time.Hour, Admin: netmatch.New(nil), Now: vetNow,
+		AcquireTarget: func(context.Context, string) (func(), error) {
+			acquired++
+			return func() { released++ }, nil
+		},
+		WaitForSlot: func(context.Context, time.Duration) error {
+			waited++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if reported != 0 || skipped != 2 {
+		t.Fatalf("reported=%d skipped=%d, want 0/2", reported, skipped)
+	}
+	if acquired != 2 || released != 2 {
+		t.Fatalf("target hooks acquired=%d released=%d, want 2/2", acquired, released)
+	}
+	if waited != 0 {
+		t.Fatalf("WaitForSlot called %d times for vet/dedup/dry-run candidates, want 0", waited)
+	}
+}
+
+func TestReportSharedSlotOwnsPacing(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":{"abuseConfidenceScore":100}}`))
+	}))
+	defer srv.Close()
+
+	cands := []ReportCandidate{
+		{SrcIP: "8.8.8.8", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30, LastSeen: vetNow.Add(-time.Hour)},
+		{SrcIP: "1.1.1.1", Playbook: "dictionary_spray", ProbeScore: 90, EventCount: 400, UniqueUsers: 30, LastSeen: vetNow.Add(-time.Hour)},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	var waited int
+	reported, skipped, err := Report(ctx, newFakeRecorder(), cands, Options{
+		APIKey: "k", Endpoint: srv.URL, MinProbe: 60, Rewindow: time.Hour,
+		RateLimit: time.Hour, Admin: netmatch.New(nil), Now: vetNow,
+		WaitForSlot: func(context.Context, time.Duration) error {
+			waited++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if reported != 2 || skipped != 0 || posts != 2 || waited != 2 {
+		t.Fatalf("reported=%d skipped=%d posts=%d waited=%d, want 2/0/2/2", reported, skipped, posts, waited)
+	}
+}
+
+func TestReportTargetReleaseLifecycle(t *testing.T) {
+	ledgerErr := errors.New("ledger write failed")
+	cases := []struct {
+		name            string
+		status          int
+		body            string
+		recorderErr     error
+		waitErr         error
+		wantReported    int
+		wantErr         error
+		wantProgressErr bool
+	}{
+		{name: "success", status: http.StatusOK, body: `{"data":{"abuseConfidenceScore":100}}`, wantReported: 1},
+		{name: "submit failure", status: http.StatusInternalServerError, body: `provider failure`, wantProgressErr: true},
+		{name: "ledger failure", status: http.StatusOK, body: `{"data":{"abuseConfidenceScore":100}}`, recorderErr: ledgerErr, wantErr: ledgerErr, wantProgressErr: true},
+		{name: "rate limit", status: http.StatusTooManyRequests, body: `{}`, wantErr: ErrRateLimited, wantProgressErr: true},
+		{name: "cancelled slot", status: http.StatusOK, body: `{"data":{"abuseConfidenceScore":100}}`, waitErr: context.Canceled, wantErr: context.Canceled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				posts++
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			rec := newFakeRecorder()
+			rec.recordErr = tc.recorderErr
+			var acquired, released int
+			var progressErr error
+			reported, _, err := Report(context.Background(), rec, []ReportCandidate{{
+				SrcIP: "8.8.8.8", Playbook: "dictionary_spray", ProbeScore: 90,
+				EventCount: 400, UniqueUsers: 30, LastSeen: vetNow.Add(-time.Hour),
+			}}, Options{
+				APIKey: "k", Endpoint: srv.URL, MinProbe: 60, Rewindow: time.Hour,
+				RateLimit: time.Millisecond, Admin: netmatch.New(nil), Now: vetNow,
+				AcquireTarget: func(context.Context, string) (func(), error) {
+					acquired++
+					return func() { released++ }, nil
+				},
+				WaitForSlot: func(context.Context, time.Duration) error { return tc.waitErr },
+				OnProgress:  func(_ ReportCandidate, _ *Result, err error) { progressErr = err },
+			})
+			if reported != tc.wantReported {
+				t.Fatalf("reported=%d, want %d", reported, tc.wantReported)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error=%v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil && tc.wantReported == 1 && err != nil {
+				t.Fatalf("Report: %v", err)
+			}
+			if acquired != 1 || released != 1 {
+				t.Fatalf("target hooks acquired=%d released=%d, want 1/1", acquired, released)
+			}
+			if (progressErr != nil) != tc.wantProgressErr {
+				t.Fatalf("progress error=%v, want error=%v", progressErr, tc.wantProgressErr)
+			}
+			if tc.waitErr != nil && posts != 0 {
+				t.Fatalf("cancelled slot made %d POSTs, want 0", posts)
+			}
+		})
 	}
 }

@@ -26,15 +26,7 @@ type BazaarUpload struct {
 // same class of bug, so this brings v5 in line.
 func (s *Store) ensureBazaarUploadsTable() error {
 	s.onceBazaar.Do(func() {
-		_, s.errBazaar = s.execWrite(`
-CREATE TABLE IF NOT EXISTS bazaar_uploads (
-  sha256          TEXT PRIMARY KEY,
-  uploaded_at     TEXT NOT NULL,
-  response_status TEXT NOT NULL,
-  mb_url          TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_bazaar_uploads_ts ON bazaar_uploads(uploaded_at);
-`)
+		s.errBazaar = s.WithTx(func(tx *sql.Tx) error { return ensureLedgerTimeSchema(tx, bazaarLedger) })
 	})
 	return s.errBazaar
 }
@@ -66,18 +58,22 @@ func (s *Store) RecordBazaarUpload(u BazaarUpload) error {
 	if err := s.ensureBazaarUploadsTable(); err != nil {
 		return err
 	}
-	ts := u.UploadedAt.UTC().Format(time.RFC3339Nano)
 	if u.UploadedAt.IsZero() {
-		ts = time.Now().UTC().Format(time.RFC3339Nano)
+		u.UploadedAt = time.Now()
+	}
+	ts := u.UploadedAt.UTC().Format(time.RFC3339Nano)
+	if _, err := parseLedgerTimestamp(ts); err != nil {
+		return err
 	}
 	_, err := s.execWrite(`
-INSERT INTO bazaar_uploads (sha256, uploaded_at, response_status, mb_url)
-VALUES (?, ?, ?, ?)
+INSERT INTO bazaar_uploads (sha256, uploaded_at, response_status, mb_url, uploaded_at_key)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(sha256) DO UPDATE SET
   uploaded_at=excluded.uploaded_at,
+  uploaded_at_key=excluded.uploaded_at_key,
   response_status=excluded.response_status,
   mb_url=excluded.mb_url`,
-		u.SHA256, ts, u.ResponseStatus, u.MBURL)
+		u.SHA256, ts, u.ResponseStatus, u.MBURL, formatFixedUTC(u.UploadedAt))
 	return err
 }
 
@@ -113,14 +109,14 @@ func (s *Store) BazaarUploadStats(since time.Time, pol SharePolicy) (BazaarStats
 	err := s.db.QueryRow(`
 SELECT COUNT(*),
        COUNT(CASE WHEN response_status='file_already_known' THEN 1 END),
-       MAX(uploaded_at)
+	       (`+latestLedgerTimeSQL(bazaarLedger)+`)
 FROM bazaar_uploads`).Scan(&st.TotalUploaded, &st.Duplicates, &lastTS)
 	if err != nil {
 		return st, err
 	}
 	if lastTS.Valid {
-		if t, perr := time.Parse(time.RFC3339Nano, lastTS.String); perr == nil {
-			st.LastUploadAt = t
+		if st.LastUploadAt, err = parseLedgerTimestamp(lastTS.String); err != nil {
+			return st, err
 		}
 	}
 	if len(pol.Origins) == 0 {
@@ -142,7 +138,7 @@ WHERE a.status='fetched'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
   AND a.size_bytes >= ?
   AND a.origin IN (`+strings.Join(ph, ",")+`)
-  AND COALESCE(a.created_at, a.ts) >= ?
+  AND julianday(a.last_successful_fetch_at) >= julianday(?)
   AND a.sha256 NOT IN (SELECT sha256 FROM bazaar_uploads)`, args...).Scan(&st.Pending); err != nil {
 		log.Printf("bazaar pending count: %v (defaulting to 0)", err)
 	}
@@ -156,13 +152,7 @@ func (s *Store) ListBazaarUploads(limit int) ([]BazaarUpload, error) {
 	if err := s.ensureBazaarUploadsTable(); err != nil {
 		return nil, err
 	}
-	q := `SELECT sha256, uploaded_at, response_status, COALESCE(mb_url, '')
-	      FROM bazaar_uploads ORDER BY uploaded_at DESC`
-	args := []interface{}{}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
+	q, args := orderedLedgerQuery(bazaarLedger, "sha256,uploaded_at,response_status,COALESCE(mb_url,'')", limit)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -171,12 +161,12 @@ func (s *Store) ListBazaarUploads(limit int) ([]BazaarUpload, error) {
 	var out []BazaarUpload
 	for rows.Next() {
 		var u BazaarUpload
-		var tsStr string
-		if err := rows.Scan(&u.SHA256, &tsStr, &u.ResponseStatus, &u.MBURL); err != nil {
+		var tsStr, key string
+		if err := rows.Scan(&u.SHA256, &tsStr, &u.ResponseStatus, &u.MBURL, &key); err != nil {
 			return nil, err
 		}
-		if t, perr := time.Parse(time.RFC3339Nano, tsStr); perr == nil {
-			u.UploadedAt = t
+		if u.UploadedAt, err = parseLedgerRowTimestamp(tsStr, key); err != nil {
+			return nil, err
 		}
 		out = append(out, u)
 	}
@@ -216,12 +206,13 @@ func (s *Store) ListBazaarUploadsWithArtifacts(limit int) ([]BazaarUploadWithArt
 	// the per-poll full-table cost v14 removed elsewhere. `ev` now rides the
 	// partial idx_events_sha256 (v15); `es` is restricted to the artifact
 	// sessions of uploaded samples.
-	q := `
+	uploads, args := orderedLedgerQuery(bazaarLedger, "sha256,uploaded_at,response_status,mb_url", limit)
+	q := "WITH uploads AS (" + uploads + ") " + `
 SELECT u.sha256, u.uploaded_at, u.response_status, COALESCE(u.mb_url, ''),
        COALESCE(a.size_bytes, 0),
        COALESCE(NULLIF(a.src_ip, ''), NULLIF(ev.sha_ip, ''), NULLIF(es.sess_ip, ''), ''),
-       COALESCE(a.local_path, '')
-FROM bazaar_uploads u
+       COALESCE(a.local_path, ''), u.exact_time
+FROM uploads u
 LEFT JOIN (
   SELECT sha256,
          MAX(size_bytes) AS size_bytes,
@@ -229,7 +220,7 @@ LEFT JOIN (
          MAX(local_path) AS local_path,
          MAX(CASE WHEN session_id != '' THEN session_id END) AS session_id
   FROM artifacts
-  WHERE sha256 != '' AND sha256 IN (SELECT sha256 FROM bazaar_uploads)
+  WHERE sha256 != '' AND sha256 IN (SELECT sha256 FROM uploads)
   GROUP BY sha256
 ) a ON a.sha256 = u.sha256
 LEFT JOIN (
@@ -237,7 +228,7 @@ LEFT JOIN (
          MAX(CASE WHEN src_ip != '' THEN src_ip END) AS sha_ip
   FROM events
   WHERE sha256 != '' AND src_ip != ''
-    AND sha256 IN (SELECT sha256 FROM bazaar_uploads)
+    AND sha256 IN (SELECT sha256 FROM uploads)
   GROUP BY sha256
 ) ev ON ev.sha256 = u.sha256
 LEFT JOIN (
@@ -248,16 +239,11 @@ LEFT JOIN (
     AND session_id IN (
       SELECT session_id FROM artifacts
       WHERE sha256 != '' AND session_id != ''
-        AND sha256 IN (SELECT sha256 FROM bazaar_uploads)
+        AND sha256 IN (SELECT sha256 FROM uploads)
     )
   GROUP BY session_id
 ) es ON es.session_id = a.session_id
-ORDER BY u.uploaded_at DESC`
-	args := []interface{}{}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
+ORDER BY u.exact_time DESC,u.sha256 ASC`
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -266,13 +252,13 @@ ORDER BY u.uploaded_at DESC`
 	var out []BazaarUploadWithArtifact
 	for rows.Next() {
 		var u BazaarUploadWithArtifact
-		var tsStr string
+		var tsStr, key string
 		if err := rows.Scan(&u.SHA256, &tsStr, &u.ResponseStatus, &u.MBURL,
-			&u.SizeBytes, &u.SrcIP, &u.LocalPath); err != nil {
+			&u.SizeBytes, &u.SrcIP, &u.LocalPath, &key); err != nil {
 			return nil, err
 		}
-		if t, perr := time.Parse(time.RFC3339Nano, tsStr); perr == nil {
-			u.UploadedAt = t
+		if u.UploadedAt, err = parseLedgerRowTimestamp(tsStr, key); err != nil {
+			return nil, err
 		}
 		out = append(out, u)
 	}

@@ -3,7 +3,6 @@ package web
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -257,11 +256,11 @@ func (s *Server) handleThreatFoxSubmit(w http.ResponseWriter, r *http.Request) {
 	resp := threatfoxSubmitResponse{Status: "ok", Submitted: submitted, Skipped: skipped}
 	switch {
 	case errors.Is(ferr, threatfox.ErrUnauthorized):
-		log.Printf("web: threatfox submit: %v", ferr)
+		logOperationError("threatfox submit", ferr)
 		resp.Status = "error"
 		resp.Error = "abuse.ch rejected the Auth-Key"
 	case ferr != nil:
-		log.Printf("web: threatfox submit: %v", ferr)
+		logOperationError("threatfox submit", ferr)
 		if submitted > 0 {
 			resp.Status = "partial"
 		} else {

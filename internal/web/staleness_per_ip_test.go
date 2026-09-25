@@ -132,3 +132,69 @@ func TestReportEndpointGatesStalenessPerIP(t *testing.T) {
 		}
 	}
 }
+
+// TestSuggestionsUseEvidenceFromTheReportedIP closes the remaining cluster
+// attribution hole: a primary IP can be fresh but quiet while its HASSH
+// sibling supplies the cluster's brute-force playbook, score, event count and
+// username breadth. That is not evidence about the reported address.
+func TestSuggestionsUseEvidenceFromTheReportedIP(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "per-ip-evidence.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	keys, err := settings.Load(st)
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+
+	now := time.Now().UTC()
+	const targetIP = "45.33.107.22"
+	const siblingIP = "185.220.100.10"
+	const actorID = "cowrie:per-ip-evidence"
+	// The persisted cluster looks reportable, but only five of its current
+	// observations are for targetIP. The sibling owns the remaining volume and
+	// username breadth.
+	agg := &models.AggregatedActor{
+		Actor: &models.Actor{
+			ID: actorID, Source: models.SourceCowrie, PrimaryIP: targetIP,
+			Playbook: "fast_dictionary_spray", ProbeScore: 95, EventCount: 65,
+			UniqueUsers: 5, AttemptsPerHour: 120, FirstSeen: now.Add(-time.Hour), LastSeen: now,
+		},
+		IPs: map[string]models.IPStat{
+			targetIP:  {Count: 5, First: now.Add(-10 * time.Minute), Last: now},
+			siblingIP: {Count: 60, First: now.Add(-time.Hour), Last: now},
+		},
+		Users: map[string]int{"root": 30, "admin": 20, "oracle": 10, "postgres": 5},
+	}
+	events := make([]*models.Event, 0, 65)
+	for i := 0; i < 5; i++ {
+		events = append(events, &models.Event{TS: now.Add(-time.Duration(i) * time.Minute), Source: models.SourceCowrie, Kind: models.KindFailedPass, SrcIP: targetIP, Username: "root", HASSH: "per-ip-evidence", ActorID: actorID})
+	}
+	for i := 0; i < 60; i++ {
+		events = append(events, &models.Event{TS: now.Add(-time.Duration(i) * time.Minute), Source: models.SourceCowrie, Kind: models.KindFailedPass, SrcIP: siblingIP, Username: []string{"root", "admin", "oracle", "postgres"}[i%4], HASSH: "per-ip-evidence", ActorID: actorID})
+	}
+	if err := st.AppendEventsAndUpsertActorsAgg(events, []*models.AggregatedActor{agg}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	s := New(st, keys, "127.0.0.1:0", Options{AbuseReportEnabled: true, AbuseMinProbe: 60, AbuseRewindowHours: 24})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/intel/abuseipdb/suggestions?limit=10", nil)
+	s.handleAbuseIPDBSuggestions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suggestions status = %d", rec.Code)
+	}
+	var got suggestionsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, sg := range got.Suggestions {
+		if sg.SrcIP == targetIP {
+			t.Fatalf("suggested %s from sibling-owned evidence: %+v", targetIP, sg)
+		}
+	}
+	if got.Total != 0 {
+		t.Fatalf("vetted total = %d, want 0: target has only five one-user events", got.Total)
+	}
+}

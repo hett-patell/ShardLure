@@ -19,10 +19,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"github.com/networkshard/shardlure/internal/observability"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 )
 
 // DefaultEndpoint is the production URLhaus bulk submission URL.
@@ -66,15 +68,11 @@ type submitBody struct {
 
 // Result is the parsed URLhaus response for one batch.
 type Result struct {
-	// Status is the upstream query_status. Documented values include
-	// "ok" and "invalid_auth_key"; unknown values are surfaced verbatim
-	// rather than guessed at.
+	// Status is "ok" for an accepted response or "unknown" for an
+	// unrecognised provider status. Arbitrary provider text is never retained.
 	Status string
 	// Rejected counts entries URLhaus refused, when reported.
 	Rejected int
-	// Raw is the trimmed response body, kept for the CLI's -v output and
-	// for recording an unexpected status without losing information.
-	Raw string
 }
 
 // Errors surfaced to callers, kept as sentinels so the CLI can map them to
@@ -90,7 +88,15 @@ var (
 //
 // A non-2xx response or an auth-failure status is returned as an error so
 // callers never record a failed submission as if it had landed.
-func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, anonymous bool) (*Result, error) {
+func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, anonymous bool) (result *Result, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.URLhaus, observability.Submit)
+	defer func() {
+		if errors.Is(resultErr, ErrUnauthorized) {
+			trace.Finish(resultErr, observability.Unauthorized)
+			return
+		}
+		trace.Finish(resultErr)
+	}()
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, ErrMissingAPIKey
 	}
@@ -107,28 +113,32 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("urlhaus: build request: %w", err)
+		return nil, errors.New("urlhaus: invalid submission endpoint")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Auth-Key", apiKey)
 	req.Header.Set("Accept", "application/json")
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
-		return nil, fmt.Errorf("urlhaus: post: %w", err)
+		return nil, intelutil.SafeRequestError("urlhaus", "post", err)
 	}
 	defer resp.Body.Close()
 
 	// Cap the body: a misbehaving endpoint must not stream unbounded data
 	// into the decoder. URLhaus replies with a small JSON object.
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	trimmed := strings.TrimSpace(string(raw))
+	raw, err := intelutil.ReadBoundedResponse("urlhaus", resp.Body, 256<<10)
+	if err != nil {
+		return nil, err
+	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, ErrUnauthorized
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("urlhaus: HTTP %d: %s", resp.StatusCode, truncate(trimmed, 200))
+		return nil, fmt.Errorf("urlhaus: submission returned HTTP %d", resp.StatusCode)
 	}
 
 	var parsed struct {
@@ -137,22 +147,33 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 		// versions; decode the counts we know about and keep Raw for the rest.
 		Rejected []json.RawMessage `json:"rejected"`
 	}
-	// A body that isn't JSON is not fatal on a 2xx: record it verbatim.
-	_ = json.Unmarshal(raw, &parsed)
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		// URLhaus's legacy submission endpoint returns a bare plaintext ok
+		// for accepted batches and already_queued: URL when it has accepted a
+		// single URL for processing. Other plaintext tokens such as no_data are
+		// errors. Keep multi-entry already_queued responses fail-closed because a
+		// single echoed URL cannot prove the whole batch was accepted.
+		text := strings.TrimSpace(string(raw))
+		if strings.EqualFold(text, "ok") {
+			return &Result{Status: "ok"}, nil
+		}
+		const queuedPrefix = "already_queued:"
+		if len(entries) == 1 && strings.HasPrefix(strings.ToLower(text), queuedPrefix) &&
+			strings.TrimSpace(text[len(queuedPrefix):]) == entries[0].URL {
+			return &Result{Status: "already_queued"}, nil
+		}
+		return nil, errors.New("urlhaus: invalid submission response")
+	}
 
-	if parsed.QueryStatus == "invalid_auth_key" || parsed.QueryStatus == "unauthorized" {
+	status := strings.ToLower(strings.TrimSpace(parsed.QueryStatus))
+	if status == "invalid_auth_key" || status == "unauthorized" || status == "illegal_auth_key" || status == "no_auth_key" {
 		return nil, ErrUnauthorized
 	}
-	return &Result{
-		Status:   parsed.QueryStatus,
-		Rejected: len(parsed.Rejected),
-		Raw:      truncate(trimmed, 2000),
-	}, nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+	if status != "ok" {
+		return &Result{Status: "unknown"}, errors.New("urlhaus: submission rejected")
 	}
-	return s[:n] + "…"
+	if len(parsed.Rejected) > 0 {
+		return &Result{Status: "rejected", Rejected: len(parsed.Rejected)}, errors.New("urlhaus: submission contained rejected entries")
+	}
+	return &Result{Status: "ok"}, nil
 }

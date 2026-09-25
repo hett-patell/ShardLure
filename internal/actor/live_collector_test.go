@@ -77,9 +77,9 @@ func TestLiveCollectorInvalidateRemovesExactEntry(t *testing.T) {
 
 	const keepIP = "203.0.113.10"
 	const invalidateIP = "203.0.113.11"
-	c.hydrate(invalidateIP, store.JournalIPStats{})
+	c.hydrate(invalidateIP, store.JournalCounters{})
 	c.addAndFinalize(event(invalidateIP, base))
-	c.hydrate(keepIP, store.JournalIPStats{})
+	c.hydrate(keepIP, store.JournalCounters{})
 	c.addAndFinalize(event(keepIP, base.Add(time.Second)))
 	c.addAndFinalize(event(invalidateIP, base.Add(2*time.Second)))
 
@@ -299,17 +299,9 @@ func TestLiveCollectorPerIPUserCap(t *testing.T) {
 		t.Fatal("entry missing")
 	}
 	// Distinct real keys must be <= cap.
-	realKeys := 0
-	for k := range ent.stats.Users {
-		if k != liveUserOverflowKey {
-			realKeys++
-		}
-	}
+	realKeys := len(ent.stats.Users)
 	if realKeys > liveMaxUsersPerIP {
 		t.Errorf("real-key count %d exceeds cap %d", realKeys, liveMaxUsersPerIP)
-	}
-	if _, ok := ent.stats.Users[liveUserOverflowKey]; !ok {
-		t.Error("overflow bucket missing; expected entries past the cap to roll into _overflow_")
 	}
 	// Total events still 20 — counters must not be lost just because
 	// the map is full.
@@ -319,11 +311,8 @@ func TestLiveCollectorPerIPUserCap(t *testing.T) {
 	// No real username key may carry the cumulative overflow count —
 	// each real key holds only its own per-username count, and the
 	// overflow bucket holds the sum of the dropped entries.
-	overflow := ent.stats.Users[liveUserOverflowKey]
+	overflow := ent.stats.omitted
 	for k, v := range ent.stats.Users {
-		if k == liveUserOverflowKey {
-			continue
-		}
 		if v == overflow {
 			t.Errorf("real key %q has overflow value %d — overflow leaked into a real username", k, v)
 		}
@@ -334,19 +323,14 @@ func TestLiveCollectorPerIPUserCap(t *testing.T) {
 	}
 }
 
-// TestCapUsersMap exercises the hydration overflow logic in isolation.
-func TestCapUsersMap(t *testing.T) {
-	in := map[string]int{"a": 10, "b": 8, "c": 5, "d": 3, "e": 1, "f": 1}
-	out := capUsersMap(in, 3)
-	for _, want := range []string{"a", "b", "c"} {
-		if out[want] != in[want] {
-			t.Errorf("top key %q dropped or mis-counted: got %d want %d", want, out[want], in[want])
-		}
+func TestLiveCacheDoesNotReserveRealUsername(t *testing.T) {
+	c := newLiveJournalCollector(AdminSet(nil))
+	c.maxUsers = 1
+	st := IPStats{Users: map[string]int{}}
+	for _, u := range []string{"_overflow_", "other-a", "other-b", "_overflow_"} {
+		c.bumpUserLocked(&st, u)
 	}
-	if out[liveUserOverflowKey] != 3+1+1 {
-		t.Errorf("overflow = %d, want 5 (d=3 + e=1 + f=1)", out[liveUserOverflowKey])
-	}
-	if len(out) != 4 { // 3 real + overflow
-		t.Errorf("len = %d, want 4", len(out))
+	if len(st.Users) != 1 || st.Users["_overflow_"] != 2 || st.omitted != 2 {
+		t.Fatalf("cache reserves a real name: %+v", st)
 	}
 }

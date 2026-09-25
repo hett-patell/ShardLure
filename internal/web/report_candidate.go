@@ -1,35 +1,18 @@
 package web
 
 import (
+	"context"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
-// newReportCandidate builds the AbuseIPDB vetting candidate for an actor.
-//
-// It exists so the four call sites cannot each decide which rate to pass. They
-// all used actor.AttemptsPerHour, which is a LIFETIME average and therefore the
-// wrong quantity for a report about current behaviour: it understated actively
-// escalating attackers by 2-3x and flattered ones that had gone quiet.
-//
-// recentPerHour is the windowed rate, 0 when the actor has no activity in the
-// window. Zero is the honest answer there and is safe: Vet does not gate on the
-// rate (a quiet hour must not make a live attacker unreportable), it only lowers
-// suggest priority. Staleness is gated on a direct last-seen observation
-// instead, which a short lull cannot zero out.
-//
-// ipLastSeen is when the actor's PRIMARY IP was last observed — NOT
-// actor.LastSeen. The actor figure is the max across a HASSH cluster, and the
-// report names one address: feeding the cluster max into the staleness gate let
-// a fresh cluster-mate vouch for a dormant address (a live 22-IP actor kept a
-// 17.7-day-silent primary IP reportable off a 4-day-old sibling). Callers pass
-// store.PrimaryIPLastSeen()'s answer; an actor missing from that map yields the
-// zero time, which Vet hard-rejects — so the failure mode of missing data is a
-// refused report, never a wrongful one. Taking it as a parameter rather than
-// reading a.LastSeen HERE is what makes the wrong source unreachable: the field
-// this function must not use is no longer mentioned in it.
+// newReportCandidate maps target-IP/source evidence, never cluster aggregates.
+// recentPerHour describes the fixed 24h window (including an honest zero);
+// ipLastSeen is a direct observation of this IP. Classification/counts cover
+// the seven-day reporting window. Missing evidence stays zero and Vet refuses it.
 func newReportCandidate(a *models.Actor, recentPerHour float64, ipLastSeen time.Time) abuseipdb.ReportCandidate {
 	return abuseipdb.ReportCandidate{
 		SrcIP:           a.PrimaryIP,
@@ -40,6 +23,43 @@ func newReportCandidate(a *models.Actor, recentPerHour float64, ipLastSeen time.
 		AttemptsPerHour: recentPerHour,
 		LastSeen:        ipLastSeen,
 	}
+}
+
+// reportCandidateForIP evaluates each source independently. A cluster score
+// cannot choose the source: the same IP may have a handshake-only Cowrie
+// observation and confirmed journal brute-force evidence (or the reverse).
+// Suggest applies the shared Vet and priority rules; rejected evidence is
+// retained as a fallback so Report can explain its refusal. Counts are never
+// summed across sources.
+func (s *Server) reportCandidateForIP(ctx context.Context, ip string) (abuseipdb.ReportCandidate, error) {
+	now := time.Now()
+	cands, err := s.loadReportEvidence(ctx, ip, now)
+	if err != nil {
+		return abuseipdb.ReportCandidate{}, err
+	}
+	return s.chooseReportCandidate(ip, cands, now), nil
+}
+
+func (s *Server) loadReportEvidence(ctx context.Context, ip string, now time.Time) ([2]abuseipdb.ReportCandidate, error) {
+	var cands [2]abuseipdb.ReportCandidate
+	for i, source := range []models.Source{models.SourceJournal, models.SourceCowrie} {
+		evidence, err := actor.ReportEvidenceForIPContext(ctx, s.st, &models.Actor{Source: source, PrimaryIP: ip}, now)
+		if err != nil {
+			return [2]abuseipdb.ReportCandidate{}, err
+		}
+		cands[i] = newReportCandidate(evidence, evidence.AttemptsPerHour, evidence.LastSeen)
+	}
+	return cands, nil
+}
+
+func (s *Server) chooseReportCandidate(ip string, cands [2]abuseipdb.ReportCandidate, now time.Time) abuseipdb.ReportCandidate {
+	selected := abuseipdb.SelectCandidates(cands[:], s.abuseAdmin, s.abuseMinProbeLive(), now)
+	for _, cand := range selected {
+		if cand.SrcIP == ip {
+			return cand
+		}
+	}
+	return abuseipdb.ReportCandidate{SrcIP: ip}
 }
 
 // recentRatesCached memoizes the per-actor windowed rates on the same 10s TTL as

@@ -4,9 +4,63 @@
 package intelutil
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
 	"sort"
 	"strings"
+	"time"
 )
+
+// WaitForProviderAttempt enforces a minimum gap after the previous request
+// completed while allowing shutdown or request cancellation to interrupt it.
+func WaitForProviderAttempt(ctx context.Context, last time.Time, gap time.Duration) error {
+	if last.IsZero() || gap <= 0 {
+		return nil
+	}
+	wait := gap - time.Since(last)
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// ReadBoundedResponse reads at most limit bytes and rejects a body that has
+// even one byte beyond the cap. io.LimitReader(limit) alone cannot distinguish
+// an exact-limit body from a truncated oversized response.
+func ReadBoundedResponse(service string, body io.Reader, limit int64) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, SafeRequestError(service, "read response", err)
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("%s: response too large", service)
+	}
+	return raw, nil
+}
+
+// SafeRequestError returns a bounded provider error without carrying the
+// request URL or transport's diagnostic text. http.Client errors commonly
+// include the complete URL; configured endpoints may contain credentials in
+// query parameters, and proxy errors may echo request details. Cancellation
+// identity is preserved so callers can stop cleanly during shutdown.
+func SafeRequestError(service, operation string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s: %s: %w", service, operation, context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s: %s: %w", service, operation, context.DeadlineExceeded)
+	}
+	return fmt.Errorf("%s: %s failed", service, operation)
+}
 
 // Truncate returns s shortened to at most n bytes with a trailing
 // ellipsis when truncation occurs. The ellipsis is one rune (3 UTF-8

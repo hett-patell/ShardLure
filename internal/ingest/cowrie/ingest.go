@@ -2,6 +2,7 @@ package cowrie
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -81,8 +82,12 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 	if err != nil {
 		return nil, err
 	}
-	persistBindings(st, bindings)
-	stampHASSH(st, events, bindings)
+	if err := persistBindings(st, bindings); err != nil {
+		return nil, err
+	}
+	if err := stampHASSH(st, events, bindings); err != nil {
+		return nil, err
+	}
 	res, err := persistEvents(st, events, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
@@ -91,6 +96,16 @@ func IngestFile(st *store.Store, path string, adminIPs []string, replace bool) (
 }
 
 func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result, error) {
+	return IngestFileAppendContext(context.Background(), st, path, adminIPs)
+}
+
+func IngestFileAppendContext(ctx context.Context, st *store.Store, path string, adminIPs []string) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := st.RepairCanonicalHASSHBatch(2000); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -99,6 +114,13 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 		return nil, err
 	}
 	defer f.Close()
+	closed := make(chan struct{})
+	stopClose := context.AfterFunc(ctx, func() { defer close(closed); _ = f.Close() })
+	defer func() {
+		if !stopClose() {
+			<-closed
+		}
+	}()
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -122,7 +144,9 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	startOffset := prev.Offset
 	rotatedInPlace := prev.Inode == inode && prev.HeadSig != "" && headSig != "" && prev.HeadSig != headSig
 	if (prev.Inode != 0 && prev.Inode != inode) || rotatedInPlace {
-		backfillRotatedLogs(st, path, adminIPs)
+		if err := BackfillRotatedLogsContext(ctx, st, path, adminIPs); err != nil {
+			return nil, err
+		}
 	}
 	if prev.Inode != inode || fi.Size() < startOffset || rotatedInPlace {
 		startOffset = 0
@@ -133,16 +157,28 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 
 	// Incremental tail: hold back an unterminated final line (cowrie may be
 	// mid-write) so we don't consume past it and lose the event.
-	events, skipped, consumed, bindings, err := parseReader(f, false)
+	events, skipped, consumed, bindings, err := parseReader(contextReader{ctx, f}, false)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
-	persistBindings(st, bindings)
+	if err := persistBindings(st, bindings); err != nil {
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	// Stamp HASSH before dedup/cluster so actor IDs are keyed by fingerprint,
 	// not IP. Persisted first so a session whose kex landed in an earlier tail
 	// can still be recovered from the index below.
-	stampHASSH(st, events, bindings)
-	reconcileLateHASSH(st, bindings, adminIPs)
+	if err := stampHASSH(st, events, bindings); err != nil {
+		return nil, err
+	}
+	if err := reconcileLateHASSH(st, bindings); err != nil {
+		return nil, err
+	}
 
 	// Advance offset by exactly the bytes the scanner consumed, not by
 	// fi.Size(): cowrie may have appended more bytes between Stat() and
@@ -163,13 +199,16 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	if err != nil {
 		return nil, err
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if len(fresh) == 0 {
 		if err := st.SetIngestState(newState); err != nil {
 			return nil, err
 		}
 		return &Result{Skipped: skipped}, nil
 	}
-	res, err := syncCowrieActors(st, fresh, adminIPs)
+	res, err := syncCowrieActorsContext(ctx, st, fresh, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
 	}
@@ -193,7 +232,7 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 	}
 	tsSet := make(map[string]struct{}, len(candidates))
 	for _, e := range candidates {
-		tsSet[e.TS.UTC().Format(time.RFC3339Nano)] = struct{}{}
+		tsSet[store.CanonicalEventTime(e.TS)] = struct{}{}
 	}
 	tsList := make([]string, 0, len(tsSet))
 	for t := range tsSet {
@@ -208,7 +247,7 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 	out := make([]*models.Event, 0, len(candidates))
 	for _, e := range candidates {
 		id := store.EventIdentity{
-			TS:        e.TS.UTC().Format(time.RFC3339Nano),
+			TS:        store.CanonicalEventTime(e.TS),
 			Kind:      e.Kind,
 			SrcIP:     e.SrcIP,
 			SessionID: e.SessionID,
@@ -227,10 +266,9 @@ func batchDedupCowrie(st *store.Store, candidates []*models.Event) ([]*models.Ev
 // persistBindings stores the side-channel bindings a parse pass produced:
 // the ttylog sha->session map (so the capture pass can stamp session_id onto
 // cowrie-tty artifacts) and the session->HASSH map (so a later batch's events
-// for the same session can still recover the fingerprint). Best effort: a
-// write failure is surfaced via the store's normal error path but does not
-// block event ingest.
-func persistBindings(st *store.Store, bindings sideBindings) {
+// for the same session can still recover the fingerprint). A failed write
+// must leave the input offset unchanged so the next tick retries the binding.
+func persistBindings(st *store.Store, bindings sideBindings) error {
 	// Coalesce every side-channel fact this pass produced into one batch so the
 	// whole set commits in a single write transaction, instead of one writeMu
 	// acquisition per (binding × table) ahead of the event insert. The hassh/
@@ -263,9 +301,7 @@ func persistBindings(st *store.Store, bindings sideBindings) {
 			TTYTS:     b.TS,
 		})
 	}
-	// Best effort: a binding write failure does not block event ingest (same
-	// contract as before). The store logs its own errors.
-	_ = st.RecordSessionBindings(batch)
+	return st.RecordSessionBindings(batch)
 }
 
 // stampHASSH fills in e.HASSH for events whose own line didn't carry it.
@@ -275,7 +311,7 @@ func persistBindings(st *store.Store, bindings sideBindings) {
 // persisted session->hassh index for sessions whose kex landed in an earlier
 // batch. Without this the actor builder never sees a HASSH and clusters every
 // cowrie actor by IP — defeating the cross-IP fingerprint premise.
-func stampHASSH(st *store.Store, events []*models.Event, bindings sideBindings) {
+func stampHASSH(st *store.Store, events []*models.Event, bindings sideBindings) error {
 	// Which sessions still need a hassh after applying this pass's bindings?
 	needLookup := map[string]struct{}{}
 	for _, e := range events {
@@ -289,15 +325,15 @@ func stampHASSH(st *store.Store, events []*models.Event, bindings sideBindings) 
 		needLookup[e.SessionID] = struct{}{}
 	}
 	if len(needLookup) == 0 {
-		return
+		return nil
 	}
 	ids := make([]string, 0, len(needLookup))
 	for sid := range needLookup {
 		ids = append(ids, sid)
 	}
 	persisted, err := st.HASSHForSessions(ids)
-	if err != nil || len(persisted) == 0 {
-		return // best-effort: fall back to IP clustering for these sessions
+	if err != nil {
+		return err
 	}
 	for _, e := range events {
 		if e == nil || e.HASSH != "" || e.SessionID == "" {
@@ -307,50 +343,18 @@ func stampHASSH(st *store.Store, events []*models.Event, bindings sideBindings) 
 			e.HASSH = h
 		}
 	}
+	return nil
 }
 
-// reconcileLateHASSH checks whether any session that received a new HASSH
-// binding in this parse pass already has committed events carrying a
-// different (IP-based) actor ID. If so, it rewrites those events to the
-// HASSH-based actor and rebuilds the affected aggregates atomically.
-//
-// This handles the common live case: connect/login events arrive in tick N
-// without a HASSH (cowrie emits it only on client.kex), so they are stamped
-// with actor ID "cowrie:<IP>". When client.kex arrives in tick N+1, the
-// earlier events must move to "cowrie:<HASSH>" for cross-IP clustering to
-// work. Without this reconciliation the actor is permanently fragmented.
-func reconcileLateHASSH(st *store.Store, bindings sideBindings, adminIPs []string) {
-	if len(bindings.hassh) == 0 {
-		return
-	}
-	admin := actor.AdminSet(adminIPs)
+// reconcileLateHASSH must succeed before advancing the file offset. Retrying
+// a binding is safe: the store transfers only noncanonical session rows.
+func reconcileLateHASSH(st *store.Store, bindings sideBindings) error {
 	for sid, hassh := range bindings.hassh {
-		newActorID := actor.CowrieActorID("", hassh) // cowrie:<hassh>
-		// Check if this session has committed events with a different actor.
-		oldIDs, err := st.ActorIDsForSession(sid, newActorID)
-		if err != nil || len(oldIDs) == 0 {
-			continue
+		if err := reconcileSession(st, sid, hassh); err != nil {
+			return fmt.Errorf("reconcile late HASSH: %w", err)
 		}
-		// Rebuild aggregates for every affected actor (old + new).
-		// The persisted events for the old actor still have HASSH="" (the
-		// fingerprint wasn't known when they were committed), so stamp the
-		// new HASSH on every event for this session before rebuilding so
-		// the CowrieCollector assigns them to the correct HASSH-based actor.
-		allIDs := append(oldIDs, newActorID)
-		var rebuilt []*models.AggregatedActor
-		cc := actor.NewCowrieCollector(admin)
-		if err := st.IterateEventsByActorIDs(allIDs, func(e *models.Event) error {
-			if e.SessionID == sid && e.HASSH == "" {
-				e.HASSH = hassh
-			}
-			cc.Add(e)
-			return nil
-		}); err != nil {
-			continue // best-effort; next tick will retry
-		}
-		rebuilt = cc.Finalize()
-		_ = st.ReconcileSessionHASSH(sid, newActorID, rebuilt)
 	}
+	return nil
 }
 
 // BackfillRotatedLogs ingests cowrie.json.* siblings (historical rotated logs).
@@ -360,22 +364,57 @@ func BackfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string)
 
 // backfillRotatedLogs ingests cowrie.json.YYYY-MM-DD siblings when the active log rotates.
 func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string) {
+	if err := BackfillRotatedLogsContext(context.Background(), st, currentPath, adminIPs); err != nil {
+		log.Print("cowrie rotated backfill failed")
+	}
+}
+
+func BackfillRotatedLogsContext(ctx context.Context, st *store.Store, currentPath string, adminIPs []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dir := filepath.Dir(currentPath)
 	base := filepath.Base(currentPath)
 	matches, err := filepath.Glob(filepath.Join(dir, base+".*"))
 	if err != nil {
-		return
+		return err
 	}
+	var firstErr error
 	for _, p := range matches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if p == currentPath {
 			continue
 		}
 		// Best-effort, but surface failures: a corrupt or unreadable rotated
 		// log was previously swallowed silently, hiding lost telemetry.
-		if _, err := IngestFileAppend(st, p, adminIPs); err != nil {
-			log.Printf("cowrie backfill: ingest %s failed: %v", p, err)
+		if _, err := IngestFileAppendContext(ctx, st, p, adminIPs); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
+	return firstErr
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if r.ctx.Err() != nil {
+		return n, r.ctx.Err()
+	}
+	return n, err
 }
 
 // syncCowrieActors re-aggregates only the cowrie actors the fresh batch
@@ -390,6 +429,12 @@ func backfillRotatedLogs(st *store.Store, currentPath string, adminIPs []string)
 // touched-ID set is exactly the actors whose aggregate can change. Admin
 // events get a blank ActorID and are excluded.
 func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string) (*Result, error) {
+	return syncCowrieActorsContext(context.Background(), st, fresh, adminIPs)
+}
+func syncCowrieActorsContext(ctx context.Context, st *store.Store, fresh []*models.Event, adminIPs []string) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	admin := actor.AdminSet(adminIPs)
 	actor.AssignCowrieActorIDs(fresh, admin)
 
@@ -397,7 +442,7 @@ func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string)
 	if len(touched) == 0 {
 		// Only admin/skipped events in this batch — persist them but touch no
 		// actors. (Events are still recorded for telemetry completeness.)
-		if err := st.AppendEventsAndUpsertActorsAgg(fresh, nil); err != nil {
+		if err := st.AppendEventsAndUpsertActorsAggContext(ctx, fresh, nil); err != nil {
 			return nil, err
 		}
 		return &Result{Events: len(fresh), Actors: 0}, nil
@@ -407,7 +452,7 @@ func syncCowrieActors(st *store.Store, fresh []*models.Event, adminIPs []string)
 	if err != nil {
 		return nil, err
 	}
-	if err := st.AppendEventsAndUpsertActorsAgg(fresh, actors); err != nil {
+	if err := st.AppendEventsAndUpsertActorsAggContext(ctx, fresh, actors); err != nil {
 		return nil, err
 	}
 	return &Result{Events: len(fresh), Actors: len(actors)}, nil
@@ -440,9 +485,9 @@ func touchedActorIDs(fresh []*models.Event) []string {
 // O(usernames + IPs) per actor instead.
 //
 // Legacy fallback: rows written before schema v18 have flags=0, which is
-// indistinguishable from a genuinely signal-less aggregate, so their persisted
-// state can't be trusted for a fold. They get ONE last full event re-scan;
-// the resulting upsert writes real flags and every later tick folds.
+// indistinguishable from a genuinely signal-less aggregate. Recover only the
+// missing signal bits from retained events, never replace lifetime counters,
+// usernames or IP totals with a retention-limited re-aggregation.
 func buildCowrieActorsForIDs(st *store.Store, fresh []*models.Event, ids []string, admin *netmatch.Set) ([]*models.AggregatedActor, error) {
 	states, err := st.ActorStatesForIDs(ids)
 	if err != nil {
@@ -457,17 +502,18 @@ func buildCowrieActorsForIDs(st *store.Store, fresh []*models.Event, ids []strin
 		}
 		if stt.Actor.Flags == 0 && stt.Actor.EventCount > 0 {
 			legacy = append(legacy, id)
-			continue
 		}
-		cc.SeedActorState(stt.Actor, stt.Users, stt.IPs)
 	}
 	if len(legacy) > 0 {
 		if err := st.IterateEventsByActorIDs(legacy, func(e *models.Event) error {
-			cc.Add(e)
+			states[e.ActorID].Actor.Flags |= actor.CowrieEventFlags(e)
 			return nil
 		}); err != nil {
 			return nil, err
 		}
+	}
+	for _, stt := range states {
+		cc.SeedActorState(stt.Actor, stt.Users, stt.IPs)
 	}
 	for _, e := range fresh {
 		cc.Add(e)

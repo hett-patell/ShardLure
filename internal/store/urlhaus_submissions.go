@@ -20,14 +20,7 @@ type URLhausSubmission struct {
 // writeMu on a hot path.
 func (s *Store) ensureURLhausTable() error {
 	s.onceURLhaus.Do(func() {
-		_, s.errURLhaus = s.execWrite(`
-CREATE TABLE IF NOT EXISTS urlhaus_submissions (
-  url          TEXT PRIMARY KEY,
-  submitted_at TEXT NOT NULL,
-  status       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_urlhaus_submissions_ts ON urlhaus_submissions(submitted_at);
-`)
+		s.errURLhaus = s.WithTx(func(tx *sql.Tx) error { return ensureLedgerTimeSchema(tx, urlhausLedger) })
 	})
 	return s.errURLhaus
 }
@@ -59,13 +52,18 @@ func (s *Store) RecordURLhausSubmission(url, status string, at time.Time) error 
 	if at.IsZero() {
 		at = time.Now()
 	}
+	ts := at.UTC().Format(time.RFC3339Nano)
+	if _, err := parseLedgerTimestamp(ts); err != nil {
+		return err
+	}
 	_, err := s.execWrite(`
-INSERT INTO urlhaus_submissions (url, submitted_at, status)
-VALUES (?, ?, ?)
+INSERT INTO urlhaus_submissions (url, submitted_at, status, submitted_at_key)
+VALUES (?, ?, ?, ?)
 ON CONFLICT(url) DO UPDATE SET
   submitted_at=excluded.submitted_at,
+  submitted_at_key=excluded.submitted_at_key,
   status=excluded.status`,
-		url, at.UTC().Format(time.RFC3339Nano), status)
+		url, ts, status, formatFixedUTC(at))
 	return err
 }
 
@@ -92,13 +90,13 @@ func (s *Store) URLhausSubmissionStats(activeDays int) (URLhausStats, error) {
 	}
 	var st URLhausStats
 	var lastTS sql.NullString
-	if err := s.db.QueryRow(`
-SELECT COUNT(*), MAX(submitted_at) FROM urlhaus_submissions`).Scan(&st.TotalSubmitted, &lastTS); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*), ("+latestLedgerTimeSQL(urlhausLedger)+") FROM urlhaus_submissions").Scan(&st.TotalSubmitted, &lastTS); err != nil {
 		return st, err
 	}
 	if lastTS.Valid {
-		if t, perr := time.Parse(time.RFC3339Nano, lastTS.String); perr == nil {
-			st.LastSubmittedAt = t
+		var err error
+		if st.LastSubmittedAt, err = parseLedgerTimestamp(lastTS.String); err != nil {
+			return st, err
 		}
 	}
 	if activeDays <= 0 {
@@ -113,7 +111,7 @@ WHERE a.origin = 'quarantine_fetch'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
   AND a.size_bytes >= 64
   AND (a.url LIKE 'http://%' OR a.url LIKE 'https://%')
-  AND COALESCE(a.ts, a.created_at) >= ?
+  AND julianday(a.last_successful_fetch_at) >= julianday(?)
   AND a.url NOT IN (SELECT url FROM urlhaus_submissions)`, cutoff).Scan(&st.Pending); err != nil {
 		log.Printf("urlhaus pending count: %v (defaulting to 0)", err)
 	}
@@ -126,12 +124,7 @@ func (s *Store) ListURLhausSubmissions(limit int) ([]URLhausSubmission, error) {
 	if err := s.ensureURLhausTable(); err != nil {
 		return nil, err
 	}
-	q := `SELECT url, submitted_at, status FROM urlhaus_submissions ORDER BY submitted_at DESC`
-	args := []any{}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
+	q, args := orderedLedgerQuery(urlhausLedger, "url,submitted_at,status", limit)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -140,12 +133,12 @@ func (s *Store) ListURLhausSubmissions(limit int) ([]URLhausSubmission, error) {
 	var out []URLhausSubmission
 	for rows.Next() {
 		var u URLhausSubmission
-		var ts string
-		if err := rows.Scan(&u.URL, &ts, &u.Status); err != nil {
+		var ts, key string
+		if err := rows.Scan(&u.URL, &ts, &u.Status, &key); err != nil {
 			return nil, err
 		}
-		if t, perr := time.Parse(time.RFC3339Nano, ts); perr == nil {
-			u.SubmittedAt = t
+		if u.SubmittedAt, err = parseLedgerRowTimestamp(ts, key); err != nil {
+			return nil, err
 		}
 		out = append(out, u)
 	}
@@ -188,16 +181,16 @@ func (s *Store) URLhausCandidates(activeDays, limit int) ([]URLhausCandidateRow,
 	cutoff := time.Now().UTC().Add(-time.Duration(activeDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	q := `
 SELECT a.url, COALESCE(a.sha256,''), COALESCE(a.size_bytes,0), a.origin, a.status,
-       COALESCE(a.ts, a.created_at), COALESCE(a.local_path,'')
+       a.last_successful_fetch_at, COALESCE(a.local_path,'')
 FROM artifacts a
 WHERE a.origin = 'quarantine_fetch'
   AND a.status = 'fetched'
   AND a.sha256 IS NOT NULL AND a.sha256 != ''
   AND a.size_bytes >= 64
   AND (a.url LIKE 'http://%' OR a.url LIKE 'https://%')
-  AND COALESCE(a.ts, a.created_at) >= ?
+  AND julianday(a.last_successful_fetch_at) >= julianday(?)
   AND a.url NOT IN (SELECT url FROM urlhaus_submissions)
-ORDER BY COALESCE(a.ts, a.created_at) DESC`
+ORDER BY julianday(a.last_successful_fetch_at) DESC`
 	args := []any{cutoff}
 	if limit > 0 {
 		q += ` LIMIT ?`

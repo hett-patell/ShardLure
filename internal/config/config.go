@@ -6,10 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/networkshard/shardlure/internal/netmatch"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
+	Observability struct {
+		MinFreeBytes int64 `yaml:"min_free_bytes"`
+	} `yaml:"observability"`
 	DataDir string `yaml:"data_dir"`
 
 	AdminIPs []string `yaml:"admin_ips"`
@@ -20,12 +24,14 @@ type Config struct {
 	} `yaml:"ssh"`
 
 	Dashboard struct {
-		Port        int     `yaml:"port"`
-		HomeLat     float64 `yaml:"home_lat"`
-		HomeLon     float64 `yaml:"home_lon"`
-		HomeCity    string  `yaml:"home_city"`
-		HomeCountry string  `yaml:"home_country"`
-		HomeCC      string  `yaml:"home_cc"`
+		PublicOrigin   string   `yaml:"public_origin"`
+		TrustedProxies []string `yaml:"trusted_proxies"`
+		Port           int      `yaml:"port"`
+		HomeLat        float64  `yaml:"home_lat"`
+		HomeLon        float64  `yaml:"home_lon"`
+		HomeCity       string   `yaml:"home_city"`
+		HomeCountry    string   `yaml:"home_country"`
+		HomeCC         string   `yaml:"home_cc"`
 	} `yaml:"dashboard"`
 
 	Journal struct {
@@ -216,6 +222,7 @@ func userDataDir() string {
 func Default() Config {
 	dir := userDataDir()
 	c := Config{DataDir: dir}
+	c.Observability.MinFreeBytes = 268435456
 	c.AdminIPs = []string{}
 	c.Journal.Unit = "ssh"
 	c.SSH.AdminPort = 2222
@@ -264,11 +271,18 @@ func applyEnvOverrides(c *Config) {
 	}
 }
 
+// ResolvePath chooses the existing deployment configuration without opening a
+// store. Recovery creation still rejects a missing resolved file explicitly.
+func ResolvePath(path string) string {
+	if path == "" {
+		return resolveConfigPath()
+	}
+	return path
+}
+
 func Load(path string) (Config, error) {
 	c := Default()
-	if path == "" {
-		path = resolveConfigPath()
-	}
+	path = ResolvePath(path)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -277,6 +291,14 @@ func Load(path string) (Config, error) {
 		}
 		return c, err
 	}
+	return Parse(b)
+}
+
+// Parse applies the same configuration semantics to already-protected bytes.
+// Recovery tooling can preserve exactly the configuration it interpreted,
+// without reopening a replaceable source path or creating a default store.
+func Parse(b []byte) (Config, error) {
+	c := Default()
 	if err := yaml.Unmarshal(b, &c); err != nil {
 		return c, err
 	}
@@ -299,6 +321,12 @@ func Load(path string) (Config, error) {
 // zero values that have defined meaning (Port 0 = pick default later, Retention
 // 0 = purging disabled by design).
 func (c Config) Validate() error {
+	if _, err := netmatch.NewOriginPolicy(c.Dashboard.PublicOrigin, c.Dashboard.TrustedProxies); err != nil {
+		return err
+	}
+	if c.Observability.MinFreeBytes < 0 {
+		return fmt.Errorf("config: observability.min_free_bytes must be nonnegative")
+	}
 	checkPort := func(name string, p int) error {
 		if p < 0 || p > 65535 {
 			return fmt.Errorf("config: %s must be in 0-65535, got %d", name, p)

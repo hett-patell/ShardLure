@@ -1,12 +1,58 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+// WithTxContext also bounds admission to the single writer. Cancelling only
+// SQLite after an uninterruptible mutex wait would still hang startup/shutdown.
+func (s *Store) WithTxContext(ctx context.Context, fn func(*sql.Tx) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !s.writeMu.TryLock() {
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-tick.C:
+			}
+			if s.writeMu.TryLock() {
+				break
+			}
+		}
+	}
+	defer s.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	err = tx.Commit()
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
 
 func (s *Store) WithTx(fn func(*sql.Tx) error) error {
 	// Serialize write transactions (single SQLite writer) while leaving reads
@@ -75,7 +121,10 @@ func (s *Store) AppendEventsAndReplaceActorsAgg(source models.Source, fresh []*m
 // arbitrary rebuilds we clear the touched actors' child rows first, then
 // rewrite them from the fresh aggregate.
 func (s *Store) AppendEventsAndUpsertActorsAgg(fresh []*models.Event, actors []*models.AggregatedActor) error {
-	return s.WithTx(func(tx *sql.Tx) error {
+	return s.AppendEventsAndUpsertActorsAggContext(context.Background(), fresh, actors)
+}
+func (s *Store) AppendEventsAndUpsertActorsAggContext(ctx context.Context, fresh []*models.Event, actors []*models.AggregatedActor) error {
+	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
 		for _, e := range fresh {
 			if err := insertEvent(tx, e); err != nil {
 				return err
@@ -88,6 +137,18 @@ func (s *Store) AppendEventsAndUpsertActorsAgg(fresh []*models.Event, actors []*
 		}
 		return writeActorsTx(tx, actors)
 	})
+	for _, source := range []models.Source{models.SourceCowrie, models.SourceJournal} {
+		n := 0
+		for _, event := range fresh {
+			if event != nil && event.Source == source {
+				n++
+			}
+		}
+		if n > 0 {
+			s.observeIngest(source, n, err)
+		}
+	}
+	return err
 }
 
 // deleteActorChildrenTx removes the actor_ips / actor_users rows for a single
@@ -104,8 +165,19 @@ func deleteActorChildrenTx(tx *sql.Tx, actorID string) error {
 func writeActorsTx(tx *sql.Tx, actors []*models.AggregatedActor) error {
 	for _, agg := range actors {
 		a := agg.Actor
+		var existed bool
+		if a.Source == models.SourceJournal {
+			if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM actors WHERE id=?)", a.ID).Scan(&existed); err != nil {
+				return err
+			}
+		}
 		if err := upsertActor(tx, a); err != nil {
 			return err
+		}
+		if a.Source == models.SourceJournal && a.DerivedCurrent && !existed {
+			if _, err := tx.Exec("UPDATE journal_summaries SET status='pending' WHERE actor_id=?", a.ID); err != nil {
+				return err
+			}
 		}
 		for ip, st := range agg.IPs {
 			if err := upsertActorIP(tx, a.ID, ip, st.First, st.Last, st.Count); err != nil {
@@ -129,8 +201,9 @@ func clearSourceTx(tx *sql.Tx, source models.Source) error {
 	return err
 }
 
-// JournalActorUpdate contains the actor roll-up written alongside a newly
-// inserted journal event. The event's source IP identifies the actor_ips row.
+// JournalActorUpdate supplies the actor identity for a journal append. Legacy
+// counter fields remain source-compatible but are not trusted: the transaction
+// increments durable counters only after deduplication.
 type JournalActorUpdate struct {
 	Actor     *models.Actor
 	IPFirst   time.Time
@@ -144,6 +217,13 @@ type JournalActorUpdate struct {
 // writes the event plus its optional actor roll-up in one transaction. Event
 // IDs are published to the caller only after the transaction commits.
 func (s *Store) AppendJournalEventAtomic(e *models.Event, update *JournalActorUpdate) (inserted bool, err error) {
+	defer func() {
+		n := 0
+		if inserted && err == nil {
+			n = 1
+		}
+		s.observeIngest(models.SourceJournal, n, err)
+	}()
 	if e == nil {
 		return false, errors.New("store: nil journal event")
 	}
@@ -152,45 +232,13 @@ func (s *Store) AppendJournalEventAtomic(e *models.Event, update *JournalActorUp
 	}
 
 	stored := *e
-	normalizedTS := stored.TS.UTC().Format(time.RFC3339Nano)
+	if update != nil {
+		stored.ActorID = update.Actor.ID
+	}
 	err = s.WithTx(func(tx *sql.Tx) error {
-		var exists int
-		err := tx.QueryRow(`
-SELECT 1
-FROM events INDEXED BY idx_events_ts
-WHERE ts = ?
-  AND source = ?
-  AND kind = ?
-  AND COALESCE(src_ip, '') = ?
-  AND COALESCE(src_port, 0) = ?
-  AND COALESCE(username, '') = ?
-  AND COALESCE(raw, '') = ?
-LIMIT 1`, normalizedTS, stored.Source, stored.Kind, stored.SrcIP, stored.SrcPort, stored.Username, stored.Raw).Scan(&exists)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-
-		if err := insertEvent(tx, &stored); err != nil {
-			return err
-		}
-		if update != nil {
-			if err := upsertActor(tx, update.Actor); err != nil {
-				return err
-			}
-			if err := upsertActorIP(tx, update.Actor.ID, stored.SrcIP, update.IPFirst, update.IPLast, update.IPCount); err != nil {
-				return err
-			}
-			if update.Username != "" && update.Username != "?" {
-				if err := upsertActorUser(tx, update.Actor.ID, update.Username, update.UserCount); err != nil {
-					return err
-				}
-			}
-		}
-		inserted = true
-		return nil
+		var err error
+		inserted, err = appendJournalEventTx(tx, &stored, update != nil)
+		return err
 	})
 	if err != nil {
 		return false, err
@@ -200,6 +248,152 @@ LIMIT 1`, normalizedTS, stored.Source, stored.Kind, stored.SrcIP, stored.SrcPort
 	}
 	e.ID = stored.ID
 	return true, nil
+}
+
+// AppendJournalEventsAtomic appends one bounded batch without reconstructing
+// lifetime counters from retention-limited events. Replays and concurrent live
+// appends share the same transaction-local identity/counter code.
+func (s *Store) AppendJournalEventsAtomic(events []*models.Event) (count int, resultErr error) {
+	return s.AppendJournalEventsAtomicContext(context.Background(), events)
+}
+func (s *Store) AppendJournalEventsAtomicContext(ctx context.Context, events []*models.Event) (count int, resultErr error) {
+	defer func() { s.observeIngest(models.SourceJournal, count, resultErr) }()
+	if len(events) > 500 {
+		return 0, errors.New("journal batch exceeds 500 events")
+	}
+	stored := make([]models.Event, len(events))
+	for i, e := range events {
+		if e == nil {
+			return 0, errors.New("store: nil journal event")
+		}
+		stored[i] = *e
+		stored[i].ID = 0
+	}
+	inserted := 0
+	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		for i := range stored {
+			e := &stored[i]
+			ok, err := appendJournalEventTx(tx, e, e.ActorID != "" && e.Kind != models.KindAccepted)
+			if err != nil {
+				return err
+			}
+			if ok {
+				inserted++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	for i := range stored {
+		if stored[i].ID != 0 {
+			events[i].ID = stored[i].ID
+		}
+	}
+	return inserted, nil
+}
+
+func appendJournalEventTx(tx *sql.Tx, stored *models.Event, withActor bool) (bool, error) {
+	if stored.Source != models.SourceJournal {
+		return false, errors.New("store: journal append source mismatch")
+	}
+	var exists int
+	err := tx.QueryRow(`
+SELECT 1
+FROM events INDEXED BY idx_events_ts
+WHERE ts IN (?, ?)
+  AND source = ?
+  AND kind = ?
+  AND COALESCE(src_ip, '') = ?
+  AND COALESCE(src_port, 0) = ?
+  AND COALESCE(username, '') = ?
+  AND COALESCE(raw, '') = ?
+LIMIT 1`, CanonicalEventTime(stored.TS), stored.TS.UTC().Format(time.RFC3339Nano), stored.Source, stored.Kind, stored.SrcIP, stored.SrcPort, stored.Username, stored.Raw).Scan(&exists)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if err := insertEvent(tx, stored); err != nil {
+		return false, err
+	}
+	if withActor {
+		if err := incrementJournalActorTx(tx, stored); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func incrementJournalActorTx(tx *sql.Tx, e *models.Event) error {
+	a := &models.Actor{ID: e.ActorID, Source: models.SourceJournal, PrimaryIP: e.SrcIP, FirstSeen: e.TS, LastSeen: e.TS, Intent: "unknown"}
+	var first, last, source string
+	err := tx.QueryRow("SELECT event_count,unique_users,first_seen,last_seen,source FROM actors WHERE id=?", e.ActorID).Scan(&a.EventCount, &a.UniqueUsers, &first, &last, &source)
+	isNew := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !isNew {
+		return err
+	}
+	if !isNew {
+		if source != "journal" {
+			return errors.New("journal actor source mismatch")
+		}
+		if a.FirstSeen, err = parseTime(first); err != nil {
+			return err
+		}
+		if a.LastSeen, err = parseTime(last); err != nil {
+			return err
+		}
+	}
+	a.EventCount++
+	if a.FirstSeen.IsZero() || e.TS.Before(a.FirstSeen) {
+		a.FirstSeen = e.TS
+	}
+	if e.TS.After(a.LastSeen) {
+		a.LastSeen = e.TS
+	}
+	a.AttemptsPerHour = float64(a.EventCount) / max(a.LastSeen.Sub(a.FirstSeen).Hours(), 0.25)
+	if isNew {
+		if err := upsertActor(tx, a); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("UPDATE journal_summaries SET status='pending' WHERE actor_id=?", a.ID); err != nil {
+			return err
+		}
+	} else {
+		// Counter-only updates retain the last stored profile, including legacy
+		// unverified evidence. Readers mask it until derivation is current.
+		if _, err := tx.Exec("UPDATE actors SET event_count=?,first_seen=?,last_seen=?,attempts_per_hour=? WHERE id=?", a.EventCount, formatFixedUTC(a.FirstSeen), formatFixedUTC(a.LastSeen), a.AttemptsPerHour, a.ID); err != nil {
+			return err
+		}
+	}
+	if e.Username != "" && e.Username != "?" {
+		res, err := tx.Exec("INSERT INTO actor_users(actor_id,username,count) VALUES(?,?,1) ON CONFLICT(actor_id,username) DO NOTHING", a.ID, e.Username)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := tx.Exec("UPDATE actor_users SET count=count+1 WHERE actor_id=? AND username=?", a.ID, e.Username); err != nil {
+				return err
+			}
+		} else {
+			a.UniqueUsers++
+		}
+	}
+	if _, err := tx.Exec("UPDATE actors SET unique_users=? WHERE id=?", a.UniqueUsers, a.ID); err != nil {
+		return err
+	}
+	var ipCount int
+	err = tx.QueryRow("SELECT count FROM actor_ips WHERE actor_id=? AND ip=?", a.ID, e.SrcIP).Scan(&ipCount)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return upsertActorIP(tx, a.ID, e.SrcIP, a.FirstSeen, a.LastSeen, ipCount+1)
 }
 
 // UpsertJournalActorAtomic applies the three actor-related writes
@@ -235,92 +429,96 @@ func deleteActorsTx(tx *sql.Tx, source models.Source) error {
 	if _, err := tx.Exec("DELETE FROM actor_users WHERE actor_id IN (SELECT id FROM actors WHERE source=?)", source); err != nil {
 		return err
 	}
-	_, err := tx.Exec("DELETE FROM actors WHERE source=?", source)
+	// Rebuilding derived state is not permission to remove operator work,
+	// including notes left on actors whose last retained event has aged out.
+	_, err := tx.Exec("DELETE FROM actors WHERE source=? AND COALESCE(campaigns,'')='' AND COALESCE(notes,'')=''", source)
 	return err
 }
 
-// ReconcileSessionHASSH updates events for a cowrie session whose actor_id
-// was assigned before the session's HASSH fingerprint was known (the common
-// case: connect/login events arrive before cowrie.client.kex). It rewrites
-// every event for sessionID whose actor_id differs from newActorID to use
-// newActorID, then deletes and rewrites the aggregate rows for every old and
-// new actor ID involved. Zero-event actor rows (including the old IP-based
-// actor if all its events moved) are deleted so the dashboard never shows a
-// ghost actor. The caller supplies pre-rebuilt aggregates for the affected
-// actor IDs so this method is pure storage plumbing.
-func (s *Store) ReconcileSessionHASSH(sessionID, newActorID string, rebuilt []*models.AggregatedActor) error {
+// ReconcileSessionHASSH transfers only the session's retained evidence between
+// lifetime aggregates. Reads, callback and writes share the writer transaction;
+// callers must not use Store methods inside reconcile (writeMu is not reentrant).
+// The iterator excludes already-canonical rows, so retrying never double-counts.
+func (s *Store) ReconcileSessionHASSH(sessionID, newActorID, hassh string,
+	reconcile func(map[string]*ActorState, func(func(*models.Event) error) error) ([]*models.AggregatedActor, error)) error {
+	if sessionID == "" || hassh == "" || newActorID == "" {
+		return errors.New("store: empty HASSH reconciliation identity")
+	}
 	return s.WithTx(func(tx *sql.Tx) error {
-		// Discover old actor IDs: distinct actor_id values on this session's
-		// events that differ from newActorID.
-		oldRows, err := tx.Query(
-			`SELECT DISTINCT actor_id FROM events WHERE session_id=? AND actor_id<>? AND actor_id<>''`,
-			sessionID, newActorID)
+		rows, err := tx.Query("SELECT DISTINCT actor_id FROM events WHERE source=? AND session_id=? AND actor_id<>? AND actor_id<>''", models.SourceCowrie, sessionID, newActorID)
 		if err != nil {
 			return err
 		}
-		var oldIDs []string
-		func() {
-			defer oldRows.Close()
-			for oldRows.Next() {
-				var id string
-				if err := oldRows.Scan(&id); err != nil {
-					return
-				}
-				oldIDs = append(oldIDs, id)
+		ids := []string{newActorID}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
 			}
-		}()
-		if err := oldRows.Err(); err != nil {
+			ids = append(ids, id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
 			return err
 		}
-		if len(oldIDs) == 0 {
-			return nil // nothing to reconcile
-		}
-
-		// Update the events' actor_id to the new value.
-		if _, err := tx.Exec(
-			`UPDATE events SET actor_id=? WHERE session_id=? AND actor_id<>? AND actor_id<>''`,
-			newActorID, sessionID, newActorID); err != nil {
-			return err
-		}
-
-		// Clear and rewrite aggregates for every affected actor ID (old + new).
-		allIDs := append(oldIDs, newActorID)
-		for _, id := range allIDs {
-			if err := deleteActorChildrenTx(tx, id); err != nil {
+		if len(ids) > 1 {
+			states, err := actorStatesForIDs(tx, ids)
+			if err != nil {
 				return err
 			}
-		}
-		for _, agg := range rebuilt {
-			if err := upsertActor(tx, agg.Actor); err != nil {
+			stream := func(fn func(*models.Event) error) error {
+				rows, err := tx.Query(
+					"SELECT ts,kind,COALESCE(src_ip,''),COALESCE(username,''),COALESCE(ssh_client,''),COALESCE(command,''),COALESCE(sha256,''),actor_id FROM events WHERE source=? AND session_id=? AND actor_id<>? AND actor_id<>'' ORDER BY ts",
+					models.SourceCowrie, sessionID, newActorID)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for rows.Next() {
+					e := &models.Event{Source: models.SourceCowrie, SessionID: sessionID, HASSH: hassh}
+					var ts string
+					if err := rows.Scan(&ts, &e.Kind, &e.SrcIP, &e.Username, &e.SSHClient, &e.Command, &e.SHA256, &e.ActorID); err != nil {
+						return err
+					}
+					e.TS, err = parseTime(ts)
+					if err != nil {
+						return err
+					}
+					if err := fn(e); err != nil {
+						return err
+					}
+				}
+				return rows.Err()
+			}
+			updated, err := reconcile(states, stream)
+			if err != nil {
 				return err
 			}
-			for ip, st := range agg.IPs {
-				if err := upsertActorIP(tx, agg.Actor.ID, ip, st.First, st.Last, st.Count); err != nil {
+			for _, id := range ids {
+				if err := deleteActorChildrenTx(tx, id); err != nil {
 					return err
 				}
 			}
-			for username, count := range agg.Users {
-				if err := upsertActorUser(tx, agg.Actor.ID, username, count); err != nil {
-					return err
-				}
-			}
-		}
-
-		// Delete any actor rows that now have zero events (the old IP-based
-		// actor that was fully subsumed by the HASSH actor).
-		for _, id := range oldIDs {
-			var n int
-			if err := tx.QueryRow(
-				`SELECT COUNT(1) FROM events WHERE actor_id=?`, id).Scan(&n); err != nil {
+			if err := writeActorsTx(tx, updated); err != nil {
 				return err
 			}
-			if n == 0 {
-				if _, err := tx.Exec(`DELETE FROM actors WHERE id=?`, id); err != nil {
-					return err
+			for _, agg := range updated {
+				a := agg.Actor
+				// Retention is not proof that an actor has no lifetime evidence. Only
+				// a genuinely empty, unannotated aggregate may be removed.
+				if a.ID != newActorID && a.EventCount == 0 && a.Campaigns == "" && !isOperatorNote(a.Notes) {
+					if _, err := tx.Exec("DELETE FROM actors WHERE id=?", a.ID); err != nil {
+						return err
+					}
 				}
 			}
 		}
-		return nil
+		// Also repairs legacy rows whose actor_id was already moved but whose
+		// HASSH was left empty. Blank actor IDs (admin exemptions) stay blank.
+		_, err = tx.Exec("UPDATE events SET hassh=?,actor_id=CASE WHEN COALESCE(actor_id,'')='' THEN actor_id ELSE ? END WHERE source=? AND session_id=? AND (COALESCE(hassh,'')<>? OR (actor_id<>'' AND actor_id<>?))", hassh, newActorID, models.SourceCowrie, sessionID, hassh, newActorID)
+		return err
 	})
 }
 

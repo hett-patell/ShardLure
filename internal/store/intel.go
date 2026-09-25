@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -39,13 +40,13 @@ func (s *Store) HourlyEventCountsByKind(limitHours int) ([]HourlyKindCell, error
 	if limitHours <= 0 {
 		limitHours = 72
 	}
-	cutoff := time.Now().UTC().Add(-time.Duration(limitHours) * time.Hour).Format(time.RFC3339Nano)
-	rows, err := s.db.Query(`
-SELECT substr(ts, 1, 13) AS hour, kind, COUNT(*) AS hits
-FROM events
-WHERE ts >= ?
+	cutoff := time.Now().UTC().Add(-time.Duration(limitHours) * time.Hour)
+	window, args := eventTimeBranches("kind", &cutoff, "", nil)
+	rows, err := s.db.Query("WITH hourly_events AS ("+window+") "+`
+SELECT substr(exact_ts, 1, 13) AS hour, kind, COUNT(*) AS hits
+FROM hourly_events
 GROUP BY hour, kind
-ORDER BY hour ASC, kind ASC`, cutoff)
+ORDER BY hour ASC, kind ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +59,9 @@ ORDER BY hour ASC, kind ASC`, cutoff)
 		if err := rows.Scan(&hour, &c.Kind, &c.Hits); err != nil {
 			return nil, err
 		}
-		c.Hour, _ = time.Parse("2006-01-02T15", hour)
+		if c.Hour, err = time.Parse("2006-01-02T15", hour); err != nil {
+			return nil, fmt.Errorf("hourly event kinds: invalid timestamp")
+		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -73,7 +76,7 @@ func (s *Store) CountsByIntent() ([]LabelCount, error) {
 }
 
 func (s *Store) CountsByPlaybook() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT playbook, COUNT(*) AS hits FROM actors WHERE playbook != '' GROUP BY playbook ORDER BY hits DESC`)
+	return s.labelCounts("SELECT label,COUNT(*) AS hits FROM (SELECT " + actorVisiblePlaybookSQL + " AS label FROM actors) WHERE label<>'' GROUP BY label ORDER BY hits DESC,label")
 }
 
 func (s *Store) CountsBySource() ([]LabelCount, error) {
@@ -101,48 +104,20 @@ func (s *Store) RecentCommands(limit int) ([]CommandEvent, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT ts, kind, src_ip, username, actor_id, command, session_id, sha256, filename, source
-FROM events WHERE command IS NOT NULL AND command != '' ORDER BY ts DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []CommandEvent
-	for rows.Next() {
-		var e CommandEvent
-		var ts string
-		var kind, source string
-		if err := rows.Scan(&ts, &kind, &e.SrcIP, &e.Username, &e.ActorID, &e.Command,
-			&e.SessionID, &e.SHA256, &e.Filename, &source); err != nil {
-			return nil, err
-		}
-		e.TS, _ = parseTime(ts)
-		e.Kind = models.EventKind(kind)
-		e.Source = models.Source(source)
-		out = append(out, e)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// Cowrie stamps username on login/auth events, not on command.input —
-	// fill empty usernames from the session's login row so the intel
-	// "Recent commands" User column isn't permanently "—".
-	if err := s.fillSessionUsernames(out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	query, args := orderedGlobalEventQuery(commandEventColumns, nil,
+		"command IS NOT NULL AND command != ''", nil, true, limit)
+	return s.commandEvents(query, args)
 }
 
 func (s *Store) EventsByActor(actorID string, limit int) ([]CommandEvent, error) {
-	q := `SELECT ts, kind, src_ip, username, actor_id, command, session_id, sha256, filename, source
-FROM events WHERE actor_id=? ORDER BY ts DESC`
-	args := []any{actorID}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	rows, err := s.db.Query(q, args...)
+	query, args := orderedEventQuery(commandEventColumns, nil, "actor_id=?", []any{actorID}, true, limit)
+	return s.commandEvents(query, args)
+}
+
+const commandEventColumns = `id,ts,kind,COALESCE(src_ip,''),COALESCE(username,''),COALESCE(actor_id,''),COALESCE(command,''),COALESCE(session_id,''),COALESCE(sha256,''),COALESCE(filename,''),source`
+
+func (s *Store) commandEvents(query string, args []any) ([]CommandEvent, error) {
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -151,18 +126,26 @@ FROM events WHERE actor_id=? ORDER BY ts DESC`
 	var out []CommandEvent
 	for rows.Next() {
 		var e CommandEvent
-		var ts string
+		var id int64
+		var ts, exact string
 		var kind, source string
-		if err := rows.Scan(&ts, &kind, &e.SrcIP, &e.Username, &e.ActorID, &e.Command,
-			&e.SessionID, &e.SHA256, &e.Filename, &source); err != nil {
+		if err := rows.Scan(&id, &ts, &kind, &e.SrcIP, &e.Username, &e.ActorID, &e.Command,
+			&e.SessionID, &e.SHA256, &e.Filename, &source, &exact); err != nil {
 			return nil, err
 		}
-		e.TS, _ = parseTime(ts)
+		if e.TS, err = parseTime(ts); err != nil {
+			return nil, fmt.Errorf("event %d: invalid timestamp", id)
+		}
 		e.Kind = models.EventKind(kind)
 		e.Source = models.Source(source)
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Release this reader before the second lookup, even with a one-connection
+	// test pool. Cowrie command events normally inherit their user from login.
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	if err := s.fillSessionUsernames(out); err != nil {
@@ -234,11 +217,10 @@ GROUP BY session_id`
 
 // LastCommandByActor returns the most recent non-empty command for an actor.
 func (s *Store) LastCommandByActor(actorID string) (string, error) {
+	query, args := orderedEventQuery("id,command", nil,
+		"actor_id=? AND command IS NOT NULL AND command != ''", []any{actorID}, true, 1)
 	var cmd string
-	err := s.db.QueryRow(`
-SELECT command FROM events
-WHERE actor_id=? AND command IS NOT NULL AND command != ''
-ORDER BY ts DESC LIMIT 1`, actorID).Scan(&cmd)
+	err := s.db.QueryRow("SELECT command FROM ("+query+")", args...).Scan(&cmd)
 	return cmd, err
 }
 
@@ -259,13 +241,13 @@ func (s *Store) LastCommandsForActors(ids []string) (map[string]string, error) {
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	q := `
+	base, args := eventTimeBranches("id,actor_id,command", nil,
+		"actor_id IN ("+strings.Join(placeholders, ",")+") AND command IS NOT NULL AND command != ''", args)
+	q := "WITH command_events AS (" + base + ") " + `
 SELECT actor_id, command FROM (
   SELECT actor_id, command,
-         ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY ts DESC) AS rn
-  FROM events
-  WHERE actor_id IN (` + strings.Join(placeholders, ",") + `)
-    AND command IS NOT NULL AND command != ''
+         ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY exact_ts DESC,id DESC) AS rn
+  FROM command_events
 ) WHERE rn = 1`
 	rows, err := s.db.Query(q, args...)
 	if err != nil {

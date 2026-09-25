@@ -5,9 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/netmatch"
@@ -20,6 +21,10 @@ func journalctlFollowArgs(unit string) []string {
 }
 
 func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []string) error {
+	return TailFollowObserved(ctx, st, unit, adminIPs, nil)
+}
+
+func TailFollowObserved(ctx context.Context, st *store.Store, unit string, adminIPs []string, heartbeat func()) error {
 	if unit == "" {
 		unit = "ssh"
 	}
@@ -32,8 +37,28 @@ func TailFollow(ctx context.Context, st *store.Store, unit string, adminIPs []st
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("journalctl follow: %w", err)
 	}
+	waiting := &atomic.Bool{}
+	reader := &tailHeartbeatReader{r: stdout, waiting: waiting, heartbeat: heartbeat}
+	watch, stop := context.WithCancel(ctx)
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		tick := time.NewTicker(5 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-watch.Done():
+				return
+			case <-tick.C:
+				if waiting.Load() && heartbeat != nil {
+					heartbeat()
+				}
+			}
+		}
+	}()
+	defer func() { stop(); <-joined }()
 
-	if err := consumeTail(st, stdout, admin); err != nil {
+	if err := consumeTail(st, reader, admin); err != nil {
 		// Kill BEFORE Wait. journalctl -f never exits on its own, so a plain
 		// Wait() here blocks forever on a scanner error (e.g. bufio.ErrTooLong
 		// from a >1MiB line) — wedging the goroutine and silently ending
@@ -71,13 +96,29 @@ func consumeTail(st *store.Store, r io.Reader, admin *netmatch.Set) error {
 			// syncing it here created actor state that the next batch
 			// rebuild silently reversed.
 			if _, err := st.AppendJournalEventAtomic(e, nil); err != nil {
-				fmt.Fprintf(os.Stderr, "journal tail insert failed: %v\n", err)
+				return err
 			}
 			continue
 		}
 		if _, err := actor.SyncJournalEvent(st, e, admin); err != nil {
-			fmt.Fprintf(os.Stderr, "journal actor sync failed for %s: %v\n", e.SrcIP, err)
+			return err
 		}
 	}
 	return sc.Err()
+}
+
+type tailHeartbeatReader struct {
+	r         io.Reader
+	waiting   *atomic.Bool
+	heartbeat func()
+}
+
+func (r *tailHeartbeatReader) Read(p []byte) (int, error) {
+	r.waiting.Store(true)
+	n, err := r.r.Read(p)
+	r.waiting.Store(false)
+	if n > 0 && r.heartbeat != nil {
+		r.heartbeat()
+	}
+	return n, err
 }

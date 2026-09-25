@@ -152,7 +152,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := newCommandContext(context.Background())
 	defer cancel()
 
 	uploaded, skipped, ferr := bazaar.Share(ctx, &bazaarRecorderAdapter{st: st}, cands, opts)
@@ -199,7 +199,9 @@ func (a *bazaarRecorderAdapter) RecordBazaarUpload(sha, status, mbURL string, at
 // that actually clear the gate.
 func collectShareCandidates(st *store.Store, singleSHA string, since time.Duration) ([]bazaar.Candidate, error) {
 	if singleSHA != "" {
-		row, err := st.GetArtifactBySHA(singleSHA)
+		row, err := st.GetArtifactForShareBySHA(singleSHA, store.SharePolicy{
+			MinBytes: bazaar.MinSampleBytes, Origins: bazaar.ShareableOrigins(),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("no artifact with sha256=%s: %w", singleSHA, err)
 		}
@@ -228,10 +230,7 @@ func artifactToCandidate(a store.Artifact) bazaar.Candidate {
 	// the attacker actually dropped the sample), falling back to CreatedAt
 	// only when ts is unknown. CreatedAt is capture-registration time, which
 	// for a re-imported archive is "now" and would wrongly look fresh.
-	observed := a.TS
-	if observed.IsZero() {
-		observed = a.CreatedAt
-	}
+	observed := a.LastSuccessfulFetchAt
 	return bazaar.Candidate{
 		SHA256:     a.SHA256,
 		LocalPath:  a.LocalPath,

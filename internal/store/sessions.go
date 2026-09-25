@@ -1,7 +1,8 @@
 package store
 
 import (
-	"database/sql"
+	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -74,6 +75,77 @@ func firstSessionOpts(opts []SessionListOptions) SessionListOptions {
 	return SessionListOptions{}
 }
 
+type sessionAccumulator struct {
+	summary        SessionSummary
+	firstCommand   string
+	firstCommandTS time.Time
+	firstCommandID int64
+}
+
+func (s *Store) sessionSummariesSince(since time.Time, minCommands int) ([]ShellSessionSummary, error) {
+	byID := make(map[string]*sessionAccumulator)
+	err := s.IterateEventsSince(since, func(event *models.Event) error {
+		if event.Source != models.SourceCowrie || event.SessionID == "" {
+			return nil
+		}
+		acc := byID[event.SessionID]
+		if acc == nil {
+			acc = &sessionAccumulator{summary: SessionSummary{ID: event.SessionID, StartTS: event.TS, EndTS: event.TS}}
+			byID[event.SessionID] = acc
+		}
+		sum := &acc.summary
+		if event.TS.Before(sum.StartTS) {
+			sum.StartTS = event.TS
+		}
+		if event.TS.After(sum.EndTS) {
+			sum.EndTS = event.TS
+		}
+		if event.SrcIP > sum.SrcIP {
+			sum.SrcIP = event.SrcIP
+		}
+		if event.Username != "" && event.Username > sum.Username {
+			sum.Username = event.Username
+		}
+		if event.HASSH > sum.HASSH {
+			sum.HASSH = event.HASSH
+		}
+		if event.SSHClient > sum.SSHClient {
+			sum.SSHClient = event.SSHClient
+		}
+		if event.ActorID > sum.ActorID {
+			sum.ActorID = event.ActorID
+		}
+		sum.EventCount++
+		if event.Command != "" {
+			sum.CmdCount++
+			if event.Kind == models.KindCommand && (acc.firstCommandTS.IsZero() || event.TS.Before(acc.firstCommandTS) ||
+				(event.TS.Equal(acc.firstCommandTS) && event.ID < acc.firstCommandID)) {
+				acc.firstCommand = event.Command
+				acc.firstCommandTS = event.TS
+				acc.firstCommandID = event.ID
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ShellSessionSummary, 0, len(byID))
+	for _, acc := range byID {
+		if acc.summary.CmdCount < minCommands {
+			continue
+		}
+		out = append(out, ShellSessionSummary{SessionSummary: acc.summary, FirstCommand: acc.firstCommand})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].EndTS.Equal(out[j].EndTS) {
+			return out[i].EndTS.After(out[j].EndTS)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 // ListSessions returns cowrie sessions whose latest event falls within
 // the given window, ordered most-recent first. limit caps the result so
 // the dashboard list stays bounded.
@@ -90,74 +162,24 @@ func firstSessionOpts(opts []SessionListOptions) SessionListOptions {
 // different population than the rows.
 func (s *Store) CountSessionsSince(since time.Time, opts ...SessionListOptions) (int, error) {
 	o := firstSessionOpts(opts)
-	if h := o.having(); h != "" {
-		// Grouped subquery: the filter is an aggregate over each session, so the
-		// groups have to be formed before they can be counted.
-		var n int
-		err := s.db.QueryRow(`
-SELECT COUNT(*) FROM (
-  SELECT session_id FROM events
-  WHERE source='cowrie' AND session_id != '' AND ts >= ?
-  GROUP BY session_id`+h+`
-)`, since.UTC().Format(time.RFC3339Nano)).Scan(&n)
-		return n, err
-	}
-	var n int
-	err := s.db.QueryRow(`
-SELECT COUNT(DISTINCT session_id) FROM events
-WHERE source='cowrie' AND session_id != '' AND ts >= ?`,
-		since.UTC().Format(time.RFC3339Nano)).Scan(&n)
-	return n, err
+	rows, err := s.sessionSummariesSince(since, o.MinCommands)
+	return len(rows), err
 }
 
 func (s *Store) ListSessions(since time.Time, limit int, opts ...SessionListOptions) ([]SessionSummary, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	// The HAVING clause is interpolated, not bound: it is built from an int by
-	// having() (strconv.Itoa), never from caller text. Placeholders can't appear
-	// in a HAVING that has to be part of the statement text here anyway.
-	rows, err := s.db.Query(`
-SELECT
-  session_id,
-  MAX(src_ip)                                       AS src_ip,
-  -- Alphabetical-max non-empty username. NOT chronologically "most recent" —
-  -- a correlated per-session ORDER BY ts subquery here made this endpoint take
-  -- ~110s over a 30d window (tens of thousands of session groups). In practice
-  -- a session re-authing to a *different* username is vanishingly rare (zero on
-  -- live data), so MAX is a safe, fast approximation; the detail modal shows
-  -- the true chronological user.
-  COALESCE(MAX(CASE WHEN username != '' THEN username END), '') AS username,
-  MAX(hassh)                                        AS hassh,
-  MAX(ssh_client)                                   AS ssh_client,
-  MIN(ts)                                           AS start_ts,
-  MAX(ts)                                           AS end_ts,
-  COUNT(*)                                          AS n,
-  SUM(CASE WHEN command != '' THEN 1 ELSE 0 END)    AS n_cmd,
-  COALESCE(MAX(actor_id), '')                       AS actor_id
-FROM events
-WHERE source='cowrie' AND session_id != '' AND ts >= ?
-GROUP BY session_id`+firstSessionOpts(opts).having()+`
-ORDER BY end_ts DESC
-LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+	rows, err := s.sessionSummariesSince(since, firstSessionOpts(opts).MinCommands)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []SessionSummary
-	for rows.Next() {
-		var s SessionSummary
-		var startTS, endTS string
-		if err := rows.Scan(&s.ID, &s.SrcIP, &s.Username, &s.HASSH, &s.SSHClient,
-			&startTS, &endTS, &s.EventCount, &s.CmdCount, &s.ActorID); err != nil {
-			return nil, err
-		}
-		s.StartTS, _ = parseTime(startTS)
-		s.EndTS, _ = parseTime(endTS)
-		out = append(out, s)
+	if len(rows) > limit {
+		rows = rows[:limit]
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	out := make([]SessionSummary, len(rows))
+	for i := range rows {
+		out[i] = rows[i].SessionSummary
 	}
 	if err := s.stampSessionMeta(out); err != nil {
 		return nil, err
@@ -209,55 +231,12 @@ func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionS
 	if limit <= 0 {
 		limit = 30
 	}
-	sinceStr := since.UTC().Format(time.RFC3339Nano)
-	rows, err := s.db.Query(`
-WITH first_cmds AS (
-  SELECT session_id, command,
-    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ts ASC) AS rn
-  FROM events
-  WHERE source = 'cowrie' AND kind = 'command' AND command != '' AND ts >= ?
-)
-SELECT
-  s.session_id,
-  MAX(s.src_ip)                                            AS src_ip,
-  COALESCE(MAX(CASE WHEN s.username != '' THEN s.username END), '') AS username,
-  MAX(s.hassh)                                             AS hassh,
-  MAX(s.ssh_client)                                        AS ssh_client,
-  MIN(s.ts)                                                AS start_ts,
-  MAX(s.ts)                                                AS end_ts,
-  COUNT(*)                                                 AS n,
-  SUM(CASE WHEN s.kind='command' THEN 1 ELSE 0 END)        AS n_cmd,
-  COALESCE(MAX(s.actor_id), '')                            AS actor_id,
-  COALESCE(MAX(fc.command), '')                            AS first_cmd
-FROM events s
-LEFT JOIN first_cmds fc ON fc.session_id = s.session_id AND fc.rn = 1
-WHERE s.source='cowrie' AND s.session_id != '' AND s.ts >= ?
-GROUP BY s.session_id
-HAVING n_cmd > 0
-ORDER BY end_ts DESC
-LIMIT ?`, sinceStr, sinceStr, limit)
+	out, err := s.sessionSummariesSince(since, 1)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []ShellSessionSummary
-	for rows.Next() {
-		var sum ShellSessionSummary
-		var startTS, endTS string
-		var firstCmd sql.NullString
-		if err := rows.Scan(&sum.ID, &sum.SrcIP, &sum.Username, &sum.HASSH, &sum.SSHClient,
-			&startTS, &endTS, &sum.EventCount, &sum.CmdCount, &sum.ActorID, &firstCmd); err != nil {
-			return nil, err
-		}
-		sum.StartTS, _ = parseTime(startTS)
-		sum.EndTS, _ = parseTime(endTS)
-		if firstCmd.Valid {
-			sum.FirstCommand = firstCmd.String
-		}
-		out = append(out, sum)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	// Stamp duration/arch from the side-channel. ShellSessionSummary embeds
 	// SessionSummary by value, so mutate through the embedded field in place.
@@ -288,8 +267,8 @@ func (s *Store) SessionEvents(sessionID string) ([]*models.Event, error) {
 	// index and every session-detail click full-scanned the events table.
 	// Sessions are cowrie-only, so this doesn't drop rows.
 	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, actor_id
-FROM events WHERE source='cowrie' AND session_id=? ORDER BY ts ASC`, sessionID)
+SELECT id, ts, source, kind, COALESCE(src_ip,''), COALESCE(src_port,0), COALESCE(username,''), COALESCE(password,''), COALESCE(session_id,''), COALESCE(hassh,''), COALESCE(ssh_client,''), COALESCE(command,''), COALESCE(sha256,''), COALESCE(filename,''), COALESCE(dst_ip,''), COALESCE(dst_port,0), COALESCE(actor_id,'')
+FROM events WHERE source='cowrie' AND session_id=?`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -303,12 +282,25 @@ FROM events WHERE source='cowrie' AND session_id=? ORDER BY ts ASC`, sessionID)
 			&e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.ActorID); err != nil {
 			return nil, err
 		}
-		e.TS, _ = parseTime(ts)
+		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return nil, fmt.Errorf("event %d ts: %w", e.ID, err)
+		}
+		e.TS = parsed
 		e.Source = models.Source(source)
 		e.Kind = models.EventKind(kind)
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].TS.Equal(out[j].TS) {
+			return out[i].TS.Before(out[j].TS)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
 
 // CountSessions returns the all-time number of distinct cowrie sessions.

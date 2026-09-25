@@ -19,6 +19,7 @@ type fakeRecorder struct {
 	mu        sync.Mutex
 	submitted map[string]string
 	failOn    string // URL whose URLhausSubmitted call should error
+	recordErr error
 }
 
 func newFakeRecorder() *fakeRecorder {
@@ -38,6 +39,9 @@ func (f *fakeRecorder) URLhausSubmitted(url string) (bool, error) {
 func (f *fakeRecorder) RecordURLhausSubmission(url, status string, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.recordErr != nil {
+		return f.recordErr
+	}
 	f.submitted[url] = status
 	return nil
 }
@@ -121,6 +125,38 @@ func TestShareSubmitsOnlyVettedURLs(t *testing.T) {
 	}
 	if got := rec.submitted[good.URL]; got != "ok" {
 		t.Errorf("recorded status = %q, want ok", got)
+	}
+}
+
+func TestShareLedgerFailureIsNotDurableSuccess(t *testing.T) {
+	cs := newCaptureServer(t)
+	rec := newFakeRecorder()
+	ledgerErr := errors.New("ledger write failed")
+	rec.recordErr = ledgerErr
+	var progressSubmitted bool
+	var progressReason string
+
+	submitted, skipped, err := Share(context.Background(), rec, []Candidate{goodCandidate()}, Options{
+		APIKey: "k", Endpoint: cs.URL, RateLimit: time.Millisecond, Now: vetNow,
+		OnProgress: func(_ Candidate, durable bool, reason string) {
+			progressSubmitted = durable
+			progressReason = reason
+		},
+	})
+	if !errors.Is(err, ledgerErr) {
+		t.Fatalf("error = %v, want ledger failure", err)
+	}
+	if submitted != 0 || skipped != 0 {
+		t.Fatalf("submitted=%d skipped=%d, want 0/0", submitted, skipped)
+	}
+	if len(cs.allEntries()) != 1 {
+		t.Fatalf("provider received %d entries, want 1", len(cs.allEntries()))
+	}
+	if progressSubmitted {
+		t.Fatal("ledger failure was announced as durable success")
+	}
+	if !strings.Contains(progressReason, "ledger") {
+		t.Fatalf("progress reason = %q, want sanitized ledger failure", progressReason)
 	}
 }
 
@@ -250,6 +286,40 @@ func TestShareBatchesLargeSets(t *testing.T) {
 	}
 	if n := len(cs.allEntries()); n != 55 {
 		t.Errorf("total entries = %d, want 55", n)
+	}
+}
+
+func TestSharePacesAfterFailedBatch(t *testing.T) {
+	var mu sync.Mutex
+	var attempts []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts = append(attempts, time.Now())
+		n := len(attempts)
+		mu.Unlock()
+		if n == 1 {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte("{\"query_status\":\"ok\"}"))
+	}))
+	defer srv.Close()
+
+	one, two := goodCandidate(), goodCandidate()
+	two.URL += "-second"
+	_, _, err := Share(context.Background(), newFakeRecorder(), []Candidate{one, two}, Options{
+		APIKey: "k", Endpoint: srv.URL, BatchSize: 1, RateLimit: 100 * time.Millisecond, Now: vetNow,
+	})
+	if err == nil {
+		t.Fatal("first failed batch must be returned")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("attempts=%d, want 2", len(attempts))
+	}
+	if gap := attempts[1].Sub(attempts[0]); gap < 80*time.Millisecond {
+		t.Fatalf("failed batch was followed after %v, want configured pacing", gap)
 	}
 }
 

@@ -1,13 +1,91 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/intel/abuseipdb"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+func TestCollectReportCandidatesSelectsOneSourcePerIP(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "report-sources.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now().UTC().Add(-time.Second)
+	for _, fixture := range []struct {
+		ip           string
+		source       models.Source
+		count        int
+		lifetimeRate float64
+	}{
+		{"8.8.8.8", models.SourceCowrie, 200, 9000},
+		{"8.8.8.8", models.SourceJournal, 400, 1},
+		{"1.1.1.1", models.SourceJournal, 800, 2},
+	} {
+		a := &models.Actor{ID: fmt.Sprintf("%s:%s", fixture.source, fixture.ip), Source: fixture.source,
+			PrimaryIP: fixture.ip, ProbeScore: 100, Playbook: "fast_dictionary_spray",
+			FirstSeen: now.Add(-time.Hour), LastSeen: now, EventCount: 90000, AttemptsPerHour: fixture.lifetimeRate}
+		var events []*models.Event
+		for i := 0; i < fixture.count; i++ {
+			events = append(events, &models.Event{TS: now.Add(-time.Duration(i) * time.Second),
+				Source: a.Source, ActorID: a.ID, SrcIP: a.PrimaryIP, Kind: models.KindFailedPass,
+				Username: []string{"root", "admin", "postgres", "oracle"}[i%4]})
+		}
+		if err := st.AppendEventsAndUpsertActorsAgg(events, []*models.AggregatedActor{{Actor: a}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cands, err := collectReportCandidates(st, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("one candidate per target IP required, got %+v", cands)
+	}
+	if cands[0].SrcIP != "1.1.1.1" || cands[0].EventCount != 800 {
+		t.Fatalf("ranking used cluster/lifetime activity instead of current target evidence: %+v", cands)
+	}
+	if cands[1].SrcIP != "8.8.8.8" || cands[1].EventCount != 400 || cands[1].UniqueUsers != 4 {
+		t.Fatalf("must select the stronger qualifying source, never combine counts: %+v", cands[1])
+	}
+}
+
+func TestCollectReportCandidatesDoesNotPrefilterClusterScore(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "report-score.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now().UTC().Add(-time.Second)
+	a := &models.Actor{ID: "journal:8.8.8.8", Source: models.SourceJournal,
+		PrimaryIP: "8.8.8.8", ProbeScore: 1, Playbook: "unknown",
+		FirstSeen: now.Add(-time.Hour), LastSeen: now, EventCount: 400}
+	var events []*models.Event
+	for i := 0; i < 400; i++ {
+		events = append(events, &models.Event{TS: now.Add(-time.Duration(i) * time.Second),
+			Source: a.Source, ActorID: a.ID, SrcIP: a.PrimaryIP, Kind: models.KindFailedPass,
+			Username: []string{"root", "admin", "postgres", "oracle"}[i%4]})
+	}
+	if err := st.AppendEventsAndUpsertActorsAgg(events, []*models.AggregatedActor{{Actor: a}}); err != nil {
+		t.Fatal(err)
+	}
+	cands, err := collectReportCandidates(st, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("got %d candidates; recent target evidence must reach Vet despite the stored score", len(cands))
+	}
+	if ok, reason := abuseipdb.Vet(cands[0], nil, 60, time.Now()); !ok {
+		t.Fatalf("recent brute-force evidence rejected: %s (%+v)", reason, cands[0])
+	}
+}
 
 // TestCollectReportCandidatesUsesPrimaryIPLastSeen pins the CLI half of the
 // wrongful-report fix. The candidate's LastSeen must be the PRIMARY IP's own
@@ -57,16 +135,9 @@ func TestCollectReportCandidatesUsesPrimaryIPLastSeen(t *testing.T) {
 			continue
 		}
 		found = true
-		if d := c.LastSeen.Sub(clusterLast); d > -time.Second && d < time.Second {
-			t.Fatalf("candidate LastSeen is the CLUSTER max (%v) — the fresh cluster-mate is "+
-				"vouching for the dormant primary IP, and Vet will pass a report for an address "+
-				"silent for 18 days", c.LastSeen)
-		}
-		if d := c.LastSeen.Sub(ipLast); d < -time.Second || d > time.Second {
-			t.Fatalf("candidate LastSeen = %v, want the primary IP's own last observation %v", c.LastSeen, ipLast)
-		}
 	}
-	if !found {
-		t.Fatal("clustered actor missing from the candidate pool entirely")
+	if found {
+		t.Fatal("clustered actor entered the CLI candidate pool using its aggregate evidence; " +
+			"the target IP has been silent for 18 days and must be excluded before report vetting")
 	}
 }

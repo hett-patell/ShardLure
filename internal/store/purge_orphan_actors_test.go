@@ -55,12 +55,12 @@ func TestMaintenancePurgeDeletesOrphanActors(t *testing.T) {
 	seedActor(t, s, "cowrie:hasevents", old, "", "")   // still has an event -> keep
 	seedActor(t, s, "cowrie:tagged", old, "mirai", "") // operator campaign tag -> keep
 
-	// `notes` is NOT an operator field: actor.builder regenerates it on every
-	// rebuild ("2 events, 0 usernames"), so EVERY actor on a live deployment
-	// has one — guarding on it made the sweep delete nothing at all (verified
-	// against prod: 6,716 of 6,716 actors carried a generated note, so the
-	// orphan count the sweep would have removed was 0 instead of 103).
-	seedActor(t, s, "cowrie:machine-note", old, "", "2 events, 0 usernames")
+	// Generated summaries do not pin an orphan; preserved legacy/operator
+	// notes do. Keep the fixture aligned with the v23 ownership split.
+	seedActor(t, s, "cowrie:machine-note", old, "", "")
+	if _, err := s.db.Exec("UPDATE actors SET generated_notes='2 events, 0 usernames' WHERE id='cowrie:machine-note'"); err != nil {
+		t.Fatal(err)
+	}
 
 	// One surviving event, timestamped inside the retention window, belonging
 	// to cowrie:hasevents.
@@ -101,6 +101,52 @@ func TestMaintenancePurgeDeletesOrphanActors(t *testing.T) {
 	// The kept actors' children must survive.
 	if got := countRows(t, s, `SELECT COUNT(1) FROM actor_ips WHERE actor_id=?`, "cowrie:tagged"); got != 1 {
 		t.Errorf("actor_ips for campaign-tagged actor = %d, want 1", got)
+	}
+}
+
+func TestMaintenancePurgeOrphanActorsUsesExactMixedTimes(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "purge-orphan-time.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+	seedActor(t, st, "cowrie:fresh-offset", cutoff.Add(2*time.Hour), "", "")
+	seedActor(t, st, "cowrie:old-offset", cutoff.Add(-2*time.Hour), "", "")
+	freshText := cutoff.Add(2 * time.Hour).In(time.FixedZone("minus-14", -14*60*60)).Format(time.RFC3339Nano)
+	oldText := cutoff.Add(-2 * time.Hour).In(time.FixedZone("plus-14", 14*60*60)).Format(time.RFC3339Nano)
+	if _, err := st.db.Exec(`UPDATE actors SET first_seen=?,last_seen=? WHERE id='cowrie:fresh-offset'`, freshText, freshText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE actors SET first_seen=?,last_seen=? WHERE id='cowrie:old-offset'`, oldText, oldText); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MaintenancePurge(30); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, st, `SELECT COUNT(*) FROM actors WHERE id='cowrie:fresh-offset'`); got != 1 {
+		t.Fatalf("fresh offset actor rows=%d, want 1", got)
+	}
+	if got := countRows(t, st, `SELECT COUNT(*) FROM actors WHERE id='cowrie:old-offset'`); got != 0 {
+		t.Fatalf("old offset actor rows=%d, want 0", got)
+	}
+}
+
+func TestMaintenancePurgeRejectsMalformedOrphanActorTime(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "purge-orphan-malformed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	seedActor(t, st, "cowrie:bad-time", time.Now().Add(-90*24*time.Hour), "", "")
+	if _, err := st.db.Exec(`UPDATE actors SET last_seen='not-a-time' WHERE id='cowrie:bad-time'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MaintenancePurge(30); err == nil {
+		t.Fatal("malformed orphan actor timestamp must stop retention")
+	}
+	if got := countRows(t, st, `SELECT COUNT(*) FROM actors WHERE id='cowrie:bad-time'`); got != 1 {
+		t.Fatalf("malformed actor rows=%d, want 1", got)
 	}
 }
 

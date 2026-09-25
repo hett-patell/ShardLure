@@ -110,6 +110,28 @@ func TestFoldUsesPersistedAggregate(t *testing.T) {
 	}
 }
 
+func TestFoldLegacySignalsPreserveLifetimeCounters(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedActorState(t, st, &models.Actor{ID: "cowrie:9.9.9.9", Source: models.SourceCowrie, PrimaryIP: "9.9.9.9", FirstSeen: first, LastSeen: first, EventCount: 100, UniqueUsers: 1}, map[string]int{"historic": 100}, map[string]models.IPStat{"9.9.9.9": {Count: 100, First: first, Last: first}})
+	path := writeTempCowrieLog(t, `{"eventid":"cowrie.login.failed","timestamp":"2026-07-03T11:00:01Z","src_ip":"9.9.9.9","username":"root","session":"s1"}`)
+	if _, err := IngestFileAppend(st, path, nil); err != nil {
+		t.Fatal(err)
+	}
+	states, err := st.ActorStatesForIDs([]string{"cowrie:9.9.9.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := states["cowrie:9.9.9.9"]
+	if s.Actor.EventCount != 101 || s.Users["historic"] != 100 || s.Users["root"] != 1 || s.IPs["9.9.9.9"].Count != 101 {
+		t.Fatalf("legacy fold erased lifetime evidence: actor=%+v users=%v ips=%v", s.Actor, s.Users, s.IPs)
+	}
+	if !s.Actor.FirstSeen.Equal(first) {
+		t.Fatal("legacy fold lost first seen")
+	}
+}
+
 // TestFoldLegacyFallbackRescansOnce: a pre-v18 row (flags=0) can't be folded
 // safely — its signals are unknown — so it gets one last full event re-scan,
 // after which real flags are persisted and later ticks fold.

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/networkshard/shardlure/internal/intel/intelutil"
 )
 
 // Candidate is one row from artifacts considered for upload. The
@@ -127,6 +130,7 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 	// submitted counts samples that cleared Vet and were therefore sent (or, in
 	// dry-run, previewed). MaxUploads bounds THIS, not the candidates examined.
 	submitted := 0
+	var lastAttempt time.Time
 	for i, cand := range candidates {
 		if ctx.Err() != nil {
 			return uploaded, skipped, ctx.Err()
@@ -245,6 +249,10 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 			continue
 		}
 
+		if err := intelutil.WaitForProviderAttempt(ctx, lastAttempt, opts.RateLimit); err != nil {
+			return uploaded, skipped, err
+		}
+
 		// Open just before the POST so we don't hold N file
 		// descriptors during the (sequential) loop.
 		f, oerr := os.Open(cand.LocalPath)
@@ -255,6 +263,7 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 			continue
 		}
 		res, uerr := c.Upload(ctx, opts.APIKey, f, cand.SHA256, sub)
+		lastAttempt = time.Now()
 		_ = f.Close()
 		// Counted on attempt, not on acceptance: MaxUploads bounds what we send
 		// to abuse.ch, and a rejected POST was still a call we made.
@@ -282,34 +291,21 @@ func Share(ctx context.Context, rec UploadRecorder, candidates []Candidate, opts
 				continue
 			}
 		} else {
-			if opts.OnProgress != nil {
-				opts.OnProgress(cand, cls, res, nil)
-			}
 			if res.IsAccepted() {
-				if rerr := rec.RecordBazaarUpload(cand.SHA256, res.Status, res.SampleURL, time.Now().UTC()); rerr != nil && firstErr == nil {
-					firstErr = rerr
+				if rerr := rec.RecordBazaarUpload(cand.SHA256, res.Status, res.SampleURL, time.Now().UTC()); rerr != nil {
+					observability.DurableShare(ctx, observability.MalwareBazaar, rerr, 1)
+					if opts.OnProgress != nil {
+						opts.OnProgress(cand, cls, res, rerr)
+					}
+					// The provider accepted the sample, but without a ledger row a
+					// later run can upload it again. Stop before sending more samples.
+					return uploaded, skipped, errors.Join(firstErr, rerr)
 				}
 				uploaded++
+				observability.DurableShare(ctx, observability.MalwareBazaar, nil, 1)
 			}
-		}
-
-		// Be polite to the abuse.ch endpoint. Their fair-use terms
-		// don't pin a number, but their own example python script
-		// has no retries and the community API doc says repeat
-		// violations of fair use lead to a ban. 2 s between calls
-		// is conservative and still ships our 26-sample backlog in
-		// under a minute.
-		// Skip the wait when the budget is already spent — the next iteration
-		// would only break, and pacing exists to space out API calls, not to
-		// delay the summary line.
-		budgetSpent := opts.MaxUploads > 0 && submitted >= opts.MaxUploads
-		if i+1 < len(candidates) && !budgetSpent {
-			t := time.NewTimer(opts.RateLimit)
-			select {
-			case <-ctx.Done():
-				t.Stop() // don't leak the timer when the context wins the race
-				return uploaded, skipped, ctx.Err()
-			case <-t.C:
+			if opts.OnProgress != nil {
+				opts.OnProgress(cand, cls, res, nil)
 			}
 		}
 	}

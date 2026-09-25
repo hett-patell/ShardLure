@@ -1,6 +1,9 @@
 package store
 
 import (
+	"context"
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
@@ -49,6 +52,12 @@ const RecentRateWindow = 24 * time.Hour
 // query from hauling in rows that would be rejected downstream anyway.
 const ReportPoolMaxAge = 7 * 24 * time.Hour
 
+// reportingActorPoolLimit is a hard safety ceiling for the broad candidate
+// pool. Callers must not be able to turn a reporting request into an
+// unbounded actor/evidence scan by passing an accidental or user-controlled
+// limit.
+const reportingActorPoolLimit = 1000
+
 // ActorRate pairs an actor with its rate over a bounded window. It is a distinct
 // type rather than an Actor with AttemptsPerHour overwritten, so a caller can
 // never mistake the windowed figure for the stored lifetime one.
@@ -69,27 +78,26 @@ func (s *Store) RecentRatesByActor(since time.Time) (map[string]float64, error) 
 	if hours <= 0 {
 		hours = RecentRateWindow.Hours()
 	}
-	rows, err := s.db.Query(`
-		SELECT actor_id, COUNT(*)
-		FROM events
-		WHERE ts >= ? AND actor_id IS NOT NULL AND actor_id <> ''
-		GROUP BY actor_id`,
-		since.UTC().Format(time.RFC3339Nano),
-	)
+	counts, err := s.recentEventCountsByActor(context.Background(), since)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := make(map[string]float64)
-	for rows.Next() {
-		var id string
-		var n int
-		if err := rows.Scan(&id, &n); err != nil {
-			return nil, err
-		}
+	out := make(map[string]float64, len(counts))
+	for id, n := range counts {
 		out[id] = float64(n) / hours
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+func (s *Store) recentEventCountsByActor(ctx context.Context, since time.Time) (map[string]int, error) {
+	counts := make(map[string]int)
+	err := s.IterateEventsSinceContext(ctx, since, func(event *models.Event) error {
+		if event.ActorID != "" {
+			counts[event.ActorID]++
+		}
+		return nil
+	})
+	return counts, err
 }
 
 // TopActorsByRecentRate ranks actors by how hard they are hitting IN THE WINDOW,
@@ -105,18 +113,7 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 	if hours <= 0 {
 		hours = RecentRateWindow.Hours()
 	}
-	// Ranked in SQL, actors loaded in a second pass. Selecting actorColumns plus
-	// an extra column would need its own scanner, and a second copy of that
-	// column list is exactly how a scan silently drifts from the schema.
-	rows, err := s.db.Query(`
-		SELECT actor_id, COUNT(*) AS n
-		FROM events
-		WHERE ts >= ? AND actor_id IS NOT NULL AND actor_id <> ''
-		GROUP BY actor_id
-		ORDER BY n DESC
-		LIMIT ?`,
-		since.UTC().Format(time.RFC3339Nano), limit,
-	)
+	counts, err := s.recentEventCountsByActor(context.Background(), since)
 	if err != nil {
 		return nil, err
 	}
@@ -124,20 +121,19 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 		id string
 		n  int
 	}
-	var hits []hit
-	for rows.Next() {
-		var h hit
-		if err := rows.Scan(&h.id, &h.n); err != nil {
-			rows.Close()
-			return nil, err
+	hits := make([]hit, 0, len(counts))
+	for id, n := range counts {
+		hits = append(hits, hit{id: id, n: n})
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].n != hits[j].n {
+			return hits[i].n > hits[j].n
 		}
-		hits = append(hits, h)
+		return hits[i].id < hits[j].id
+	})
+	if len(hits) > limit {
+		hits = hits[:limit]
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
 
 	out := make([]ActorRate, 0, len(hits))
 	for _, h := range hits {
@@ -190,9 +186,11 @@ func (s *Store) PrimaryIPLastSeen() (map[string]time.Time, error) {
 		if err := rows.Scan(&id, &ts); err != nil {
 			return nil, err
 		}
-		if t, perr := time.Parse(time.RFC3339Nano, ts); perr == nil {
-			out[id] = t
+		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return nil, fmt.Errorf("actor %s primary ip last_seen: %w", id, err)
 		}
+		out[id] = parsed
 	}
 	return out, rows.Err()
 }
@@ -228,25 +226,81 @@ func (s *Store) PrimaryIPLastSeen() (map[string]time.Time, error) {
 // abuseipdb.Vet enforces its own staleness gate on top of this — the pool is a
 // query optimisation, not the policy — so tightening here cannot loosen there.
 func (s *Store) ActorsForReporting(since time.Time, limit int) ([]models.Actor, error) {
+	return s.ActorsForReportingContext(context.Background(), since, limit)
+}
+
+// ActorsForReportingContext is the cancellable form used by CLI and HTTP
+// reporting paths. The pool is deliberately bounded before the SQL LIMIT is
+// assembled, so the caller cannot request an unbounded result set.
+func (s *Store) ActorsForReportingContext(ctx context.Context, since time.Time, limit int) ([]models.Actor, error) {
 	if limit <= 0 {
-		limit = 1000
+		limit = reportingActorPoolLimit
+	}
+	if limit > reportingActorPoolLimit {
+		limit = reportingActorPoolLimit
 	}
 	// Bound the lifetime half relative to `since` rather than the wall clock, so
 	// a caller passing an older window widens both halves consistently and the
 	// query stays a pure function of its arguments (testable without freezing
 	// time).
 	poolFloor := since.Add(-ReportPoolMaxAge)
-	return s.queryActors(`SELECT `+actorColumns+`
-FROM actors a
-WHERE a.id IN (
-        SELECT actor_id FROM events
-        WHERE ts >= ? AND actor_id IS NOT NULL AND actor_id <> ''
-      )
-   OR a.id IN (
-        SELECT id FROM actors WHERE attempts_per_hour > 0 AND last_seen >= ?
-        ORDER BY attempts_per_hour DESC LIMIT ?
-      )
-ORDER BY a.attempts_per_hour DESC`,
-		since.UTC().Format(time.RFC3339Nano),
-		poolFloor.UTC().Format(time.RFC3339Nano), limit)
+	counts, err := s.recentEventCountsByActor(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	actors, err := s.queryActorsContext(ctx, "SELECT "+actorColumns+" FROM actors")
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]models.Actor, len(actors))
+	for _, actor := range actors {
+		byID[actor.ID] = actor
+	}
+	type recentHit struct {
+		actor models.Actor
+		count int
+	}
+	recent := make([]recentHit, 0, len(counts))
+	for id, count := range counts {
+		if actor, ok := byID[id]; ok {
+			recent = append(recent, recentHit{actor: actor, count: count})
+		}
+	}
+	sort.Slice(recent, func(i, j int) bool {
+		if recent[i].count != recent[j].count {
+			return recent[i].count > recent[j].count
+		}
+		if recent[i].actor.AttemptsPerHour != recent[j].actor.AttemptsPerHour {
+			return recent[i].actor.AttemptsPerHour > recent[j].actor.AttemptsPerHour
+		}
+		return recent[i].actor.ID < recent[j].actor.ID
+	})
+	out := make([]models.Actor, 0, reportingActorPoolLimit)
+	seen := make(map[string]bool, reportingActorPoolLimit)
+	for _, hit := range recent {
+		if len(out) >= reportingActorPoolLimit {
+			break
+		}
+		out = append(out, hit.actor)
+		seen[hit.actor.ID] = true
+	}
+	sort.Slice(actors, func(i, j int) bool {
+		if actors[i].AttemptsPerHour != actors[j].AttemptsPerHour {
+			return actors[i].AttemptsPerHour > actors[j].AttemptsPerHour
+		}
+		return actors[i].ID < actors[j].ID
+	})
+	lifetimeAdded := 0
+	for _, actor := range actors {
+		if lifetimeAdded >= limit || len(out) >= reportingActorPoolLimit {
+			break
+		}
+		if actor.AttemptsPerHour <= 0 || actor.LastSeen.Before(poolFloor) || seen[actor.ID] {
+			continue
+		}
+		out = append(out, actor)
+		seen[actor.ID] = true
+		lifetimeAdded++
+	}
+	return out, nil
 }

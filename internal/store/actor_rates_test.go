@@ -1,11 +1,161 @@
 package store
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+func TestActorsForReportingContextHonorsCancellation(t *testing.T) {
+	st := newTestStore(t, "pool_cancel.db")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := st.ActorsForReportingContext(ctx, time.Now().Add(-24*time.Hour), 1000)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ActorsForReportingContext with cancelled context: %v, want context.Canceled", err)
+	}
+}
+
+func TestRecentRateQueriesUseExactMixedTimestampInstants(t *testing.T) {
+	st := newTestStore(t, "rates_mixed_time.db")
+	since := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+	recentID, oldID := "journal:recent-offset", "journal:old-offset"
+	recentText := since.Add(time.Minute).In(time.FixedZone("minus-14", -14*60*60)).Format(time.RFC3339Nano)
+	oldText := since.Add(-time.Minute).In(time.FixedZone("plus-14", 14*60*60)).Format(time.RFC3339Nano)
+	for _, row := range []struct{ ts, id string }{{recentText, recentID}, {oldText, oldID}} {
+		if _, err := st.db.Exec(`INSERT INTO events(ts,source,kind,actor_id) VALUES(?,?,?,?)`,
+			row.ts, models.SourceJournal, models.KindFailedPass, row.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, actor := range []*models.Actor{
+		{ID: recentID, Source: models.SourceJournal, FirstSeen: since, LastSeen: since.Add(time.Minute), EventCount: 1},
+		{ID: oldID, Source: models.SourceJournal, FirstSeen: since.Add(-8 * 24 * time.Hour), LastSeen: since.Add(-8 * 24 * time.Hour), EventCount: 1},
+	} {
+		if err := st.UpsertActor(actor); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rates, err := st.RecentRatesByActor(since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rates[recentID] <= 0 {
+		t.Fatalf("recent offset actor missing from rates: %v", rates)
+	}
+	if _, ok := rates[oldID]; ok {
+		t.Fatalf("old offset actor included in rates: %v", rates)
+	}
+	top, err := st.TopActorsByRecentRate(since, 8)
+	if err != nil || len(top) != 1 || top[0].Actor.ID != recentID {
+		t.Fatalf("top=%+v err=%v, want only %s", top, err, recentID)
+	}
+	pool, err := st.ActorsForReportingContext(context.Background(), since, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pool) != 1 || pool[0].ID != recentID {
+		t.Fatalf("reporting pool=%+v, want only %s", pool, recentID)
+	}
+}
+
+func TestPrimaryIPLastSeenRejectsMalformedTime(t *testing.T) {
+	st := newTestStore(t, "primary_ip_bad_time.db")
+	now := time.Now().UTC()
+	actor := &models.Actor{ID: "journal:bad-time", Source: models.SourceJournal, PrimaryIP: "8.8.8.8", FirstSeen: now, LastSeen: now}
+	if err := st.UpsertActor(actor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO actor_ips(actor_id,ip,first_seen,last_seen,count) VALUES(?,?,?,?,1)`,
+		actor.ID, actor.PrimaryIP, formatFixedUTC(now), "not-a-time"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PrimaryIPLastSeen(); err == nil || !strings.Contains(err.Error(), actor.ID) {
+		t.Fatalf("error=%v, want contextual malformed timestamp failure", err)
+	}
+}
+
+func TestActorsForReportingContextCapsCallerLimit(t *testing.T) {
+	st := newTestStore(t, "pool_cap.db")
+	now := time.Now().UTC()
+	events := make([]*models.Event, 0, reportingActorPoolLimit+1)
+	aggregates := make([]*models.AggregatedActor, 0, reportingActorPoolLimit+1)
+	for i := 0; i < reportingActorPoolLimit+1; i++ {
+		id := fmt.Sprintf("journal:pool-%04d", i)
+		events = append(events, &models.Event{
+			TS: now, Source: models.SourceJournal, Kind: "failed_password", ActorID: id,
+		})
+		aggregates = append(aggregates, &models.AggregatedActor{Actor: &models.Actor{
+			ID: id, Source: models.SourceJournal, FirstSeen: now, LastSeen: now,
+			EventCount: 1, AttemptsPerHour: float64(i + 1),
+		}})
+	}
+	if err := st.AppendEventsAndUpsertActorsAgg(events, aggregates); err != nil {
+		t.Fatalf("seed oversized reporting pool: %v", err)
+	}
+
+	actors, err := st.ActorsForReportingContext(context.Background(), time.Now().Add(-24*time.Hour), reportingActorPoolLimit+1)
+	if err != nil {
+		t.Fatalf("ActorsForReportingContext: %v", err)
+	}
+	if len(actors) > reportingActorPoolLimit {
+		t.Fatalf("reporting pool returned %d actors, hard cap is %d", len(actors), reportingActorPoolLimit)
+	}
+}
+
+func TestActorsForReportingPrioritizesRecentActorsAtHardCap(t *testing.T) {
+	st := newTestStore(t, "pool_recent_priority.db")
+	now := time.Now().UTC()
+	const recentCount = reportingActorPoolLimit
+	events := make([]*models.Event, 0, recentCount+1)
+	aggregates := make([]*models.AggregatedActor, 0, recentCount+1)
+	for i := 0; i < recentCount; i++ {
+		id := fmt.Sprintf("journal:recent-%04d", i)
+		events = append(events, &models.Event{
+			TS: now, Source: models.SourceJournal, Kind: "failed_password",
+			SrcIP: fmt.Sprintf("198.51.100.%d", i%254+1), ActorID: id,
+		})
+		aggregates = append(aggregates, &models.AggregatedActor{Actor: &models.Actor{
+			ID: id, Source: models.SourceJournal, PrimaryIP: fmt.Sprintf("198.51.100.%d", i%254+1),
+			FirstSeen: now, LastSeen: now, EventCount: 1, AttemptsPerHour: 1,
+		}})
+	}
+	// This actor is outside the recent window but has the highest lifetime rate.
+	// It must not displace a currently active actor when the bounded pool is full.
+	pausedID := "journal:paused-lifetime-heavy"
+	events = append(events, &models.Event{
+		TS: now.Add(-48 * time.Hour), Source: models.SourceJournal, Kind: "failed_password",
+		SrcIP: "203.0.113.9", ActorID: pausedID,
+	})
+	aggregates = append(aggregates, &models.AggregatedActor{Actor: &models.Actor{
+		ID: pausedID, Source: models.SourceJournal, PrimaryIP: "203.0.113.9",
+		FirstSeen: now.Add(-48 * time.Hour), LastSeen: now.Add(-48 * time.Hour),
+		EventCount: 1, AttemptsPerHour: 100000,
+	}})
+	if err := st.AppendEventsAndUpsertActorsAgg(events, aggregates); err != nil {
+		t.Fatalf("seed reporting priority fixture: %v", err)
+	}
+
+	actors, err := st.ActorsForReportingContext(context.Background(), now.Add(-24*time.Hour), 1)
+	if err != nil {
+		t.Fatalf("ActorsForReportingContext: %v", err)
+	}
+	if len(actors) != reportingActorPoolLimit {
+		t.Fatalf("reporting pool returned %d actors, want hard cap %d", len(actors), reportingActorPoolLimit)
+	}
+	for _, actor := range actors {
+		if actor.ID == pausedID {
+			t.Fatal("lifetime-heavy paused actor displaced a currently active actor at the hard cap")
+		}
+	}
+}
 
 // seedRateFixture builds two actors with the SAME lifetime event count but very
 // different recent behaviour: `escalating` has been observed for weeks and is

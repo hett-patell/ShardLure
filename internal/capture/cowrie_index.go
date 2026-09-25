@@ -2,11 +2,15 @@ package capture
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
-	"os"
+	"errors"
+	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -21,22 +25,60 @@ type cowrieLogClosed struct {
 }
 
 // indexTTYBindingsFromFile scans path for cowrie.log.closed events and
-// records each sha256->session binding into the store. Errors opening
-// or reading the file return nil (best-effort): missing rotated
-// siblings are normal, and a partial scan still produces useful
-// bindings.
+// records each sha256->session binding. Missing rotated siblings are normal;
+// other I/O and persistence failures are returned so the caller can retry.
 func indexTTYBindingsFromFile(st *store.Store, path string) error {
-	f, err := os.Open(path)
-	if err != nil {
+	root, err := safefile.OpenRoot(filepath.Dir(path))
+	if errors.Is(err, safefile.ErrNotExist) {
 		return nil
 	}
-	defer f.Close()
+	if err != nil {
+		return safeCaptureError(err, "capture TTY index access failed")
+	}
+	defer root.Close()
+	return indexTTYBindingsFromRoot(context.Background(), st, root, filepath.Base(path))
+}
 
-	sc := bufio.NewScanner(f)
-	buf := make([]byte, 0, 256*1024)
-	sc.Buffer(buf, 2*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
+func indexTTYBindingsFromRoot(ctx context.Context, st *store.Store, root *safefile.Root, name string) error {
+	f, err := root.OpenRegular(name)
+	if errors.Is(err, safefile.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return safeCaptureError(err, "capture TTY index access failed")
+	}
+	defer f.Close()
+	reader := bufio.NewReaderSize(f, 64<<10)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var line []byte
+		oversized := false
+		for {
+			part, more, err := reader.ReadLine()
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return safeCaptureError(err, "capture TTY index read failed")
+			}
+			if len(line)+len(part) > 2<<20 {
+				oversized = true
+			}
+			if !oversized {
+				line = append(line, part...)
+			}
+			if !more {
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if oversized {
+			continue
+		}
 		// Cheap pre-filter: skip lines that don't even mention
 		// log.closed before parsing JSON. Cowrie.json is large
 		// and JSON parsing per line is expensive enough to be
@@ -51,10 +93,14 @@ func indexTTYBindingsFromFile(st *store.Store, path string) error {
 		if rec.EventID != "cowrie.log.closed" || rec.SHA == "" || rec.Session == "" {
 			continue
 		}
-		ts, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(rec.Timestamp))
-		_ = st.RecordCowrieTTYBinding(rec.SHA, rec.Session, ts)
+		ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(rec.Timestamp))
+		if err != nil || !looksLikeSHA256(rec.SHA) {
+			continue
+		}
+		if err := st.RecordCowrieTTYBinding(rec.SHA, rec.Session, ts); err != nil {
+			return safeCaptureError(err, "capture TTY index recording failed")
+		}
 	}
-	return nil
 }
 
 // containsBytes is a tiny wrapper to keep the hot pre-filter explicit

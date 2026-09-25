@@ -54,9 +54,8 @@ func credentialKindPlaceholders() string {
 func (s *Store) TopUsernamesSince(since time.Time, limit int) ([]CredentialCount, error) {
 	return s.credentialCounts(`
 		SELECT username, '', COUNT(*) AS c
-		FROM events
-		WHERE ts >= ? AND kind IN (`+credentialKindPlaceholders()+`)
-		  AND COALESCE(username,'') <> '' AND username <> '?'
+		FROM credential_events
+		WHERE COALESCE(username,'') <> '' AND username <> '?'
 		GROUP BY username
 		ORDER BY c DESC, username ASC`, since, limit)
 }
@@ -65,9 +64,8 @@ func (s *Store) TopUsernamesSince(since time.Time, limit int) ([]CredentialCount
 func (s *Store) TopPasswordsSince(since time.Time, limit int) ([]CredentialCount, error) {
 	return s.credentialCounts(`
 		SELECT '', password, COUNT(*) AS c
-		FROM events
-		WHERE ts >= ? AND kind IN (`+credentialKindPlaceholders()+`)
-		  AND COALESCE(password,'') <> ''
+		FROM credential_events
+		WHERE COALESCE(password,'') <> ''
 		GROUP BY password
 		ORDER BY c DESC, password ASC`, since, limit)
 }
@@ -76,9 +74,8 @@ func (s *Store) TopPasswordsSince(since time.Time, limit int) ([]CredentialCount
 func (s *Store) TopCombosSince(since time.Time, limit int) ([]CredentialCount, error) {
 	return s.credentialCounts(`
 		SELECT username, password, COUNT(*) AS c
-		FROM events
-		WHERE ts >= ? AND kind IN (`+credentialKindPlaceholders()+`)
-		  AND COALESCE(username,'') <> '' AND username <> '?'
+		FROM credential_events
+		WHERE COALESCE(username,'') <> '' AND username <> '?'
 		  AND COALESCE(password,'') <> ''
 		GROUP BY username, password
 		ORDER BY c DESC, username ASC, password ASC`, since, limit)
@@ -94,18 +91,32 @@ func (s *Store) DistinctCredentialCount(column string, since time.Time) (int, er
 	default:
 		return 0, nil
 	}
-	args := append([]any{since.UTC().Format(time.RFC3339Nano)}, credentialKinds...)
+	window, args := credentialWindowQuery(since)
+	filter := "COALESCE(" + column + ",'') <> ''"
+	if column == "username" {
+		// '?' represents an unknown username, but is a literal password in
+		// TopPasswordsSince/TopCombosSince. The total must count that same pool.
+		filter += " AND username <> '?'"
+	}
 	var n int
-	err := s.db.QueryRow(`
+	err := s.db.QueryRow(window+`
 		SELECT COUNT(DISTINCT `+column+`)
-		FROM events
-		WHERE ts >= ? AND kind IN (`+credentialKindPlaceholders()+`)
-		  AND COALESCE(`+column+`,'') <> '' AND `+column+` <> '?'`, args...).Scan(&n)
+		FROM credential_events
+		WHERE `+filter, args...).Scan(&n)
 	return n, err
 }
 
+// Count in SQLite without materializing events. Both sides of the migration
+// share an exact instant boundary, including a whole-second cutoff.
+func credentialWindowQuery(since time.Time) (string, []any) {
+	query, args := globalEventTimeBranches("username,password", &since,
+		"kind IN ("+credentialKindPlaceholders()+")", credentialKinds)
+	return "WITH credential_events AS (" + query + ") ", args
+}
+
 func (s *Store) credentialCounts(query string, since time.Time, limit int) ([]CredentialCount, error) {
-	args := append([]any{since.UTC().Format(time.RFC3339Nano)}, credentialKinds...)
+	window, args := credentialWindowQuery(since)
+	query = window + query
 	if limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, limit)

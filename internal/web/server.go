@@ -21,24 +21,39 @@ import (
 	"github.com/networkshard/shardlure/internal/hostsvc"
 	"github.com/networkshard/shardlure/internal/intel/vt"
 	"github.com/networkshard/shardlure/internal/netmatch"
+	"github.com/networkshard/shardlure/internal/observability"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
-// httpError logs the real (possibly DB-internal) error server-side and returns
-// a generic message to the client, so store/SQL internals aren't exposed over
-// HTTP. All these endpoints are auth-gated, but leaking schema/error detail is
-// still poor hygiene. `where` is a short handler tag for the server log.
+// httpError emits only a fixed failure category and an internal operation tag.
+// Neither the response nor the log may disclose a raw underlying error.
 func httpError(w http.ResponseWriter, where string, err error, code int) {
-	log.Printf("web: %s: %v", where, err)
+	logOperationError(where, err)
 	http.Error(w, http.StatusText(code), code)
 }
 
+// Only source-owned operation tags and a closed failure category reach logs.
+// Raw errors can carry SQL values, private paths and credentials.
+func logOperationError(operation string, err error) {
+	reason := "operation_failed"
+	if errors.Is(err, context.Canceled) {
+		reason = "canceled"
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		reason = "deadline_exceeded"
+	}
+	log.Printf("web: %s: %s", operation, reason)
+}
+
 type Server struct {
-	st   *store.Store
-	addr string
-	geo  *geoResolver
+	originPolicy OriginPolicy
+	originError  error
+	onListening  func(net.Addr)
+	monitor      *observability.Monitor
+	st           *store.Store
+	addr         string
+	geo          *geoResolver
 	// keys is the live runtime keystore. Secrets (dashboard token, bazaar +
 	// abuseipdb API keys) and the tunable knobs below are read THROUGH it at
 	// request time so a value saved from the Settings panel takes effect
@@ -88,17 +103,25 @@ type Server struct {
 	// floor guarantees we never machine-gun the MB API regardless of client.
 	bazaarMu     sync.Mutex
 	lastBazaarAt time.Time
+	bazaarGate   chan struct{}
 
 	// abuseReportMu + lastAbuseReportAt throttle AbuseIPDB /report POSTs
 	// process-wide, the same defense as bazaar: the per-actor button is
 	// bypassable, so a server-side floor guarantees we never spam the API.
 	abuseReportMu     sync.Mutex
 	lastAbuseReportAt time.Time
+	abuseReportGate   chan struct{}
 	// abuseReportBatchMu serializes batch report-all runs. Separate from
 	// abuseReportMu so single-IP reports aren't blocked for the duration
 	// of a multi-minute batch. TryLock returns "already in progress" to
 	// concurrent callers instead of queueing.
 	abuseReportBatchMu sync.Mutex
+	// abuseReportTargetOnce/gates serialize the complete dedup -> submission ->
+	// ledger-record flow for a target. A fixed bucket pool keeps attacker-
+	// controlled target strings from growing an unbounded lock map; collisions
+	// only serialize otherwise unrelated targets briefly.
+	abuseReportTargetOnce  sync.Once
+	abuseReportTargetGates [64]chan struct{}
 
 	// urlhausBatchMu serializes URLhaus submit batches. Without it a
 	// double-clicked "Submit All" could race the dedup ledger and publish the
@@ -174,6 +197,11 @@ type Server struct {
 	ratesMu     sync.Mutex
 	ratesCached map[string]float64
 	ratesAt     time.Time
+
+	// Advisory per-IP evidence only; actual report POSTs bypass this cache.
+	reportEvidenceMu     sync.Mutex
+	reportEvidenceCache  map[string]reportEvidenceEntry
+	reportEvidenceFlight chan struct{}
 
 	// Per-actor primary-IP last-seen for the report staleness gate; see
 	// report_candidate.go for why this is not actors.last_seen.
@@ -628,6 +656,11 @@ func (s *Server) topCountriesCached() []topCountryRow {
 }
 
 type Options struct {
+	PublicOrigin   string
+	TrustedProxies []string
+	// OnListening announces successful binding before long application seeding.
+	OnListening     func(net.Addr)
+	Monitor         *observability.Monitor
 	HomeLat         float64
 	HomeLon         float64
 	HomeCity        string
@@ -744,7 +777,9 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	if abuseRewindow <= 0 {
 		abuseRewindow = 24 * time.Hour
 	}
-	return &Server{
+	server := &Server{
+		onListening:           firstOpt.OnListening,
+		monitor:               firstOpt.Monitor,
 		st:                    st,
 		addr:                  addr,
 		keys:                  keys,
@@ -772,6 +807,9 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 		tailscaleMode:            firstOpt.TailscaleMode,
 		startedAt:                time.Now(),
 	}
+	server.geo.monitor = firstOpt.Monitor
+	server.originPolicy, server.originError = NewOriginPolicy(firstOpt.PublicOrigin, firstOpt.TrustedProxies)
+	return server
 }
 
 // ---- live setting accessors ---------------------------------------------
@@ -901,7 +939,18 @@ func (s *Server) homeLive() homePoint {
 
 // RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
 func (s *Server) RunContext(ctx context.Context) error {
+	defer func() {
+		if s.geo != nil {
+			s.geo.mmdb.close()
+		}
+	}()
+	if s.originError != nil {
+		return s.originError
+	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", s.guardOperationalRead(s.handleHealth))
+	mux.HandleFunc("/readyz", s.guardOperationalRead(s.handleReady))
+	mux.HandleFunc("/metrics", s.guardOperationalRead(s.handleMetrics))
 	// Every /api/* route is registered through s.guard so the auth check
 	// lives in ONE place — a new handler cannot forget it. Handlers keep
 	// their own inner requireDashboardAuth calls harmlessly (it's
@@ -1039,7 +1088,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 				"Set a token, or bind to loopback/Tailscale", s.addr)
 		}
 		// Also fail for wildcard / unresolved addresses without a token.
-		if listenHostIP(s.addr) == nil && !s.tailscaleMode {
+		if listenHostIP(s.addr) == nil {
 			return fmt.Errorf("refusing to start: dashboard would bind a WILDCARD address (%s) with no "+
 				"SHARDLURE_DASH_TOKEN set - credential exports would be world-readable. "+
 				"Set a token, or bind to an explicit loopback address", s.addr)
@@ -1054,9 +1103,12 @@ func (s *Server) RunContext(ctx context.Context) error {
 				"Keep it on Tailscale/loopback or set SHARDLURE_DASH_TOKEN.")
 	}
 
+	var handlers handlerDrain
 	srv := &http.Server{
-		Addr:        s.addr,
-		Handler:     securityHeaders(mux),
+		Addr: s.addr,
+		Handler: handlers.wrap(securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mux.ServeHTTP(w, r.WithContext(observability.WithMonitor(r.Context(), s.monitor)))
+		}))),
 		ReadTimeout: 10 * time.Second,
 		// 60s rather than 20s so /debug/pprof/profile?seconds=30 can
 		// complete. No handler is supposed to take longer than a few
@@ -1071,27 +1123,40 @@ func (s *Server) RunContext(ctx context.Context) error {
 	}
 
 	errCh := make(chan error, 1)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	if s.onListening != nil {
+		s.onListening(listener.Addr())
+	}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
 		errCh <- nil
 	}()
 
+	defer func() {
+		handlers.stop()
+		// Close cancels remaining request contexts if graceful shutdown times
+		// out. Join handlers before closing their shared resources.
+		_ = srv.Close()
+		handlers.wait()
+	}()
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		handlers.stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		err := srv.Shutdown(shutdownCtx)
 		<-errCh
-		// Close the geo mmdb handle on the way out. One long-lived fd is
-		// harmless in practice, but the resolver has a lifecycle method and
-		// shutdown is the one place it belongs.
-		if s.geo != nil {
-			s.geo.mmdb.close()
-		}
-		return nil
+		return err
 	case err := <-errCh:
 		return err
 	}
@@ -1107,6 +1172,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.applicationAvailable(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1166,19 +1234,39 @@ func isPublicIP(ip net.IP) bool {
 	return true
 }
 
-// requireDashboardAuth gates /api/* and debug routes. Header-only by design:
-// the token must never travel in an /api URL, where it would leak into access
-// logs, Referer headers, and proxy logs. The dashboard's fetch wrapper always
-// sets the Authorization header, so these routes need nothing else.
+// requireDashboardAuth accepts explicit credentials or the page bootstrap's
+// HttpOnly cookie. Cookie-authenticated writes must prove same-origin; explicit
+// headers remain usable by CLI clients. API query tokens are never accepted.
+// refuseTokenlessProxy reports (and answers) a token-less request whose
+// direct peer is a configured trusted reverse proxy. Open mode means "the
+// caller is on this host", but a proxy connects from this host on behalf of
+// remote clients, so it never inherits that trust: behind a proxy, set
+// SHARDLURE_DASH_TOKEN.
+func (s *Server) refuseTokenlessProxy(w http.ResponseWriter, r *http.Request) bool {
+	if s.originPolicy.IsTrustedPeer(r.RemoteAddr) {
+		http.Error(w, "a dashboard token is required behind a reverse proxy", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
 func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardToken() == "" {
-		return true
+		return !s.refuseTokenlessProxy(w, r)
 	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if strings.TrimSpace(token) == "" {
 		token = r.Header.Get("X-ShardLure-Token")
 	}
 	if s.tokenMatches(token) {
+		return true
+	}
+	if ck, err := r.Cookie("shardlure_session"); err == nil && s.tokenMatches(ck.Value) {
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" ||
+			(r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && !s.sameOriginRequest(r)) {
+			http.Error(w, "same-origin request required", http.StatusForbidden)
+			return false
+		}
 		return true
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="shardlure-dashboard"`)
@@ -1217,11 +1305,10 @@ func securityHeaders(next http.Handler) http.Handler {
 // headers, or server access logs. Subsequent page loads authenticate via
 // the cookie alone.
 //
-// All /api endpoints remain header-only (Authorization / X-ShardLure-Token);
-// the cookie is only used by the two HTML page routes.
+// API routes also accept this cookie, with a same-origin gate on writes.
 func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardToken() == "" {
-		return true
+		return !s.refuseTokenlessProxy(w, r)
 	}
 
 	// 1. Check Bearer / X-ShardLure-Token header (preferred).
@@ -1241,13 +1328,18 @@ func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 	// 3. Check ?token= query param (bootstrap only). On success, set cookie
 	//    and redirect to the same URL without the token so it leaves history.
 	if qt := r.URL.Query().Get("token"); s.tokenMatches(qt) {
+		_, secure, err := s.originPolicy.Expected(r)
+		if err != nil {
+			http.Error(w, "invalid request origin", http.StatusForbidden)
+			return false
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     "shardlure_session",
 			Value:    qt,
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteStrictMode,
-			Secure:   r.TLS != nil,
+			Secure:   secure,
 			MaxAge:   0, // session cookie - expires when the browser closes
 		})
 		// Strip token from the URL and redirect.
@@ -1329,19 +1421,21 @@ type summaryBlock struct {
 }
 
 type actorCard struct {
-	ID       string  `json:"id"`
-	IP       string  `json:"ip"`
-	Playbook string  `json:"playbook"`
-	Intent   string  `json:"intent"`
-	Probe    int     `json:"probe"`
-	Events   int     `json:"events"`
-	RateHour float64 `json:"rateHour"`
-	LastSeen string  `json:"lastSeen"`
-	Conf     int     `json:"conf"`
-	Lat      float64 `json:"lat,omitempty"`
-	Lon      float64 `json:"lon,omitempty"`
-	Country  string  `json:"country,omitempty"`
-	CC       string  `json:"cc,omitempty"`
+	DerivedCurrent bool    `json:"derivedCurrent"`
+	GeneratedNotes string  `json:"generatedNotes"`
+	ID             string  `json:"id"`
+	IP             string  `json:"ip"`
+	Playbook       string  `json:"playbook"`
+	Intent         string  `json:"intent"`
+	Probe          int     `json:"probe"`
+	Events         int     `json:"events"`
+	RateHour       float64 `json:"rateHour"`
+	LastSeen       string  `json:"lastSeen"`
+	Conf           int     `json:"conf"`
+	Lat            float64 `json:"lat,omitempty"`
+	Lon            float64 `json:"lon,omitempty"`
+	Country        string  `json:"country,omitempty"`
+	CC             string  `json:"cc,omitempty"`
 }
 
 type recentRecord struct {
@@ -1490,15 +1584,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	cardRates := s.recentRatesCached()
 	for _, a := range actors {
 		card := actorCard{
-			ID:       a.ID,
-			IP:       a.PrimaryIP,
-			Playbook: a.Playbook,
-			Intent:   a.Intent,
-			Probe:    a.ProbeScore,
-			Events:   a.EventCount,
-			RateHour: cardRates[a.ID],
-			LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
-			Conf:     a.Confidence,
+			DerivedCurrent: a.DerivedCurrent,
+			GeneratedNotes: a.GeneratedNotes,
+			ID:             a.ID,
+			IP:             a.PrimaryIP,
+			Playbook:       a.Playbook,
+			Intent:         a.Intent,
+			Probe:          a.ProbeScore,
+			Events:         a.EventCount,
+			RateHour:       cardRates[a.ID],
+			LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
+			Conf:           a.Confidence,
 		}
 		if !isPrivateIP(a.PrimaryIP) {
 			g := s.geo.cached(a.PrimaryIP)
@@ -1519,15 +1615,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if topActors, err := s.st.TopActorsByEvents(14); err == nil {
 		for _, a := range topActors {
 			tc := actorCard{
-				ID:       a.ID,
-				IP:       a.PrimaryIP,
-				Playbook: a.Playbook,
-				Intent:   a.Intent,
-				Probe:    a.ProbeScore,
-				Events:   a.EventCount,
-				RateHour: cardRates[a.ID],
-				LastSeen: a.LastSeen.UTC().Format(time.RFC3339),
-				Conf:     a.Confidence,
+				DerivedCurrent: a.DerivedCurrent,
+				GeneratedNotes: a.GeneratedNotes,
+				ID:             a.ID,
+				IP:             a.PrimaryIP,
+				Playbook:       a.Playbook,
+				Intent:         a.Intent,
+				Probe:          a.ProbeScore,
+				Events:         a.EventCount,
+				RateHour:       cardRates[a.ID],
+				LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
+				Conf:           a.Confidence,
 			}
 			if !isPrivateIP(a.PrimaryIP) {
 				if g := s.geo.cached(a.PrimaryIP); g.OK {
@@ -1678,19 +1776,28 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // caller to believe the verb carries meaning, and every write endpoint here
 // already rejects the wrong verb, so the two halves of the API should agree.
 func (s *Server) guardRead(h http.HandlerFunc) http.HandlerFunc {
-	return s.guard(func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireDashboardAuth(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !s.applicationAvailable(w, r) {
+			return
+		}
 		h(w, r)
-	})
+	}
 }
 
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireDashboardAuth(w, r) {
+			return
+		}
+		if !s.applicationAvailable(w, r) {
 			return
 		}
 		h(w, r)
@@ -1703,7 +1810,7 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 // along with the "dashboard is open on Tailscale" convenience mode.
 func (s *Server) guardDebug(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.dashboardToken() == "" && !isLoopbackPeer(r.RemoteAddr) {
+		if s.dashboardToken() == "" && (!isLoopbackPeer(r.RemoteAddr) || s.originPolicy.IsTrustedPeer(r.RemoteAddr)) {
 			http.Error(w, "debug endpoints require a dashboard token or a loopback connection", http.StatusForbidden)
 			return
 		}

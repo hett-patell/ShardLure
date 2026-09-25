@@ -1,9 +1,11 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +17,10 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	observerMu     sync.RWMutex
+	ingestObserver func(models.Source, int, error)
+	db             *sql.DB
+	path           string // canonical database name; never a retention target
 	// writeMu serializes WRITES at the application layer. SQLite allows only
 	// one writer, and live mode has several writer goroutines (journal tail,
 	// cowrie ticker, retention purge) plus the web server sharing this db; with
@@ -24,7 +29,9 @@ type Store struct {
 	// batch). Serializing writes here avoids that WITHOUT capping the pool to a
 	// single connection — so concurrent READS still run in parallel under WAL
 	// (a 1-connection pool would make a slow analytics query block ingest).
-	writeMu sync.Mutex
+	writeMu       sync.Mutex
+	captureMu     sync.Mutex
+	capturePolicy CaptureRetentionPolicy
 
 	// Lazy-table creation guards. The artifacts / enrichment / bazaar / tty
 	// tables are created on first use (CREATE TABLE IF NOT EXISTS), but the
@@ -42,6 +49,7 @@ type Store struct {
 	onceURLhaus      sync.Once
 	onceThreatFox    sync.Once
 	oncePayloadIntel sync.Once
+	onceFileCapture  sync.Once
 	// errs from the once-bodies, so a failed creation still surfaces.
 	errArtifacts    error
 	errEnrich       error
@@ -53,10 +61,16 @@ type Store struct {
 	errURLhaus      error
 	errThreatFox    error
 	errPayloadIntel error
+	errFileCapture  error
 }
 
 type sqlExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+}
+
+type sqlRowExecer interface {
+	sqlExecer
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 type sqlQueryer interface {
@@ -64,10 +78,29 @@ type sqlQueryer interface {
 }
 
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	return openWithOwnerCheck(path, CheckDatabaseOwner)
+}
+
+func openWithOwnerCheck(path string, checkOwner func(string) error) (*Store, error) {
+	if err := checkOwner(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, ErrDatabaseUnsafe
+	}
+	path = abs
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, ErrDatabaseAccess
+	}
+	if err := checkOwner(path); err != nil {
+		return nil, err
+	}
+	dsn, err := sqliteFileURI(path, url.Values{"_pragma": []string{"journal_mode(WAL)", "busy_timeout(5000)"}})
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +116,7 @@ func Open(path string) (*Store, error) {
 	// staleness without forcing constant reconnects.
 	db.SetMaxIdleConns(8)
 	db.SetConnMaxLifetime(time.Hour)
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -99,9 +132,19 @@ func Open(path string) (*Store, error) {
 		_ = err
 	}
 	// Honeypot DBs can contain attacker-supplied passwords; restrict to owner.
+	if err := checkOwner(path); err != nil {
+		db.Close()
+		return nil, err
+	}
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
 		if _, err := os.Stat(p); err == nil {
-			_ = os.Chmod(p, 0o600)
+			if err := os.Chmod(p, 0o600); err != nil {
+				db.Close()
+				return nil, ErrDatabaseAccess
+			}
+		} else if !os.IsNotExist(err) {
+			db.Close()
+			return nil, ErrDatabaseAccess
 		}
 	}
 	return s, nil
@@ -123,8 +166,10 @@ func (s *Store) migrate() error {
 	schema := `
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  -- RFC3339Nano UTC text; dashboard hourly aggregation relies on ISO prefix ordering.
+  -- Fixed-width RFC3339 UTC text plus exact epoch nanoseconds. ts remains for
+  -- compatibility/export; ts_unix_ns drives chronological v20+ reads.
   ts TEXT NOT NULL,
+  ts_unix_ns INTEGER,
   source TEXT NOT NULL,
   kind TEXT NOT NULL,
   src_ip TEXT,
@@ -658,6 +703,63 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	if current < 19 {
+		if err := s.migrateCaptureEvidence(now); err != nil {
+			return err
+		}
+	}
+	// v20: exact event instants. The column is intentionally nullable and this
+	// migration is schema-only: rewriting a multi-million-row events table while
+	// Open holds startup would create a large WAL and delay the live daemon. New
+	// writes populate it immediately; a bounded ID-cursor worker backfills legacy
+	// rows after startup.
+	if current < 20 {
+		has, err := s.columnExists("events", "ts_unix_ns")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE events ADD COLUMN ts_unix_ns INTEGER`); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_unix_ns ON events(ts_unix_ns, id) WHERE ts_unix_ns IS NOT NULL`); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (20, ?)`, now); err != nil {
+			return err
+		}
+	}
+	// v21: isolate unconverted timestamps. A migrated database pays no
+	// full-table scan to check for legacy rows, and backfill shrinks this index.
+	if current < 21 {
+		if err := s.WithTx(func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_legacy_ts ON events(ts,id) WHERE ts_unix_ns IS NULL`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(21,?)`, now)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
+	// v22 is schema-only: keep original submission/dedup records intact and
+	// repair exact ordering keys in bounded background transactions.
+	if current < 22 {
+		if err := s.migrateLedgerTimes(now); err != nil {
+			return err
+		}
+	}
+	if current < 23 {
+		if err := s.migrateJournalSummaries(now); err != nil {
+			return err
+		}
+	}
+	if current < 24 {
+		if err := s.migrateFileCaptures(now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -774,9 +876,9 @@ func (s *Store) InsertEvent(e *models.Event) error {
 
 func insertEvent(db sqlExecer, e *models.Event) error {
 	res, err := db.Exec(`
-INSERT INTO events (ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, dst_ip, dst_port, raw, actor_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.TS.UTC().Format(time.RFC3339Nano), e.Source, e.Kind, e.SrcIP, e.SrcPort,
+INSERT INTO events (ts, ts_unix_ns, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, dst_ip, dst_port, raw, actor_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		formatFixedUTC(e.TS), e.TS.UnixNano(), e.Source, e.Kind, e.SrcIP, e.SrcPort,
 		e.Username, e.Password, e.SessionID, e.HASSH, e.SSHClient,
 		e.Command, e.SHA256, e.Filename, e.DstIP, e.DstPort, e.Raw, e.ActorID)
 	if err != nil {
@@ -796,33 +898,68 @@ func (s *Store) UpsertActor(a *models.Actor) error {
 
 func upsertActor(db sqlExecer, a *models.Actor) error {
 	_, err := db.Exec(`
-INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO actors (id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags, generated_notes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   primary_ip=excluded.primary_ip, playbook=excluded.playbook, intent=excluded.intent,
   confidence=excluded.confidence, first_seen=excluded.first_seen, last_seen=excluded.last_seen,
   event_count=excluded.event_count,
   unique_users=excluded.unique_users, attempts_per_hour=excluded.attempts_per_hour,
   hassh=excluded.hassh, ssh_client=excluded.ssh_client, username_hash=excluded.username_hash,
-  campaigns=excluded.campaigns, probe_score=excluded.probe_score, notes=excluded.notes,
-  flags=excluded.flags`,
+  probe_score=excluded.probe_score,
+  flags=excluded.flags, generated_notes=excluded.generated_notes`,
 		a.ID, a.Source, a.PrimaryIP, a.Playbook, a.Intent, a.Confidence,
 		a.FirstSeen.UTC().Format(time.RFC3339Nano), a.LastSeen.UTC().Format(time.RFC3339Nano),
 		a.EventCount, a.UniqueUsers, a.AttemptsPerHour, a.HASSH, a.SSHClient,
-		a.UsernameHash, a.Campaigns, a.ProbeScore, a.Notes, a.Flags)
+		a.UsernameHash, a.Campaigns, a.ProbeScore, a.Notes, a.Flags, a.GeneratedNotes)
 	return err
 }
 
-func upsertActorIP(db sqlExecer, actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
-	_, err := db.Exec(`
-INSERT INTO actor_ips (actor_id, ip, first_seen, last_seen, count) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(actor_id, ip) DO UPDATE SET
-  first_seen=CASE WHEN excluded.first_seen < first_seen THEN excluded.first_seen ELSE first_seen END,
-  last_seen=CASE WHEN excluded.last_seen > last_seen THEN excluded.last_seen ELSE last_seen END,
-  count=excluded.count`,
-		actorID, ip, firstSeen.UTC().Format(time.RFC3339Nano), lastSeen.UTC().Format(time.RFC3339Nano), count)
+func upsertActorIP(db sqlRowExecer, actorID, ip string, firstSeen, lastSeen time.Time, count int) error {
+	var storedFirst, storedLast sql.NullString
+	err := db.QueryRow("SELECT first_seen,last_seen FROM actor_ips WHERE actor_id=? AND ip=?", actorID, ip).
+		Scan(&storedFirst, &storedLast)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = db.Exec("INSERT INTO actor_ips (actor_id, ip, first_seen, last_seen, count) VALUES (?, ?, ?, ?, ?)",
+			actorID, ip, formatFixedUTC(firstSeen), formatFixedUTC(lastSeen), count)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+
+	mergedFirst, mergedLast := firstSeen, lastSeen
+	if storedFirst.Valid && storedFirst.String != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, storedFirst.String)
+		if err != nil {
+			return fmt.Errorf("actor_ips %s/%s first_seen: %w", actorID, ip, err)
+		}
+		if parsed.Before(mergedFirst) {
+			mergedFirst = parsed
+		}
+	}
+	if storedLast.Valid && storedLast.String != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, storedLast.String)
+		if err != nil {
+			return fmt.Errorf("actor_ips %s/%s last_seen: %w", actorID, ip, err)
+		}
+		if parsed.After(mergedLast) {
+			mergedLast = parsed
+		}
+	}
+	_, err = db.Exec("UPDATE actor_ips SET first_seen=?,last_seen=?,count=? WHERE actor_id=? AND ip=?",
+		formatFixedUTC(mergedFirst), formatFixedUTC(mergedLast), count, actorID, ip)
 	return err
 }
+
+func formatFixedUTC(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
+// CanonicalEventTime is the exact text representation used by event writes and
+// identity probes. Keeping this single-site prevents append dedup from drifting
+// when the storage format changes.
+func CanonicalEventTime(t time.Time) string { return formatFixedUTC(t) }
 
 func upsertActorUser(db sqlExecer, actorID, user string, count int) error {
 	_, err := db.Exec(`
@@ -835,7 +972,7 @@ ON CONFLICT(actor_id, username) DO UPDATE SET count=excluded.count`,
 // actorColumns is the canonical SELECT list for an actors row. Kept in
 // one place so ListActors / GetActor / GetActorByPrimaryIP stay in sync
 // with scanActorRow below.
-const actorColumns = `id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags`
+const actorColumns = `id, source, primary_ip, playbook, intent, confidence, first_seen, last_seen, event_count, unique_users, attempts_per_hour, hassh, ssh_client, username_hash, campaigns, probe_score, notes, flags, generated_notes, (` + journalDerivedStateSQL + `)='current',` + journalDerivedStateSQL
 
 // rowScan is satisfied by both *sql.Row and *sql.Rows so the same
 // scan code can be used for single-row QueryRow and Query iteration.
@@ -851,9 +988,10 @@ type rowScan interface {
 // than silently zeroed (fix #13).
 func scanActorRow(r rowScan, a *models.Actor) error {
 	var fs, ls string
+	var derivedStatus string
 	if err := r.Scan(&a.ID, &a.Source, &a.PrimaryIP, &a.Playbook, &a.Intent, &a.Confidence,
 		&fs, &ls, &a.EventCount, &a.UniqueUsers, &a.AttemptsPerHour, &a.HASSH, &a.SSHClient,
-		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes, &a.Flags); err != nil {
+		&a.UsernameHash, &a.Campaigns, &a.ProbeScore, &a.Notes, &a.Flags, &a.GeneratedNotes, &a.DerivedCurrent, &derivedStatus); err != nil {
 		return err
 	}
 	var err error
@@ -862,6 +1000,14 @@ func scanActorRow(r rowScan, a *models.Actor) error {
 	}
 	if a.LastSeen, err = parseTime(ls); err != nil {
 		return fmt.Errorf("actor %s last_seen: %w", a.ID, err)
+	}
+	if a.Source == models.SourceJournal && !a.DerivedCurrent {
+		a.UsernameHash, a.Confidence, a.ProbeScore = "", 0, 0
+		if derivedStatus == "unknown_history" {
+			a.Playbook, a.GeneratedNotes = "unknown_history", "Historical username coverage is unverified"
+		} else {
+			a.Playbook, a.GeneratedNotes = "pending", "Journal profile derivation is pending"
+		}
 	}
 	return nil
 }
@@ -879,7 +1025,14 @@ func parseTime(s string) (time.Time, error) {
 // the rows. Shared by the three list variants below so a future actor-column
 // change stays single-site.
 func (s *Store) queryActors(q string, args ...any) ([]models.Actor, error) {
-	rows, err := s.db.Query(q, args...)
+	return s.queryActorsContext(context.Background(), q, args...)
+}
+
+// queryActorsContext is the cancellable counterpart to queryActors. Reporting
+// candidates can require scanning a large actor table; request/CLI shutdown
+// must be able to interrupt that read instead of waiting for the full query.
+func (s *Store) queryActorsContext(ctx context.Context, q string, args ...any) ([]models.Actor, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -955,6 +1108,11 @@ type ActorState struct {
 // 300k-event actor was 98.5% of lifetime allocations (13.8 TB, ~1.4 GC/sec).
 // Missing IDs are simply absent from the result (brand-new actors).
 func (s *Store) ActorStatesForIDs(ids []string) (map[string]*ActorState, error) {
+	return actorStatesForIDs(s.db, ids)
+}
+
+// The transaction form keeps reconciliation's reads and writes in one snapshot.
+func actorStatesForIDs(db sqlQueryer, ids []string) (map[string]*ActorState, error) {
 	out := make(map[string]*ActorState, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -967,7 +1125,7 @@ func (s *Store) ActorStatesForIDs(ids []string) (map[string]*ActorState, error) 
 	}
 	in := strings.Join(placeholders, ",")
 
-	rows, err := s.db.Query(`SELECT `+actorColumns+` FROM actors WHERE id IN (`+in+`)`, args...)
+	rows, err := db.Query(`SELECT `+actorColumns+` FROM actors WHERE id IN (`+in+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -986,7 +1144,7 @@ func (s *Store) ActorStatesForIDs(ids []string) (map[string]*ActorState, error) 
 		return out, nil
 	}
 
-	urows, err := s.db.Query(`SELECT actor_id, username, count FROM actor_users WHERE actor_id IN (`+in+`)`, args...)
+	urows, err := db.Query(`SELECT actor_id, username, count FROM actor_users WHERE actor_id IN (`+in+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1005,7 +1163,7 @@ func (s *Store) ActorStatesForIDs(ids []string) (map[string]*ActorState, error) 
 		return nil, err
 	}
 
-	iprows, err := s.db.Query(`SELECT actor_id, ip, first_seen, last_seen, count FROM actor_ips WHERE actor_id IN (`+in+`)`, args...)
+	iprows, err := db.Query(`SELECT actor_id, ip, first_seen, last_seen, count FROM actor_ips WHERE actor_id IN (`+in+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1109,7 +1267,7 @@ func (s *Store) ActorUsersLimit(id string, limit int) ([]models.ActorUser, error
 // rows use EventsSince or IterateEventsBySource instead.
 func (s *Store) RecentEvents(limit int) ([]models.Event, error) {
 	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, username, command, actor_id, raw FROM events ORDER BY ts DESC LIMIT ?`, limit)
+SELECT id, ts, source, kind, COALESCE(src_ip,''), COALESCE(username,''), COALESCE(command,''), COALESCE(actor_id,''), COALESCE(raw,'') FROM events ORDER BY ts DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1175,15 +1333,7 @@ func (s *Store) ActorCount() (int, error) {
 // if there are no events. Used by the Settings health strip to show how fresh
 // ingest is ("last event 3s ago" vs a stalled feed).
 func (s *Store) LatestEventTime() (time.Time, error) {
-	var ts sql.NullString
-	if err := s.db.QueryRow(`SELECT MAX(ts) FROM events`).Scan(&ts); err != nil {
-		return time.Time{}, err
-	}
-	if !ts.Valid || ts.String == "" {
-		return time.Time{}, nil
-	}
-	t, _ := parseTime(ts.String)
-	return t, nil
+	return latestEventTime(context.Background(), s.db)
 }
 
 // MaintenancePurge deletes rows older than retentionDays from the
@@ -1201,8 +1351,22 @@ func (s *Store) LatestEventTime() (time.Time, error) {
 // happens. Pre-create them here so the very first purge call
 // against a fresh DB is a clean no-op rather than an error.
 func (s *Store) MaintenancePurge(retentionDays int) error {
+	return s.MaintenancePurgeContext(context.Background(), retentionDays)
+}
+
+// MaintenancePurgeContext is MaintenancePurge that stops between bounded
+// steps when ctx is cancelled. The live daemon joins its purge worker before
+// closing the store, and a first purge of an aged DB takes minutes: without
+// this, `systemctl stop` waited past TimeoutStopSec and SIGKILLed the process
+// mid-purge, skipping the WAL checkpoint in Close. Every committed chunk is
+// complete on its own, so stopping between chunks leaves consistent state and
+// the next run resumes.
+func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) error {
 	if retentionDays <= 0 {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := s.EnsureEnrichmentTable(); err != nil {
 		return err
@@ -1226,79 +1390,50 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	if err := s.ensurePayloadIntelTable(); err != nil {
 		return err
 	}
-	cutoff := time.Now().AddDate(0, 0, -retentionDays).UTC().Format(time.RFC3339Nano)
+	cutoffTime := time.Now().AddDate(0, 0, -retentionDays).UTC()
+	// A corrupt event has no chronological meaning. Refuse retention before any
+	// table is mutated rather than letting text order delete or retain it by
+	// accident.
+	var badEventID int64
+	var badEventTS string
+	err := s.db.QueryRow(`SELECT id,ts FROM events WHERE ts_unix_ns IS NULL AND julianday(ts) IS NULL LIMIT 1`).
+		Scan(&badEventID, &badEventTS)
+	if err == nil {
+		return fmt.Errorf("event %d ts: invalid timestamp %q", badEventID, badEventTS)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 
-	// Reference-safe purge: collect files, delete expired rows, and determine
-	// which paths have zero remaining references — all under one continuous
-	// writeMu hold. Without this, a new artifact referencing the same local_path
-	// could be inserted between the file collection and the row deletion,
-	// causing us to unlink a file that is still live.
-	var artifactFiles []string
-	if err := func() error {
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
-		tx, err := s.db.Begin()
-		if err != nil {
+	if err := s.ensureFileCaptureTable(); err != nil {
+		return err
+	}
+	// Keep optional-cache validation ahead of artifact retention. Artifact
+	// cleanup itself uses bounded pages and an explicit filesystem policy.
+	cacheTargets := []struct{ table, column string }{
+		{"ip_enrichment", "fetched_at"},
+		{"cowrie_tty_index", "ts"},
+		{"cowrie_session_hassh", "observed_at"},
+		{"cowrie_session_meta", "observed_at"},
+		{"payload_intel", "fetched_at"},
+	}
+	// Malformed cache times stop retention before anything is mutated (fail
+	// closed), checked by SQLite itself outside the writer lock rather than by
+	// materializing every row in Go.
+	for _, target := range cacheTargets {
+		if err := checkTextTimeColumn(ctx, s.db, target.table, target.column); err != nil {
 			return err
 		}
-		defer tx.Rollback()
-
-		// Enrichment cache — column is fetched_at (see enrichment.go).
-		if _, err := tx.Exec(`DELETE FROM ip_enrichment WHERE fetched_at < ?`, cutoff); err != nil {
+	}
+	for _, target := range cacheTargets {
+		if err := s.purgeTextTimeRows(ctx, target.table, target.column, cutoffTime); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM cowrie_tty_index WHERE ts < ?`, cutoff); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM cowrie_session_hassh WHERE observed_at < ?`, cutoff); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM cowrie_session_meta WHERE observed_at < ?`, cutoff); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM payload_intel WHERE fetched_at < ?`, cutoff); err != nil {
-			return err
-		}
-
-		// Collect paths of artifacts we're about to delete, THEN delete the rows.
-		rows, err := tx.Query(
-			`SELECT local_path FROM artifacts WHERE COALESCE(ts, created_at) < ? AND local_path IS NOT NULL AND local_path != ''`,
-			cutoff)
-		if err != nil {
-			log.Printf("store: purge could not list artifact files (will orphan on disk): %v", err)
-		} else {
-			defer rows.Close()
-			for rows.Next() {
-				var p string
-				if err := rows.Scan(&p); err == nil && p != "" {
-					artifactFiles = append(artifactFiles, p)
-				}
-			}
-			_ = rows.Close()
-		}
-
-		if _, err := tx.Exec(`DELETE FROM artifacts WHERE COALESCE(ts, created_at) < ?`, cutoff); err != nil {
-			return err
-		}
-
-		// After deleting expired rows, check which paths are still referenced
-		// by remaining live artifacts. Only unlink zero-reference paths.
-		safeToUnlink := artifactFiles[:0]
-		for _, p := range artifactFiles {
-			var n int
-			if err := tx.QueryRow(
-				`SELECT COUNT(1) FROM artifacts WHERE local_path=?`, p).Scan(&n); err != nil {
-				// If we can't check, keep the file (safe default).
-				continue
-			}
-			if n == 0 {
-				safeToUnlink = append(safeToUnlink, p)
-			}
-		}
-		artifactFiles = safeToUnlink
-
-		return tx.Commit()
-	}(); err != nil {
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.purgeArtifacts(cutoffTime); err != nil {
 		return err
 	}
 
@@ -1308,23 +1443,65 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	// of an aged DB held writeMu for minutes, stalling the ingest tick, journal
 	// tail, and capture runner, and ballooned the WAL.
 	const purgeChunk = 5000
+	legacyCeiling := formatFixedUTC(cutoffTime.Add(15 * time.Hour))
+	var eventCursor int64
 	for {
-		var affected int64
-		if err := func() error {
-			s.writeMu.Lock()
-			defer s.writeMu.Unlock()
-			res, err := s.db.Exec(
-				`DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE ts < ? LIMIT ?)`,
-				cutoff, purgeChunk)
-			if err != nil {
-				return err
-			}
-			affected, _ = res.RowsAffected()
-			return nil
-		}(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if affected < purgeChunk {
+		rows, err := s.db.Query(`SELECT id,ts FROM events
+WHERE id>? AND (ts_unix_ns < ? OR (ts_unix_ns IS NULL AND ts < ?))
+ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeChunk)
+		if err != nil {
+			return err
+		}
+		var scanned int
+		var expiredEventIDs []int64
+		for rows.Next() {
+			var id int64
+			var ts string
+			if err := rows.Scan(&id, &ts); err != nil {
+				rows.Close()
+				return err
+			}
+			scanned++
+			eventCursor = id
+			parsed, err := time.Parse(time.RFC3339Nano, ts)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("event %d ts: %w", id, err)
+			}
+			if parsed.Before(cutoffTime) {
+				expiredEventIDs = append(expiredEventIDs, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(expiredEventIDs) > 0 {
+			if err := func() error {
+				s.captureMu.Lock()
+				defer s.captureMu.Unlock()
+				return s.WithTx(func(tx *sql.Tx) error {
+					ceiling, err := s.captureEventCeilingTx(tx)
+					if err != nil {
+						return err
+					}
+					eligible := expiredEventIDs[:0]
+					for _, id := range expiredEventIDs {
+						if id <= ceiling {
+							eligible = append(eligible, id)
+						}
+					}
+					return deleteRowsByID(tx, "events", eligible)
+				})
+			}(); err != nil {
+				return err
+			}
+		}
+		if scanned < purgeChunk {
 			break
 		}
 	}
@@ -1341,23 +1518,18 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	//   - last_seen < cutoff, so an actor the ingest tick created moments ago
 	//     (its events not yet visible to this transaction) is never raced away;
 	//   - no surviving events, an index probe on the (actor_id, ts) composite;
-	//   - no operator annotation, which means `campaigns` ONLY. `notes` looks
-	//     like the same kind of field but is machine-generated — actor.builder
-	//     rewrites it on every rebuild ("2 events, 0 usernames") — so every
-	//     actor on a live deployment carries one, and including it here made
-	//     the sweep a silent no-op (prod: 6,716 of 6,716 rows had a generated
-	//     note, so 0 of the 103 real orphans would have been removed).
+	//   - no operator annotation (see isOperatorNote: builder text left in the
+	//     legacy notes column before v23 is not one).
 	//
 	// Unlike events this is NOT chunked: actors is bounded by the number of
 	// distinct attacker identities (thousands, against a million events), so
 	// one transaction holds writeMu for a fraction of a single event chunk.
 	// The predicate is stable across the three statements because deleting the
 	// child rows cannot change which actors match it.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := func() error {
-		const orphanPredicate = `
-  last_seen < ?
-  AND COALESCE(campaigns, '') = ''
-  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor_id = actors.id)`
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
 		tx, err := s.db.Begin()
@@ -1365,17 +1537,50 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 			return err
 		}
 		defer tx.Rollback()
+		rows, err := tx.Query(`SELECT id,last_seen,COALESCE(notes,'') FROM actors
+WHERE COALESCE(campaigns,'')=''
+  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor_id=actors.id)`)
+		if err != nil {
+			return err
+		}
+		var orphanIDs []string
+		for rows.Next() {
+			var id, lastSeen, notes string
+			if err := rows.Scan(&id, &lastSeen, &notes); err != nil {
+				rows.Close()
+				return err
+			}
+			if isOperatorNote(notes) {
+				continue
+			}
+			parsed, err := time.Parse(time.RFC3339Nano, lastSeen)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("actor %s last_seen: %w", id, err)
+			}
+			if parsed.Before(cutoffTime) {
+				orphanIDs = append(orphanIDs, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
 		for _, child := range []string{"actor_ips", "actor_users"} {
-			if _, err := tx.Exec(`DELETE FROM `+child+
-				` WHERE actor_id IN (SELECT id FROM actors WHERE`+orphanPredicate+`)`, cutoff); err != nil {
+			if err := deleteStringRowsByKey(tx, child, "actor_id", orphanIDs); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec(`DELETE FROM actors WHERE`+orphanPredicate, cutoff); err != nil {
+		if err := deleteStringRowsByKey(tx, "actors", "id", orphanIDs); err != nil {
 			return err
 		}
 		return tx.Commit()
 	}(); err != nil {
+		return err
+	}
+
+	if err := s.purgeCaptureDiagnostics(cutoffTime); err != nil {
 		return err
 	}
 
@@ -1390,13 +1595,167 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 		_, _ = s.db.Exec(`PRAGMA optimize`)
 	}()
 
-	// Unlink the evidence files now that their rows are gone. Best-effort: an
-	// unremovable file is logged-by-omission (a later run / quota sweep retries)
-	// rather than failing the purge. The ".txt" sibling is the rendered TTY
-	// transcript written next to the raw capture.
-	for _, p := range artifactFiles {
-		_ = os.Remove(p)
-		_ = os.Remove(p + ".txt")
+	return nil
+}
+
+func deleteRowsByID(tx *sql.Tx, table string, ids []int64) error {
+	if table != "events" && table != "artifacts" {
+		return fmt.Errorf("unsupported purge table %q", table)
+	}
+	const chunk = 400
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
+		args := make([]any, 0, end-start)
+		for _, id := range ids[start:end] {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec("DELETE FROM "+table+" WHERE id IN ("+placeholders+")", args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validTextTimeTarget(table, column string) error {
+	valid := (table == "ip_enrichment" && column == "fetched_at") ||
+		(table == "cowrie_tty_index" && column == "ts") ||
+		((table == "cowrie_session_hassh" || table == "cowrie_session_meta") && column == "observed_at") ||
+		(table == "payload_intel" && column == "fetched_at")
+	if !valid {
+		return fmt.Errorf("unsupported retention timestamp %s.%s", table, column)
+	}
+	return nil
+}
+
+// checkTextTimeColumn fails closed on the first cache row whose time SQLite
+// cannot interpret, before retention mutates anything.
+func checkTextTimeColumn(ctx context.Context, db *sql.DB, table, column string) error {
+	if err := validTextTimeTarget(table, column); err != nil {
+		return err
+	}
+	var rowID int64
+	var text string
+	err := db.QueryRowContext(ctx, "SELECT rowid,"+column+" FROM "+table+" WHERE julianday("+column+") IS NULL LIMIT 1").Scan(&rowID, &text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%s row %d %s: invalid timestamp %q", table, rowID, column, text)
+}
+
+// purgeTextTimeRows deletes expired cache rows in bounded chunks, each in its
+// own transaction, releasing captureMu/writeMu between chunks exactly like the
+// events purge. It used to read the WHOLE table and parse every timestamp in
+// Go inside one transaction holding both locks, stalling ingest for the entire
+// scan on a large DB. Only text below cutoff+15h can be expired under any UTC
+// offset (RFC3339 text orders by local time, and offsets are at most 14h), so
+// fresh rows are never materialized; candidates are parsed exactly.
+func (s *Store) purgeTextTimeRows(ctx context.Context, table, column string, cutoff time.Time) error {
+	if err := validTextTimeTarget(table, column); err != nil {
+		return err
+	}
+	const chunk = 5000
+	ceiling := formatFixedUTC(cutoff.Add(15 * time.Hour))
+	var cursor int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		scanned := 0
+		err := func() error {
+			s.captureMu.Lock()
+			defer s.captureMu.Unlock()
+			return s.WithTx(func(tx *sql.Tx) error {
+				rows, err := tx.Query("SELECT rowid,"+column+" FROM "+table+" WHERE rowid>? AND "+column+"<? ORDER BY rowid LIMIT ?", cursor, ceiling, chunk)
+				if err != nil {
+					return err
+				}
+				var expired []int64
+				for rows.Next() {
+					var rowID int64
+					var text string
+					if err := rows.Scan(&rowID, &text); err != nil {
+						rows.Close()
+						return err
+					}
+					scanned++
+					cursor = rowID
+					parsed, err := time.Parse(time.RFC3339Nano, text)
+					if err != nil {
+						rows.Close()
+						return fmt.Errorf("%s row %d %s: %w", table, rowID, column, err)
+					}
+					if parsed.Before(cutoff) {
+						expired = append(expired, rowID)
+					}
+				}
+				if err := rows.Err(); err != nil {
+					rows.Close()
+					return err
+				}
+				rows.Close()
+				return deleteRowsByRowID(tx, table, expired)
+			})
+		}()
+		if err != nil {
+			return err
+		}
+		if scanned < chunk {
+			return nil
+		}
+	}
+}
+
+func deleteRowsByRowID(tx *sql.Tx, table string, ids []int64) error {
+	switch table {
+	case "ip_enrichment", "cowrie_tty_index", "cowrie_session_hassh", "cowrie_session_meta", "payload_intel":
+	default:
+		return fmt.Errorf("unsupported rowid purge table %q", table)
+	}
+	const chunk = 400
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
+		args := make([]any, 0, end-start)
+		for _, id := range ids[start:end] {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec("DELETE FROM "+table+" WHERE rowid IN ("+placeholders+")", args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteStringRowsByKey(tx *sql.Tx, table, column string, values []string) error {
+	valid := (table == "actors" && column == "id") ||
+		((table == "actor_ips" || table == "actor_users") && column == "actor_id")
+	if !valid {
+		return fmt.Errorf("unsupported purge target %s.%s", table, column)
+	}
+	const chunk = 400
+	for start := 0; start < len(values); start += chunk {
+		end := start + chunk
+		if end > len(values) {
+			end = len(values)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
+		args := make([]any, 0, end-start)
+		for _, value := range values[start:end] {
+			args = append(args, value)
+		}
+		if _, err := tx.Exec("DELETE FROM "+table+" WHERE "+column+" IN ("+placeholders+")", args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }

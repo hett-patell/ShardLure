@@ -2,8 +2,8 @@ package actor
 
 import (
 	"container/list"
+	"context"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -21,9 +21,8 @@ import (
 //     row durable, so evicting only loses the in-memory cache (it's
 //     reloaded on the next event for that IP).
 //   - liveMaxUsersPerIP caps the cardinality of the per-IP username
-//     map. Overflow names are collapsed into liveUserOverflowKey so
-//     the IP's distinct-user count keeps incrementing while we stop
-//     allocating new map entries. This protects against a single
+//     map. Omitted names increment only a scalar, never a synthetic
+//     username; durable state owns the exact corpus. This protects against a single
 //     scanner trying to exhaust memory with a million unique probed
 //     names.
 //   - liveIdleTTL is a defensive sweep ceiling: an IP not touched in
@@ -33,10 +32,9 @@ import (
 //     stay pinned until the LRU rolls over (which could be days on
 //     a quiet honeypot).
 var (
-	liveMaxIPs          = 4096
-	liveMaxUsersPerIP   = 256
-	liveUserOverflowKey = "_overflow_"
-	liveIdleTTL         = 12 * time.Hour
+	liveMaxIPs        = 4096
+	liveMaxUsersPerIP = 256
+	liveIdleTTL       = 12 * time.Hour
 )
 
 // liveCollector is a process-wide bounded journal aggregator. State
@@ -48,7 +46,7 @@ var (
 // The DB is the source of truth: every collector mutation is followed
 // by AppendJournalEventAtomic, and a rejected append invalidates the
 // mutated entry. When an entry is evicted, the row stays authoritative;
-// on the IP's next event we re-hydrate from store.LoadJournalIPStats so
+// on the IP's next event we re-hydrate counters from store.LoadJournalCounters so
 // the next atomic append writes the true running totals instead of
 // clobbering them with a small post-evict count.
 //
@@ -136,10 +134,9 @@ func adminSetsEqual(a, b *netmatch.Set) bool {
 // its actor roll-up in the same transaction. It owns canonical ActorID
 // stamping for attack events; callers must not insert the event first.
 //
-// Steady-state cost: O(U log U) where U is the unique-username count
-// for this IP. On an evicted-then-returning IP, plus two indexed
-// SELECTs to re-hydrate the composite actor/IP counters and the
-// actor's users. Bounded RSS in either case.
+// Steady-state work is counter-only. Hydration uses one indexed scalar read,
+// never an attacker-sized username map. Store transactions own exact counters;
+// the resident collector is a bounded diagnostic cache, not derived evidence.
 func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) (inserted bool, err error) {
 	if e == nil {
 		return false, nil
@@ -168,7 +165,7 @@ func SyncJournalEvent(st *store.Store, e *models.Event, admin *netmatch.Set) (in
 	// or after eviction. Done outside c.mu to avoid holding the
 	// collector lock across the SELECTs.
 	if !c.has(e.SrcIP) {
-		stored, err := st.LoadJournalIPStats(JournalActorID(e.SrcIP), e.SrcIP)
+		stored, err := st.LoadJournalCounters(context.Background(), JournalActorID(e.SrcIP), e.SrcIP)
 		if err != nil {
 			return false, fmt.Errorf("hydrate journal ip stats: %w", err)
 		}
@@ -221,7 +218,7 @@ func (c *liveJournalCollector) invalidate(ip string) {
 // entry already exists (a concurrent caller raced us), the existing
 // values win — they were just hydrated too and any subsequent add()
 // from the racing event will roll forward correctly.
-func (c *liveJournalCollector) hydrate(ip string, stored store.JournalIPStats) {
+func (c *liveJournalCollector) hydrate(ip string, stored store.JournalCounters) {
 	if c.admin.Has(ip) {
 		return
 	}
@@ -230,18 +227,9 @@ func (c *liveJournalCollector) hydrate(ip string, stored store.JournalIPStats) {
 	if _, exists := c.byIP[ip]; exists {
 		return
 	}
-	users := stored.UserCounts
-	if users == nil {
-		users = map[string]int{}
-	}
-	// Cap on hydration to honor the maxUsers invariant. We can't
-	// recover the exact mapping from before the cap, so we keep the
-	// top-N by count and put the rest in overflow. Sort by count
-	// descending; pick a deterministic tie-breaker so the snapshot
-	// is reproducible.
-	if len(users) > c.maxUsers {
-		users = capUsersMap(users, c.maxUsers)
-	}
+	// Never load the entire durable username corpus just to trim it. This
+	// small map is a disposable cache; derivation pages actor_users separately.
+	users := map[string]int{}
 	now := c.now()
 	ent := &liveIPEntry{
 		stats: IPStats{
@@ -294,22 +282,19 @@ func (c *liveJournalCollector) addAndFinalize(e *models.Event) (*models.Actor, I
 	}
 	userCount := 0
 	if e.Username != "" && e.Username != "?" {
-		// After bumpUserLocked the map either holds the real key or
-		// has rolled it into the overflow bucket. Either way the
-		// stored value is the count we want to upsert.
+		// This diagnostic count is never persisted as an absolute counter.
 		if v, ok := ent.stats.Users[e.Username]; ok {
 			userCount = v
-		} else {
-			userCount = ent.stats.Users[liveUserOverflowKey]
 		}
 	}
-	a := journalActor(e.SrcIP, &ent.stats)
+	a := &models.Actor{ID: JournalActorID(e.SrcIP), Source: models.SourceJournal, PrimaryIP: e.SrcIP,
+		EventCount: ent.stats.Count, FirstSeen: ent.stats.First, LastSeen: ent.stats.Last}
 	ipStat := IPStat{Count: ent.stats.Count, First: ent.stats.First, Last: ent.stats.Last}
 	return a, ipStat, userCount
 }
 
-// bumpUserLocked increments the per-IP username counter, rolling
-// new usernames into the overflow bucket once the per-IP map is at
+// bumpUserLocked increments the per-IP username cache, counting omitted
+// names separately once the per-IP map is at
 // capacity. Existing usernames always continue to increment.
 func (c *liveJournalCollector) bumpUserLocked(st *IPStats, u string) {
 	if _, ok := st.Users[u]; ok {
@@ -317,7 +302,7 @@ func (c *liveJournalCollector) bumpUserLocked(st *IPStats, u string) {
 		return
 	}
 	if len(st.Users) >= c.maxUsers {
-		st.Users[liveUserOverflowKey]++
+		st.omitted++
 		return
 	}
 	st.Users[u] = 1
@@ -354,45 +339,4 @@ func (c *liveJournalCollector) dropOldestLocked() {
 	ip := e.Value.(string)
 	c.lru.Remove(e)
 	delete(c.byIP, ip)
-}
-
-// capUsersMap returns a new map containing the top-n entries of in
-// (by count, ties broken by lexical key) plus an overflow bucket
-// holding the summed counts of the dropped entries. Used during
-// hydration when the persisted user count exceeds the per-IP cap.
-func capUsersMap(in map[string]int, n int) map[string]int {
-	if n <= 0 || len(in) <= n {
-		out := make(map[string]int, len(in))
-		for k, v := range in {
-			out[k] = v
-		}
-		return out
-	}
-	type kv struct {
-		k string
-		v int
-	}
-	all := make([]kv, 0, len(in))
-	for k, v := range in {
-		all = append(all, kv{k, v})
-	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].v != all[j].v {
-			return all[i].v > all[j].v
-		}
-		return all[i].k < all[j].k
-	})
-	out := make(map[string]int, n+1)
-	overflow := 0
-	for i, e := range all {
-		if i < n {
-			out[e.k] = e.v
-		} else {
-			overflow += e.v
-		}
-	}
-	if overflow > 0 {
-		out[liveUserOverflowKey] = overflow
-	}
-	return out
 }

@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -98,9 +99,9 @@ type SemanticError struct {
 func (e *SemanticError) Error() string {
 	status := e.Status
 	if status == "" {
-		status = "<empty>"
+		status = "invalid_response"
 	}
-	return fmt.Sprintf("bazaar: upload rejected with query_status %q", status)
+	return "bazaar: upload rejected with query_status " + status
 }
 
 func (e *SemanticError) Fatal() bool {
@@ -123,7 +124,15 @@ func (r Result) IsAccepted() bool {
 //
 // authKey is the abuse.ch Auth-Key. Passing an empty string is a
 // caller bug: returns an error before any network IO.
-func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha256 string, sub Submission) (*Result, error) {
+func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha256 string, sub Submission) (result *Result, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.MalwareBazaar, observability.Upload)
+	defer func() {
+		if result != nil && !result.IsAccepted() {
+			trace.Finish(resultErr, observability.Rejected)
+			return
+		}
+		trace.Finish(resultErr)
+	}()
 	if strings.TrimSpace(authKey) == "" {
 		return nil, errors.New("bazaar: missing Auth-Key")
 	}
@@ -169,45 +178,47 @@ func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha
 	jph["Content-Type"] = []string{"application/json"}
 	jpw, err := w.CreatePart(jph)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("bazaar: create metadata part failed")
 	}
 	if _, err := jpw.Write(jb); err != nil {
-		return nil, err
+		return nil, errors.New("bazaar: write metadata part failed")
 	}
 	// File part.
 	fpw, err := w.CreateFormFile("file", sub.Filename)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("bazaar: create file part failed")
 	}
 	if _, err := io.Copy(fpw, file); err != nil {
-		return nil, fmt.Errorf("copy file part: %w", err)
+		return nil, intelutil.SafeRequestError("bazaar", "read sample", err)
 	}
 	if err := w.Close(); err != nil {
-		return nil, err
+		return nil, errors.New("bazaar: close upload body failed")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, body)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("bazaar: invalid upload endpoint")
 	}
 	req.Header.Set("Auth-Key", authKey)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
-		return nil, fmt.Errorf("post: %w", err)
+		return nil, intelutil.SafeRequestError("bazaar", "post", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := intelutil.ReadBoundedResponse("bazaar", resp.Body, 1<<20)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, err
 	}
 	// abuse.ch returns 200 for both success AND most semantic errors
 	// (no_api_key, file_expected); the actual outcome lives in the
 	// JSON body's query_status. A non-2xx is always a transport-level
 	// failure worth surfacing.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("upload: http %d: %s", resp.StatusCode, truncateForError(raw))
+		return nil, fmt.Errorf("bazaar: upload returned HTTP %d", resp.StatusCode)
 	}
 
 	// Response shape: {"query_status": "...", "data": {...}}
@@ -215,9 +226,10 @@ func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha
 		QueryStatus string `json:"query_status"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("parse response: %w; body=%q", err, truncateForError(raw))
+		return nil, errors.New("bazaar: invalid upload response")
 	}
-	r := &Result{Status: parsed.QueryStatus}
+	status := safeSemanticStatus(parsed.QueryStatus)
+	r := &Result{Status: status}
 	if r.IsAccepted() && sha256 != "" {
 		r.SampleURL = "https://bazaar.abuse.ch/sample/" + sha256 + "/"
 	}
@@ -233,10 +245,15 @@ func (c *Client) Upload(ctx context.Context, authKey string, file io.Reader, sha
 // copied per destination.
 func sanitiseTags(in []string) []string { return intelutil.SanitiseAbuseChTags(in) }
 
-func truncateForError(b []byte) string {
-	const max = 400
-	if len(b) <= max {
-		return string(b)
+func safeSemanticStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "inserted", "file_already_known", "no_api_key", "user_blacklisted",
+		"http_post_expected", "file_expected", "file_too_large", "file_type_not_allowed":
+		return status
+	case "":
+		return "invalid_response"
+	default:
+		return "unknown"
 	}
-	return string(b[:max]) + "...(truncated)"
 }

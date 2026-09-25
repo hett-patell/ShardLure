@@ -22,27 +22,18 @@ type WindowActivity struct {
 
 // WindowActivitySince aggregates the window in ONE pass.
 //
-// Every field is a conditional SUM over the same `ts >= ?` restriction, so the
-// planner uses the ts index once rather than once per metric. Measured at 16ms
-// for a 24h window on a 670k-row database, which is why this is safe to put
-// behind the 5s poll path (cached above, but cheap even cold).
-//
-// `since` is formatted with the same RFC3339Nano layout the ts column stores.
-// Do not switch this to SQLite's datetime(): that renders a SPACE between date
-// and time while ts uses 'T', and since these are TEXT comparisons the mismatch
-// silently shifts the window boundary by up to a day.
+// The native branch retains its timestamp index; only legacy rows need parsing.
+// Every metric uses the same exact window, without retaining event bodies in Go.
 func (s *Store) WindowActivitySince(since time.Time) (WindowActivity, error) {
 	out := WindowActivity{Since: since}
-	row := s.db.QueryRow(`
+	window, args := eventTimeBranches("src_ip,kind", &since, "", nil)
+	row := s.db.QueryRow("WITH activity_events AS ("+window+") "+`
 		SELECT COUNT(*),
 		       COUNT(DISTINCT src_ip),
 		       SUM(CASE WHEN kind = 'accepted' THEN 1 ELSE 0 END),
 		       SUM(CASE WHEN kind = 'command' THEN 1 ELSE 0 END),
 		       SUM(CASE WHEN kind IN ('file_download','file_upload') THEN 1 ELSE 0 END)
-		FROM events
-		WHERE ts >= ?`,
-		since.UTC().Format(time.RFC3339Nano),
-	)
+		FROM activity_events`, args...)
 	// The SUMs are NULL when the window is empty, so they are scanned as
 	// nullable and defaulted rather than failing the whole gauge on a quiet box.
 	var accepted, commands, downloads *int

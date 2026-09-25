@@ -131,7 +131,7 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := newCommandContext(context.Background())
 	defer cancel()
 
 	submitted, skipped, ferr := urlhaus.Share(ctx, st, cands, opts)

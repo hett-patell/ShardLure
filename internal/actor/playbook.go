@@ -56,49 +56,63 @@ const (
 
 // ClassifyPlaybook returns a playbook tag from observed usernames and rate.
 func ClassifyPlaybook(usernames []string, attemptsPerHour float64) string {
-	if len(usernames) == 0 {
+	var features playbookFeatures
+	for _, user := range usernames {
+		features.add(user)
+	}
+	return features.classify(attemptsPerHour)
+}
+
+// playbookFeatures holds exact username-corpus signals in constant space.
+// Callers add each distinct username once, preserving case-sensitive identity
+// while matching the same case-insensitive heuristics as ClassifyPlaybook.
+type playbookFeatures struct {
+	users, cn, svc, crypto, admin, k8s int
+}
+
+func (f *playbookFeatures) add(user string) {
+	f.users++
+	lu := strings.ToLower(user)
+	if serviceUsers[lu] {
+		f.svc++
+	}
+	if cryptoUsers[lu] {
+		f.crypto++
+	}
+	if lu == "admin" || lu == "root" || lu == "user" || lu == "test" {
+		f.admin++
+	}
+	if strings.Contains(lu, "k8s") || lu == "deploy" || lu == "ci" {
+		f.k8s++
+	}
+	if reCNName.MatchString(lu) || len(lu) >= 4 && isMostlyLowerAlpha(lu) {
+		f.cn++
+	}
+}
+
+func (f playbookFeatures) classify(attemptsPerHour float64) string {
+	if f.users == 0 {
 		return "unknown"
 	}
-
-	cn, svc, crypto, admin, k8s := 0, 0, 0, 0, 0
-	for _, u := range usernames {
-		lu := strings.ToLower(u)
-		if serviceUsers[lu] {
-			svc++
-		}
-		if cryptoUsers[lu] {
-			crypto++
-		}
-		if lu == "admin" || lu == "root" || lu == "user" || lu == "test" {
-			admin++
-		}
-		if strings.Contains(lu, "k8s") || lu == "deploy" || lu == "ci" {
-			k8s++
-		}
-		if reCNName.MatchString(lu) || len(lu) >= 4 && isMostlyLowerAlpha(lu) {
-			cn++
-		}
-	}
-
-	n := float64(len(usernames))
-	if attemptsPerHour >= playbookFastSprayAPH && float64(cn)/n > playbookCNRatioThreshold {
+	n := float64(f.users)
+	if attemptsPerHour >= playbookFastSprayAPH && float64(f.cn)/n > playbookCNRatioThreshold {
 		return "fast_dictionary_spray"
 	}
-	if svc >= 2 && attemptsPerHour < playbookServiceAccountMaxAPH {
+	if f.svc >= 2 && attemptsPerHour < playbookServiceAccountMaxAPH {
 		return "service_account_enum"
 	}
 	// Avoid over-classifying large sprays as crypto campaigns when
 	// they only include one incidental "sol/solana" username.
-	if crypto >= 2 || (crypto >= 1 && float64(crypto)/n >= playbookCryptoRatioThreshold) {
+	if f.crypto >= 2 || (f.crypto >= 1 && float64(f.crypto)/n >= playbookCryptoRatioThreshold) {
 		return "crypto_target"
 	}
 	// Two or more k8s/deploy/ci-flavoured usernames signal someone
 	// hunting CI/CD or container ops accounts rather than blasting
 	// stock credentials.
-	if k8s >= playbookOpsMinHits {
+	if f.k8s >= playbookOpsMinHits {
 		return "ops_target"
 	}
-	if admin >= 2 && attemptsPerHour >= playbookDefaultCredAPH {
+	if f.admin >= 2 && attemptsPerHour >= playbookDefaultCredAPH {
 		return "default_credential_spray"
 	}
 	if attemptsPerHour >= playbookDictionarySprayAPH {
@@ -119,11 +133,15 @@ func ClassifyPlaybook(usernames []string, attemptsPerHour float64) string {
 // signal-to-noise). The handshake-scan label is applied only when there is
 // genuinely nothing else — no auth attempt, no command, no payload, no tunnel.
 func ClassifyCowriePlaybook(usernames []string, attemptsPerHour float64, sshClient string, hasAuth, hasCommand, hasTunnel, hasPayload bool) string {
+	return cowriePlaybook(ClassifyPlaybook(usernames, attemptsPerHour), sshClient, hasAuth, hasCommand, hasTunnel, hasPayload)
+}
+
+func cowriePlaybook(corpusPlaybook, sshClient string, hasAuth, hasCommand, hasTunnel, hasPayload bool) string {
 	// A real auth attempt or any post-login action means the actor is doing
 	// more than scanning — defer to the username-corpus classifier, which has
 	// the richer signal for those.
 	if hasAuth || hasCommand || hasTunnel || hasPayload {
-		return ClassifyPlaybook(usernames, attemptsPerHour)
+		return corpusPlaybook
 	}
 
 	// Handshake-only. The client banner is the durable fingerprint of the

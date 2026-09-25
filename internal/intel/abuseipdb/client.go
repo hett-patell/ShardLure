@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/networkshard/shardlure/internal/observability"
 	"io"
 	"net/http"
 	"net/url"
@@ -73,7 +74,9 @@ type Result struct {
 // is a caller bug (returns an error before any network IO). A 429 is returned
 // as (Result{RateLimited:true}, nil) — an expected operational state, not an
 // error; any other non-2xx is an error.
-func (c *Client) Submit(ctx context.Context, authKey string, rep Submission) (*Result, error) {
+func (c *Client) Submit(ctx context.Context, authKey string, rep Submission) (result *Result, resultErr error) {
+	ctx, trace := observability.TraceRequest(ctx, observability.AbuseIPDB, observability.Submit)
+	defer func() { ; trace.Finish(resultErr) }()
 	if strings.TrimSpace(authKey) == "" {
 		return nil, errors.New("abuseipdb: missing API key")
 	}
@@ -96,20 +99,22 @@ func (c *Client) Submit(ctx context.Context, authKey string, rep Submission) (*R
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, errors.New("abuseipdb: invalid report endpoint")
 	}
 	req.Header.Set("Key", authKey)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
+	observability.StartHTTP(ctx)
 	resp, err := c.hc.Do(req)
+	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
-		return nil, fmt.Errorf("post: %w", err)
+		return nil, safeRequestError("post", err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, safeRequestError("read response", err)
 	}
 
 	// 429 = daily report limit reached. Surface as a clean signal so the
@@ -118,19 +123,42 @@ func (c *Client) Submit(ctx context.Context, authKey string, rep Submission) (*R
 		return &Result{RateLimited: true}, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("report: http %d: %s", resp.StatusCode, truncateForError(raw))
+		return nil, fmt.Errorf("abuseipdb: report returned HTTP %d", resp.StatusCode)
 	}
 
 	// Success shape: {"data": {"ipAddress": "...", "abuseConfidenceScore": N}}
 	var parsed struct {
-		Data struct {
-			AbuseConfidenceScore int `json:"abuseConfidenceScore"`
+		Data *struct {
+			AbuseConfidenceScore *int `json:"abuseConfidenceScore"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("parse response: %w; body=%q", err, truncateForError(raw))
+		return nil, errors.New("abuseipdb: invalid report response")
 	}
-	return &Result{Score: parsed.Data.AbuseConfidenceScore}, nil
+	if parsed.Data == nil || parsed.Data.AbuseConfidenceScore == nil {
+		return nil, errors.New("abuseipdb: report response has no abuse confidence score")
+	}
+	score := *parsed.Data.AbuseConfidenceScore
+	if score < 0 || score > 100 {
+		return nil, errors.New("abuseipdb: report response has invalid abuse confidence score")
+	}
+	return &Result{Score: score}, nil
+}
+
+// safeRequestError intentionally discards transport diagnostics. http.Client
+// errors commonly include the complete request URL, and this endpoint may be
+// configured with a query parameter containing a credential in tests or by a
+// proxy. Preserve only cancellation identity so callers can still distinguish
+// shutdown from an ordinary provider failure.
+func safeRequestError(op string, err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("abuseipdb: %s: %w", op, context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("abuseipdb: %s: %w", op, context.DeadlineExceeded)
+	default:
+		return fmt.Errorf("abuseipdb: %s failed", op)
+	}
 }
 
 func joinInts(in []int) string {
@@ -139,12 +167,4 @@ func joinInts(in []int) string {
 		parts = append(parts, strconv.Itoa(n))
 	}
 	return strings.Join(parts, ",")
-}
-
-func truncateForError(b []byte) string {
-	const max = 400
-	if len(b) <= max {
-		return string(b)
-	}
-	return string(b[:max]) + "...(truncated)"
 }

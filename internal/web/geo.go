@@ -2,7 +2,9 @@ package web
 
 import (
 	"container/list"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/observability"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 )
@@ -47,6 +50,7 @@ type geoEntry struct {
 }
 
 type geoResolver struct {
+	monitor  *observability.Monitor
 	mu       sync.Mutex
 	cache    map[string]*geoEntry
 	lru      *list.List // front = most recent insert/touch
@@ -360,30 +364,31 @@ func (g *geoResolver) prefetch(ips []string, budget time.Duration) {
 		releaseClaims(need[48:])
 		need = need[:48]
 	}
-	deadline := time.Now().Add(budget)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 	var wg sync.WaitGroup
 	for i, ip := range need {
-		if time.Now().After(deadline) {
+		if ctx.Err() != nil {
 			releaseClaims(need[i:])
 			break
 		}
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
-			g.fetch(ip)
+			g.fetch(ctx, ip)
 		}(ip)
 	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(budget):
-	}
+	wg.Wait()
 }
 
-func (g *geoResolver) fetch(ip string) {
+func (g *geoResolver) fetch(ctx context.Context, ip string) {
 	select {
 	case g.sem <- struct{}{}:
+	case <-ctx.Done():
+		g.mu.Lock()
+		delete(g.inflight, ip)
+		g.mu.Unlock()
+		return
 	default:
 		g.mu.Lock()
 		delete(g.inflight, ip)
@@ -426,15 +431,41 @@ func (g *geoResolver) fetch(ip string) {
 		g.mu.Unlock()
 		return
 	}
-	resp, err := g.http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		g.mu.Lock()
 		delete(g.inflight, ip)
-		g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Minute)})
+		g.mu.Unlock()
+		return
+	}
+	ctx, trace := observability.TraceRequest(observability.WithMonitor(ctx, g.monitor), observability.IPAPI, observability.IPLookup)
+	req = req.WithContext(ctx)
+	outcome := observability.InvalidResponse
+	var requestErr error
+	defer func() {
+		if requestErr != nil {
+			trace.Finish(requestErr)
+		} else {
+			trace.Finish(nil, outcome)
+		}
+	}()
+	observability.StartHTTP(ctx)
+	resp, err := g.http.Do(req)
+	observability.HTTPResult(ctx, resp, err)
+	if err != nil {
+		requestErr = err
+		g.mu.Lock()
+		delete(g.inflight, ip)
+		if ctx.Err() == nil {
+			g.putLocked(ip, geoEntry{Expiry: g.now().Add(30 * time.Minute)})
+		}
 		g.mu.Unlock()
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		requestErr = errors.New("geo request rejected")
+	}
 
 	var out struct {
 		Status  string  `json:"status"`
@@ -462,6 +493,11 @@ func (g *geoResolver) fetch(ip string) {
 		Country: out.Country,
 		City:    out.City,
 		CC:      out.CC,
+	}
+	if ent.OK {
+		outcome = observability.Success
+	} else {
+		outcome = observability.Rejected
 	}
 	if ent.OK {
 		ent.Expiry = g.now().Add(24 * time.Hour)

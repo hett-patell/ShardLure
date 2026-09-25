@@ -1,10 +1,62 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"time"
 
 	"github.com/networkshard/shardlure/pkg/models"
 )
+
+const eventWindowColumns = `id, ts, source, kind, COALESCE(src_ip,''), COALESCE(src_port,0), COALESCE(username,''), COALESCE(password,''), COALESCE(session_id,''), COALESCE(hassh,''), COALESCE(ssh_client,''), COALESCE(command,''), COALESCE(sha256,''), COALESCE(filename,''), COALESCE(dst_ip,''), COALESCE(dst_port,0), COALESCE(actor_id,'')`
+
+func readWindowEvents(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, since time.Time, limit int) ([]*models.Event, error) {
+	query, args := orderedEventQuery(eventWindowColumns, &since, "", nil, true, limit)
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	var out []*models.Event
+	err = iterateOrderedEventRows(rows, false, func(e *models.Event) error { out = append(out, e); return nil })
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) collectEventsSince(since time.Time, limit int) ([]*models.Event, int, error) {
+	// Count and page share a read snapshot even when ingest/backfill is active.
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
+	query, args := eventWindowCountQuery(since)
+	var total int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	events, err := readWindowEvents(ctx, tx, since, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, 0, err
+	}
+	return events, total, nil
+}
+
+func (s *Store) iterateEventsSinceExactContext(ctx context.Context, since time.Time, descending bool, fn func(*models.Event) error) error {
+	query, args := orderedEventQuery(eventWindowColumns, &since, "", nil, descending, 0)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	return iterateOrderedEventRows(rows, false, fn)
+}
 
 // EventsSince returns events with TS >= since. Includes all columns the
 // classifier and exporters need (kind, command, src_ip, actor_id,
@@ -23,29 +75,7 @@ func (s *Store) EventsSince(since time.Time, limit int) ([]*models.Event, error)
 	if limit <= 0 {
 		limit = 5000
 	}
-	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, actor_id
-FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
-		since.UTC().Format(time.RFC3339Nano), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*models.Event
-	for rows.Next() {
-		e := &models.Event{}
-		var ts, source, kind string
-		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
-			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.Command,
-			&e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.ActorID); err != nil {
-			return nil, err
-		}
-		e.TS, _ = parseTime(ts)
-		e.Source = models.Source(source)
-		e.Kind = models.EventKind(kind)
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return readWindowEvents(context.Background(), s.db, since, limit)
 }
 
 // IterateEventsSince streams every event with TS >= since (no row cap), in
@@ -55,30 +85,13 @@ FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?`,
 // buffering the whole result set in memory, so MITRE/TTP/IOC/graph/deobf can
 // classify the entire window on a small VPS. fn must not retain e across calls.
 func (s *Store) IterateEventsSince(since time.Time, fn func(*models.Event) error) error {
-	rows, err := s.db.Query(`
-SELECT id, ts, source, kind, src_ip, src_port, username, password, session_id, hassh, ssh_client, command, sha256, filename, COALESCE(dst_ip,'') AS dst_ip, dst_port, actor_id
-FROM events WHERE ts >= ? ORDER BY ts ASC`,
-		since.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		e := &models.Event{}
-		var ts, source, kind string
-		if err := rows.Scan(&e.ID, &ts, &source, &kind, &e.SrcIP, &e.SrcPort, &e.Username,
-			&e.Password, &e.SessionID, &e.HASSH, &e.SSHClient, &e.Command,
-			&e.SHA256, &e.Filename, &e.DstIP, &e.DstPort, &e.ActorID); err != nil {
-			return err
-		}
-		e.TS, _ = parseTime(ts)
-		e.Source = models.Source(source)
-		e.Kind = models.EventKind(kind)
-		if err := fn(e); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+	return s.IterateEventsSinceContext(context.Background(), since, fn)
+}
+
+// IterateEventsSinceContext is the cancellable form used by report and web
+// paths whose callers may disconnect during a large legacy window scan.
+func (s *Store) IterateEventsSinceContext(ctx context.Context, since time.Time, fn func(*models.Event) error) error {
+	return s.iterateEventsSinceExactContext(ctx, since, false, fn)
 }
 
 // EventsSinceAll returns every event in the window (full window, no silent
@@ -107,19 +120,14 @@ func (s *Store) EventsSinceAll(since time.Time) ([]*models.Event, error) {
 // window size so callers can disclose "analyzed N of M" instead of quietly
 // classifying a fraction. limit<=0 uses defaultWindowEventCap.
 //
-// The events are returned newest-first (ts DESC LIMIT), matching what a capped
-// view should show — the most recent activity — while total comes from a cheap
-// COUNT that rides idx_events_ts.
+// Indexed migrated rows and exactly parsed legacy rows are merged newest-first
+// before SQL LIMIT. A separate scalar count in the same snapshot reports the
+// full window size without decoding discarded event bodies.
 func (s *Store) EventsSinceCapped(since time.Time, limit int) (events []*models.Event, total int, err error) {
 	if limit <= 0 {
 		limit = defaultWindowEventCap
 	}
-	sinceStr := since.UTC().Format(time.RFC3339Nano)
-	if err = s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE ts >= ?`, sinceStr).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	events, err = s.EventsSince(since, limit)
-	return events, total, err
+	return s.collectEventsSince(since, limit)
 }
 
 // defaultWindowEventCap bounds the events any single windowed-analytics fetch

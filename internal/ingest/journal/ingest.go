@@ -2,13 +2,12 @@ package journal
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
-	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -75,11 +74,20 @@ func looksLikeSSHD(line string) bool {
 }
 
 func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
+	return persistJournalEventsContext(context.Background(), st, events, adminIPs, replace)
+}
+func persistJournalEventsContext(ctx context.Context, st *store.Store, events []*models.Event, adminIPs []string, replace bool) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	admin := actor.AdminSet(adminIPs)
 	skippedAdmin := 0
 	stored := make([]*models.Event, 0, len(events))
 	attack := make([]*models.Event, 0, len(events))
 	for _, e := range events {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if e.Kind == models.KindAccepted && admin.Has(e.SrcIP) {
 			skippedAdmin++
 			continue
@@ -95,9 +103,11 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 	actor.AssignJournalActorIDs(attack, admin)
 
 	var aggActors []*models.AggregatedActor
+	actorCount := 0
 	var duplicates int
 	if replace {
 		aggActors = actor.BuildFromJournalAggregated(attack, admin)
+		actorCount = len(aggActors)
 		if err := st.ReplaceSourceEventsAndActorsAgg(models.SourceJournal, stored, aggActors); err != nil {
 			return nil, err
 		}
@@ -122,43 +132,32 @@ func persistJournalEvents(st *store.Store, events []*models.Event, adminIPs []st
 				Duplicates:   duplicates,
 			}, nil
 		}
-		// Rebuild actors by streaming persisted journal events + the
-		// fresh attack subset; never materializes the full event set.
-		aggActors, err = buildJournalActorsFromDB(st, freshAttackOnly(freshStored), admin)
-		if err != nil {
-			return nil, err
+		// Lifetime state may outlive retained events. Fold only fresh rows into
+		// durable counters, under the same post-dedup transaction as live ingest.
+		// Each writer batch is bounded; retry safely deduplicates committed pages.
+		touched := map[string]struct{}{}
+		for start := 0; start < len(freshStored); start += 500 {
+			page := freshStored[start:min(start+500, len(freshStored))]
+			n, err := st.AppendJournalEventsAtomicContext(ctx, page)
+			if err != nil {
+				return nil, err
+			}
+			duplicates += len(page) - n
+			for _, e := range page {
+				if e.ActorID != "" && e.ID != 0 {
+					touched[e.ActorID] = struct{}{}
+				}
+			}
 		}
-		if err := st.AppendEventsAndReplaceActorsAgg(models.SourceJournal, freshStored, aggActors); err != nil {
-			return nil, err
-		}
+		actorCount = len(touched)
 	}
 
 	return &Result{
 		Events:       len(stored) - duplicates,
-		Actors:       len(aggActors),
+		Actors:       actorCount,
 		SkippedAdmin: skippedAdmin,
 		Duplicates:   duplicates,
 	}, nil
-}
-
-// buildJournalActorsFromDB streams persisted *attack* journal events past
-// the collector and folds in the fresh attack batch.
-func buildJournalActorsFromDB(st *store.Store, fresh []*models.Event, admin *netmatch.Set) ([]*models.AggregatedActor, error) {
-	jc := actor.NewJournalCollector(admin)
-	if err := st.IterateEventsBySource(models.SourceJournal, func(e *models.Event) error {
-		// Accepted/admin lines are stored but never form an actor.
-		if e.Kind == models.KindAccepted {
-			return nil
-		}
-		jc.Add(e)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	for _, e := range fresh {
-		jc.Add(e)
-	}
-	return jc.Finalize(), nil
 }
 
 // batchDedupJournal returns the subset of candidates that does NOT match an
@@ -177,7 +176,7 @@ func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.E
 	}
 	tsSet := make(map[string]struct{}, len(candidates))
 	for _, e := range candidates {
-		tsSet[e.TS.UTC().Format(time.RFC3339Nano)] = struct{}{}
+		tsSet[store.CanonicalEventTime(e.TS)] = struct{}{}
 	}
 	tsList := make([]string, 0, len(tsSet))
 	for t := range tsSet {
@@ -206,21 +205,11 @@ func batchDedupJournal(st *store.Store, candidates []*models.Event) ([]*models.E
 
 func identityForEvent(e *models.Event) store.EventIdentity {
 	return store.EventIdentity{
-		TS:       e.TS.UTC().Format(time.RFC3339Nano),
+		TS:       store.CanonicalEventTime(e.TS),
 		Kind:     e.Kind,
 		SrcIP:    e.SrcIP,
+		SrcPort:  e.SrcPort,
+		Raw:      e.Raw,
 		Username: e.Username,
-		Command:  e.Command,
 	}
-}
-
-func freshAttackOnly(events []*models.Event) []*models.Event {
-	out := make([]*models.Event, 0, len(events))
-	for _, e := range events {
-		if e.Kind == models.KindAccepted {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
 }

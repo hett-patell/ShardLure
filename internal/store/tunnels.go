@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -16,7 +17,7 @@ type TunnelTarget struct {
 	LastSeen     time.Time `json:"lastSeen"`
 }
 
-// tunnelTargetWhere is the row filter shared by TopTunnelTargets and
+// tunnelTargetWindow is the row filter shared by TopTunnelTargets and
 // CountTunnelTargetsSince. It lives in one place because the two must select
 // the SAME population: a count taken over different criteria than the page it
 // describes is worse than no count at all. Only kind='tunnel' events carry a
@@ -25,14 +26,13 @@ type TunnelTarget struct {
 // into a bogus ":0" bucket.
 //
 // A zero `since` means "all time".
-func tunnelTargetWhere(since time.Time) (string, []interface{}) {
-	where := `kind='tunnel' AND dst_ip IS NOT NULL AND dst_ip != ''`
-	var args []interface{}
+func tunnelTargetWindow(since time.Time) (string, []any) {
+	var cutoff *time.Time
 	if !since.IsZero() {
-		where += ` AND ts >= ?`
-		args = append(args, since.UTC().Format(time.RFC3339Nano))
+		cutoff = &since
 	}
-	return where, args
+	return globalEventTimeBranches("dst_ip,dst_port,actor_id", cutoff,
+		"kind='tunnel' AND dst_ip IS NOT NULL AND dst_ip != ''", nil)
 }
 
 // CountTunnelTargetsSince returns the TRUE number of distinct (dst_ip, dst_port)
@@ -45,12 +45,11 @@ func tunnelTargetWhere(since time.Time) (string, []interface{}) {
 // under-count a host probed on several ports, which is exactly the port-sweep
 // shape this widget exists to show.
 func (s *Store) CountTunnelTargetsSince(since time.Time) (int, error) {
-	where, args := tunnelTargetWhere(since)
+	window, args := tunnelTargetWindow(since)
 	var n int
-	err := s.db.QueryRow(`
+	err := s.db.QueryRow("WITH tunnel_events AS ("+window+") "+`
 SELECT COUNT(*) FROM (
-  SELECT dst_ip, dst_port FROM events
-  WHERE `+where+`
+  SELECT dst_ip, dst_port FROM tunnel_events
   GROUP BY dst_ip, dst_port
 )`, args...).Scan(&n)
 	return n, err
@@ -68,18 +67,17 @@ func (s *Store) TopTunnelTargets(since time.Time, limit int) ([]TunnelTarget, er
 	if limit <= 0 {
 		limit = defaultLimit
 	}
-	where, args := tunnelTargetWhere(since)
+	window, args := tunnelTargetWindow(since)
 	args = append(args, limit)
-	rows, err := s.db.Query(`
+	rows, err := s.db.Query("WITH tunnel_events AS ("+window+") "+`
 SELECT dst_ip, dst_port,
        COUNT(*)                       AS hits,
        COUNT(DISTINCT actor_id)       AS uniq_actors,
-       MIN(ts)                        AS first_seen,
-       MAX(ts)                        AS last_seen
-FROM events
-WHERE `+where+`
+       MIN(exact_ts)                  AS first_seen,
+       MAX(exact_ts)                  AS last_seen
+FROM tunnel_events
 GROUP BY dst_ip, dst_port
-ORDER BY hits DESC, last_seen DESC
+ORDER BY hits DESC, last_seen DESC, dst_ip ASC, dst_port ASC
 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -92,8 +90,13 @@ LIMIT ?`, args...)
 		if err := rows.Scan(&t.DstIP, &t.DstPort, &t.Hits, &t.UniqueActors, &first, &last); err != nil {
 			return nil, err
 		}
-		t.FirstSeen, _ = parseTime(first)
-		t.LastSeen, _ = parseTime(last)
+		var err error
+		if t.FirstSeen, err = parseTime(first); err != nil {
+			return nil, fmt.Errorf("tunnel first seen: invalid timestamp")
+		}
+		if t.LastSeen, err = parseTime(last); err != nil {
+			return nil, fmt.Errorf("tunnel last seen: invalid timestamp")
+		}
 		out = append(out, t)
 	}
 	return out, rows.Err()

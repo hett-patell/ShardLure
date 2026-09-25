@@ -52,25 +52,27 @@ type heatmapCell struct {
 }
 
 type intelActorRow struct {
-	ID          string       `json:"id"`
-	IP          string       `json:"ip"`
-	Source      string       `json:"source"`
-	Playbook    string       `json:"playbook"`
-	Intent      string       `json:"intent"`
-	Events      int          `json:"events"`
-	UniqueUsers int          `json:"uniqueUsers"`
-	RateHour    float64      `json:"rateHour"`
-	ProbeScore  int          `json:"probeScore"`
-	Confidence  int          `json:"confidence"`
-	HASSH       string       `json:"hassh,omitempty"`
-	SSHClient   string       `json:"sshClient,omitempty"`
-	FirstSeen   string       `json:"firstSeen"`
-	LastSeen    string       `json:"lastSeen"`
-	Country     string       `json:"country,omitempty"`
-	City        string       `json:"city,omitempty"`
-	CC          string       `json:"cc,omitempty"`
-	TopUsers    []topUserRow `json:"topUsers"`
-	LastCommand string       `json:"lastCommand,omitempty"`
+	DerivedCurrent bool         `json:"derivedCurrent"`
+	GeneratedNotes string       `json:"generatedNotes"`
+	ID             string       `json:"id"`
+	IP             string       `json:"ip"`
+	Source         string       `json:"source"`
+	Playbook       string       `json:"playbook"`
+	Intent         string       `json:"intent"`
+	Events         int          `json:"events"`
+	UniqueUsers    int          `json:"uniqueUsers"`
+	RateHour       float64      `json:"rateHour"`
+	ProbeScore     int          `json:"probeScore"`
+	Confidence     int          `json:"confidence"`
+	HASSH          string       `json:"hassh,omitempty"`
+	SSHClient      string       `json:"sshClient,omitempty"`
+	FirstSeen      string       `json:"firstSeen"`
+	LastSeen       string       `json:"lastSeen"`
+	Country        string       `json:"country,omitempty"`
+	City           string       `json:"city,omitempty"`
+	CC             string       `json:"cc,omitempty"`
+	TopUsers       []topUserRow `json:"topUsers"`
+	LastCommand    string       `json:"lastCommand,omitempty"`
 }
 
 type commandRow struct {
@@ -101,6 +103,9 @@ func (s *Server) handleIntelPage(w http.ResponseWriter, r *http.Request) {
 	// Page route: accept ?token= so a browser navigation can load the HTML,
 	// whose JS then uses the header for /api calls. See requirePageAuth.
 	if !s.requirePageAuth(w, r) {
+		return
+	}
+	if !s.applicationAvailable(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -222,13 +227,15 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 
 	for _, a := range actors {
 		row := intelActorRow{
-			ID:          a.ID,
-			IP:          a.PrimaryIP,
-			Source:      string(a.Source),
-			Playbook:    a.Playbook,
-			Intent:      a.Intent,
-			Events:      a.EventCount,
-			UniqueUsers: a.UniqueUsers,
+			DerivedCurrent: a.DerivedCurrent,
+			GeneratedNotes: a.GeneratedNotes,
+			ID:             a.ID,
+			IP:             a.PrimaryIP,
+			Source:         string(a.Source),
+			Playbook:       a.Playbook,
+			Intent:         a.Intent,
+			Events:         a.EventCount,
+			UniqueUsers:    a.UniqueUsers,
 			// Windowed, not the stored lifetime average: the UI renders this as
 			// "rate/h" meaning current intensity, and a lifetime mean understates
 			// an escalating attacker 2-3x. Absent from the map = no recent
@@ -286,20 +293,22 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := intelActorRow{
-		ID:          a.ID,
-		IP:          a.PrimaryIP,
-		Source:      string(a.Source),
-		Playbook:    a.Playbook,
-		Intent:      a.Intent,
-		Events:      a.EventCount,
-		UniqueUsers: a.UniqueUsers,
-		RateHour:    s.recentRatesCached()[a.ID],
-		ProbeScore:  a.ProbeScore,
-		Confidence:  a.Confidence,
-		HASSH:       a.HASSH,
-		SSHClient:   a.SSHClient,
-		FirstSeen:   a.FirstSeen.UTC().Format(time.RFC3339),
-		LastSeen:    a.LastSeen.UTC().Format(time.RFC3339),
+		DerivedCurrent: a.DerivedCurrent,
+		GeneratedNotes: a.GeneratedNotes,
+		ID:             a.ID,
+		IP:             a.PrimaryIP,
+		Source:         string(a.Source),
+		Playbook:       a.Playbook,
+		Intent:         a.Intent,
+		Events:         a.EventCount,
+		UniqueUsers:    a.UniqueUsers,
+		RateHour:       s.recentRatesCached()[a.ID],
+		ProbeScore:     a.ProbeScore,
+		Confidence:     a.Confidence,
+		HASSH:          a.HASSH,
+		SSHClient:      a.SSHClient,
+		FirstSeen:      a.FirstSeen.UTC().Format(time.RFC3339),
+		LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
 	}
 	if !isPrivateIP(a.PrimaryIP) {
 		g := s.geo.cached(a.PrimaryIP)
@@ -344,9 +353,10 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 	// endpoint enforces, so the button only shows when a report would succeed.
 	reportEligible := false
 	if s.abuseEnabledLive() && s.abuseKeyLive() != "" {
-		ok, _ := abuseipdb.Vet(newReportCandidate(a, s.recentRatesCached()[a.ID], s.primaryIPSeenCached()[a.ID]),
+		cand, evidenceErr := s.reportCandidateForIPCached(r.Context(), a.PrimaryIP)
+		ok, _ := abuseipdb.Vet(cand,
 			s.abuseAdmin, s.abuseMinProbeLive(), time.Now())
-		if ok {
+		if evidenceErr == nil && ok {
 			// Also hide the button if we already reported within the window,
 			// so the operator isn't offered a no-op.
 			if already, _ := s.st.AbuseIPDBReported(a.PrimaryIP, s.abuseRewindowLive()); !already {
