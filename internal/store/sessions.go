@@ -95,11 +95,21 @@ func sessionWindow(since time.Time) (string, []any) {
 // event prod database /api/intel/sessions at 30d/90d never answered. The
 // per-column MAX choices match the previous Go accumulator exactly.
 func (s *Store) sessionSummariesSince(since time.Time, minCommands, limit int) ([]ShellSessionSummary, error) {
+	out, _, err := s.sessionSummaryPage(since, minCommands, limit)
+	return out, err
+}
+
+// sessionSummaryPage is sessionSummariesSince plus the total number of
+// matching sessions, computed in the same pass (COUNT(*) OVER () over the
+// grouped rows, before LIMIT). Grouping the window a second time just to count
+// doubled the cost of the slowest intel panel on prod.
+func (s *Store) sessionSummaryPage(since time.Time, minCommands, limit int) ([]ShellSessionSummary, int, error) {
 	window, args := sessionWindow(since)
 	query := `WITH w AS (` + window + `)
 SELECT session_id, MAX(src_ip), COALESCE(MAX(CASE WHEN username<>'' THEN username END),''),
   COALESCE(MAX(hassh),''), COALESCE(MAX(ssh_client),''), COALESCE(MAX(actor_id),''),
-  MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END)
+  MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END),
+  COUNT(*) OVER ()
 FROM w GROUP BY session_id`
 	if minCommands > 0 {
 		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
@@ -112,28 +122,29 @@ FROM w GROUP BY session_id`
 	}
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []ShellSessionSummary
+	total := 0
 	for rows.Next() {
 		var sum SessionSummary
 		var srcIP sql.NullString
 		var startTS, endTS string
 		if err := rows.Scan(&sum.ID, &srcIP, &sum.Username, &sum.HASSH, &sum.SSHClient, &sum.ActorID,
-			&startTS, &endTS, &sum.EventCount, &sum.CmdCount); err != nil {
-			return nil, err
+			&startTS, &endTS, &sum.EventCount, &sum.CmdCount, &total); err != nil {
+			return nil, 0, err
 		}
 		sum.SrcIP = srcIP.String
 		if sum.StartTS, err = time.Parse(time.RFC3339Nano, startTS); err != nil {
-			return nil, fmt.Errorf("session %s event time: %w", sum.ID, err)
+			return nil, 0, fmt.Errorf("session %s event time: %w", sum.ID, err)
 		}
 		if sum.EndTS, err = time.Parse(time.RFC3339Nano, endTS); err != nil {
-			return nil, fmt.Errorf("session %s event time: %w", sum.ID, err)
+			return nil, 0, fmt.Errorf("session %s event time: %w", sum.ID, err)
 		}
 		out = append(out, ShellSessionSummary{SessionSummary: sum})
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // countSessionsSince counts the same population sessionSummariesSince lists,
@@ -204,6 +215,26 @@ SELECT session_id, command FROM (
 // different population than the rows.
 func (s *Store) CountSessionsSince(since time.Time, opts ...SessionListOptions) (int, error) {
 	return s.countSessionsSince(since, firstSessionOpts(opts).MinCommands)
+}
+
+// ListSessionsWithTotal is ListSessions plus the true matching-session total
+// (CountSessionsSince) from a single aggregation pass.
+func (s *Store) ListSessionsWithTotal(since time.Time, limit int, opts ...SessionListOptions) ([]SessionSummary, int, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, total, err := s.sessionSummaryPage(since, firstSessionOpts(opts).MinCommands, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]SessionSummary, len(rows))
+	for i := range rows {
+		out[i] = rows[i].SessionSummary
+	}
+	if err := s.stampSessionMeta(out); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
 }
 
 func (s *Store) ListSessions(since time.Time, limit int, opts ...SessionListOptions) ([]SessionSummary, error) {

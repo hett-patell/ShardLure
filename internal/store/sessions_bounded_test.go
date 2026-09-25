@@ -62,3 +62,49 @@ func TestSessionSummariesDoNotMaterializeTheWindow(t *testing.T) {
 		t.Fatalf("%d allocations for %d events in the window; the window was materialized in Go", n, events)
 	}
 }
+
+// The sessions endpoint needs both a page and the true total. Grouping the
+// window twice (list, then count) doubled the cost of the slowest intel
+// panel on prod (8 s at 30d, 17 s at 90d); one pass must give the same answer.
+func TestListSessionsWithTotalMatchesSeparateCalls(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "sessions-total.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC().Add(-time.Minute)
+	for i := 0; i < 90; i++ {
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		cmd := ""
+		if i%3 == 0 {
+			cmd = "id"
+		}
+		if _, err := st.db.Exec(`INSERT INTO events(ts,ts_unix_ns,source,kind,session_id,src_ip,command) VALUES(?,?,?,?,?,?,?)`,
+			formatFixedUTC(ts), ts.UnixNano(), "cowrie", "command", fmt.Sprintf("s%02d", i/2), "192.0.2.1", cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since := now.Add(-24 * time.Hour)
+	for _, opts := range [][]SessionListOptions{nil, {{MinCommands: 1}}} {
+		want, err := st.ListSessions(since, 7, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantTotal, err := st.CountSessionsSince(since, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, total, err := st.ListSessionsWithTotal(since, 7, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != wantTotal || len(got) != len(want) {
+			t.Fatalf("opts=%v total=%d/%d rows=%d/%d", opts, total, wantTotal, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("row %d: %+v != %+v", i, got[i], want[i])
+			}
+		}
+	}
+}
