@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -67,5 +68,33 @@ func TestRepairCanonicalHASSHBoundedResumable(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The repair runs on every Cowrie ingest tick. On ARM the planner answered
+// source='cowrie' from idx_events_session and walked every Cowrie row
+// (~1.7M) to find a ~20-row id range, costing ~10% of a core at idle.
+func TestRepairCanonicalHASSHSeeksIDRange(t *testing.T) {
+	st := newTestStore(t, "repair-plan.db")
+	rows, err := st.db.Query("EXPLAIN QUERY PLAN "+canonicalHASSHRepairUpdate, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var a, b, c int
+		var detail string
+		if err := rows.Scan(&a, &b, &c, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "SEARCH events USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)") {
+		t.Fatalf("repair must seek the id range, not scan an index of every Cowrie row:\n%s", plan)
 	}
 }
