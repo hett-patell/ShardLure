@@ -9,6 +9,11 @@ ssh:
 
 dashboard:
   port: 8080
+  # Reverse proxy terminating HTTPS (optional). Set both keys or neither; the
+  # direct TCP peer must be listed, and X-Forwarded-* never grants trust.
+  # public_origin: https://shardlure.example.internal
+  # trusted_proxies:
+  #   - 127.0.0.1
   # Change these to your VPS/operator location for the globe origin.
   home_lat: 19.0760
   home_lon: 72.8777
@@ -114,3 +119,8 @@ intel:
     # Optional operator suffix appended to the generated report comment. The
     # generated comment carries NOTHING identifying the honeypot host/session.
     comment: ""
+
+observability:
+  # /readyz reports not-ready when the data volume has less free space than
+  # this. 0 disables only this threshold. Default 268435456 (256 MiB).
+  min_free_bytes: 268435456

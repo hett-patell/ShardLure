@@ -32,11 +32,15 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 - [URLhaus URL Submission](#urlhaus-url-submission)
 - [VirusTotal Payload Lookup](#virustotal-payload-lookup)
 - [AbuseIPDB Reporting](#abuseipdb-reporting)
+- [Backup And Recovery](#backup-and-recovery)
+- [Health And Metrics](#health-and-metrics)
 - [Architecture](#architecture)
 - [Security Notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
 - [Uninstall](#uninstall)
 - [Roadmap](#roadmap)
+
+Longer operational guides (installation, backup, security, troubleshooting) live in the [ShardLure Wiki](https://github.com/hett-patell/ShardLure/wiki).
 
 ## Features
 
@@ -290,7 +294,11 @@ sudo ./shardlure run
 | `ioc` | Export a small IOC slice |
 | `share bazaar [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]` | Upload captured payloads to MalwareBazaar (abuse.ch) |
 | `share urlhaus [--dry-run] [--limit N] [--active-days N] [--anonymous] [--status]` | Submit the malware-distribution URLs those payloads came from to URLhaus (abuse.ch) |
+| `share threatfox [--dry-run] [--limit N] [--active-days N] [--status]` | Submit malware-delivery IOCs for Malpedia-labelled payloads to ThreatFox (abuse.ch) |
 | `report abuseipdb [--dry-run] [--limit N] [--min-probe N] [--rewindow N] [--status]` | Report confirmed brute-forcers to AbuseIPDB |
+| `-config CONFIG backup create --output NEW_BUNDLE [--include-file FILE] [--timeout 30m]` | Write a verified, owner-only backup bundle of the database, config and evidence. See [Backup And Recovery](#backup-and-recovery). |
+| `backup verify --input BUNDLE [--timeout 30m]` | Check every file in a bundle against its manifest, without opening the live database |
+| `backup restore --input BUNDLE --to NEW_DATA_DIR [--dry-run] [--timeout 30m]` | Restore into a directory that must not exist yet; never activates services |
 | `version` | Print version |
 
 ### Installer
@@ -621,6 +629,55 @@ The same gate runs for both the CLI and the dashboard's "Report All" button. The
 | `--min-probe N` | 60 | minimum actor ProbeScore to report (0-100) |
 | `--rewindow N` | 24 | hours before a reported IP may be reported again |
 | `--status` | – | list past reports from `abuseipdb_reports` instead of reporting |
+
+## Backup And Recovery
+
+`shardlure backup` takes and restores consistent snapshots while collection keeps running.
+
+```bash
+# Snapshot the live collection (reads the same config the service uses).
+sudo shardlure -config /var/lib/shardlure/shardlure.yaml backup create --output /root/shardlure-backup-2026-09-25
+
+# Check a bundle before relying on it.
+sudo shardlure backup verify --input /root/shardlure-backup-2026-09-25
+
+# Restore into a NEW directory. Nothing running is touched.
+sudo shardlure backup restore --input /root/shardlure-backup-2026-09-25 --to /var/lib/shardlure-restored
+```
+
+- **What a bundle holds.** A SQLite snapshot taken through the database's own backup API (safe on a live WAL database), the configuration exactly as the service parsed it, referenced evidence files, Cowrie downloads and TTY logs, and a `manifest.json` with every file's hash and size. `--include-file` adds extra administrative files.
+- **Ownership and limits.** Bundle directories are `0700` and files `0600`. The manifest is format v1, capped at 64 MiB and 1,000,000 entries. Every operation times out after 30 minutes unless `--timeout` says otherwise.
+- **Failure is visible.** A bundle is staged under a private `.incomplete` name and only published once every write and `fsync` succeeded. If publication fails late, the output keeps its incomplete marker and the command does not report success.
+- **Restore never overwrites.** The destination must not exist. Restore re-checks every hash, remaps stored evidence paths into the new directory, resets Cowrie file cursors so a later replay deduplicates instead of duplicating history, and writes `shardlure.recovery.yaml` (capture and retention disabled) plus `recovery-report.json` describing every transformation. Your original config, settings, annotations and submission ledgers are preserved unchanged.
+- **Activation is manual.** Restore does not start, stop or reconfigure any service. Review the report, point a service at the recovered config, and enable capture and retention yourself when you are satisfied.
+- **Nothing is deleted.** No backup command removes old bundles, source evidence or incomplete output.
+
+## Health And Metrics
+
+The web server exposes three operational endpoints:
+
+| Endpoint | Meaning |
+| --- | --- |
+| `/healthz` | The process is serving and its required workers are alive |
+| `/readyz` | Startup finished, samples are fresh and storage has room; `503` while starting, draining or degraded |
+| `/metrics` | Prometheus text: worker state, queue depths, checkpoints, disk space and outbound request/record counts, with fixed label sets only |
+
+- **Access.** These endpoints follow the `/debug/*` rule. With `SHARDLURE_DASH_TOKEN` set they need the token as a header; without one they answer only loopback connections. A `?token=` query is refused. A trusted reverse proxy (below) cannot reach them without a token.
+- **Sampling.** Health is sampled every 5 seconds with a 1-second budget. Readiness fails if the newest sample is older than 15 seconds. Expensive gauges refresh at most once a minute and report their age rather than a silent zero.
+- **Disk threshold.** `observability.min_free_bytes` (default 268435456, 256 MiB) marks the data volume not ready below that free space. `0` disables only this check.
+
+### Behind a reverse proxy
+
+By default ShardLure trusts nothing about the client beyond the TCP peer, and `X-Forwarded-*` headers never grant trust. To terminate HTTPS at a proxy, set both keys in the `dashboard` section:
+
+```yaml
+dashboard:
+  public_origin: https://shardlure.example.internal
+  trusted_proxies:
+    - 127.0.0.1        # the proxy's literal address, or a CIDR prefix
+```
+
+Both keys are required together. `public_origin` must be an `http(s)://host[:port]` origin with no path. `trusted_proxies` accepts up to 256 literal addresses or prefixes, and rejects `/0` catch-alls. Only requests whose direct peer is on that list, and whose `Host` matches the public origin, are treated as proxied; session cookies then carry `Secure`.
 
 ## Architecture
 
