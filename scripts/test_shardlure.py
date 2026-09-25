@@ -309,6 +309,11 @@ class PatchDeploymentTests(unittest.TestCase):
 
 class ServiceSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
+        # SSH changes are validated for the operator's real source address;
+        # fixtures declare it instead of relying on a guessed loopback.
+        operator = mock.patch.dict(os.environ, {"SSH_CONNECTION": "192.0.2.10 50000 192.0.2.1 2200"})
+        operator.start()
+        self.addCleanup(operator.stop)
         self.old_umask = os.umask(0o077)
         # These renderer/publication tests do not talk to the host manager.
         # Effective-account policy is tested against real/fake manager results

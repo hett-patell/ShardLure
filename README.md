@@ -133,7 +133,11 @@ It walks you through everything, in order:
 6. **Move real SSH** to the admin port via a drop-in at
    `/etc/ssh/sshd_config.d/99-shardlure-admin.conf` (key-only, root password
    login disabled). The original config is backed up to
-   `/etc/ssh/sshd_config.shardlure-bak`.
+   `/etc/ssh/sshd_config.shardlure-bak`. The new policy is checked with
+   `sshd -T` for **your actual client address**, so `Match Address` rules that
+   apply to you are honored. The installer reads it from your SSH session;
+   running from a local console instead, set
+   `SHARDLURE_ADMIN_SSH_FROM=<your client IP>` or it refuses to move SSH.
 7. **Verify gate** — pauses for you to confirm `ssh -p <admin-port>` works in a
    second terminal before going further (type `yes` to continue, `abort` to stop).
 8. **Create the `cowrie` system user**, clone + build Cowrie into

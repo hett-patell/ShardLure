@@ -13,6 +13,11 @@ from scripts import shardlure
 
 class SSHRecoveryTests(unittest.TestCase):
     def setUp(self):
+        # SSH changes are validated for the operator's real source address;
+        # fixtures declare it instead of relying on a guessed loopback.
+        operator = mock.patch.dict(os.environ, {"SSH_CONNECTION": "192.0.2.10 50000 192.0.2.1 2200"})
+        operator.start()
+        self.addCleanup(operator.stop)
         self.mask = os.umask(0o077)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -118,6 +123,37 @@ class SSHRecoveryTests(unittest.TestCase):
         checks = [args for args in self.calls if args[:2] == ["sshd", "-T"]]
         self.assertTrue(checks, "effective restored policy was not checked")
         self.assertTrue(all("-C" in args for args in checks), "Match rules were checked without operator context")
+
+
+class OperatorContextTests(unittest.TestCase):
+    """Regression (whole-branch review): with SSH_CONNECTION missing, the
+    normal case under sudo's env_reset, operator_context silently used
+    127.0.0.1, so `sshd -T -C` checked Match rules for the wrong address and a
+    `Match Address <operator net>` restriction could lock the operator out."""
+
+    def context(self, env, ancestor=None):
+        from scripts import ssh_transition
+        env = {"SUDO_USER": "root", **env}
+        with (mock.patch.dict(os.environ, env, clear=True),
+              mock.patch.object(ssh_transition, "_ancestor_ssh_connection", return_value=ancestor, create=True)):
+            return ssh_transition.operator_context()
+
+    def test_missing_source_address_is_refused_not_guessed(self):
+        from scripts import ssh_transition
+        with self.assertRaises(ssh_transition.safe.SafetyError):
+            self.context({})
+
+    def test_parent_login_shell_address_is_recovered(self):
+        ctx = self.context({}, ancestor="203.0.113.5 50000 198.51.100.7 22")
+        self.assertEqual((ctx["addr"], ctx["laddr"]), ("203.0.113.5", "198.51.100.7"))
+
+    def test_explicit_console_override_is_used(self):
+        ctx = self.context({"SHARDLURE_ADMIN_SSH_FROM": "203.0.113.9"})
+        self.assertEqual(ctx["addr"], "203.0.113.9")
+
+    def test_own_environment_still_wins(self):
+        ctx = self.context({"SSH_CONNECTION": "192.0.2.4 1 192.0.2.8 22"}, ancestor="203.0.113.5 1 198.51.100.7 22")
+        self.assertEqual(ctx["addr"], "192.0.2.4")
 
 
 if __name__ == "__main__":

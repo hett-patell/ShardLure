@@ -23,11 +23,55 @@ def operator_context() -> dict:
     account = pwd.getpwnam(user)
     if account.pw_name != user or re.fullmatch(r"[A-Za-z0-9_.@-]+", user) is None:
         raise safe.SafetyError("cannot identify the administrative SSH user")
+    # The source address decides which `Match Address` blocks `sshd -T -C`
+    # evaluates when proving the operator keeps key-only access. It used to
+    # fall back silently to 127.0.0.1 when SSH_CONNECTION was missing (the
+    # normal case under sudo's env_reset), validating the wrong policy. Take it
+    # from our own environment, else the parent login shell sudo was started
+    # from, else an explicit console override; otherwise refuse.
     fields = os.environ.get("SSH_CONNECTION", "").split()
-    peer, local = (fields[0], fields[2]) if len(fields) == 4 else ("127.0.0.1", "127.0.0.1")
-    ipaddress.ip_address(peer)
-    ipaddress.ip_address(local)
+    if len(fields) != 4:
+        fields = (_ancestor_ssh_connection() or "").split()
+    if len(fields) == 4:
+        peer, local = fields[0], fields[2]
+    elif os.environ.get("SHARDLURE_ADMIN_SSH_FROM", "").strip():
+        peer = os.environ["SHARDLURE_ADMIN_SSH_FROM"].strip()
+        local = "::" if ":" in peer else "0.0.0.0"
+    else:
+        raise safe.SafetyError(
+            "cannot determine the address you will administer SSH from; run the installer "
+            "from your SSH session, or set SHARDLURE_ADMIN_SSH_FROM=<your client IP>")
+    try:
+        ipaddress.ip_address(peer)
+        ipaddress.ip_address(local)
+    except ValueError as exc:
+        raise safe.SafetyError("invalid administrative SSH address") from exc
     return {"user": user, "addr": peer, "host": peer, "laddr": local}
+
+
+def _ancestor_ssh_connection(max_depth: int = 32):
+    """SSH_CONNECTION of the nearest ancestor process that has one.
+
+    sudo resets the environment it passes to the child, but the operator's
+    login shell (its ancestor) keeps it; root can read that process's environ.
+    """
+    pid = os.getppid()
+    for _ in range(max_depth):
+        if pid <= 1:
+            return None
+        try:
+            environ = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            environ = b""
+        for item in environ.split(b"\0"):
+            if item.startswith(b"SSH_CONNECTION="):
+                return item.split(b"=", 1)[1].decode("ascii", "replace")
+        try:
+            stat_text = Path(f"/proc/{pid}/stat").read_text()
+            pid = int(stat_text.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+    return None
 
 
 def ports(text: str) -> set[int]:
