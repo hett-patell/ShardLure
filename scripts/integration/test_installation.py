@@ -240,9 +240,21 @@ class Acceptance:
                   mock.patch.object(s, "install_services", side_effect=private_services)):
                 s.cmd_run()
         self.await_ready()
+        self.cowrie_stays_active()
         self.control_alive()
         self.login(self.new_admin)
         self.record("Python installer fresh setup", custom_literal_paths=True, real_cowrie=True)
+
+    def cowrie_stays_active(self, settle=12):
+        # Type=simple units report "active" the instant they are exec'd, so a
+        # Cowrie that crash-loops on its own configuration passes an immediate
+        # is-active check. Require it to stay up without restarting.
+        time.sleep(settle)
+        show = run(["systemctl", "show", "cowrie.service", "-p", "ActiveState", "-p", "NRestarts"]).stdout
+        state = dict(line.split("=", 1) for line in show.splitlines() if "=" in line)
+        if state.get("ActiveState") != "active" or state.get("NRestarts") != "0":
+            raise RuntimeError(f"real Cowrie did not stay running: {state}")
+        self.record("real Cowrie stays running under its service account", settle_seconds=settle)
 
     def permissions_and_ingest(self):
         service, cowrie = pwd.getpwnam("shardlure"), pwd.getpwnam("cowrie")
@@ -347,6 +359,17 @@ class Acceptance:
                 print("guest service diagnostic", unit, status.stdout, flush=True)
                 journal = run(["journalctl", "--unit", unit, "-n", "30", "--no-pager", "-o", "cat"], check=False)
                 print("guest-only inert service log", unit, journal.stdout[-6000:], flush=True)
+                # The tail is often only twistd's usage text; the cause of an
+                # "Unknown command" is the plugin import error before it.
+                first = run(["journalctl", "--unit", unit, "--no-pager", "-o", "cat"], check=False)
+                print("guest-only inert service log (first start)", unit, first.stdout[:8000], flush=True)
+            if hasattr(self, "data") and (self.data / "cowrie/venv/bin/python").exists():
+                home = self.data / "cowrie"
+                probe = run(["runuser", "-u", "cowrie", "--", "env", f"PYTHONPATH={home / 'src'}",
+                             home / "venv/bin/python", "-c",
+                             "import os,sys; os.chdir(sys.argv[1]); import twisted.plugins.cowrie_plugin; print('cowrie plugin import ok')",
+                             home], check=False)
+                print("guest Cowrie plugin import probe", probe.returncode, probe.stdout[-2000:], probe.stderr[-6000:], flush=True)
             if hasattr(self, "current_data"):
                 try:
                     run(["systemctl", "stop", "shardlure-live.service"], check=False)
