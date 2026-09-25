@@ -1351,8 +1351,22 @@ func (s *Store) LatestEventTime() (time.Time, error) {
 // happens. Pre-create them here so the very first purge call
 // against a fresh DB is a clean no-op rather than an error.
 func (s *Store) MaintenancePurge(retentionDays int) error {
+	return s.MaintenancePurgeContext(context.Background(), retentionDays)
+}
+
+// MaintenancePurgeContext is MaintenancePurge that stops between bounded
+// steps when ctx is cancelled. The live daemon joins its purge worker before
+// closing the store, and a first purge of an aged DB takes minutes: without
+// this, `systemctl stop` waited past TimeoutStopSec and SIGKILLed the process
+// mid-purge, skipping the WAL checkpoint in Close. Every committed chunk is
+// complete on its own, so stopping between chunks leaves consistent state and
+// the next run resumes.
+func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) error {
 	if retentionDays <= 0 {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := s.EnsureEnrichmentTable(); err != nil {
 		return err
@@ -1396,31 +1410,27 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	}
 	// Keep optional-cache validation ahead of artifact retention. Artifact
 	// cleanup itself uses bounded pages and an explicit filesystem policy.
-	if err := func() error {
-		s.captureMu.Lock()
-		defer s.captureMu.Unlock()
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
-		tx, err := s.db.Begin()
-		if err != nil {
+	cacheTargets := []struct{ table, column string }{
+		{"ip_enrichment", "fetched_at"},
+		{"cowrie_tty_index", "ts"},
+		{"cowrie_session_hassh", "observed_at"},
+		{"cowrie_session_meta", "observed_at"},
+		{"payload_intel", "fetched_at"},
+	}
+	// Malformed cache times stop retention before anything is mutated (fail
+	// closed), checked by SQLite itself outside the writer lock rather than by
+	// materializing every row in Go.
+	for _, target := range cacheTargets {
+		if err := checkTextTimeColumn(ctx, s.db, target.table, target.column); err != nil {
 			return err
 		}
-		defer tx.Rollback()
-
-		for _, target := range []struct{ table, column string }{
-			{"ip_enrichment", "fetched_at"},
-			{"cowrie_tty_index", "ts"},
-			{"cowrie_session_hassh", "observed_at"},
-			{"cowrie_session_meta", "observed_at"},
-			{"payload_intel", "fetched_at"},
-		} {
-			if err := purgeTextTimeRows(tx, target.table, target.column, cutoffTime); err != nil {
-				return err
-			}
+	}
+	for _, target := range cacheTargets {
+		if err := s.purgeTextTimeRows(ctx, target.table, target.column, cutoffTime); err != nil {
+			return err
 		}
-
-		return tx.Commit()
-	}(); err != nil {
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := s.purgeArtifacts(cutoffTime); err != nil {
@@ -1436,6 +1446,9 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 	legacyCeiling := formatFixedUTC(cutoffTime.Add(15 * time.Hour))
 	var eventCursor int64
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rows, err := s.db.Query(`SELECT id,ts FROM events
 WHERE id>? AND (ts_unix_ns < ? OR (ts_unix_ns IS NULL AND ts < ?))
 ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeChunk)
@@ -1513,6 +1526,9 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 	// one transaction holds writeMu for a fraction of a single event chunk.
 	// The predicate is stable across the three statements because deleting the
 	// child rows cannot change which actors match it.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := func() error {
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
@@ -1604,7 +1620,7 @@ func deleteRowsByID(tx *sql.Tx, table string, ids []int64) error {
 	return nil
 }
 
-func purgeTextTimeRows(tx *sql.Tx, table, column string, cutoff time.Time) error {
+func validTextTimeTarget(table, column string) error {
 	valid := (table == "ip_enrichment" && column == "fetched_at") ||
 		(table == "cowrie_tty_index" && column == "ts") ||
 		((table == "cowrie_session_hassh" || table == "cowrie_session_meta") && column == "observed_at") ||
@@ -1612,33 +1628,88 @@ func purgeTextTimeRows(tx *sql.Tx, table, column string, cutoff time.Time) error
 	if !valid {
 		return fmt.Errorf("unsupported retention timestamp %s.%s", table, column)
 	}
-	rows, err := tx.Query("SELECT rowid," + column + " FROM " + table)
+	return nil
+}
+
+// checkTextTimeColumn fails closed on the first cache row whose time SQLite
+// cannot interpret, before retention mutates anything.
+func checkTextTimeColumn(ctx context.Context, db *sql.DB, table, column string) error {
+	if err := validTextTimeTarget(table, column); err != nil {
+		return err
+	}
+	var rowID int64
+	var text string
+	err := db.QueryRowContext(ctx, "SELECT rowid,"+column+" FROM "+table+" WHERE julianday("+column+") IS NULL LIMIT 1").Scan(&rowID, &text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	var expired []int64
-	for rows.Next() {
-		var rowID int64
-		var text string
-		if err := rows.Scan(&rowID, &text); err != nil {
-			rows.Close()
-			return err
-		}
-		parsed, err := time.Parse(time.RFC3339Nano, text)
-		if err != nil {
-			rows.Close()
-			return fmt.Errorf("%s row %d %s: %w", table, rowID, column, err)
-		}
-		if parsed.Before(cutoff) {
-			expired = append(expired, rowID)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
+	return fmt.Errorf("%s row %d %s: invalid timestamp %q", table, rowID, column, text)
+}
+
+// purgeTextTimeRows deletes expired cache rows in bounded chunks, each in its
+// own transaction, releasing captureMu/writeMu between chunks exactly like the
+// events purge. It used to read the WHOLE table and parse every timestamp in
+// Go inside one transaction holding both locks, stalling ingest for the entire
+// scan on a large DB. Only text below cutoff+15h can be expired under any UTC
+// offset (RFC3339 text orders by local time, and offsets are at most 14h), so
+// fresh rows are never materialized; candidates are parsed exactly.
+func (s *Store) purgeTextTimeRows(ctx context.Context, table, column string, cutoff time.Time) error {
+	if err := validTextTimeTarget(table, column); err != nil {
 		return err
 	}
-	rows.Close()
-	return deleteRowsByRowID(tx, table, expired)
+	const chunk = 5000
+	ceiling := formatFixedUTC(cutoff.Add(15 * time.Hour))
+	var cursor int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		scanned := 0
+		err := func() error {
+			s.captureMu.Lock()
+			defer s.captureMu.Unlock()
+			return s.WithTx(func(tx *sql.Tx) error {
+				rows, err := tx.Query("SELECT rowid,"+column+" FROM "+table+" WHERE rowid>? AND "+column+"<? ORDER BY rowid LIMIT ?", cursor, ceiling, chunk)
+				if err != nil {
+					return err
+				}
+				var expired []int64
+				for rows.Next() {
+					var rowID int64
+					var text string
+					if err := rows.Scan(&rowID, &text); err != nil {
+						rows.Close()
+						return err
+					}
+					scanned++
+					cursor = rowID
+					parsed, err := time.Parse(time.RFC3339Nano, text)
+					if err != nil {
+						rows.Close()
+						return fmt.Errorf("%s row %d %s: %w", table, rowID, column, err)
+					}
+					if parsed.Before(cutoff) {
+						expired = append(expired, rowID)
+					}
+				}
+				if err := rows.Err(); err != nil {
+					rows.Close()
+					return err
+				}
+				rows.Close()
+				return deleteRowsByRowID(tx, table, expired)
+			})
+		}()
+		if err != nil {
+			return err
+		}
+		if scanned < chunk {
+			return nil
+		}
+	}
 }
 
 func deleteRowsByRowID(tx *sql.Tx, table string, ids []int64) error {

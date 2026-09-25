@@ -251,7 +251,7 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 			}
 			start(func() {
 				for ctx.Err() == nil {
-					if err := st.MaintenancePurge(cfg.RetentionDays); err != nil {
+					if err := st.MaintenancePurgeContext(ctx, cfg.RetentionDays); err != nil && ctx.Err() == nil {
 						log.Print("maintenance purge failed")
 					}
 					if _, err := runner.PurgeOldSourceFilesContext(ctx, cfg.RetentionDays); err != nil && ctx.Err() == nil {
