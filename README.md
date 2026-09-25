@@ -253,18 +253,22 @@ cd "$(mktemp -d)"
 curl -fsSLO "https://github.com/hett-patell/ShardLure/releases/download/$TAG/shardlure-linux-$ARCH"
 curl -fsSLO "https://github.com/hett-patell/ShardLure/releases/download/$TAG/SHA256SUMS"
 sha256sum --check --ignore-missing SHA256SUMS      # must print: shardlure-linux-$ARCH: OK
-chmod 0755 "shardlure-linux-$ARCH"
+sudo install -m 0755 "shardlure-linux-$ARCH" /usr/local/bin/shardlure.new
 
 # 1. Back up with the NEW binary (v2.7.x has no backup command). The snapshot
 #    never migrates the database, so the running old version is unaffected.
+#    Run it as the service account: the database belongs to that account and
+#    any other one, root included, is refused ("database ownership mismatch").
+SVC=$(systemctl show -p User --value shardlure-live); SVC=${SVC:-root}
 CONFIG=$(systemctl show -p Environment --value shardlure-live | tr ' ' '\n' | sed -n 's/^SHARDLURE_CONFIG=//p' | tail -1)
-sudo "./shardlure-linux-$ARCH" -config "${CONFIG:-/var/lib/shardlure/shardlure.yaml}" \
-  backup create --output "/root/shardlure-before-$TAG"
-sudo "./shardlure-linux-$ARCH" backup verify --input "/root/shardlure-before-$TAG"
+sudo install -d -o "$SVC" -g "$SVC" -m 0700 /var/backups/shardlure
+sudo -u "$SVC" /usr/local/bin/shardlure.new -config "${CONFIG:-/var/lib/shardlure/shardlure.yaml}" \
+  backup create --output "/var/backups/shardlure/before-$TAG"
+sudo -u "$SVC" /usr/local/bin/shardlure.new backup verify --input "/var/backups/shardlure/before-$TAG"
 
 # 2. Swap the binary, keeping the old one for rollback.
 sudo cp -p /usr/local/bin/shardlure /usr/local/bin/shardlure.previous
-sudo install -m 0755 "shardlure-linux-$ARCH" /usr/local/bin/shardlure
+sudo mv /usr/local/bin/shardlure.new /usr/local/bin/shardlure
 sudo systemctl restart shardlure-live
 shardlure version
 ```
@@ -703,16 +707,25 @@ The same gate runs for both the CLI and the dashboard's "Report All" button. The
 
 `shardlure backup` takes and restores consistent snapshots while collection keeps running.
 
+Run these as the account the service runs as. That is `shardlure` on hosts installed by v2.8.0 and root on hosts upgraded from v2.7.x. The database belongs to that account, and any other one, root included, is refused with `database ownership mismatch`.
+
 ```bash
+SVC=$(systemctl show -p User --value shardlure-live); SVC=${SVC:-root}
+sudo install -d -o "$SVC" -g "$SVC" -m 0700 /var/backups/shardlure
+
 # Snapshot the live collection (reads the same config the service uses).
-sudo shardlure -config /var/lib/shardlure/shardlure.yaml backup create --output /root/shardlure-backup-2026-09-25
+sudo -u "$SVC" shardlure -config /var/lib/shardlure/shardlure.yaml \
+  backup create --output /var/backups/shardlure/2026-09-25
 
 # Check a bundle before relying on it.
-sudo shardlure backup verify --input /root/shardlure-backup-2026-09-25
+sudo -u "$SVC" shardlure backup verify --input /var/backups/shardlure/2026-09-25
 
-# Restore into a NEW directory. Nothing running is touched.
-sudo shardlure backup restore --input /root/shardlure-backup-2026-09-25 --to /var/lib/shardlure-restored
+# Restore into a NEW directory the service account owns. Nothing running is touched.
+sudo install -d -o "$SVC" -g "$SVC" -m 0700 /var/lib/shardlure-restore
+sudo -u "$SVC" shardlure backup restore --input /var/backups/shardlure/2026-09-25 --to /var/lib/shardlure-restore/data
 ```
+
+The destination's parent directories must be owned by root or the service account. For example, a `/srv` owned by `ubuntu` is refused.
 
 - **What a bundle holds.** A SQLite snapshot taken through the database's own backup API (safe on a live WAL database), the configuration exactly as the service parsed it, referenced evidence files, Cowrie downloads and TTY logs, and a `manifest.json` with every file's hash and size. `--include-file` adds extra administrative files.
 - **Ownership and limits.** Bundle directories are `0700` and files `0600`. The manifest is format v1, capped at 64 MiB and 1,000,000 entries. Every operation times out after 30 minutes unless `--timeout` says otherwise.
