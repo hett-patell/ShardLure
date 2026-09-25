@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -78,6 +79,11 @@ func main() {
 
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
+		if errors.Is(err, store.ErrDatabaseOwner) {
+			if hint := databaseOwnerHint(cfg.DBPath()); hint != "" {
+				err = fmt.Errorf("%w\nhint: %s", err, hint)
+			}
+		}
 		fatal(err)
 	}
 	defer st.Close()
