@@ -564,10 +564,17 @@ def plant_bait_files() -> None:
     if not fsctl.exists() or not pickle_path.exists():
         return
 
+    python = COWRIE_HOME / "venv/bin/python"
+
     def fs(cmd: str) -> None:
         # mkdir on an existing dir (and similar) is a benign non-zero exit;
         # fsctl prints its own diagnostics, so no extra handling here.
-        run([str(fsctl), str(pickle_path), cmd])
+        # Run the script through the venv interpreter, never via its own
+        # shebang: pip writes a /bin/sh trampoline that quotes the interpreter
+        # path without escaping `"`, `$` or `\`, so on such a data path every
+        # call failed "not found" and the bait silently never loaded. This is
+        # the same way cowrie.service starts twistd.
+        run([str(python), str(fsctl), str(pickle_path), cmd])
 
     for d in (
         "/opt", "/opt/app", "/opt/app/config", "/opt/app/secrets",
@@ -640,8 +647,20 @@ def deploy_patches() -> None:
         die("Cowrie patch preflight/apply failed; refusing to continue with a fingerprintable honeypot")
 
 
+def cowrie_cfg_value(value: object) -> str:
+    """Escape a literal for Cowrie's ExtendedInterpolation config reader.
+
+    Cowrie (install/cowrie.commit, core/config.py) parses cowrie.cfg with
+    configparser.ExtendedInterpolation, where `$` introduces `${...}`
+    references and a bare `$` is a syntax error. A data path containing `$`
+    therefore made every path lookup raise and Cowrie could not start.
+    """
+    return str(value).replace("$", "$$")
+
+
 def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
     endpoint = f"tcp:{honeypot_port}:interface=0.0.0.0"
+    home = cowrie_cfg_value(COWRIE_HOME)
     lines = text.splitlines()
     out: list[str] = []
     section = ""
@@ -696,12 +715,12 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             # time.tzset(), so the unit env is what reliably wins).
             ("timezone", "UTC"),
             ("sensor_name", "prod-app-server-01"),
-            ("log_path", f"{COWRIE_HOME}/var/log/cowrie"),
-            ("state_path", f"{COWRIE_HOME}/var/lib/cowrie"),
-            ("download_path", f"{COWRIE_HOME}/var/lib/cowrie/downloads"),
-            ("contents_path", f"{COWRIE_HOME}/honeyfs"),
-            ("data_path", f"{COWRIE_HOME}/src/cowrie/data"),
-            ("etc_path", f"{COWRIE_HOME}/etc"),
+            ("log_path", f"{home}/var/log/cowrie"),
+            ("state_path", f"{home}/var/lib/cowrie"),
+            ("download_path", f"{home}/var/lib/cowrie/downloads"),
+            ("contents_path", f"{home}/honeyfs"),
+            ("data_path", f"{home}/src/cowrie/data"),
+            ("etc_path", f"{home}/etc"),
         ],
         "shell": [
             ("arch", "linux-x64-lsb"),
@@ -711,11 +730,11 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             ("hardware_platform", "x86_64"),
             ("operating_system", "GNU/Linux"),
             ("ssh_version", "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022"),
-            ("filesystem", f"{COWRIE_HOME}/src/cowrie/data/fs.pickle"),
+            ("filesystem", f"{home}/src/cowrie/data/fs.pickle"),
         ],
         "output_jsonlog": [
             ("enabled", "true"),
-            ("logfile", f"{COWRIE_HOME}/var/log/cowrie/cowrie.json"),
+            ("logfile", f"{home}/var/log/cowrie/cowrie.json"),
         ],
     }
 
@@ -905,6 +924,22 @@ def systemd_value(value: str) -> str:
     return f'"{escaped}"'
 
 
+def systemd_path(value: str) -> str:
+    """Encode a single-path setting that systemd does NOT unquote.
+
+    WorkingDirectory= takes the raw rest of the line (only %-specifiers are
+    expanded), unlike Exec*/Environment=/ReadWritePaths=. Quoting it the way
+    systemd_value does made systemd read the value as a relative path and
+    refuse the whole unit on the adversarial-path guest. Spaces, quotes, `$`
+    and backslashes are literal here; only `%` needs doubling, and outer
+    whitespace would be silently trimmed, so it is refused.
+    """
+    systemd_value(value)
+    if not value.startswith("/") or value != value.strip():
+        raise ValueError("unsupported path for a raw systemd path setting")
+    return value.replace("%", "%%")
+
+
 def systemd_exec_arg(value: str) -> str:
     return systemd_value(value).replace("$", "$$")
 
@@ -953,7 +988,15 @@ def render_services(honeypot_port: int, dash_port: int) -> dict[str, str]:
             f"--umask 0027 --nodaemon --pidfile= -l - cowrie"
         )
     else:
-        cowrie_exec = f"{systemd_exec_arg(str(py))} {systemd_exec_arg(str(twistd))} --umask 0027 --nodaemon --pidfile= -l - cowrie"
+        # systemd refuses an Exec executable path containing `$` (and `$$` is
+        # only unescaped in arguments), so the venv interpreter under a data
+        # path cannot be argv[0] of the unit. A fixed /bin/sh exec()s it
+        # instead: the path stays a literal argument and the shell never
+        # parses it ("$@" expands positional parameters without re-splitting).
+        cowrie_exec = (
+            "/bin/sh -c 'exec \"$$@\"' cowrie-launch "
+            f"{systemd_exec_arg(str(py))} {systemd_exec_arg(str(twistd))} --umask 0027 --nodaemon --pidfile= -l - cowrie"
+        )
     cowrie_text = f"""[Unit]
 Description=Cowrie SSH honeypot (ShardLure)
 After=network.target
@@ -962,7 +1005,7 @@ After=network.target
 Type=simple
 User={COWRIE_USER}
 Group={COWRIE_USER}
-WorkingDirectory={systemd_value(str(COWRIE_HOME))}
+WorkingDirectory={systemd_path(str(COWRIE_HOME))}
 Environment={systemd_environment("PYTHONPATH",str(COWRIE_HOME / "src"))}
 Environment={systemd_environment("PATH",str(COWRIE_HOME / "venv/bin")+":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
 Environment=TZ=UTC

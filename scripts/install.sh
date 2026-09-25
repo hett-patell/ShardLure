@@ -296,6 +296,16 @@ systemd_value() {
   printf '"%s"' "$value"
 }
 
+# WorkingDirectory= takes the raw rest of the line (only %-specifiers are
+# expanded); it does not unquote like Exec*/Environment=. See systemd_path in
+# shardlure.py: quoting it made systemd refuse cowrie.service.
+systemd_path() {
+  local value="$1"
+  [[ ! "$value" =~ [[:cntrl:]] ]] || err "unsupported control character in service value"
+  [[ "$value" == /* && "$value" != *[[:space:]] ]] || err "unsupported path for a raw systemd path setting"
+  printf '%s' "${value//%/%%}"
+}
+
 systemd_exec_arg() {
   local encoded
   encoded="$(systemd_value "$1")" || return
@@ -615,6 +625,9 @@ if [[ "$COWRIE" -eq 1 ]]; then
   # absent or when we own it (marker), so hand-edits survive re-runs.
   COWRIE_CFG="$COWRIE_HOME/etc/cowrie.cfg"
   CFG_MARKER="# managed by shardlure install.sh"
+  # Cowrie reads cowrie.cfg with configparser.ExtendedInterpolation: a bare
+  # `$` is a syntax error there, so literal path values are written as `$$`.
+  COWRIE_CFG_HOME="${COWRIE_HOME//\$/\$\$}"
   if [[ "$FRESH_COWRIE" == 1 ]]; then
     cat > "$COWRIE_CFG" <<CFG
 $CFG_MARKER
@@ -626,7 +639,7 @@ listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0
 
 [output_jsonlog]
 enabled = true
-logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json
+logfile = $COWRIE_CFG_HOME/var/log/cowrie/cowrie.json
 CFG
     log "cowrie.cfg written (ssh port $HONEYPOT_PORT, jsonlog enabled)"
   else
@@ -668,7 +681,7 @@ After=network.target
 Type=simple
 User=cowrie
 Group=cowrie
-WorkingDirectory=$(systemd_value "$COWRIE_HOME")
+WorkingDirectory=$(systemd_path "$COWRIE_HOME")
 # TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
 # 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
 # host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.

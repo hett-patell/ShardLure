@@ -550,6 +550,73 @@ class ServiceSafetyTests(unittest.TestCase):
                            for line in unit.splitlines() if line.startswith("Environment=")]
             self.assertIn("SHARDLURE_CONFIG=" + str(data / "config.yaml"), assignments)
 
+    def test_generated_units_verify_with_literal_adversarial_paths(self) -> None:
+        # Regression (disposable-guest CI run 36099193385): WorkingDirectory= is
+        # not a quote-aware systemd setting, so the quoted encoding shared with
+        # Exec/Environment made systemd read it as a relative path and refuse
+        # the whole cowrie.service. The literal-path test above mocks `run`,
+        # so only the real verifier catches this.
+        if not shutil.which("systemd-analyze"):
+            self.skipTest("systemd-analyze unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / 'data "quote" $VALUE %n apostrophe\'s \\ back'
+            venv = data / "cowrie" / "venv" / "bin"
+            venv.mkdir(parents=True)
+            for name in ("python", "twistd"):
+                (venv / name).write_text("#!/bin/sh\n")
+                (venv / name).chmod(0o755)
+            with (
+                mock.patch.object(shardlure, "DATA_DIR", data),
+                mock.patch.object(shardlure, "COWRIE_HOME", data / "cowrie"),
+                mock.patch.object(shardlure, "COWRIE_LOG", data / "cowrie/var/log/cowrie/cowrie.json"),
+                mock.patch.object(shardlure, "CONFIG_FILE", data / "shardlure.yaml"),
+                mock.patch.object(shardlure, "_tailscale_iface", return_value=""),
+            ):
+                units = shardlure.render_services(2222, 8080)
+            for name, text in units.items():
+                with self.subTest(unit=name):
+                    check_service_unit(self, root, text)
+            workdir = [line.partition("=")[2] for line in units["cowrie.service"].splitlines()
+                       if line.startswith("WorkingDirectory=")]
+            self.assertEqual([w.replace("%%", "%") for w in workdir], [str(data / "cowrie")])
+
+    def test_bait_tool_runs_through_venv_interpreter(self) -> None:
+        # Regression (guest CI run 36099193385): pip's generated fsctl script
+        # starts with a /bin/sh trampoline that quotes the interpreter path
+        # without escaping `"`, `$` or `\`, so every call failed "not found"
+        # on the adversarial path and bait silently never loaded.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / 'data "q" $VALUE %n a\'s \\ p' / "cowrie"
+            (home / "venv/bin").mkdir(parents=True)
+            (home / "src/cowrie/data").mkdir(parents=True)
+            (home / "var/lib/cowrie").mkdir(parents=True)
+            (home / "src/cowrie/data/fs.pickle").write_bytes(b"inert")
+            (home / "venv/bin/fsctl").write_text("inert")
+            calls = []
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0))):
+                shardlure.plant_bait_files()
+            self.assertTrue(calls)
+            for args in calls:
+                self.assertEqual(args[:2], [str(home / "venv/bin/python"), str(home / "venv/bin/fsctl")])
+
+    def test_cowrie_cfg_paths_survive_extended_interpolation(self) -> None:
+        # Cowrie (install/cowrie.commit) reads cowrie.cfg with
+        # configparser.ExtendedInterpolation, where a bare `$` is a syntax
+        # error: a data path containing one made every path lookup raise and
+        # Cowrie could not start. Values must be written with `$` as `$$`.
+        import configparser
+        home = Path('/srv/data "q" $VALUE %n a\'s \\ p/cowrie')
+        with mock.patch.object(shardlure, "COWRIE_HOME", home):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+        parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        parser.read_string(text)
+        self.assertEqual(parser.get("honeypot", "log_path"), f"{home}/var/log/cowrie")
+        self.assertEqual(parser.get("honeypot", "etc_path"), f"{home}/etc")
+        self.assertEqual(parser.get("shell", "filesystem"), f"{home}/src/cowrie/data/fs.pickle")
+        self.assertEqual(parser.get("output_jsonlog", "logfile"), f"{home}/var/log/cowrie/cowrie.json")
+
     def test_systemd_controls_reject_before_unit_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
