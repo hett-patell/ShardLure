@@ -393,8 +393,17 @@ func openDirConfined(dirfd int, path string, extraFlags int, resolve uint64) (in
 // opened with O_NOFOLLOW.
 func openatNoFollow(dirfd int, path string, flags, mode int) (int, error) {
 	clean := filepath.Clean(path)
+	cur := dirfd
+	owned := false
 	if filepath.IsAbs(clean) {
-		dirfd = unix.AT_FDCWD
+		// Anchor an absolute path at the real root. AT_FDCWD plus the
+		// relative components below resolved against the process working
+		// directory, which only matched "/" by accident under systemd.
+		root, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return -1, err
+		}
+		cur, owned = root, true
 	}
 	parts := strings.Split(clean, string(filepath.Separator))
 	var nonEmpty []string
@@ -406,8 +415,6 @@ func openatNoFollow(dirfd int, path string, flags, mode int) (int, error) {
 	if len(nonEmpty) == 0 {
 		nonEmpty = []string{"."}
 	}
-	cur := dirfd
-	owned := false
 	for i, name := range nonEmpty {
 		isLast := i == len(nonEmpty)-1
 		f := flags
