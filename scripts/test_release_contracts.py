@@ -16,7 +16,6 @@ from scripts.test_shardlure import (
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
-RELEASING_PATH = ROOT / "docs" / "RELEASING.md"
 RELEASE_SCRIPT_PATH = ROOT / "scripts" / "publish-release.sh"
 INSTALLER_PATH = ROOT / "scripts" / "install.sh"
 COWRIE_PIN_PATH = ROOT / "install" / "cowrie.commit"
@@ -1714,8 +1713,8 @@ checkout_fresh_cowrie
         self.assertIn("cancel-in-progress: false", release_job)
 
     def test_releasing_guide_delegates_release_creation_to_ci(self) -> None:
-        self.assertTrue(RELEASING_PATH.is_file(), "docs/RELEASING.md must exist")
-        guide = RELEASING_PATH.read_text(encoding="utf-8")
+        readme = README_PATH.read_text(encoding="utf-8")
+        guide = readme[readme.index("### Releasing\n") : readme.index("## Configuration\n")]
 
         self.assertIn("git tag -a v2.0.0", guide)
         self.assertIn("git push origin refs/tags/v2.0.0", guide)
