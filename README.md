@@ -677,7 +677,7 @@ dashboard:
     - 127.0.0.1        # the proxy's literal address, or a CIDR prefix
 ```
 
-Both keys are required together. `public_origin` must be an `http(s)://host[:port]` origin with no path. `trusted_proxies` accepts up to 256 literal addresses or prefixes, and rejects `/0` catch-alls. Only requests whose direct peer is on that list, and whose `Host` matches the public origin, are treated as proxied; session cookies then carry `Secure`.
+Both keys are required together. `public_origin` must be an `http(s)://host[:port]` origin with no path. `trusted_proxies` accepts up to 256 literal addresses or prefixes, and rejects `/0` catch-alls. Only requests whose direct peer is on that list, and whose `Host` matches the public origin, are treated as proxied; session cookies then carry `Secure`. **A proxy also requires `SHARDLURE_DASH_TOKEN`:** token-less mode means "the caller is on this host", and a proxy connects from this host on behalf of remote clients, so every page, API and debug request it forwards without a token is refused with 403.
 
 ## Architecture
 

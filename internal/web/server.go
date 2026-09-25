@@ -1237,9 +1237,22 @@ func isPublicIP(ip net.IP) bool {
 // requireDashboardAuth accepts explicit credentials or the page bootstrap's
 // HttpOnly cookie. Cookie-authenticated writes must prove same-origin; explicit
 // headers remain usable by CLI clients. API query tokens are never accepted.
+// refuseTokenlessProxy reports (and answers) a token-less request whose
+// direct peer is a configured trusted reverse proxy. Open mode means "the
+// caller is on this host", but a proxy connects from this host on behalf of
+// remote clients, so it never inherits that trust: behind a proxy, set
+// SHARDLURE_DASH_TOKEN.
+func (s *Server) refuseTokenlessProxy(w http.ResponseWriter, r *http.Request) bool {
+	if s.originPolicy.IsTrustedPeer(r.RemoteAddr) {
+		http.Error(w, "a dashboard token is required behind a reverse proxy", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
 func (s *Server) requireDashboardAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardToken() == "" {
-		return true
+		return !s.refuseTokenlessProxy(w, r)
 	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if strings.TrimSpace(token) == "" {
@@ -1295,7 +1308,7 @@ func securityHeaders(next http.Handler) http.Handler {
 // API routes also accept this cookie, with a same-origin gate on writes.
 func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.dashboardToken() == "" {
-		return true
+		return !s.refuseTokenlessProxy(w, r)
 	}
 
 	// 1. Check Bearer / X-ShardLure-Token header (preferred).
@@ -1797,7 +1810,7 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 // along with the "dashboard is open on Tailscale" convenience mode.
 func (s *Server) guardDebug(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.dashboardToken() == "" && !isLoopbackPeer(r.RemoteAddr) {
+		if s.dashboardToken() == "" && (!isLoopbackPeer(r.RemoteAddr) || s.originPolicy.IsTrustedPeer(r.RemoteAddr)) {
 			http.Error(w, "debug endpoints require a dashboard token or a loopback connection", http.StatusForbidden)
 			return
 		}
