@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"runtime"
 	"sort"
@@ -1342,12 +1343,18 @@ func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 			Secure:   secure,
 			MaxAge:   0, // session cookie - expires when the browser closes
 		})
-		// Strip token from the URL and redirect.
-		clean := *r.URL
-		q := clean.Query()
+		// Strip token from the URL and redirect. Only the path and query are
+		// kept: an absolute-form request target ("GET http://evil.example/")
+		// leaves its scheme and host in r.URL, and redirecting to that sent
+		// the browser off-site.
+		q := r.URL.Query()
 		q.Del("token")
-		clean.RawQuery = q.Encode()
-		http.Redirect(w, r, clean.String(), http.StatusFound)
+		clean := url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: q.Encode()}
+		target := clean.String()
+		if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+			target = "/"
+		}
+		http.Redirect(w, r, target, http.StatusFound)
 		return false // redirect; don't serve the page
 	}
 
