@@ -387,3 +387,52 @@ func TestJournalSummaryRestartsAfterLateNameAndCorruptState(t *testing.T) {
 		t.Fatalf("duplicate name must reuse complete corpus done=%v err=%v", done, err)
 	}
 }
+
+// Regression (whole-branch review): the live worker asked for the first 16
+// pending ids in actor_id order and returned on the first failure, so one
+// actor with a persistently bad row (an unparseable first_seen, say) blocked
+// derivation for every journal actor sorting after it, leaving them masked as
+// pending with probe score 0 and never offered for reporting.
+func TestPendingJournalSummariesAreNotBlockedByOneFailingActor(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "hol.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	ids := []string{"journal:198.51.100.1", "journal:198.51.100.2"}
+	for _, id := range ids {
+		e := &models.Event{TS: base, Source: models.SourceJournal, Kind: models.KindFailedPass, ActorID: id, SrcIP: id[len("journal:"):], Username: "root"}
+		if _, err := s.AppendJournalEventAtomic(e, &store.JournalActorUpdate{Actor: &models.Actor{ID: id}, Username: "root"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec("UPDATE actors SET first_seen='not a time' WHERE id=?", ids[0])
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	cursor := ""
+	var sawErr bool
+	for cycle := 0; cycle < 3; cycle++ {
+		next, err := AdvancePendingJournalSummaries(ctx, s, cursor, 1)
+		if err != nil {
+			sawErr = true
+		}
+		cursor = next
+	}
+	if !sawErr {
+		t.Fatal("the failing actor's error was not reported")
+	}
+	pending, err := s.PendingJournalSummaries(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range pending {
+		if id == ids[1] {
+			t.Fatalf("healthy actor %s stayed pending behind a failing one", ids[1])
+		}
+	}
+}

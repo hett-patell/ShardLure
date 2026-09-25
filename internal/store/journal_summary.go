@@ -101,10 +101,17 @@ WHERE ai.actor_id=? AND ai.ip=? AND a.source='journal'`, actorID, ip).Scan(&out.
 }
 
 func (s *Store) PendingJournalSummaries(ctx context.Context, limit int) ([]string, error) {
+	return s.PendingJournalSummariesAfter(ctx, "", limit)
+}
+
+// PendingJournalSummariesAfter pages pending actors in actor_id order,
+// strictly after the given id, so a caller can move past an actor whose
+// derivation keeps failing instead of re-reading the same first page.
+func (s *Store) PendingJournalSummariesAfter(ctx context.Context, after string, limit int) ([]string, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT actor_id FROM journal_summaries WHERE status='pending' ORDER BY actor_id LIMIT ?", limit)
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_id FROM journal_summaries WHERE status='pending' AND actor_id>? ORDER BY actor_id LIMIT ?", after, limit)
 	if err != nil {
 		return nil, err
 	}

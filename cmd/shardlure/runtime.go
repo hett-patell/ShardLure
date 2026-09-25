@@ -201,17 +201,11 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 		start := func(fn func()) { group.Add(1); go func() { defer group.Done(); fn() }() }
 		start(func() { runRuntimeBackfills(ctx, m, st) })
 		start(func() {
+			cursor := "" // owned by this worker goroutine only
 			runPeriodicWorker(ctx, m, observability.JournalSummaries, time.Second, 20*time.Second, func(ctx context.Context) error {
-				ids, err := st.PendingJournalSummaries(ctx, 16)
-				if err != nil {
-					return err
-				}
-				for _, id := range ids {
-					if _, err := st.AdvanceJournalSummary(ctx, id, 1000, actor.NewJournalSummaryCodec()); err != nil {
-						return err
-					}
-				}
-				return nil
+				next, err := actor.AdvancePendingJournalSummaries(ctx, st, cursor, 16)
+				cursor = next
+				return err
 			})
 		})
 		if opts.Live {
