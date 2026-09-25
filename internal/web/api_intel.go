@@ -185,16 +185,13 @@ func (s *Server) handleIntelSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		opts = append(opts, store.SessionListOptions{MinCommands: n})
 	}
-	sessions, err := s.st.ListSessions(since, limit, opts...)
+	// One aggregation pass returns the page and the true total for the same
+	// opts, so the total describes the same population as the rows (a count of
+	// all sessions beside a command-filtered page would read as truncation).
+	sessions, total, err := s.st.ListSessionsWithTotal(since, limit, opts...)
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
-	}
-	// Same opts, so the total describes the same population as the rows: a count
-	// of all sessions beside a command-filtered page would read as truncation.
-	total, terr := s.st.CountSessionsSince(since, opts...)
-	if terr != nil {
-		total = len(sessions)
 	}
 	resp := sessionsResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),

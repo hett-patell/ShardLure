@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+// canonicalHASSHRepairUpdate repairs one id range; the stored cursor is kept
+// up with ingest, so the range is normally a tick's worth of new rows. The
+// unary + on source is load-bearing: without it the planner answers
+// source='cowrie' from idx_events_session and walks every Cowrie row to find
+// that range (~10% of a core at idle on a 1.7M-event DB, every 5s tick).
+const canonicalHASSHRepairUpdate = `UPDATE events SET hassh=(SELECT h.hassh FROM cowrie_session_hassh h WHERE h.session_id=events.session_id)
+WHERE id>? AND id<=? AND +source='cowrie' AND COALESCE(hassh,'')=''
+ AND EXISTS(SELECT 1 FROM cowrie_session_hassh h WHERE h.session_id=events.session_id AND h.hassh<>'' AND events.actor_id='cowrie:'||h.hassh)`
+
 // RepairCanonicalHASSHBatch backfills the old reconciliation's missing HASSH
 // only when its actor ID already agrees with the durable session binding. It
 // does not guess identity or rebuild aggregates from retention-limited rows.
@@ -32,9 +41,7 @@ func (s *Store) RepairCanonicalHASSHBatch(limit int) (int, error) {
 		if end == 0 {
 			return nil
 		}
-		result, err := tx.Exec(`UPDATE events SET hassh=(SELECT h.hassh FROM cowrie_session_hassh h WHERE h.session_id=events.session_id)
-WHERE id>? AND id<=? AND source='cowrie' AND COALESCE(hassh,'')=''
- AND EXISTS(SELECT 1 FROM cowrie_session_hassh h WHERE h.session_id=events.session_id AND h.hassh<>'' AND events.actor_id='cowrie:'||h.hassh)`, cursor, end)
+		result, err := tx.Exec(canonicalHASSHRepairUpdate, cursor, end)
 		if err != nil {
 			return err
 		}
