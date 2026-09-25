@@ -381,7 +381,19 @@ GitHub Actions runs on push and pull request:
 - `go build -o shardlure ./cmd/shardlure` + `shardlure version` smoke
 - `scripts/ci-web-smoke.sh` — boots the web server and checks it serves
 - a cross-build job for the release targets
-- `scripts/install.sh` end to end on a disposable GitHub-hosted Ubuntu guest (see [docs/INSTALLER-INTEGRATION.md](docs/INSTALLER-INTEGRATION.md)); a tag cannot publish unless it passes
+- `scripts/install.sh` end to end on a disposable GitHub-hosted Ubuntu guest (see [Development and Contributing](https://github.com/hett-patell/ShardLure/wiki/Development-and-Contributing)); a tag cannot publish unless it passes
+
+### Releasing
+
+Releases are cut by pushing an annotated tag from an up-to-date `main`:
+
+```bash
+git switch main && git pull --ff-only origin main
+git tag -a v2.0.0 -m 'ShardLure v2.0.0'
+git push origin refs/tags/v2.0.0
+```
+
+CI does the rest: it builds and smoke-tests every target, runs the installer integration on a disposable Ubuntu guest, generates `SHA256SUMS`, uploads all assets to a draft release and publishes only after every upload succeeds. A failed build, test or upload leaves nothing published.
 
 ## Configuration
 

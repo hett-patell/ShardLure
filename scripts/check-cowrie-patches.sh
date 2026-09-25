@@ -283,8 +283,7 @@ fi
 # Apply, verify every expected target changed, then prove check mode and normal
 # reapplication leave the complete patch set byte-for-byte unchanged. The list is
 # git-diff --name-only order (alphabetical by path); keep it sorted. The stealth
-# patches (2026-08-13) added base.py/which.py/script.py to the original three —
-# see docs/superpowers/specs/2026-08-13-cowrie-stealth-hardening-design.md.
+# patches (2026-08-13) added base.py/which.py/script.py to the original three.
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"

@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-// These tests pin the frontend contracts from docs/FRONTEND-UI-AUDIT-2026-09-07.md.
-// Every finding there was first reproduced in a real browser against the
-// pre-fix build (see the audit's remediation section), then fixed; each test
+// These tests pin the frontend contracts from the 2026-09-07 frontend UI audit.
+// Every finding was first reproduced in a real browser against the pre-fix
+// build, then fixed; each test
 // below reads the embedded asset so the shipped dashboard cannot regress
 // silently. They are deliberately literal string/regexp checks on the HTML
 // and CSS — the point is to fail the build the moment someone re-adds an
