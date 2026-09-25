@@ -222,26 +222,40 @@ func TestLateHASSHPreservesRetainedLifetimeAndAnnotations(t *testing.T) {
 }
 
 func TestReconcilePreservesAnnotationThatLooksGenerated(t *testing.T) {
-	st := openTestStore(t)
-	defer st.Close()
-	path := writeTempCowrieLog(t, `{"eventid":"cowrie.login.failed","timestamp":"2026-09-21T10:00:00Z","src_ip":"1.2.3.4","username":"root","session":"annotated"}`)
-	if _, err := IngestFileAppend(st, path, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Arbitrary legacy note text is operator-owned, even when it happens to
-	// match an old classifier's output. Do not guess that it is disposable.
-	if err := st.WithTx(func(tx *sql.Tx) error {
-		_, err := tx.Exec("UPDATE actors SET notes='1 events, 1 usernames' WHERE id='cowrie:1.2.3.4'")
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	appendLine(t, path, `{"eventid":"cowrie.client.kex","timestamp":"2026-09-21T10:00:01Z","session":"annotated","hassh":"annotation-target"}`)
-	if _, err := IngestFileAppend(st, path, nil); err != nil {
-		t.Fatal(err)
-	}
-	old, err := st.GetActor("cowrie:1.2.3.4")
-	if err != nil || old.Notes != "1 events, 1 usernames" || old.EventCount != 0 {
-		t.Fatalf("annotation-bearing actor removed: %+v err=%v", old, err)
+	// Arbitrary operator text keeps an emptied pre-HASSH actor, even when it
+	// quotes classifier output. Exact legacy builder output ("N events, M
+	// usernames", written into notes on every rebuild before v23) does not:
+	// keeping it left a zero-event duplicate of every legacy actor that later
+	// gained a fingerprint (see store.isOperatorNote).
+	for _, tc := range []struct {
+		note string
+		keep bool
+	}{
+		{"1 events, 1 usernames - same box as last week", true},
+		{"1 events, 1 usernames", false},
+	} {
+		st := openTestStore(t)
+		path := writeTempCowrieLog(t, `{"eventid":"cowrie.login.failed","timestamp":"2026-09-21T10:00:00Z","src_ip":"1.2.3.4","username":"root","session":"annotated"}`)
+		if _, err := IngestFileAppend(st, path, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.WithTx(func(tx *sql.Tx) error {
+			_, err := tx.Exec("UPDATE actors SET notes=? WHERE id='cowrie:1.2.3.4'", tc.note)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		appendLine(t, path, `{"eventid":"cowrie.client.kex","timestamp":"2026-09-21T10:00:01Z","session":"annotated","hassh":"annotation-target"}`)
+		if _, err := IngestFileAppend(st, path, nil); err != nil {
+			t.Fatal(err)
+		}
+		old, err := st.GetActor("cowrie:1.2.3.4")
+		if tc.keep && (err != nil || old == nil || old.Notes != tc.note || old.EventCount != 0) {
+			t.Errorf("note %q: annotation-bearing actor removed: %+v err=%v", tc.note, old, err)
+		}
+		if !tc.keep && err == nil && old != nil {
+			t.Errorf("note %q: legacy builder text kept an emptied actor: %+v", tc.note, old)
+		}
+		st.Close()
 	}
 }
