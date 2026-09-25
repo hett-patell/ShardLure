@@ -1351,7 +1351,10 @@ func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 		q.Del("token")
 		clean := url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: q.Encode()}
 		target := clean.String()
-		if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+		// Browsers read both "//host" and "/\host" as protocol-relative. The
+		// URL encoder already escapes a backslash to %5C; this check must not
+		// depend on that.
+		if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") || strings.HasPrefix(target, "/\\") {
 			target = "/"
 		}
 		http.Redirect(w, r, target, http.StatusFound)
