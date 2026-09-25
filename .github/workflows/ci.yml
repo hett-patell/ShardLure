@@ -9,6 +9,11 @@ name: CI
       - "v*"
   pull_request:
 
+# Least privilege by default: test and cross-build only read the repo. Jobs
+# that need more (release: contents write) say so on their own.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Go test (amd64)
