@@ -4,7 +4,6 @@ name: CI
   push:
     branches:
       - main
-      - fix/reliability
     tags:
       - "v*"
   pull_request:

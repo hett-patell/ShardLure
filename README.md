@@ -21,6 +21,7 @@ you      -> port 2222 (SSH)   -> real admin access via keys/Tailscale
 
 - [Features](#features)
 - [Setup Guide](#setup-guide)
+- [Upgrading](#upgrading)
 - [Local Development](#local-development)
 - [Commands](#commands)
 - [CI](#ci)
@@ -186,9 +187,17 @@ right way to reach it.
 For defense in depth, set a token the dashboard requires on every request:
 
 ```bash
-# Add to the shardlure-live systemd unit's [Service] section, then daemon-reload + restart:
-Environment=SHARDLURE_DASH_TOKEN=your-long-random-token
+sudo systemctl edit shardlure-live
+# In the editor, add:
+#   [Service]
+#   Environment=SHARDLURE_DASH_TOKEN=your-long-random-token
+sudo systemctl restart shardlure-live
 ```
+
+Use a drop-in (`systemctl edit`) rather than editing the unit file itself. The
+installers record the units they write and refuse to touch one that was changed
+by hand, so an edited unit blocks every later `finish` or reinstall. Drop-ins are
+never modified and keep applying across upgrades.
 
 Then reach the dashboard with `?token=…` (page load) or an `Authorization: Bearer …`
 header (API calls — the token is never accepted in an `/api` URL, to keep it out
@@ -201,7 +210,9 @@ of access logs).
 
 ### Step 5 (optional) — Enable IP reputation enrichment & MalwareBazaar sharing
 
-Add provider API keys as `Environment=` lines in the `shardlure-live` unit (see
+Add provider API keys as `Environment=` lines in a `shardlure-live` drop-in
+(`sudo systemctl edit shardlure-live`, as in Step 4), or save them in the
+dashboard's Settings panel (see
 [IP Reputation Enrichment](#ip-reputation-enrichment) and
 [Threat Intel Sharing](#threat-intel-sharing-malwarebazaar)). Two enrichment
 providers (Shodan, GreyNoise) work with no key at all.
@@ -226,6 +237,42 @@ Verify from the honeypot shell:
 ls -la /opt/app/
 cat /opt/app/.env
 ```
+
+## Upgrading
+
+Upgrade an existing installation by replacing the binary. Both installers refuse
+to run over an active host or one they did not install (anything installed
+before v2.8.0), by design: re-running them would rewrite units, accounts and
+permissions under live data. A binary upgrade leaves Cowrie, `cowrie.cfg`,
+sshd, the firewall, your config and systemd drop-ins exactly as they are.
+
+```bash
+TAG=v2.8.0
+ARCH=arm64          # amd64, arm64 or armv7 (check: uname -m)
+cd "$(mktemp -d)"
+curl -fsSLO "https://github.com/hett-patell/ShardLure/releases/download/$TAG/shardlure-linux-$ARCH"
+curl -fsSLO "https://github.com/hett-patell/ShardLure/releases/download/$TAG/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS      # must print: shardlure-linux-$ARCH: OK
+chmod 0755 "shardlure-linux-$ARCH"
+
+# 1. Back up with the NEW binary (v2.7.x has no backup command). The snapshot
+#    never migrates the database, so the running old version is unaffected.
+CONFIG=$(systemctl show -p Environment --value shardlure-live | tr ' ' '\n' | sed -n 's/^SHARDLURE_CONFIG=//p' | tail -1)
+sudo "./shardlure-linux-$ARCH" -config "${CONFIG:-/var/lib/shardlure/shardlure.yaml}" \
+  backup create --output "/root/shardlure-before-$TAG"
+sudo "./shardlure-linux-$ARCH" backup verify --input "/root/shardlure-before-$TAG"
+
+# 2. Swap the binary, keeping the old one for rollback.
+sudo cp -p /usr/local/bin/shardlure /usr/local/bin/shardlure.previous
+sudo install -m 0755 "shardlure-linux-$ARCH" /usr/local/bin/shardlure
+sudo systemctl restart shardlure-live
+shardlure version
+```
+
+- **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues.
+- **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
+- **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
+- **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
 
 ## Local Development
 
@@ -325,6 +372,7 @@ GitHub Actions runs on push and pull request:
 
 - `scripts/check-utf8.sh` — fails on any tracked text file with a UTF-16 BOM or NUL bytes (see Troubleshooting for why this exists)
 - `python3 -m unittest scripts/test_release_contracts.py` and `scripts/test_shardlure.py`
+- `python3 -m unittest scripts/test_installer_safety.py scripts/test_ssh_transition.py` — installer filesystem and SSH transactions
 - `scripts/check-cowrie-patches.sh` — anti-fingerprint patches still apply to the pinned Cowrie
 - `gofmt -l` on all tracked Go files (formatting is enforced)
 - `go mod verify`
@@ -333,6 +381,7 @@ GitHub Actions runs on push and pull request:
 - `go build -o shardlure ./cmd/shardlure` + `shardlure version` smoke
 - `scripts/ci-web-smoke.sh` — boots the web server and checks it serves
 - a cross-build job for the release targets
+- `scripts/install.sh` end to end on a disposable GitHub-hosted Ubuntu guest (see [docs/INSTALLER-INTEGRATION.md](docs/INSTALLER-INTEGRATION.md)); a tag cannot publish unless it passes
 
 ## Configuration
 
