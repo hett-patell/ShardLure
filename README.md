@@ -77,6 +77,10 @@ A complete walkthrough for standing up ShardLure on a fresh Ubuntu/Debian VPS
 (it also supports dnf/yum and pacman hosts). Budget ~10 minutes, most of it
 Cowrie's pip install.
 
+### Supported data filesystems
+
+The data directory (database, evidence, backups) must live on **ext4, XFS, Btrfs, tmpfs or overlayfs**. ShardLure writes evidence and backups through pinned file descriptors with no-replace renames and directory `fsync`, and it refuses filesystems whose behavior for those operations has not been verified, rather than risk an overwrite or a lost write. On anything else (ZFS, F2FS, network filesystems) capture, backups and readiness report an unsupported-filesystem error, and retention stops at the first evidence file it cannot delete safely. Put the data directory on a supported volume.
+
 ### Before you start — the one rule that matters
 
 **Keep your current SSH session open until you've verified the new admin port
