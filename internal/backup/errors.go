@@ -1,6 +1,10 @@
 package backup
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/networkshard/shardlure/internal/store"
+)
 
 var (
 	ErrInvalidManifest   = errors.New("backup: invalid manifest or content")
@@ -22,7 +26,18 @@ type Failure struct {
 	cause   error
 }
 
-func (e *Failure) Error() string        { return e.Kind.Error() }
+// pathFreeReasons are fixed store sentinels that name the fix without naming a
+// path, so Error may append them to the category.
+var pathFreeReasons = []error{store.ErrDatabaseUnsafe, store.ErrDatabaseOwner, store.ErrDatabaseAccess, store.ErrDatabaseUnsupported}
+
+func (e *Failure) Error() string {
+	for _, reason := range pathFreeReasons {
+		if errors.Is(e.cause, reason) {
+			return e.Kind.Error() + ": " + reason.Error()
+		}
+	}
+	return e.Kind.Error()
+}
 func (e *Failure) Unwrap() error        { return e.cause }
 func (e *Failure) Is(target error) bool { return target == e.Kind }
 func failure(kind, cause error, stage string) error {

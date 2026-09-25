@@ -144,3 +144,25 @@ func TestCreateAllowsSeparateDataBackupsAndLimitsCustomLogSelection(t *testing.T
 		}
 	}
 }
+
+// A database the store refuses to open must say why. The generic IO category
+// hid "use a private directory owned by the service account" from an operator
+// whose data directory was group-writable; that reason carries no path.
+func TestCreateReportsUnsafeDatabaseReason(t *testing.T) {
+	fixture := newFixture(t)
+	dataDir := filepath.Dir(fixture.Config) // the fixture DB lives beside its config
+	if err := os.Chmod(dataDir, 0770); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dataDir, 0700) })
+	_, err := Create(context.Background(), CreateOptions{ConfigPath: fixture.Config, Output: filepath.Join(t.TempDir(), "backup"), AppVersion: "test", AppCommit: "inert"})
+	if err == nil {
+		t.Fatal("backup of a group-writable database directory succeeded")
+	}
+	if !strings.Contains(err.Error(), "private directory owned by the service account") {
+		t.Fatalf("error hides the reason: %v", err)
+	}
+	if strings.Contains(err.Error(), dataDir) {
+		t.Fatalf("error leaks the path: %v", err)
+	}
+}
