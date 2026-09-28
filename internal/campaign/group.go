@@ -116,6 +116,7 @@ type component struct {
 	idx    []int
 	minSeq int64 // -1 when no value was assigned before
 	id     string
+	assign string // ID written for this component's new or rewritten values
 }
 
 func Group(in Input) Output {
@@ -370,11 +371,14 @@ func Group(in Input) Output {
 		taken[c.id] = true
 		reserved[c.id] = true
 	}
-	// Other direct IDs a component absorbed (a new bridge) retire into it.
+	// Other direct IDs a component absorbed (a new bridge) retire into it,
+	// except the ID it already resolves to: a merged-from piece holding its
+	// own merge target's ID (when the target's other evidence has aged out)
+	// would otherwise alias the target back into the merged-from ID, a cycle.
 	for _, r := range roots {
 		c := comps[r]
 		for _, cl := range claims[r] {
-			if cl.direct && cl.raw != c.id && !taken[cl.raw] {
+			if cl.direct && cl.raw != c.id && !taken[cl.raw] && Resolve(aliases, c.id) != cl.raw {
 				aliases[cl.raw] = c.id
 			}
 		}
@@ -389,15 +393,42 @@ func Group(in Input) Output {
 		}
 	}
 
+	// Merged-from status belongs only to evidence that already carried the
+	// merged-from ID when the operator merged; it must never spread. A
+	// component that took a merged-from ID therefore writes new or rewritten
+	// values under its best other claim in the same lineage (typically an
+	// unrelated campaign's ID, aliased in for the length of a bridge, which
+	// it revives when the bridge breaks). Writing the merged-from ID instead
+	// let a value first seen during a bridge carry the merge to the other
+	// side and swallow that campaign for good. With no such claim, the
+	// values were only ever seen with merged evidence, so they belong to the
+	// merge target itself: they are written under its resolved ID, which is
+	// never a merged-from ID, so the status still cannot spread.
+	for _, r := range roots {
+		c := comps[r]
+		c.assign = c.id
+		if !mergedFrom[c.id] {
+			continue
+		}
+		final := Resolve(aliases, c.id)
+		c.assign = final
+		for _, cl := range claims[r] {
+			if !cl.merged && Resolve(aliases, cl.raw) == final {
+				c.assign = cl.raw
+				break
+			}
+		}
+	}
+
 	// Collect occurrences per final campaign ID.
 	members := map[string][]int{}
-	compOf := map[int]string{}
+	compOf := map[int]*component{}
 	for _, r := range roots {
 		c := comps[r]
 		id := Resolve(aliases, c.id)
 		members[id] = append(members[id], c.idx...)
 		for _, i := range c.idx {
-			compOf[i] = c.id
+			compOf[i] = c
 		}
 	}
 	names, notes := map[string]string{}, map[string]string{}
@@ -446,10 +477,11 @@ func Group(in Input) Output {
 	// to take a different identity (a split that minted or revived an ID).
 	newAssign := map[string]Assignment{}
 	for i, x := range occ {
-		compID, ok := compOf[i]
-		if !ok || !emitted[Resolve(aliases, compID)] {
+		comp, ok := compOf[i]
+		if !ok || !emitted[Resolve(aliases, comp.id)] {
 			continue
 		}
+		compID := comp.assign
 		k := vkey(x.Kind, x.Value)
 		if _, done := newAssign[k]; done {
 			continue

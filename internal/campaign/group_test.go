@@ -531,3 +531,92 @@ func TestMergeSurvivesTransientBridgeToAnotherCampaign(t *testing.T) {
 		}
 	})
 }
+
+// mergedKPD sets up campaigns K, P and D and merges P into K.
+func mergedKPD() ([]Occurrence, map[string]string, []Edit, Output) {
+	all := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0),
+		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
+		o("script", "D", "e1", "e", 2), o("script", "D", "f1", "f", 2)}
+	first := Group(Input{Occurrences: all})
+	ids := map[string]string{}
+	for _, c := range first.Campaigns {
+		ids[c.AnchorValue] = c.ID
+	}
+	edits := []Edit{{ID: 1, CampaignID: ids["P"], Action: "merge", Arg: ids["K"]}}
+	return all, ids, edits, feed(feed(first, all, edits), all, edits)
+}
+
+// kAndDSeparate checks that after a bridge breaks K holds its merged
+// evidence (a, b, c, d) and D is back under its own ID without them.
+func kAndDSeparate(t *testing.T, ids map[string]string) func(int, Output) {
+	return func(cycle int, out Output) {
+		t.Helper()
+		k, okK := byID(out)[ids["K"]]
+		d, okD := byID(out)[ids["D"]]
+		if !okK || !okD || !reflect.DeepEqual(actorsOf(k), []string{"a", "b", "c", "d"}) || !reflect.DeepEqual(actorsOf(d), []string{"e", "f"}) {
+			t.Fatalf("after bridge cycle %d: merge or D's identity lost: %+v", cycle, out.Campaigns)
+		}
+	}
+}
+
+// Evidence first seen while P was bridged to D must not inherit P's merged
+// status: here D's actors pick up a new payload Y during the bridge.
+func TestValueFirstSeenInBridgeDoesNotInheritMerge(t *testing.T) {
+	all, ids, edits, merged := mergedKPD()
+	withY := append(append([]Occurrence{}, all...), o("script", "D", "e3", "e", 4), o("payload", "Y", "e3", "e", 4), o("payload", "Y", "f3", "f", 4))
+	bridge := append(append([]Occurrence{}, withY...), o("script", "D", "c2", "c", 3), o("payload", "P", "c2", "c", 3))
+	bridged := settle(t, merged, bridge, edits, 3, func(cycle int, out Output) {
+		if k, ok := byID(out)[ids["K"]]; len(out.Campaigns) != 1 || !ok || !hasActor(k, "e") {
+			t.Fatalf("bridge cycle %d: want one campaign under K: %+v", cycle, out.Campaigns)
+		}
+	})
+	settle(t, bridged, withY, edits, 3, kAndDSeparate(t, ids))
+}
+
+// The bridge itself is a new value X (c3 carries P and X, e3 carries D and
+// X). When c3 ages out, X stays with D and must not drag D into K.
+func TestBridgeThroughNewValueDoesNotInheritMerge(t *testing.T) {
+	all, ids, edits, merged := mergedKPD()
+	after := append(append([]Occurrence{}, all...), o("script", "D", "e3", "e", 4), o("payload", "X", "e3", "e", 4))
+	bridge := append(append([]Occurrence{}, after...), o("payload", "P", "c3", "c", 4), o("payload", "X", "c3", "c", 4))
+	bridged := settle(t, merged, bridge, edits, 3, func(cycle int, out Output) {
+		if k, ok := byID(out)[ids["K"]]; len(out.Campaigns) != 1 || !ok || !hasActor(k, "e") {
+			t.Fatalf("bridge cycle %d: want one campaign under K: %+v", cycle, out.Campaigns)
+		}
+	})
+	settle(t, bridged, after, edits, 3, kAndDSeparate(t, ids))
+}
+
+// A merged piece outlives its target's own evidence and picks up a value only
+// ever seen with merged evidence. That value is written under the merge
+// target itself, and the target must never be aliased back into the
+// merged-from ID (an alias cycle).
+func TestMergedPieceOutlivesItsTargetWithoutAliasCycle(t *testing.T) {
+	all, ids, edits, merged := mergedKPD()
+	rest := append(append([]Occurrence{}, all[2:]...), // K's own evidence aged out
+		o("payload", "P", "c5", "c", 6), o("payload", "Y", "c5", "c", 6), o("payload", "Y", "d5", "d", 6))
+	settle(t, merged, rest, edits, 3, func(cycle int, out Output) {
+		for from := range out.Aliases {
+			seen := map[string]bool{}
+			for id := from; ; {
+				if seen[id] {
+					t.Fatalf("cycle %d: alias cycle through %s: %v", cycle, id, out.Aliases)
+				}
+				seen[id] = true
+				next, ok := out.Aliases[id]
+				if !ok || next == id {
+					break
+				}
+				id = next
+			}
+		}
+		if k, ok := byID(out)[ids["K"]]; !ok || !reflect.DeepEqual(actorsOf(k), []string{"c", "d"}) {
+			t.Fatalf("cycle %d: the merged piece left K: %+v", cycle, out.Campaigns)
+		}
+		for _, a := range out.Assignments {
+			if a.Value == "Y" && a.CampaignID != ids["K"] {
+				t.Fatalf("cycle %d: Y written under %s, want the merge target", cycle, a.CampaignID)
+			}
+		}
+	})
+}
