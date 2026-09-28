@@ -135,8 +135,9 @@ func (w *Worker) tick(ctx context.Context) error {
 	}
 	// settle -> assign -> (regroup, rebuild) -> prune, sequentially in this
 	// goroutine under w.mu: AssignScriptFamilies and PruneOrphanScripts assume
-	// a single sequential caller. Prune frees representatives one level per
-	// pass, which is fine at one call per tick.
+	// a single sequential caller. Prune runs only on a tick that settled or
+	// regrouped (it takes writeMu, so an idle tick must not pay for it) and
+	// frees representatives one level per such pass.
 	settled, err := w.st.SettleSessionScripts(ctx, time.Now().Add(-settleIdle), settleBatch)
 	if err != nil {
 		return err
