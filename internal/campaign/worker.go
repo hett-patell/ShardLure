@@ -266,7 +266,7 @@ func groupingRows(out Output) ([]store.CampaignRow, []store.CampaignAssignmentRo
 type reasonJSON struct {
 	Kind      string `json:"kind"`
 	Value     string `json:"value"`
-	Label     string `json:"label,omitempty"`
+	Label     string `json:"label"` // always present: the API contract lists it
 	FirstSeen string `json:"firstSeen"`
 }
 

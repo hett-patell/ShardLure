@@ -131,27 +131,39 @@ func TestCampaignEditValidatesAndWakes(t *testing.T) {
 	}
 }
 
-// A merge resolves both sides through the alias map, so merging a campaign
-// into an ID that already resolves to it is refused as a self-merge, and an
-// alias to a live campaign is accepted as a target.
-func TestCampaignEditMergeResolvesAliases(t *testing.T) {
+// Edits are recorded literally. Stored aliases include Group's automatic
+// bridge aliases, and Group alone interprets IDs (through merge aliases only):
+// resolving here would turn "merge T into A" while A is bridged into B into a
+// permanent merge into B. Aliases only count as existence.
+func TestCampaignEditMergeRecordsLiteralIDs(t *testing.T) {
 	s, st := hasshTestServer(t)
 	mux := http.NewServeMux()
 	s.registerCampaignRoutes(mux)
-	rows := []store.CampaignRow{{ID: "c-aaaaaaaaaaaa"}, {ID: "c-bbbbbbbbbbbb"}}
-	if err := st.SaveGrouping(context.Background(), rows, nil, map[string]string{"c-000000000001": "c-aaaaaaaaaaaa"}, 0); err != nil {
+	const a, b, t0 = "c-000000000001", "c-aaaaaaaaaaaa", "c-bbbbbbbbbbbb" // a is bridge-aliased into b
+	rows := []store.CampaignRow{{ID: b}, {ID: t0}}
+	if err := st.SaveGrouping(context.Background(), rows, nil, map[string]string{a: b}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if c := postCampaignEdit(mux, url.Values{"id": {"c-aaaaaaaaaaaa"}, "action": {"merge"}, "arg": {"c-000000000001"}}).Code; c != http.StatusBadRequest {
-		t.Fatalf("self-merge through alias = %d", c)
+	if c := postCampaignEdit(mux, url.Values{"id": {b}, "action": {"merge"}, "arg": {b}}).Code; c != http.StatusBadRequest {
+		t.Fatalf("literal self-merge = %d", c)
 	}
-	if c := postCampaignEdit(mux, url.Values{"id": {"c-bbbbbbbbbbbb"}, "action": {"merge"}, "arg": {"c-000000000001"}}).Code; c != http.StatusOK {
-		t.Fatalf("merge into alias of live campaign = %d", c)
+	for _, e := range [][2]string{{t0, a}, {a, b}} { // merge T into A; make the A->B bridge permanent
+		if c := postCampaignEdit(mux, url.Values{"id": {e[0]}, "action": {"merge"}, "arg": {e[1]}}).Code; c != http.StatusOK {
+			t.Fatalf("merge %s into %s = %d", e[0], e[1], c)
+		}
 	}
-	// The resolved target is recorded: the edit lands on the campaign the
-	// operator saw, not on a retired ID.
-	if edits, err := st.CampaignEdits(context.Background()); err != nil || len(edits) != 1 || edits[0].CampaignID != "c-bbbbbbbbbbbb" || edits[0].Arg != "c-aaaaaaaaaaaa" {
-		t.Fatalf("recorded merge %+v %v", edits, err)
+	if c := postCampaignEdit(mux, url.Values{"id": {a}, "action": {"rename"}, "arg": {"X"}}).Code; c != http.StatusOK {
+		t.Fatalf("rename via alias source = %d", c)
+	}
+	edits, err := st.CampaignEdits(context.Background())
+	if err != nil || len(edits) != 3 {
+		t.Fatalf("edits %+v %v", edits, err)
+	}
+	want := [][2]string{{t0, a}, {a, b}, {a, "X"}}
+	for i, e := range edits {
+		if e.CampaignID != want[i][0] || e.Arg != want[i][1] {
+			t.Errorf("edit %d recorded %s/%s, want %s/%s", i, e.CampaignID, e.Arg, want[i][0], want[i][1])
+		}
 	}
 }
 

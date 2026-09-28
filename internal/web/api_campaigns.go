@@ -238,8 +238,11 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 // Auth and origin follow the other mutating endpoints: bare guard (header
 // token, or the session cookie with the same-origin check that
 // requireDashboardAuth applies to non-GET requests) plus the method check
-// here. The dashboard has a single shared token, so every dashboard edit is
-// recorded as who="dashboard"; the CLI records "cli".
+// here. Fields: id (campaign ID; optional for ignore_evidence, where it only
+// files the edit under that campaign's history), action, arg. IDs are
+// recorded literally (see below). The dashboard has a single shared token,
+// so every dashboard edit is recorded as who="dashboard"; the CLI records
+// "cli".
 func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -260,11 +263,23 @@ func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Every campaign the edit names must exist once aliases are followed,
-	// and the resolved ID is what gets recorded, so the edit lands on the
-	// campaign the operator was looking at.
+	// Every campaign the edit names must exist: a live campaign or any alias
+	// source counts. The resolved ID is used ONLY for that check; the edit
+	// is recorded exactly as submitted. Stored aliases include Group's
+	// automatic bridge aliases, and Group alone interprets edit IDs (through
+	// merge aliases only). Recording the resolution would turn "merge T into
+	// A" while A is bridged into B into a permanent merge into B, and would
+	// refuse "merge A into B" (make the bridge permanent) as a self-merge.
+	// The edit ledger is append-only, so that mistake has no undo.
+	refs := []string{}
 	if id != "" {
-		resolved, ok, err := s.st.ResolveCampaignID(r.Context(), id)
+		refs = append(refs, id)
+	}
+	if action == "merge" {
+		refs = append(refs, arg)
+	}
+	for _, ref := range refs {
+		_, ok, err := s.st.ResolveCampaignID(r.Context(), ref)
 		if err != nil {
 			httpError(w, "campaign_edit", err, http.StatusInternalServerError)
 			return
@@ -273,23 +288,6 @@ func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown campaign", http.StatusBadRequest)
 			return
 		}
-		id = resolved
-	}
-	if action == "merge" {
-		target, ok, err := s.st.ResolveCampaignID(r.Context(), arg)
-		if err != nil {
-			httpError(w, "campaign_edit", err, http.StatusInternalServerError)
-			return
-		}
-		if !ok {
-			http.Error(w, "unknown merge target", http.StatusBadRequest)
-			return
-		}
-		if target == id {
-			http.Error(w, "a campaign cannot be merged into itself", http.StatusBadRequest)
-			return
-		}
-		arg = target
 	}
 	if err := s.st.AppendCampaignEdit(r.Context(), id, action, arg, campaignEditWho); err != nil {
 		httpError(w, "campaign_edit", err, http.StatusInternalServerError)
@@ -320,8 +318,9 @@ func campaignText(s string, max int, multiline bool) bool {
 
 // validateCampaignEdit checks the shape of an edit before any store lookup.
 // Every action except ignore_evidence names a campaign by ID (names can be
-// ambiguous); ignore_evidence is global, and its ID is optional and only
-// files the edit under a campaign's history.
+// ambiguous). ignore_evidence is global: its campaign ID is optional, must
+// exist when given, and only files the edit under that campaign's history;
+// it never scopes which campaigns stop linking on the evidence.
 func validateCampaignEdit(id, action, arg string) error {
 	needID := action != "ignore_evidence"
 	if (needID || id != "") && !campaignIDRe.MatchString(id) {
@@ -339,6 +338,9 @@ func validateCampaignEdit(id, action, arg string) error {
 	case "merge":
 		if !campaignIDRe.MatchString(arg) {
 			return errors.New("merge target must be a campaign id")
+		}
+		if arg == id { // literal: Group decides what the two IDs resolve to
+			return errors.New("a campaign cannot be merged into itself")
 		}
 	case "remove_actor":
 		if arg == "" || len(arg) > maxCampaignActorIDLen || !campaignText(arg, maxCampaignActorIDLen, false) {
