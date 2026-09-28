@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -885,4 +886,37 @@ func TestMergeTargetKeepsIDNameAndRemovalThroughTurnover(t *testing.T) {
 			t.Fatalf("cycle %d: K's operator lost ID, name or removal: %+v", cycle, out.Campaigns)
 		}
 	})
+}
+
+// A 70-link merge chain resolves to its root. Resolve used to stop after 64
+// hops and return a non-root; mergeAlias[from] = to is only safe when both
+// are roots, so the truncated answer let the next merge write a genuine
+// cycle into the alias map (merge c-001 into c-000 on this chain aliased
+// c-065 -> c-064 while c-064 -> c-065 already existed). The walk is bounded
+// by len(aliases)+1, the exact upper bound of any acyclic chain, so it never
+// truncates a legitimate chain and still terminates on a corrupt map.
+func TestResolveFollowsLongMergeChainToRoot(t *testing.T) {
+	id := func(i int) string { return fmt.Sprintf("c-%03d", i) }
+	aliases := map[string]string{}
+	for i := 0; i < 70; i++ {
+		aliases[id(i)] = id(i + 1)
+	}
+	if got := Resolve(aliases, id(0)); got != id(70) {
+		t.Fatalf("Resolve = %s, want the root %s", got, id(70))
+	}
+	var edits []Edit
+	for i := 0; i < 70; i++ {
+		edits = append(edits, Edit{ID: int64(i + 1), CampaignID: id(i), Action: "merge", Arg: id(i + 1)})
+	}
+	edits = append(edits, Edit{ID: 71, CampaignID: id(1), Action: "merge", Arg: id(0)})
+	out := Group(Input{Edits: edits})
+	for i := 0; i <= 70; i++ {
+		r := Resolve(out.Aliases, id(i))
+		if _, aliased := out.Aliases[r]; aliased || r != id(70) {
+			t.Fatalf("%s resolves to %s (still aliased: %v), want the root %s", id(i), r, aliased, id(70))
+		}
+	}
+	if Resolve(map[string]string{"a": "b", "b": "a"}, "a") == "" {
+		t.Fatal("a cyclic map must still terminate")
+	}
 }

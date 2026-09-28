@@ -77,9 +77,14 @@ func CampaignID(kind, value string) string {
 	return "c-" + hex.EncodeToString(sum[:])[:12]
 }
 
-// Resolve follows aliases to the current ID, bounded against cycles.
+// Resolve follows aliases to the current ID. The walk is bounded by
+// len(aliases)+1, the exact upper bound of any acyclic chain, so it never
+// truncates a legitimate chain and still terminates on a corrupt map. A fixed
+// hop cap was not merely a truncation: mergeAlias[from] = to is safe only when
+// both are roots, and a chain longer than the cap made Resolve return a
+// non-root, so the next merge wrote a genuine cycle into the alias map.
 func Resolve(aliases map[string]string, id string) string {
-	for i := 0; i < 64; i++ {
+	for i := 0; i <= len(aliases); i++ {
 		next, ok := aliases[id]
 		if !ok || next == id {
 			return id
@@ -358,7 +363,8 @@ func Group(in Input) Output {
 			isOwned[l] = true
 		}
 		defers := func(l string) bool {
-			for i, t := 0, l; i < 64; i++ {
+			// in.Aliases is stored data: bound the walk like Resolve does.
+			for i, t := 0, l; i <= len(in.Aliases); i++ {
 				next, ok := in.Aliases[t]
 				if !ok || next == t {
 					return false

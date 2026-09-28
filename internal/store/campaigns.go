@@ -279,8 +279,12 @@ func (s *Store) AppendCampaignEdit(ctx context.Context, campaignID, action, arg,
 	})
 }
 
+// campaignAliasTarget follows the stored alias map to the current ID. The
+// walk is bounded by len(aliases)+1, the exact upper bound of any acyclic
+// chain, so it never truncates a legitimate chain (a fixed cap returned a
+// non-root for chains longer than it) and still terminates on a corrupt map.
 func campaignAliasTarget(aliases map[string]string, id string) string {
-	for i := 0; i < 64; i++ {
+	for i := 0; i <= len(aliases); i++ {
 		n, ok := aliases[id]
 		if !ok || n == id {
 			return id

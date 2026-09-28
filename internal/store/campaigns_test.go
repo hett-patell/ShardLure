@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -325,5 +326,21 @@ func TestCampaignEditsIndexed(t *testing.T) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_campaign_edits_campaign' AND tbl_name='campaign_edits'`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("index count = %d err = %v", n, err)
+	}
+}
+
+// campaignAliasTarget walks the stored alias map, which is data: the walk is
+// bounded by len(aliases)+1 so a legitimate 70-link chain resolves to its
+// root while a corrupt cyclic map still terminates.
+func TestCampaignAliasTargetFollowsLongChain(t *testing.T) {
+	aliases := map[string]string{}
+	for i := 0; i < 70; i++ {
+		aliases[fmt.Sprintf("c-%03d", i)] = fmt.Sprintf("c-%03d", i+1)
+	}
+	if got := campaignAliasTarget(aliases, "c-000"); got != "c-070" {
+		t.Fatalf("got %s, want the root c-070", got)
+	}
+	if campaignAliasTarget(map[string]string{"a": "b", "b": "a"}, "a") == "" {
+		t.Fatal("a cyclic map must still terminate")
 	}
 }
