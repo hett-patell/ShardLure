@@ -193,14 +193,14 @@ func TestModalsAreNativeDialogs(t *testing.T) {
 	if strings.Contains(intelHTML, `<div class="sess-modal"`) {
 		t.Fatal("a modal is still a div overlay: no focus trap, no inert background")
 	}
-	for _, id := range []string{"payload-modal", "sess-modal"} {
+	for _, id := range []string{"payload-modal", "sess-modal", "campaign-modal"} {
 		if !regexp.MustCompile(`<dialog class="sess-modal" id="` + id + `" aria-labelledby="[a-z-]+">`).MatchString(intelHTML) {
 			t.Errorf("%s is not a labelled <dialog>", id)
 		}
 	}
 	js := inlineScripts(intelHTML)
-	if n := strings.Count(js, "modal.showModal()"); n != 2 {
-		t.Errorf("showModal() call sites: %d, want 2", n)
+	if n := strings.Count(js, "modal.showModal()"); n != 3 {
+		t.Errorf("showModal() call sites: %d, want 3", n)
 	}
 	// The only remaining .open toggle is the actor-detail drawer, not a modal.
 	if n := strings.Count(js, ".classList.add('open')"); n != 1 || !strings.Contains(js, "el.classList.add('open')") {

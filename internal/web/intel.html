@@ -822,6 +822,31 @@
   .vt-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
   .vt-btn:disabled { opacity: .55; cursor: default; }
 
+  /* ==== Campaigns and scripts ==== */
+  #campaigns-table tbody tr[data-campaign], #scripts-table tbody tr[data-script] { cursor: pointer; }
+  #campaigns-table tbody tr[data-campaign]:hover, #scripts-table tbody tr[data-script]:hover { background: color-mix(in srgb, var(--accent-2) 5%, transparent); }
+  #scripts-table code { font-family: var(--mono); font-size: 11px; word-break: break-all; }
+  .cm-btn {
+    font-family: var(--mono, monospace); font-size: 11px; padding: 1px 6px; margin: 1px 4px 1px 0;
+    background: transparent; color: var(--blue-team); max-width: 100%;
+    border: 1px solid var(--line-strong); border-radius: 3px; cursor: pointer;
+    overflow-wrap: break-word; text-align: left;
+  }
+  .cm-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .cm-badges { margin: 8px 0 4px; }
+  .cm-row { margin: 6px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .cm-row input { flex: 1 1 200px; min-width: 0; font: 12px var(--mono); color: var(--text);
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: 3px; padding: 3px 6px; }
+  .cm-h { margin: 14px 0 6px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; }
+  .cm-status { min-height: 1.2em; font-size: 11px; color: var(--dim); }
+  .cm-notes { display: block; width: 100%; min-height: 80px; margin-bottom: 6px; font: 12px var(--mono); color: var(--text);
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: 3px; padding: 6px; box-sizing: border-box; }
+  .cm-scroll { overflow-x: auto; }
+  /* Detail tables show whole values (fingerprints, key comments, actor IDs):
+     the global fixed layout would ellipsise exactly what the analyst needs. */
+  .cm-table { table-layout: auto; }
+  .cm-table td { white-space: normal; overflow-wrap: break-word; text-overflow: clip; vertical-align: top; }
+
   /* URLhaus sharing table. Attacker URLs are long and untrusted, so the cell
      truncates with an ellipsis (full value stays in the title attribute)
      rather than blowing out the table width. */
@@ -1247,7 +1272,7 @@
     .grid > .panel, .panel-body { overflow-x: auto; }
     #actors-table, #cmds-table, #capture-table, #abuse-suggest-table, #urlhaus-table, #urlhaus-log,
     #threatfox-table, #threatfox-log, #ttp-table, #payloads-table, #pending-table, #bazaar-table,
-    #ioc-table, #tunnels-table, #set-reports-table { min-width: 620px; }
+    #ioc-table, #tunnels-table, #set-reports-table, #campaigns-table, #scripts-table { min-width: 620px; }
     .sess-head, .sess-row { min-width: 640px; }
     .cred-grid { grid-template-columns: 1fr; }
     .set-row { grid-template-columns: 1fr; gap: 6px; }
@@ -1763,6 +1788,36 @@
         </div>
       </section>
 
+      <section class="panel" id="panel-campaigns">
+        <div class="panel-head">
+          <h2>Campaigns</h2>
+          <span class="meta" id="campaigns-meta">sessions linked by the same SSH key, payload or script</span>
+        </div>
+        <div class="panel-body">
+        <div class="table-scroll">
+        <table class="dense" id="campaigns-table">
+          <thead><tr><th>campaign</th><th class="num">actors</th><th class="num">IPs</th><th class="num">sessions</th><th>linked by</th><th>first → last</th></tr></thead>
+          <tbody><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
+        </table>
+        </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-scripts">
+        <div class="panel-head">
+          <h2>Scripts</h2>
+          <span class="meta" id="scripts-meta">normalised command scripts and their variants</span>
+        </div>
+        <div class="panel-body">
+        <div class="table-scroll">
+        <table class="dense" id="scripts-table">
+          <thead><tr><th>script</th><th class="num">variants</th><th class="num">sessions</th><th class="num">actors</th><th class="num">IPs</th><th>links</th><th>first → last</th></tr></thead>
+          <tbody><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
+        </table>
+        </div>
+        </div>
+      </section>
+
       <section class="panel" id="panel-replay">
         <div class="panel-head">
           <h2>Attack replay / synthesis</h2>
@@ -2022,6 +2077,18 @@
       <button type="button" class="sm-close" id="sm-close">close (esc)</button>
     </div>
     <div class="sm-body" id="sm-body" tabindex="0"></div>
+  </div>
+</dialog>
+
+<!-- Campaign / script detail -->
+<dialog class="sess-modal" id="campaign-modal" aria-labelledby="cm-title">
+  <div class="sm-card">
+    <div class="sm-head">
+      <h2 class="sm-title" id="cm-title">campaign</h2>
+      <div class="sm-sub" id="cm-sub"></div>
+      <button type="button" class="sm-close" id="cm-close">close (esc)</button>
+    </div>
+    <div class="sm-body" id="cm-body" tabindex="0"></div>
   </div>
 </dialog>
 
@@ -2456,6 +2523,13 @@ async function loadActorDetail(id) {
   const cmds = d.commands || [];
   const events = d.events || [];
   let html = '';
+  // Campaign badges: opened by the delegated listener on #detail-cmds in the
+  // campaigns block; the id travels in an escaped data-* attribute.
+  if (d.campaigns && d.campaigns.length) {
+    html += '<div class="cm-badges">' + d.campaigns.map(function(c) {
+      return '<button type="button" class="cm-btn" data-campaign-open="' + esc(c.id) + '">campaign: ' + esc(c.name || c.suggestedName || c.id) + '</button>';
+    }).join('') + '</div>';
+  }
   if (cmds.length) {
     html += '<div style="color:var(--dim);margin:8px 0 4px;font-size:10px;text-transform:uppercase;letter-spacing:.08em">Commands executed (' + cmds.length + ')</div>';
     html += cmds.map(function(c) {
@@ -3235,6 +3309,26 @@ function buildPalette(q) {
       group: 'Payloads', label: p.filename || (p.sha256 || '').slice(0, 16),
       sub: (p.family || p.fileKind || ''),
       action: function () { openPayload(p.sha256); closePalette(); }
+    });
+  });
+  (_lastCampaigns || []).forEach(function (c) {
+    var hay = ((c.search || '') + ' ' + (c.name || '') + ' ' + (c.suggestedName || '') + ' ' + (c.id || '')).toLowerCase();
+    if (hay.indexOf(q) < 0) return;
+    if (out.filter(function (r) { return r.group === 'Campaigns'; }).length >= 5) return;
+    out.push({
+      group: 'Campaigns', label: campaignDisplayName(c),
+      sub: (c.actors || 0) + ' actors · ' + (c.sessions || 0) + ' sessions',
+      action: function () { setActiveView('red'); openCampaign(c.id); closePalette(); }
+    });
+  });
+  (_lastScripts || []).forEach(function (f) {
+    var hay = ((f.family || '') + ' ' + (f.display || '')).toLowerCase();
+    if (hay.indexOf(q) < 0) return;
+    if (out.filter(function (r) { return r.group === 'Scripts'; }).length >= 5) return;
+    out.push({
+      group: 'Scripts', label: String(f.display || '').split('\n')[0].slice(0, 80) || String(f.family || '').slice(0, 16),
+      sub: (f.sessions || 0) + ' sessions',
+      action: function () { setActiveView('red'); openScript(f.family); closePalette(); }
     });
   });
   return out;
@@ -4381,13 +4475,13 @@ async function refreshTTP() {
 const _setActiveForTTP = setActiveView;
 setActiveView = function(name) {
   _setActiveForTTP(name);
-  if (name === 'red') { refreshTTP(); refreshTunnels(); }
+  if (name === 'red') { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); }
 };
-onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); });
+onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); });
 pollEvery(30000, function() {
-  if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); }
+  if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); }
 });
-if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); }
+if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); }
 
 // ==== Proxy targets (direct-tcpip pivots) =========================
 function renderTunnels(data) {
@@ -4427,6 +4521,220 @@ async function refreshTunnels() {
     renderTunnels(await r.json());
   } catch (_) {}
 }
+
+// ==== Campaigns and scripts ======================================
+// Everything rendered here is attacker-controlled (script text, SSH key
+// comments, payload names, hosts, client versions, actor IDs). Every value
+// goes through esc() (escapes & < > " ' and maps null to ''), whether it lands
+// in text or in a quoted data-* attribute; values travel back out through
+// dataset in delegated listeners, never through inline handlers or URLs.
+var _lastCampaigns = [], _lastScripts = [];
+
+function kindLabel(k) { return ({ ssh_key: 'SSH key', payload: 'payload', script: 'script' })[k] || String(k || ''); }
+function shortTime(s) { return s ? String(s).slice(0, 10) : '—'; }
+function actionButton(action, label, attrs, aria) {
+  var a = '';
+  Object.keys(attrs).forEach(function (k) { a += ' data-' + k + '="' + esc(attrs[k]) + '"'; });
+  return '<button type="button" class="cm-btn" data-action="' + esc(action) + '"' + a +
+    (aria ? ' aria-label="' + esc(aria) + '"' : '') + '>' + esc(label) + '</button>';
+}
+function campaignDisplayName(c) {
+  return c.name || (c.suggestedName ? c.suggestedName + ' (suggested)' : c.id);
+}
+
+async function refreshCampaigns() {
+  try {
+    const r = await fetch('/api/intel/campaigns?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    _lastCampaigns = d.campaigns || [];
+    const tb = document.querySelector('#campaigns-table tbody');
+    document.getElementById('campaigns-meta').textContent = _lastCampaigns.length + ' campaigns';
+    if (!_lastCampaigns.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">no linked sessions yet</td></tr>'; return; }
+    tb.innerHTML = _lastCampaigns.map(function (c) {
+      const name = campaignDisplayName(c);
+      return '<tr tabindex="0" data-campaign="' + esc(c.id) + '" aria-label="open campaign ' + esc(name) + '">' +
+        '<td>' + esc(name) + '</td><td class="num">' + fmt(c.actors) + '</td><td class="num">' + fmt(c.ips) + '</td><td class="num">' + fmt(c.sessions) + '</td>' +
+        '<td>' + esc((c.kinds || []).map(kindLabel).join(', ')) + '</td><td class="range">' + esc(shortTime(c.firstSeen)) + ' → ' + esc(shortTime(c.lastSeen)) + '</td></tr>';
+    }).join('');
+  } catch (_) {}
+}
+
+async function refreshScripts() {
+  try {
+    const r = await fetch('/api/intel/scripts?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    _lastScripts = d.families || [];
+    const tb = document.querySelector('#scripts-table tbody');
+    document.getElementById('scripts-meta').textContent = _lastScripts.length + ' script families';
+    if (!_lastScripts.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">no settled scripts yet</td></tr>'; return; }
+    tb.innerHTML = _lastScripts.map(function (f) {
+      const first = String(f.display || '').split('\n')[0].slice(0, 120);
+      return '<tr tabindex="0" data-script="' + esc(f.family) + '" title="' + esc(f.reason) + '" aria-label="open script ' + esc(String(f.family || '').slice(0, 12)) + '">' +
+        '<td><code>' + esc(first) + '</code></td><td class="num">' + (f.variants || []).length + '</td><td class="num">' + fmt(f.sessions) + '</td>' +
+        '<td class="num">' + fmt(f.actors) + '</td><td class="num">' + fmt(f.ips) + '</td><td>' + (f.links ? 'links sessions' : 'display only') + '</td>' +
+        '<td class="range">' + esc(shortTime(f.firstSeen)) + ' → ' + esc(shortTime(f.lastSeen)) + '</td></tr>';
+    }).join('');
+  } catch (_) {}
+}
+
+function cmBody(html) { document.getElementById('cm-body').innerHTML = html; }
+
+function showCampaignDialog(title) {
+  const modal = document.getElementById('campaign-modal');
+  document.getElementById('cm-title').textContent = title;
+  document.getElementById('cm-sub').textContent = '';
+  cmBody('<div class="empty">loading…</div>');
+  if (!modal.open) modal.showModal();
+}
+
+// errorText reads a failed response's plain-text body (the edit and lookup
+// endpoints explain a 400 there, e.g. an ambiguous name) for textContent.
+async function errorText(r) {
+  let t = '';
+  try { t = (await r.text()).trim(); } catch (_) {}
+  return (t || 'request failed') + ' (' + r.status + ')';
+}
+
+async function openCampaign(id) {
+  showCampaignDialog('campaign ' + id);
+  try {
+    const r = await fetch('/api/intel/campaign?id=' + encodeURIComponent(id) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) { cmBody('<div class="empty">' + esc(await errorText(r)) + '</div>'); return; }
+    renderCampaign(await r.json());
+  } catch (e) { cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
+}
+
+function renderCampaign(c) {
+  document.getElementById('cm-title').textContent = c.name || c.suggestedName || c.id;
+  document.getElementById('cm-sub').textContent = c.id + ' · ' + fmt(c.actors) + ' actors · ' + fmt(c.ips) + ' IPs · ' + fmt(c.sessions) +
+    ' sessions · ' + shortTime(c.firstSeen) + ' → ' + shortTime(c.lastSeen);
+  const values = {};
+  const members = (c.members || []).map(function (m) {
+    (m.reasons || []).forEach(function (r) { values[r.kind + ':' + r.value] = r; });
+    const why = (m.reasons || []).map(function (r) { return kindLabel(r.kind) + ' ' + (r.label || String(r.value || '').slice(0, 16)); }).join('; ');
+    return '<tr><td>' + actionButton('actor', m.actorId, { actor: m.actorId }, 'open actor ' + m.actorId) + '</td><td>' + esc(m.primaryIp) + '</td><td>' + esc(m.playbook) +
+      '</td><td class="num">' + fmt(m.sessions) + '</td><td>' + esc(why) + '</td><td>' +
+      actionButton('remove_actor', 'remove', { id: c.id, arg: m.actorId }, 'remove actor ' + m.actorId + ' from this campaign') + '</td></tr>';
+  }).join('');
+  const evidence = Object.keys(values).sort().map(function (k) {
+    const r = values[k];
+    const val = r.kind === 'script'
+      ? actionButton('script', String(r.value || '').slice(0, 16), { fp: r.value }, 'open script ' + String(r.value || '').slice(0, 12))
+      : '<code>' + esc(r.value) + '</code>';
+    return '<tr><td>' + esc(kindLabel(r.kind)) + '</td><td>' + val + '</td><td>' + esc(r.label) + '</td><td>' +
+      actionButton('ignore_evidence', 'ignore', { id: c.id, arg: k }, 'ignore this ' + kindLabel(r.kind) + ' as linking evidence') + '</td></tr>';
+  }).join('');
+  const ctx = [['HASSH', c.hasshes], ['clients', c.clients], ['download hosts', c.hosts]].map(function (p) {
+    return (p[1] && p[1].length) ? '<div><b>' + esc(p[0]) + ':</b> ' + esc(p[1].join(', ')) + '</div>' : '';
+  }).join('');
+  const edits = (c.edits || []).map(function (e) {
+    return '<tr><td class="range">' + esc(shortTime(e.createdAt)) + '</td><td>' + esc(e.action) + '</td><td>' + esc(e.arg) + '</td><td>' + esc(e.who) + '</td></tr>';
+  }).join('');
+  cmBody(
+    '<div id="cm-status" class="cm-status" role="status"></div>' +
+    '<div class="cm-row"><label for="cm-name">name</label> <input id="cm-name" maxlength="200" value="' + esc(c.name || c.suggestedName || '') + '"> ' +
+      actionButton('rename', 'save name', { id: c.id }) + '</div>' +
+    '<div class="cm-row"><label for="cm-merge">merge into campaign ID</label> <input id="cm-merge" maxlength="14" placeholder="c-…" autocomplete="off"> ' +
+      actionButton('merge', 'merge', { id: c.id }) + '</div>' +
+    '<h3 class="cm-h">members</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (members || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
+    '<h3 class="cm-h">linking evidence</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (evidence || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
+    '<h3 class="cm-h">context (never links)</h3>' + (ctx || '<div class="empty">none</div>') +
+    '<h3 class="cm-h">notes</h3><textarea id="cm-notes" class="cm-notes" maxlength="4000" aria-label="Campaign notes">' + esc(c.notes) + '</textarea> ' +
+      actionButton('notes', 'save notes', { id: c.id }) +
+    (edits ? '<h3 class="cm-h">edit history</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + edits + '</tbody></table></div>' : ''));
+}
+
+async function openScript(fp) {
+  showCampaignDialog('script ' + String(fp || '').slice(0, 12));
+  try {
+    const r = await fetch('/api/intel/script?fp=' + encodeURIComponent(fp) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) { cmBody('<div class="empty">' + esc(await errorText(r)) + '</div>'); return; }
+    const d = await r.json();
+    document.getElementById('cm-sub').textContent = (d.sessions || []).length + ' sessions · ' + (d.actors || []).length + ' actors';
+    const sessions = (d.sessions || []).map(function (x) {
+      return '<tr><td>' + actionButton('session', x.sessionId, { session: x.sessionId }, 'replay session ' + x.sessionId) + '</td><td>' +
+        actionButton('actor', x.actorId, { actor: x.actorId }, 'open actor ' + x.actorId) +
+        '</td><td>' + esc(x.srcIp) + '</td><td class="range">' + esc(shortTime(x.firstSeen)) + '</td></tr>';
+    }).join('');
+    cmBody('<pre class="sm-tty">' + esc(d.display) + '</pre><h3 class="cm-h">sessions</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' +
+      (sessions || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>');
+  } catch (e) { cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
+}
+
+// campaignEdit records one edit. The server only appends it and wakes the
+// campaign worker, which applies it on its next tick (5 s), so the dialog says
+// "applying…" and reloads after that. The ID is always the API's own campaign
+// id: edits are recorded literally, and a name may be ambiguous.
+async function campaignEdit(id, action, arg) {
+  const status = document.getElementById('cm-status');
+  if (status) status.textContent = 'saving…';
+  let r;
+  try {
+    r = await fetch('/api/intel/campaign/edit', { method: 'POST', body: new URLSearchParams({ id: id || '', action: action, arg: arg || '' }) });
+  } catch (e) {
+    if (status) status.textContent = 'edit failed: ' + e.message;
+    return;
+  }
+  if (!r.ok) {
+    const msg = await errorText(r);
+    if (status) status.textContent = 'edit refused: ' + msg;
+    return;
+  }
+  if (status) status.textContent = 'applying…';
+  setTimeout(function () {
+    refreshCampaigns();
+    const modal = document.getElementById('campaign-modal');
+    if (id && modal.open) openCampaign(id);
+  }, 6000);
+}
+
+function closeCampaign() {
+  const m = document.getElementById('campaign-modal');
+  if (m.open) m.close();
+}
+
+document.getElementById('cm-close').addEventListener('click', closeCampaign);
+document.getElementById('campaign-modal').addEventListener('click', function (e) {
+  // Light dismiss: a click on the <dialog> itself (frame or ::backdrop). Esc is native.
+  if (e.target.id === 'campaign-modal') { closeCampaign(); return; }
+  const b = e.target.closest('button[data-action]');
+  if (!b) return;
+  const a = b.dataset.action;
+  if (a === 'session') { closeCampaign(); openSession(b.dataset.session); return; }
+  if (a === 'actor') { closeCampaign(); setActiveView('overview'); selectedActor = b.dataset.actor; loadActorDetail(b.dataset.actor); return; }
+  if (a === 'script') { openScript(b.dataset.fp); return; }
+  let arg = b.dataset.arg || '';
+  if (a === 'rename') arg = document.getElementById('cm-name').value;
+  if (a === 'notes') arg = document.getElementById('cm-notes').value;
+  if (a === 'merge') arg = document.getElementById('cm-merge').value.trim();
+  campaignEdit(b.dataset.id || '', a, arg);
+});
+function rowOpens(table, attr, fn) {
+  const tb = document.querySelector(table + ' tbody');
+  function go(e) {
+    const tr = e.target.closest('tr[' + attr + ']');
+    if (!tr) return;
+    if (e.type === 'keydown') {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
+    fn(tr.getAttribute(attr));
+  }
+  tb.addEventListener('click', go);
+  tb.addEventListener('keydown', go);
+}
+rowOpens('#campaigns-table', 'data-campaign', openCampaign);
+rowOpens('#scripts-table', 'data-script', openScript);
+// Actor-detail campaign badges (rendered by loadActorDetail): one delegated
+// listener, registered once, since #detail-cmds is re-rendered per actor.
+document.getElementById('detail-cmds').addEventListener('click', function (e) {
+  const b = e.target.closest('button[data-campaign-open]');
+  if (b) { setActiveView('red'); openCampaign(b.dataset.campaignOpen); }
+});
+refreshCampaigns(); refreshScripts();
+// ==== end campaigns and scripts ==================================
 
 // ==== Slice G: payload library ====================================
 function fmtSize(b) {
