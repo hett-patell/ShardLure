@@ -189,6 +189,11 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				return err
 			}
 		}
+		// Fill the dashboard caches before reporting ready: filling them on the
+		// first request after a restart took 8-90 s on a 1.75M-event database.
+		if err := server.WarmCaches(ctx); err != nil {
+			return err
+		}
 		sample, err := probe(ctx)
 		if err != nil {
 			return err

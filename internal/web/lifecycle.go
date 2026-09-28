@@ -28,4 +28,16 @@ func (d *handlerDrain) wrap(next http.Handler) http.Handler {
 	})
 }
 func (d *handlerDrain) stop() { d.mu.Lock(); d.stopping = true; d.mu.Unlock() }
-func (d *handlerDrain) wait() { d.wg.Wait() }
+
+// enter admits one unit of background work unless stopping; leave ends it.
+func (d *handlerDrain) enter() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopping {
+		return false
+	}
+	d.wg.Add(1)
+	return true
+}
+func (d *handlerDrain) leave() { d.wg.Done() }
+func (d *handlerDrain) wait()  { d.wg.Wait() }
