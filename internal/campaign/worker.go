@@ -119,9 +119,9 @@ func (w *Worker) tick(ctx context.Context) error {
 			return err
 		}
 		if !res.Done {
-			// A backlog (first start, a burst, or a replace-ingest that
-			// rewound the cursor): scheduled regroups wait until it drains,
-			// then one runs. A Wake still regroups at once.
+			// A backlog (first start, a burst, or the rows a replace-ingest
+			// re-inserted above the parked cursor): scheduled regroups wait
+			// until it drains, then one runs. A Wake still regroups at once.
 			w.drained = false
 			continue
 		}
@@ -137,13 +137,15 @@ func (w *Worker) tick(ctx context.Context) error {
 	// goroutine under w.mu: AssignScriptFamilies and PruneOrphanScripts assume
 	// a single sequential caller. Prune frees representatives one level per
 	// pass, which is fine at one call per tick.
-	if _, err := w.st.SettleSessionScripts(ctx, time.Now().Add(-settleIdle), settleBatch); err != nil {
+	settled, err := w.st.SettleSessionScripts(ctx, time.Now().Add(-settleIdle), settleBatch)
+	if err != nil {
 		return err
 	}
 	if _, err := w.st.AssignScriptFamilies(ctx, familyBatch); err != nil {
 		return err
 	}
 	woken := w.wake.Swap(false)
+	regrouped := false
 	if woken || w.pending || (w.drained && time.Since(w.lastGroup) >= regroupEvery) {
 		err := w.regroup(ctx)
 		switch {
@@ -155,8 +157,16 @@ func (w *Worker) tick(ctx context.Context) error {
 			w.pending = true // retried once the backoff expires
 			return err
 		default:
-			w.pending, w.lastGroup = false, time.Now()
+			w.pending, w.lastGroup, regrouped = false, time.Now(), true
 		}
+	}
+	// PruneOrphanScripts is a DELETE ... WHERE NOT EXISTS scan under writeMu.
+	// Orphans appear only when a session re-settles under a new fingerprint
+	// or a regroup rebuilds families (retention orphans are collected on the
+	// next such tick), so an idle 5 s tick does not take the writer lock for
+	// nothing.
+	if settled == 0 && !regrouped {
+		return nil
 	}
 	return w.st.PruneOrphanScripts(ctx)
 }

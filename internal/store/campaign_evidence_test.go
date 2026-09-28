@@ -210,7 +210,7 @@ func TestRetentionPurgesCampaignDerived(t *testing.T) {
 	}
 }
 
-// A Cowrie replace-ingest drops derived rows and rewinds the recorder, but
+// A Cowrie replace-ingest drops derived rows and parks the recorder, but
 // keeps operator-named campaigns; a journal replace leaves them alone.
 func TestReplaceClearsCampaignDerived(t *testing.T) {
 	s := newTestStore(t, "replace.db")
@@ -222,7 +222,7 @@ func TestReplaceClearsCampaignDerived(t *testing.T) {
 		t.Fatal(err)
 	}
 	count := func() (n int) {
-		s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)+(SELECT COUNT(*) FROM campaign_evidence)+(SELECT COUNT(*) FROM ingest_state WHERE source='campaign')`).Scan(&n)
+		s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)+(SELECT COUNT(*) FROM campaign_evidence)`).Scan(&n)
 		return n
 	}
 	if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceJournal, nil, nil); err != nil {
@@ -231,6 +231,8 @@ func TestReplaceClearsCampaignDerived(t *testing.T) {
 	if count() == 0 {
 		t.Fatal("journal replace cleared Cowrie-derived rows")
 	}
+	var oldMax int64
+	s.db.QueryRow(`SELECT MAX(id) FROM events`).Scan(&oldMax)
 	if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +240,63 @@ func TestReplaceClearsCampaignDerived(t *testing.T) {
 	s.db.QueryRow(`SELECT group_concat(id) FROM campaigns`).Scan(&campaigns)
 	if n := count(); n != 0 || campaigns != "c-named" {
 		t.Fatalf("derived=%d campaigns=%q", n, campaigns)
+	}
+	// The recorder is parked at the pre-delete MAX(id), not deleted: with
+	// nothing re-ingested the next window has nothing to walk.
+	if c := evidenceCursorValue(t, s); c != oldMax {
+		t.Fatalf("cursor after replace %d, want %d", c, oldMax)
+	}
+	if res, err := s.RecordCampaignEvidence(context.Background(), 1000); err != nil || !res.Done || res.Scanned != 0 {
+		t.Fatalf("window after an empty replace: %+v %v", res, err)
+	}
+}
+
+// A --replace parks the recorder at the pre-delete MAX(id) instead of
+// deleting the cursor. events.id is AUTOINCREMENT and sqlite_sequence never
+// resets, so every re-ingested row gets a larger id: the first tick after a
+// replace reads them in one window instead of first stepping 5,000-rowid
+// windows across the emptied range (~350 empty seeks on prod), and none of
+// them is skipped.
+func TestReplaceParksCursorBelowReingestedRows(t *testing.T) {
+	s := newTestStore(t, "replace-cursor.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for i := 0; i < 6; i++ {
+		cowrieEvent(t, s, fmt.Sprintf("old%d", i), "cowrie:a", "command", "id", "", "", now)
+	}
+	var res EvidenceRecordResult
+	var err error
+	for !res.Done {
+		if res, err = s.RecordCampaignEvidence(ctx, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var oldMax int64
+	s.db.QueryRow(`SELECT MAX(id) FROM events`).Scan(&oldMax)
+	fresh := []*models.Event{
+		{TS: now, Source: models.SourceCowrie, Kind: models.KindCommand, SrcIP: "203.0.113.7", SessionID: "n1", ActorID: "cowrie:h1", Command: injector},
+		{TS: now, Source: models.SourceCowrie, Kind: models.KindCommand, SrcIP: "203.0.113.7", SessionID: "n1", ActorID: "cowrie:h1", Command: "uname -a"},
+	}
+	if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, fresh, nil); err != nil {
+		t.Fatal(err)
+	}
+	if c := evidenceCursorValue(t, s); c != oldMax {
+		t.Fatalf("cursor after replace %d, want the pre-delete max %d", c, oldMax)
+	}
+	var minNew int64
+	s.db.QueryRow(`SELECT MIN(id) FROM events`).Scan(&minNew)
+	if minNew <= oldMax {
+		t.Fatalf("re-ingested ids start at %d, not above the pre-delete max %d", minNew, oldMax)
+	}
+	// One 2-rowid window covers both re-ingested rows: no empty range first.
+	res, err = s.RecordCampaignEvidence(ctx, 2)
+	if err != nil || !res.Done || res.Scanned != 2 || res.Recorded != 2 {
+		t.Fatalf("first window after the replace: %+v %v", res, err)
+	}
+	var lines int
+	s.db.QueryRow(`SELECT line_count FROM session_scripts WHERE session_id='n1'`).Scan(&lines)
+	if lines != 2 {
+		t.Fatalf("re-ingested lines=%d, want 2", lines)
 	}
 }
 

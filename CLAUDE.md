@@ -29,7 +29,7 @@ Run locally after building:
 ./shardlure actors [--limit=N]
 ./shardlure reclassify cowrie [--dry-run]   # re-derive playbooks from persisted aggregates
 ./shardlure actor show <ip|actor-id>
-./shardlure web :8080 [--tailscale]        # dashboard only, static DB
+./shardlure web :8080 [--tailscale]        # dashboard without ingest; the campaigns worker still derives rows into the DB
 ./shardlure live :8080 --cowrie=<path>     # live ingest loop + dashboard (the real daemon)
 ./shardlure dashboard                       # forensic TUI (tui/app.go, bubbletea)
 ```
