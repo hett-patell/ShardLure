@@ -4705,18 +4705,27 @@ async function openScript(fp) {
 // a few seconds apart both show, and the first reload cannot render (and
 // baseline) the dialog before the worker applied the second edit. A reload
 // only ever clears the pending entry it belongs to.
-var _cmPending = null;
+//
+// _cmFlight counts edit POSTs still in flight for one view. A reload that
+// fires while one is outstanding would bump _cmView, and that edit's late
+// response would then only refresh the lists: the dialog would never show it.
+// So the timer defers (keeping its entry, merge target included) and the
+// response reschedules through the normal path.
+var _cmPending = null, _cmFlight = { view: -1, n: 0 };
 
 function scheduleCampaignReload(view, target) {
   if (_cmPending && _cmPending.view === view) {
     clearTimeout(_cmPending.timer);
-    // A pending merge target wins: the source ID has been merged away.
-    if (_cmPending.merged) target = _cmPending.target;
+    // A pending merge target wins: the source ID has been merged away, and
+    // the dialog still shows the source until the reload opens the target.
+    if (_cmPending.merged) target = { id: _cmPending.target, merged: true };
   } else {
     _cmPending = null;
   }
-  const entry = { view: view, target: target.id, merged: target.merged || false, timer: 0 };
+  const entry = { view: view, target: target.id, merged: target.merged || false, timer: 0, fired: false };
   entry.timer = setTimeout(function () {
+    entry.fired = true;
+    if (_cmFlight.view === entry.view && _cmFlight.n > 0) return; // deferred: the response reschedules
     if (_cmPending === entry) _cmPending = null;
     refreshCampaigns();
     const modal = document.getElementById('campaign-modal');
@@ -4730,6 +4739,16 @@ function scheduleCampaignReload(view, target) {
 // is in flight stay unsaved and block the reload instead of being wiped.
 async function campaignEdit(id, action, arg, raw) {
   const view = _cmView;
+  if (_cmFlight.view !== view) _cmFlight = { view: view, n: 0 };
+  _cmFlight.n++;
+  const landed = function () { if (_cmFlight.view === view && _cmFlight.n > 0) _cmFlight.n--; };
+  // A failed edit still owes any reload it deferred.
+  const failed = function () {
+    landed();
+    if (_cmPending && _cmPending.view === view && _cmPending.fired && view === _cmView && _cmFlight.n === 0) {
+      scheduleCampaignReload(view, { id: _cmPending.target, merged: _cmPending.merged });
+    }
+  };
   const status = document.getElementById('cm-status');
   if (status) status.textContent = 'saving…';
   let r;
@@ -4737,13 +4756,16 @@ async function campaignEdit(id, action, arg, raw) {
     r = await fetch('/api/intel/campaign/edit', { method: 'POST', body: new URLSearchParams({ id: id || '', action: action, arg: arg || '' }) });
   } catch (e) {
     if (status) status.textContent = 'edit failed: ' + e.message;
+    failed();
     return;
   }
   if (!r.ok) {
     const msg = await errorText(r);
     if (status) status.textContent = 'edit refused: ' + msg;
+    failed();
     return;
   }
+  landed();
   if (status) status.textContent = 'applying…';
   if (view !== _cmView) {
     // The analyst has moved on; only the lists need the result.
@@ -4762,6 +4784,12 @@ async function campaignEdit(id, action, arg, raw) {
 function closeCampaign() {
   const m = document.getElementById('campaign-modal');
   if (m.open) m.close();
+  if (_cmPending) {
+    // Nothing left to reload into, but the lists still owe the edit's result.
+    clearTimeout(_cmPending.timer);
+    _cmPending = null;
+    setTimeout(refreshCampaigns, 6000);
+  }
 }
 
 document.getElementById('cm-close').addEventListener('click', closeCampaign);
