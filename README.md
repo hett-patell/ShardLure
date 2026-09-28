@@ -71,6 +71,7 @@ Longer operational guides (installation, backup, security, troubleshooting) live
 - **Local geolocation (recommended):** point `geoip.mmdb` at a MaxMind GeoLite2/GeoIP2 City database and geo resolves **locally** — tier 1, before any HTTP. It fixes three things at once: coverage (the HTTP tier is capped per poll and only resolves IPs currently on screen, so most attacker IPs were never resolved at all), privacy (the free ip-api tier is plain HTTP, so every attacker IP you looked up was visible on the wire), and air-gap (works with outbound geo turned off entirely). A missing or corrupt database is fail-open — it degrades to the HTTP tier and says so in Settings.
 - **URLhaus URL submission:** MalwareBazaar gets the payload *files*; [URLhaus](https://urlhaus.abuse.ch/) gets the **URLs they were served from**. Because ShardLure fetches attacker URLs itself, a successful fetch is first-hand proof the URL was live and serving — exactly URLhaus's bar. Blue Team panel shows the vetting gate's decision per candidate, including *why* anything was held back. One abuse.ch Auth-Key covers both services.
 - **VirusTotal payload verdicts:** check captured payload hashes against VirusTotal without ever uploading a file — only the sha256 leaves the host. The payload library shows a `virustotal` column: cached verdicts render as an engine ratio, hashes VT has never seen render as **novel** (a genuinely interesting signal for a honeypot), and everything else gets an opt-in `check` button. The list view never spends quota; the free tier allows ~4 lookups/minute, so live lookups are always deliberate.
+- **Campaigns and scripts:** sessions that planted the same SSH key, delivered the same payload or ran the same distinctive script are linked into campaigns, each link showing its evidence. Links are made between sessions, not whole actors, because one HASSH fingerprint can cover several unrelated tools. Bot command scripts are fingerprinted after normalising the parts bots randomise, and near-identical variants are grouped for display. Names and edits you make always win.
 
 ## Setup Guide
 
@@ -277,6 +278,7 @@ shardlure version
 - **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
 - **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
+- **Rolling back from v2.9 to v2.8:** the v2.8 binary cannot create backups of the v25 database; restore the pre-upgrade bundle instead.
 
 ## Local Development
 
@@ -345,6 +347,9 @@ sudo ./shardlure run
 | `ingest cowrie <file> [--replace]` | Parse Cowrie JSON logs and build actors |
 | `actors [--limit=N]` | List actors by last seen. `CONF` is an evidence **tier** (`LOW`/`MEDIUM`/`HIGH`/`CONFIRMED`), not a percentage — it is a coarse label chosen by source and signals, so showing it as `55%` would imply a calibrated probability it does not have. `probe` (0-100) is the computed score. |
 | `actor show <id\|ip>` | Show one actor profile |
+| `campaigns [--limit=N]` | List campaigns: sessions linked by a shared SSH key, payload or distinctive script, with actor, IP and session counts |
+| `campaign show <id\|name>` | Show one campaign: members with the evidence behind each link, context (HASSH, clients, payload hosts) and notes. An ambiguous name is an error; use the ID |
+| `scripts [--limit=N]` | List settled bot command-script families with session, actor and IP counts and whether they link sessions |
 | `dashboard`, `dash`, `tui` | Open the forensic TUI |
 | `web [:8080] [--tailscale]` | Serve the web dashboard |
 | `live [:8080] [--cowrie=PATH] [--interval=5s] [--no-journal] [--tailscale]` | Run live ingest and dashboard |

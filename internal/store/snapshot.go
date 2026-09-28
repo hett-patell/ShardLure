@@ -67,6 +67,8 @@ var snapshotTables = [...]struct {
 
 const latestSnapshotSchema = 25
 
+// LatestSnapshotSchema is the newest schema a snapshot can carry; backup
+// manifest validation uses it as the schema ceiling.
 const LatestSnapshotSchema = latestSnapshotSchema
 
 func snapshotContext(ctx context.Context) (context.Context, context.CancelFunc) {
