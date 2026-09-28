@@ -112,43 +112,102 @@ func (u unionFind) union(a, b string) {
 	}
 }
 
+// lineage is one campaign identity as this cycle sees it: an ID that no
+// explicit merge retires (a merge rep), the component owning it, and the
+// earliest-assigned value that grants ownership.
+type lineage struct {
+	root string
+	seq  int64
+	key  string
+}
+
+// component is one set of linked sessions after remove_actor and merge
+// closure: its occurrence indexes (ascending), the lineages it owns and the
+// campaign ID it ends up with.
 type component struct {
 	idx    []int
-	minSeq int64 // -1 when no value was assigned before
+	owned  []string
+	minSeq map[string]int64
 	id     string
 }
 
-// holder is the earliest-assigned value of a campaign ID and the component
-// holding it: that component owns the ID this cycle.
-type holder struct {
-	seq       int64
-	key, root string
-}
-
+// Group derives campaigns from linking evidence. Its identity rules, each
+// pinned by a test, are:
+//
+//  1. Lineage. Every assigned value names a lineage: its recorded ID resolved
+//     through explicit merge aliases only. Automatic (bridge) aliases never
+//     change what a value stands for.
+//  2. Edits resolve by intent. An edit names the lineage whose ID it carries,
+//     resolved through the merge edits before it; an automatic alias current
+//     when the edit was issued does not widen it to the other side of a
+//     bridge. A campaign shows the latest rename and notes issued on any
+//     lineage it holds.
+//  3. Merges are permanent. Every piece with pure evidence of a merged
+//     lineage (a session holding only that lineage) is one campaign with the
+//     lineage's owner, every cycle, so a merge outlives the evidence that was
+//     live when it was made. Only a remove_actor that severed two pieces of
+//     one former component keeps them apart, and a lone value of the
+//     lineage inside a piece that belongs elsewhere is a bridge value, not a
+//     claim.
+//  4. Ownership. A lineage belongs to the component holding its
+//     earliest-assigned value (the spec's split rule); a component with no
+//     owned lineage mints. A component's ID is its owned lineage carrying an
+//     operator edit, else the one that already carried the ID (a lineage that
+//     deferred to a co-owned lineage last cycle defers again), else the
+//     earliest assigned. The other owned lineages become automatic aliases,
+//     rebuilt every cycle as a forest whose roots attach to the winner, so a
+//     broken bridge needs no revival step and cannot leave a cycle behind.
+//  5. Attribution. A value its component does not own is attributed to the
+//     lineage it was seen with, per value and never transitively: the pure
+//     sessions of actors that bridge nothing, and the lineages carried by
+//     the actors of its sessions. One lineage across both stamps it; more
+//     than one is decided by how many distinct actors carry each, and a tie
+//     leaves it unassigned this cycle rather than stamped with a winner it
+//     may not belong to.
+//  6. remove_actor holds every cycle on the lineage it names: the actor is
+//     dropped, before union, from every component that owns that lineage.
 func Group(in Input) Output {
-	aliases := map[string]string{}
-	for k, v := range in.Aliases {
-		aliases[k] = v
-	}
-	// Assignments are kept as recorded (raw): a value remembers the campaign
-	// it first belonged to, so a bridge that later breaks can hand each piece
-	// back its own identity instead of moving a name to foreign evidence.
 	raw := map[string]Assignment{}
 	var maxSeq int64
 	for _, a := range in.Assignments {
 		raw[vkey(a.Kind, a.Value)] = a
 		maxSeq = max(maxSeq, a.Seq)
 	}
-
-	// Edits apply in the order they were recorded, whatever order the caller
-	// passes them in (a later rename wins).
 	edits := append([]Edit(nil), in.Edits...)
 	sort.SliceStable(edits, func(i, j int) bool { return edits[i].ID < edits[j].ID })
 
-	// Edits that act before union, keyed by resolved campaign ID.
-	ignored, removed, edited, mergedFrom := map[string]bool{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}
+	// Merge aliases come from the edits alone, in edit order, resolving each
+	// side through the merges before it. A stored automatic alias never takes
+	// part: "merge T into D" while D is bridged into K merges T with D, not
+	// with K (an operator who wanted K would have named K).
+	mergeAlias := map[string]string{}
 	for _, e := range edits {
-		id := Resolve(aliases, e.CampaignID)
+		if e.Action != "merge" || e.CampaignID == "" || e.Arg == "" {
+			continue
+		}
+		if from, to := Resolve(mergeAlias, e.CampaignID), Resolve(mergeAlias, e.Arg); from != to {
+			mergeAlias[from] = to
+		}
+	}
+	repCache := map[string]string{}
+	rep := func(id string) string {
+		r, ok := repCache[id]
+		if !ok {
+			r = Resolve(mergeAlias, id)
+			repCache[id] = r
+		}
+		return r
+	}
+	inGroup := map[string]bool{} // reps that some merge retired an ID into
+	for from := range mergeAlias {
+		inGroup[rep(from)] = true
+	}
+
+	ignored, removed, edited := map[string]bool{}, map[string]map[string]bool{}, map[string]bool{}
+	names, notes := map[string]string{}, map[string]string{}
+	nameID, noteID := map[string]int64{}, map[string]int64{}
+	for _, e := range edits {
+		id := rep(e.CampaignID)
 		switch e.Action {
 		case "ignore_evidence":
 			if k, v, ok := strings.Cut(e.Arg, ":"); ok {
@@ -160,20 +219,22 @@ func Group(in Input) Output {
 			}
 			removed[id][e.Arg] = true
 			edited[id] = true
-		case "rename", "notes":
-			edited[id] = true
+		case "rename":
+			names[id], nameID[id], edited[id] = e.Arg, e.ID, true
+		case "notes":
+			notes[id], noteID[id], edited[id] = e.Arg, e.ID, true
 		case "merge":
 			edited[id] = true
-			// Only the IDs merged *from* keep their retired identity: the
-			// edit's own ID and what it resolved to before the merge. The
-			// merge target is an ordinary campaign that can still split
-			// (marking it made every automatic bridge into it permanent).
-			mergedFrom[e.CampaignID] = true
-			for _, src := range mergeChain(aliases, e.CampaignID, e.Arg) {
-				mergedFrom[src] = true
-			}
 		}
 	}
+	lineageOf := func(x Occurrence) (string, Assignment, bool) {
+		a, ok := raw[vkey(x.Kind, x.Value)]
+		if !ok {
+			return "", a, false
+		}
+		return rep(a.CampaignID), a, true
+	}
+
 	var all []Occurrence
 	for _, x := range in.Occurrences {
 		if x.SessionID == "" || x.ActorID == "" || ignored[vkey(x.Kind, x.Value)] {
@@ -183,55 +244,54 @@ func Group(in Input) Output {
 	}
 	sort.Slice(all, func(i, j int) bool { return occLess(all[i], all[j]) })
 
-	// remove_actor applies before union, and must hold every cycle. A
-	// per-value filter ("drop the actor where the value is assigned to the
-	// edited campaign") only held once: the split pieces fell below two
-	// actors and lost their assignments, or a piece minted a new ID and its
-	// values no longer named the edited campaign, and the actor bridged
-	// again. So the rule is structural: union everything, and wherever a
-	// component reaches the edited campaign (a value assigned to it or to an
-	// ID aliased into it) drop the removed actor's occurrences from that
-	// whole component, then union again. A piece split out of the edited
-	// campaign stays connected to it through the removed actor's own
-	// sessions, so the actor is kept out of that piece too, and so is any
-	// new evidence it brings. Each pass only shrinks components, and a
-	// shrunken piece reaches no campaign its parent did not, so the second
-	// pass drops nothing.
+	// parents: the session-only components before remove_actor. Two pieces
+	// of one parent that end up apart were severed by a removal, so merge
+	// closure (rule 3) must not join them again.
+	parents := sessionUnion(all, nil)
+	parentOf := func(i int) string { return parents.find(all[i].SessionID) }
+
+	// remove_actor applies before union and must hold every cycle (rule 6).
+	// It is structural: wherever a component reaches a removed-from lineage
+	// (a value assigned to it), the removed actors' occurrences leave that
+	// whole component, then union runs again. A piece split out of the
+	// lineage stays connected to it through the actor's own sessions in this
+	// pre-removal view, so the actor is kept out of that piece too, and so is
+	// any new evidence it brings. Each pass only shrinks components.
 	active := make([]bool, len(all))
 	for i := range active {
 		active[i] = true
 	}
-	resolved := map[string]string{}
-	resolve := func(id string) string {
-		r, ok := resolved[id]
-		if !ok {
-			r = Resolve(aliases, id)
-			resolved[id] = r
-		}
-		return r
-	}
-	var dropped []Occurrence
 	for len(removed) > 0 {
-		roots, members := components(all, active)
+		roots, members := unite(all, active, parentOf, lineageOf, inGroup)
+		// A component reaches a lineage when it owns it (holds its
+		// earliest-assigned value), not merely when it holds some value of it:
+		// a stray value another piece owns is re-attributed this cycle, and
+		// counting it would drop the actor now and let it back on the next
+		// run over the very same input.
+		reach := map[string]lineage{}
+		for _, r := range roots {
+			for _, i := range members[r] {
+				l, a, ok := lineageOf(all[i])
+				if !ok || removed[l] == nil {
+					continue
+				}
+				k := vkey(all[i].Kind, all[i].Value)
+				if cur, ok := reach[l]; !ok || a.Seq < cur.seq || a.Seq == cur.seq && k < cur.key {
+					reach[l] = lineage{root: r, seq: a.Seq, key: k}
+				}
+			}
+		}
 		changed := false
 		for _, r := range roots {
 			var sets []map[string]bool
-			hit := map[string]bool{}
-			for _, i := range members[r] {
-				a, ok := raw[vkey(all[i].Kind, all[i].Value)]
-				if !ok {
-					continue
-				}
-				for _, id := range [2]string{a.CampaignID, resolve(a.CampaignID)} {
-					if set := removed[id]; set != nil && !hit[id] {
-						hit[id] = true
-						sets = append(sets, set)
-					}
+			for l, h := range reach {
+				if h.root == r {
+					sets = append(sets, removed[l])
 				}
 			}
 			for _, i := range members[r] {
 				for _, set := range sets {
-					if set[all[i].ActorID] {
+					if active[i] && set[all[i].ActorID] {
 						active[i], changed = false, true
 						break
 					}
@@ -242,245 +302,189 @@ func Group(in Input) Output {
 			break
 		}
 	}
-	var occ []Occurrence
+	var occ, dropped []Occurrence
+	occIdx := make([]int, 0, len(all)) // occ position -> all position
 	for i, x := range all {
 		if active[i] {
 			occ = append(occ, x)
+			occIdx = append(occIdx, i)
 		} else {
 			dropped = append(dropped, x)
 		}
 	}
-
-	// Union sessions sharing a value.
-	roots, compIdx := components(occ, nil)
+	roots, members := unite(all, active, parentOf, lineageOf, inGroup)
 	comps := map[string]*component{}
 	for _, r := range roots {
-		comps[r] = &component{idx: compIdx[r], minSeq: -1}
+		c := &component{minSeq: map[string]int64{}}
+		for _, i := range members[r] {
+			c.idx = append(c.idx, sort.SearchInts(occIdx, i))
+		}
+		comps[r] = c
 	}
-	// Ownership implements the spec's split rule directly: "if two
-	// components claim one ID, the one holding the earliest-assigned value
-	// keeps it". Every raw ID is owned by the component holding its
-	// earliest-assigned value, and only the owner may keep, revive or retire
-	// that ID. Ranking whole components by their overall oldest value let an
-	// older campaign D, briefly bridged to K, walk off with K's ID (and its
-	// name) once the bridge broke: D's piece was older, but K's earliest value
-	// was never D's.
-	owner := map[string]holder{}
-	// Per component: the raw IDs its values carry, each with its earliest seq.
-	type claim struct {
-		raw      string
-		seq      int64
-		merged   bool // raw ID was explicitly merged from
-		viaMerge bool // raw ID was absorbed into an ID merged from
-	}
-	claims := map[string][]claim{}
+	// Ownership (rule 4): a lineage belongs to the component holding its
+	// earliest-assigned value. Ranking whole components by their oldest value
+	// let an older campaign briefly bridged to K walk off with K's ID.
+	owner := map[string]lineage{}
 	for _, r := range roots {
 		c := comps[r]
-		best := map[string]int64{}
 		for _, i := range c.idx {
-			k := vkey(occ[i].Kind, occ[i].Value)
-			a, ok := raw[k]
+			l, a, ok := lineageOf(occ[i])
 			if !ok {
 				continue
 			}
-			if s, seen := best[a.CampaignID]; !seen || a.Seq < s {
-				best[a.CampaignID] = a.Seq
+			if s, seen := c.minSeq[l]; !seen || a.Seq < s {
+				c.minSeq[l] = a.Seq
 			}
-			if c.minSeq < 0 || a.Seq < c.minSeq {
-				c.minSeq = a.Seq
-			}
-			h := holder{seq: a.Seq, key: k, root: r}
-			if cur, ok := owner[a.CampaignID]; !ok || h.seq < cur.seq || h.seq == cur.seq && h.key < cur.key {
-				owner[a.CampaignID] = h
+			k := vkey(occ[i].Kind, occ[i].Value)
+			if cur, ok := owner[l]; !ok || a.Seq < cur.seq || a.Seq == cur.seq && k < cur.key {
+				owner[l] = lineage{root: r, seq: a.Seq, key: k}
 			}
 		}
-		for id, seq := range best {
-			claims[r] = append(claims[r], claim{raw: id, seq: seq, merged: mergedFrom[id],
-				viaMerge: !mergedFrom[id] && chainHits(aliases, id, mergedFrom)})
+	}
+	for _, r := range roots {
+		c := comps[r]
+		for l := range c.minSeq {
+			if owner[l].root == r {
+				c.owned = append(c.owned, l)
+			}
 		}
-		// An explicit merge outranks every automatic ID: a component holding
-		// merged-from evidence stays in the merge target's lineage. Then the
-		// spec's order: IDs carrying operator edits, then the earliest
-		// assigned.
-		sort.Slice(claims[r], func(i, j int) bool {
-			a, b := claims[r][i], claims[r][j]
-			if a.merged != b.merged {
-				return a.merged
+		// The spec's order: IDs carrying operator edits, then the earliest
+		// assigned. Between those, a lineage that was already aliased into
+		// another lineage of this component last cycle defers to it: the ID
+		// two permanently linked campaigns show must not flip the day the
+		// winner's oldest value ages out and the other side's turns out older.
+		isOwned := map[string]bool{}
+		for _, l := range c.owned {
+			isOwned[l] = true
+		}
+		defers := func(l string) bool {
+			for i, t := 0, l; i < 64; i++ {
+				next, ok := in.Aliases[t]
+				if !ok || next == t {
+					return false
+				}
+				if isOwned[next] || isOwned[rep(next)] {
+					return true
+				}
+				t = next
 			}
-			if ea, eb := edited[Resolve(aliases, a.raw)], edited[Resolve(aliases, b.raw)]; ea != eb {
-				return ea
+			return false
+		}
+		sort.Slice(c.owned, func(i, j int) bool {
+			a, b := c.owned[i], c.owned[j]
+			if edited[a] != edited[b] {
+				return edited[a]
 			}
-			if a.seq != b.seq {
-				return a.seq < b.seq
+			if da, db := defers(a), defers(b); da != db {
+				return db
 			}
-			return a.raw < b.raw
+			if c.minSeq[a] != c.minSeq[b] {
+				return c.minSeq[a] < c.minSeq[b]
+			}
+			return a < b
 		})
 	}
-	owns := func(r, id string) bool {
-		h, ok := owner[id]
-		return ok && h.root == r
-	}
-	// Revive broken bridges. An automatic alias raw -> ... records that raw's
-	// campaign was absorbed into another; it stays only while raw's owner
-	// still shares a component with the ID it was absorbed into. Walk the
-	// chain: the first hop owned by this component means the bridge holds;
-	// one owned by another component means it broke, so raw's owner takes
-	// its own ID back. This is decided per alias, before any ID is chosen,
-	// because a piece that also holds merged-from evidence must still shed
-	// the automatic hop (D with Q merged into it, bridged into K and back)
-	// or its merge target resolves into K for good. Only owners delete and
-	// the walk stops at the first owned hop, so processing order is
-	// irrelevant. A chain ending unheld is kept for now (the piece may carry
-	// that campaign on), unless it passes through a merged-from ID: the
-	// operator merged that evidence, not this, so it never takes the target.
-	for _, r := range roots {
-		for _, cl := range claims[r] {
-			if cl.merged || !owns(r, cl.raw) {
-				continue
-			}
-			if _, aliased := aliases[cl.raw]; !aliased {
-				continue
-			}
-			if end, own, held := chainOwner(aliases, owner, cl.raw); (held && own != r) || (!held && end != "" && cl.viaMerge) {
-				delete(aliases, cl.raw)
-			}
-		}
-	}
-	// Components choose oldest first; the order only settles which of two
-	// pieces that both lost their bridge into a campaign whose own evidence
-	// aged out carries that campaign on.
-	sort.Slice(roots, func(i, j int) bool {
-		ca, cb := comps[roots[i]], comps[roots[j]]
-		switch {
-		case ca.minSeq >= 0 && cb.minSeq >= 0 && ca.minSeq != cb.minSeq:
-			return ca.minSeq < cb.minSeq
-		case (ca.minSeq >= 0) != (cb.minSeq >= 0):
-			return ca.minSeq >= 0
-		}
-		return ca.idx[0] < cb.idx[0]
-	})
 	reserved := map[string]bool{}
 	for _, a := range raw {
 		reserved[a.CampaignID] = true
 	}
-	for k, v := range aliases {
+	for k, v := range in.Aliases {
 		reserved[k], reserved[v] = true, true
 	}
-	for id := range edited {
-		reserved[id] = true
+	for _, e := range edits {
+		reserved[e.CampaignID] = true
+		if e.Action == "merge" {
+			reserved[e.Arg] = true
+		}
+	}
+	for from, to := range mergeAlias {
+		reserved[from], reserved[to] = true, true
+	}
+	// Aliases are rebuilt every cycle: the merge aliases, plus an automatic
+	// alias for every owned lineage that did not become its component's ID.
+	// An alias from an earlier bridge is simply not written again once the
+	// pieces are apart, so a revival needs no bookkeeping and cannot leave a
+	// cycle behind.
+	aliases := map[string]string{}
+	for from, to := range mergeAlias {
+		aliases[from] = to
 	}
 	taken := map[string]bool{}
 	for _, r := range roots {
 		c := comps[r]
-		for _, cl := range claims[r] {
-			if cl.merged {
-				// An explicit merge: keep the retired ID; output resolves it
-				// into the merge target, so the merge persists every cycle.
-				c.id = cl.raw
-				break
-			}
-		}
-		for _, cl := range claims[r] {
-			if c.id != "" {
-				break
-			}
-			if !owns(r, cl.raw) {
-				continue // another piece holds this ID's earliest value
-			}
-			if _, aliased := aliases[cl.raw]; !aliased {
-				c.id = cl.raw
-				continue
-			}
-			end, own, held := chainOwner(aliases, owner, cl.raw)
-			switch {
-			case held && own == r:
-				// Leads to an ID this piece holds; that claim decides.
-			case !held && !taken[end]:
-				// The campaign this evidence was absorbed into has no
-				// evidence of its own left: carry it on under its ID.
-				c.id = end
-			default:
-				c.id = cl.raw
-				delete(aliases, cl.raw)
-			}
-		}
-		if c.id == "" {
+		if len(c.owned) > 0 {
+			c.id = c.owned[0]
+		} else {
 			anchor := occ[c.idx[0]]
 			c.id = uniqueID(anchor.Kind, anchor.Value, taken, reserved, aliases)
 		}
 		taken[c.id] = true
-		reserved[c.id] = true
-	}
-	// Other IDs a component owns and did not choose retire into it (a new
-	// bridge). Never one on c.id's own chain: a merged-from piece holding its
-	// own merge target's ID (when the target's other evidence has aged out)
-	// would alias the target back into the merged-from ID, a cycle. The
-	// check walks the whole chain because the cycle can be several hops
-	// long (K -> Q -> D with P -> K already stored gave {P->K, K->P} when it
-	// compared only the chain's end).
-	for _, r := range roots {
-		c := comps[r]
-		for _, cl := range claims[r] {
-			if cl.raw == c.id || !owns(r, cl.raw) {
-				continue
-			}
-			if _, aliased := aliases[cl.raw]; aliased || chainReaches(aliases, c.id, cl.raw) {
-				continue
-			}
-			aliases[cl.raw] = c.id
+		// The alias forest inside a component is kept, not flattened: a
+		// lineage that deferred to another co-owned lineage last cycle keeps
+		// pointing at it, and only the former roots attach to the winner. A
+		// transient bridge therefore does not erase which of two permanently
+		// linked campaigns carried the ID; when the bridge ends the old root
+		// is the only non-deferring lineage and takes the ID back.
+		isOwned := map[string]bool{}
+		for _, l := range c.owned {
+			isOwned[l] = true
 		}
-	}
-	// Explicit merges, in edit order.
-	for _, e := range edits {
-		if e.Action != "merge" {
-			continue
+		for _, l := range c.owned[min(1, len(c.owned)):] {
+			aliases[l] = c.id
+			if t, ok := in.Aliases[l]; ok {
+				if t = rep(t); t != l && isOwned[t] && t != c.id {
+					aliases[l] = t
+				}
+			}
 		}
-		if from, to := Resolve(aliases, e.CampaignID), Resolve(aliases, e.Arg); from != to {
-			aliases[from] = to
+		for _, l := range c.owned[min(1, len(c.owned)):] {
+			t, i := l, 0
+			for ; i < len(c.owned) && t != c.id; i++ {
+				t = aliases[t]
+			}
+			if t != c.id {
+				aliases[l] = c.id // a stale chain that never reaches the winner
+			}
 		}
 	}
 
-	// Collect occurrences per final campaign ID.
-	members := map[string][]int{}
-	for _, r := range roots {
-		c := comps[r]
-		id := Resolve(aliases, c.id)
-		members[id] = append(members[id], c.idx...)
-	}
-	names, notes := map[string]string{}, map[string]string{}
-	for _, e := range edits {
-		id := Resolve(aliases, e.CampaignID)
-		switch e.Action {
-		case "rename":
-			names[id] = e.Arg
-		case "notes":
-			notes[id] = e.Arg
-		}
-	}
+	// Campaigns: one per component (its ID is never shared, so no two
+	// components resolve to one ID), plus an empty one for every edited
+	// lineage that no component owns, so a named campaign persists with no
+	// active members.
+	byRoot := map[string]string{}
 	idSet := map[string]bool{}
-	for id := range members {
-		idSet[id] = true
+	for _, r := range roots {
+		byRoot[comps[r].id] = r
+		idSet[comps[r].id] = true
 	}
 	for id := range names {
-		idSet[id] = true
+		if _, owned := owner[id]; !owned {
+			idSet[id] = true
+		}
 	}
 	for id := range notes {
-		idSet[id] = true
+		if _, owned := owner[id]; !owned {
+			idSet[id] = true
+		}
 	}
 	ids := make([]string, 0, len(idSet))
 	for id := range idSet {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-
 	out := Output{Aliases: aliases}
 	emitted := map[string]bool{}
 	for _, id := range ids {
 		c := Campaign{ID: id, Name: names[id], Notes: notes[id]}
-		idx := members[id]
-		sort.Ints(idx)
-		if len(idx) > 0 {
-			fillCampaign(&c, occ, idx)
+		if r, ok := byRoot[id]; ok {
+			// A campaign shows the latest rename and notes issued on any
+			// lineage it holds, not only on the one whose ID it carries: the
+			// operator renamed the campaign they were looking at, and while
+			// two lineages are one campaign that is this one. When they part,
+			// each lineage takes its own edits with it.
+			c.Name, c.Notes = latestEdit(names, nameID, comps[r].owned), latestEdit(notes, noteID, comps[r].owned)
+			fillCampaign(&c, occ, comps[r].idx)
 		}
 		if len(c.Members) < 2 && c.Name == "" && c.Notes == "" {
 			continue
@@ -489,148 +493,54 @@ func Group(in Input) Output {
 		out.Campaigns = append(out.Campaigns, c)
 	}
 
-	// Decide each value's assignment per emitted component. A value whose
-	// recorded ID resolves into the component's campaign is stable and keeps
-	// it (merged-from evidence always does, so the merge resolves into its
-	// target again every cycle). Every other value, new or carried in from a
-	// campaign this piece no longer belongs to, is attributed to the identity
-	// it was actually seen with: values sharing a session are grouped, and a
-	// group is stamped only when the stable evidence in its sessions has one
-	// identity. A value born in a bridging session, or in a bridge of new
-	// values, touches two and stays unassigned; it follows connectivity
-	// after the break and is stamped then. Stamping it with the winner's ID
-	// was what dragged that ID, a merge target's or a renamed campaign's,
-	// onto the wrong side once the bridge broke. Identity here follows
-	// explicit merge aliases only (P merged into K is K's evidence) and
-	// never an automatic one (D bridged into K stays D's), so a long-lived
-	// merge keeps accumulating evidence under a stable ID.
-	stamp, keep := map[string]string{}, map[string]bool{}
-	decided := map[string]bool{}
+	// Attribution (rule 5). A value whose lineage this component owns is
+	// stable and keeps its assignment as recorded. Every other value in an
+	// emitted component (new, or carried in from a lineage another piece
+	// owns) is attributed to the lineage it was seen with.
+	stamp := map[string]string{}
+	stable := map[string]bool{}
 	sessOcc := map[string][]int{}
 	for i, x := range occ {
 		sessOcc[x.SessionID] = append(sessOcc[x.SessionID], i)
 	}
 	for _, r := range roots {
 		c := comps[r]
-		final := Resolve(aliases, c.id)
-		if !emitted[final] {
+		if !emitted[c.id] {
+			for _, i := range c.idx {
+				if l, _, ok := lineageOf(occ[i]); ok && owner[l].root == r {
+					stable[vkey(occ[i].Kind, occ[i].Value)] = true
+				}
+			}
 			continue
 		}
-		assign := c.id
-		if mergedFrom[c.id] {
-			assign = final
-		}
-		stable := map[string]string{} // value key -> identity
-		floating := unionFind{}
-		var sessions []string
-		seenSess := map[string]bool{}
-		for _, i := range c.idx {
-			x := occ[i]
-			if !seenSess[x.SessionID] {
-				seenSess[x.SessionID] = true
-				sessions = append(sessions, x.SessionID)
-			}
-			k := vkey(x.Kind, x.Value)
-			if decided[k] {
-				continue
-			}
-			decided[k] = true
-			if prev, had := raw[k]; had && (mergedFrom[prev.CampaignID] || Resolve(aliases, prev.CampaignID) == final) {
-				stable[k] = ident(aliases, mergedFrom, prev.CampaignID)
-				keep[k] = true
-			} else {
-				floating[k] = k
-			}
-		}
-		if len(floating) == 0 {
-			continue
-		}
-		for _, s := range sessions {
-			first := ""
-			for _, i := range sessOcc[s] {
-				k := vkey(occ[i].Kind, occ[i].Value)
-				if _, ok := floating[k]; !ok {
-					continue
-				}
-				if first == "" {
-					first = k
-				} else {
-					floating.union(first, k)
-				}
-			}
-		}
-		touched := map[string]map[string]bool{}
-		for _, s := range sessions {
-			var idents []string
-			for _, i := range sessOcc[s] {
-				if id, ok := stable[vkey(occ[i].Kind, occ[i].Value)]; ok {
-					idents = append(idents, id)
-				}
-			}
-			if len(idents) == 0 {
-				continue
-			}
-			for _, i := range sessOcc[s] {
-				k := vkey(occ[i].Kind, occ[i].Value)
-				if _, ok := floating[k]; !ok {
-					continue
-				}
-				g := floating.find(k)
-				if touched[g] == nil {
-					touched[g] = map[string]bool{}
-				}
-				for _, id := range idents {
-					touched[g][id] = true
-				}
-			}
-		}
-		for k := range floating {
-			switch t := touched[floating.find(k)]; len(t) {
-			case 0:
-				// Only floating values in every session: the whole piece
-				// is new, or was rewritten into a minted ID.
-				stamp[k] = assign
-			case 1:
-				for id := range t {
-					stamp[k] = id
-				}
-			}
-		}
+		attribute(occ, sessOcc, c, r, owner, lineageOf, rep, stable, stamp)
 	}
 	// Assignments, in occurrence (time) order so fresh sequence numbers mean
-	// "oldest first".
+	// "oldest first". A value the removed actor alone carried keeps what it
+	// had: forgetting it is how a removed actor bridged again under an ID the
+	// edit did not reach.
 	newAssign := map[string]Assignment{}
 	for _, x := range occ {
 		k := vkey(x.Kind, x.Value)
 		if _, done := newAssign[k]; done {
 			continue
 		}
-		prev, had := raw[k]
 		switch id, stamped := stamp[k]; {
-		case keep[k]:
-			newAssign[k] = prev
-		case stamped && had:
-			newAssign[k] = Assignment{Kind: x.Kind, Value: x.Value, CampaignID: id, Seq: prev.Seq}
+		case stable[k]:
+			newAssign[k] = raw[k]
 		case stamped:
 			maxSeq++
 			newAssign[k] = Assignment{Kind: x.Kind, Value: x.Value, CampaignID: id, Seq: maxSeq}
 		}
 	}
-	// A value whose campaign carries an operator edit keeps its assignment
-	// even when its piece is not a campaign this cycle (or its occurrence was
-	// dropped by remove_actor). Dropping it forgot which campaign the value
-	// belonged to, so the removed actor bridged again next cycle under a
-	// freshly minted ID that the edit did not reach. A value an emitted
-	// piece deliberately left unassigned is not revived here.
-	for _, set := range [2][]Occurrence{occ, dropped} {
-		for _, x := range set {
-			k := vkey(x.Kind, x.Value)
-			if _, done := newAssign[k]; done || decided[k] {
-				continue
-			}
-			if prev, had := raw[k]; had && (edited[prev.CampaignID] || edited[Resolve(in.Aliases, prev.CampaignID)] || edited[Resolve(aliases, prev.CampaignID)]) {
-				newAssign[k] = prev
-			}
+	present := map[string]bool{}
+	for _, x := range occ {
+		present[vkey(x.Kind, x.Value)] = true
+	}
+	for _, x := range dropped {
+		k := vkey(x.Kind, x.Value)
+		if prev, had := raw[k]; had && !present[k] {
+			newAssign[k] = prev
 		}
 	}
 	keys := make([]string, 0, len(newAssign))
@@ -640,6 +550,222 @@ func Group(in Input) Output {
 	sort.Strings(keys)
 	for _, k := range keys {
 		out.Assignments = append(out.Assignments, newAssign[k])
+	}
+	return out
+}
+
+// attribute decides the lineage of every value component c does not own
+// (rule 5), writing the result into stamp and marking owned values stable.
+//
+// A component owning one lineage is that lineage: everything floating in it
+// is stamped with the campaign ID. A component owning several (a bridge, an
+// organic merge, or an explicit merge bridged to a third campaign) is read
+// per value, never transitively: grouping floating values that share a
+// session let one bridge-born value make a whole family ambiguous, and once
+// its own evidence had aged out that family was stamped with the other side.
+//
+// Evidence is taken in two tiers. Sessions of a bridge actor (an actor whose
+// sessions in this component carry stable values of two lineages: a
+// third-party bridging tool, or the family member whose session joined the
+// two sides) decide nothing: such a session looks pure exactly when the value
+// it picked from one side is still floating, which is when it must not be
+// believed.
+//
+//  1. Pure sessions: every session of a non-bridge actor whose stable values
+//     all belong to one lineage. One lineage across them stamps the value;
+//     two leave it unassigned (it is a bridge value).
+//  2. Actor continuity: the lineage of the value's own non-bridge actors,
+//     when they all carry one. This is what carries a family whose linking
+//     sessions are mixed (an organic merge) or whose newest values were
+//     picked by a bridge before anything stable co-occurred with them.
+//
+// A value with no evidence at all stays unassigned this cycle; stamping it
+// with the campaign's own ID was how a transient third party's identity
+// spread to values born inside a permanent merge. Rounds repeat while a tier
+// stamps something, every floating value is read again each round, and
+// stamps within a round apply together, so neither value order nor a
+// conflict released by a later stamp can change the result.
+func attribute(occ []Occurrence, sessOcc map[string][]int, c *component, root string, owner map[string]lineage,
+	lineageOf func(Occurrence) (string, Assignment, bool), rep func(string) string, stable map[string]bool, stamp map[string]string) {
+	lin, rawLin := map[string]string{}, map[string]string{} // value -> lineage, recorded ID
+	valOcc := map[string][]int{}
+	var floating, sessions []string
+	seenS := map[string]bool{}
+	for _, i := range c.idx {
+		x := occ[i]
+		if !seenS[x.SessionID] {
+			seenS[x.SessionID] = true
+			sessions = append(sessions, x.SessionID)
+		}
+		k := vkey(x.Kind, x.Value)
+		if _, seen := valOcc[k]; !seen {
+			if l, a, ok := lineageOf(x); ok && owner[l].root == root {
+				lin[k], rawLin[k] = l, a.CampaignID
+				stable[k] = true
+			} else {
+				floating = append(floating, k)
+			}
+		}
+		valOcc[k] = append(valOcc[k], i)
+	}
+	if len(floating) == 0 {
+		return
+	}
+	if len(c.owned) <= 1 {
+		for _, k := range floating {
+			stamp[k] = c.id
+		}
+		return
+	}
+	// Rounds: every floating value is read again each round against the
+	// stable set as it stands, so a value blocked by a conflict is released
+	// in the same cycle when a later stamp turns one of its sessions mixed.
+	// Anything still floating at the end stays unassigned this cycle.
+	for round := 0; round < 32 && len(floating) > 0; round++ {
+		sessReps, actorReps := map[string]map[string]bool{}, map[string]map[string]bool{}
+		actorRaw := map[string]map[string]bool{} // actor -> recorded IDs of its stable values
+		for _, s := range sessions {
+			for _, i := range sessOcc[s] {
+				k := vkey(occ[i].Kind, occ[i].Value)
+				l, ok := lin[k]
+				if !ok {
+					continue
+				}
+				if sessReps[s] == nil {
+					sessReps[s] = map[string]bool{}
+				}
+				sessReps[s][l] = true
+				a := occ[i].ActorID
+				if actorReps[a] == nil {
+					actorReps[a], actorRaw[a] = map[string]bool{}, map[string]bool{}
+				}
+				actorReps[a][l] = true
+				actorRaw[a][rawLin[k]] = true
+			}
+		}
+		newStamp := map[string]string{}
+		var rest []string
+		for _, k := range floating {
+			pure, cont := map[string]bool{}, map[string]bool{}
+			// votes: lineage -> recorded ID -> non-bridge actors of k's sessions
+			// carrying it, for breaking a tier-1 conflict.
+			votes := map[string]map[string]map[string]bool{}
+			seenActor := map[string]bool{}
+			for _, i := range valOcc[k] {
+				x := occ[i]
+				ar := actorReps[x.ActorID]
+				if len(ar) < 2 {
+					// Only a non-bridge actor's session is pure evidence.
+					for l := range sessReps[x.SessionID] {
+						pure[l] = true
+					}
+				}
+				// Every actor votes with every lineage it carries: a bridge
+				// actor is neutral between its two sides, but still outweighs
+				// a third party against both of them.
+				for l := range ar {
+					cont[l] = true
+				}
+				if seenActor[x.ActorID] {
+					continue
+				}
+				seenActor[x.ActorID] = true
+				for raw := range actorRaw[x.ActorID] {
+					l := rep(raw)
+					if votes[l] == nil {
+						votes[l] = map[string]map[string]bool{}
+					}
+					if votes[l][raw] == nil {
+						votes[l][raw] = map[string]bool{}
+					}
+					votes[l][raw][x.ActorID] = true
+				}
+			}
+			// Pure sessions and actor continuity are read together: one
+			// lineage across both stamps the value; two or more is a conflict,
+			// even when only one pure session exists. A lone pure session is
+			// exactly what an unflagged bridging tool produces on the day it
+			// picks a newborn, and the family's own actors, who carry the
+			// other lineage, are the evidence against it.
+			cands := map[string]bool{}
+			for l := range pure {
+				cands[l] = true
+			}
+			for l := range cont {
+				cands[l] = true
+			}
+			var pick string
+			switch {
+			case len(cands) == 1:
+				for l := range cands {
+					pick = l
+				}
+			case len(cands) > 1:
+				pick = actorMajority(votes)
+			}
+			if pick != "" {
+				newStamp[k] = pick
+			} else {
+				rest = append(rest, k)
+			}
+		}
+		for k, l := range newStamp {
+			lin[k], rawLin[k], stamp[k] = l, l, l
+		}
+		floating = rest
+		if len(newStamp) == 0 {
+			break
+		}
+	}
+}
+
+// actorMajority breaks a tier-1 conflict by actor continuity: the lineage
+// carried by strictly more of the distinct non-bridge actors that used the
+// value wins, or "" on a tie. Two pure sessions naming different lineages are
+// symmetric as co-occurrence ({v, a-value} and {v, b-value}) but not as
+// actors: a family's actors all carry its lineage, in sessions with the value
+// and in their other sessions, while a third-party tool that bridges two
+// families is one actor, and it is exactly that actor whose sessions look
+// pure while the value it picked from one side is still floating. Without
+// this a family that lives on one stable value at a time is captured by its
+// bridge partner the day that value ages out. Actors are counted per recorded
+// ID and a lineage scores its best ID, not the sum: an explicit merge joins
+// operators the evidence never showed together, and their pooled actor count
+// says nothing about which side a value belongs to.
+func actorMajority(pure map[string]map[string]map[string]bool) string {
+	best, pick, tie := -1, "", false
+	for _, l := range sortedKeys(func() map[string]bool {
+		m := map[string]bool{}
+		for l := range pure {
+			m[l] = true
+		}
+		return m
+	}()) {
+		n := 0
+		for _, actors := range pure[l] {
+			n = max(n, len(actors))
+		}
+		switch {
+		case n > best:
+			best, pick, tie = n, l, false
+		case n == best:
+			tie = true
+		}
+	}
+	if tie {
+		return ""
+	}
+	return pick
+}
+
+// latestEdit returns the value of the most recent edit (by edit ID) recorded
+// for any of the given lineages, or "" when none carries one.
+func latestEdit(values map[string]string, ids map[string]int64, lineages []string) string {
+	best, out := int64(-1), ""
+	for _, l := range lineages {
+		if id, ok := ids[l]; ok && id > best {
+			best, out = id, values[l]
+		}
 	}
 	return out
 }
@@ -659,10 +785,9 @@ func occLess(a, b Occurrence) bool {
 	return a.LastSeen.Before(b.LastSeen)
 }
 
-// components unions sessions that share a value among the occurrences
-// marked active (all when active is nil). It returns the component roots in
-// order of first occurrence and each root's occurrence indexes, ascending.
-func components(occ []Occurrence, active []bool) ([]string, map[string][]int) {
+// sessionUnion unions sessions that share a value among the occurrences
+// marked active (all when active is nil).
+func sessionUnion(occ []Occurrence, active []bool) unionFind {
 	u := unionFind{}
 	firstOf := map[string]int{}
 	for i, x := range occ {
@@ -679,9 +804,107 @@ func components(occ []Occurrence, active []bool) ([]string, map[string][]int) {
 			firstOf[k] = i
 		}
 	}
+	return u
+}
+
+// unite builds the components: sessions sharing a value, closed over
+// explicit merges (rule 3). For every lineage some merge retired an ID into,
+// the pieces holding its values are joined, one piece per pre-removal
+// parent: the piece with the lineage's earliest value there. Two pieces of
+// one parent were severed by remove_actor, and the merge must not undo that.
+// It returns the roots in order of first occurrence and each root's
+// occurrence indexes, ascending.
+func unite(all []Occurrence, active []bool, parentOf func(int) string,
+	lineageOf func(Occurrence) (string, Assignment, bool), inGroup map[string]bool) ([]string, map[string][]int) {
+	u := sessionUnion(all, active)
+	// Per recorded ID of a merged lineage: the piece holding its earliest
+	// value (its owner) and that piece's parent.
+	type best struct {
+		seq            int64
+		key, sess, par string
+	}
+	owners := map[string]best{}
+	for i, x := range all {
+		if active != nil && !active[i] {
+			continue
+		}
+		l, a, ok := lineageOf(x)
+		if !ok || !inGroup[l] {
+			continue
+		}
+		k := vkey(x.Kind, x.Value)
+		if cur, ok := owners[a.CampaignID]; !ok || a.Seq < cur.seq || a.Seq == cur.seq && k < cur.key {
+			owners[a.CampaignID] = best{a.Seq, k, x.SessionID, parentOf(i)}
+		}
+	}
+	// pure: piece -> lineages for which the piece has a session whose
+	// assigned values all belong to that lineage.
+	pure := map[string]map[string]bool{}
+	sessLin := map[string]map[string]bool{}
+	for i, x := range all {
+		if active != nil && !active[i] {
+			continue
+		}
+		if l, _, ok := lineageOf(x); ok {
+			if sessLin[x.SessionID] == nil {
+				sessLin[x.SessionID] = map[string]bool{}
+			}
+			sessLin[x.SessionID][l] = true
+		}
+	}
+	for s, ls := range sessLin {
+		if len(ls) != 1 {
+			continue
+		}
+		r := u.find(s)
+		if pure[r] == nil {
+			pure[r] = map[string]bool{}
+		}
+		for l := range ls {
+			pure[r][l] = true
+		}
+	}
+	// A claim on a recorded ID stands when the piece owns it, or when the
+	// piece lies in a different parent from the owner (nothing was severed
+	// between them) and has a pure session of that lineage: evidence of the
+	// merged campaign in its own right, as a merged-from operator's new
+	// values are. A lone value of the lineage inside a piece that otherwise
+	// belongs elsewhere is a bridge value, and is left to attribution. A
+	// non-owner in the owner's own parent was split off by remove_actor and
+	// its claim is void.
+	standing := map[string]map[string]bool{} // rep -> sessions to join
+	for i, x := range all {
+		if active != nil && !active[i] {
+			continue
+		}
+		l, a, ok := lineageOf(x)
+		if !ok || !inGroup[l] {
+			continue
+		}
+		own := owners[a.CampaignID]
+		r := u.find(x.SessionID)
+		if r == u.find(own.sess) || parentOf(i) != own.par && pure[r][l] {
+			if standing[l] == nil {
+				standing[l] = map[string]bool{}
+			}
+			standing[l][x.SessionID] = true
+		}
+	}
+	for _, l := range sortedKeys(func() map[string]bool {
+		m := map[string]bool{}
+		for l := range standing {
+			m[l] = true
+		}
+		return m
+	}()) {
+		ss := sortedKeys(standing[l])
+		for _, s := range ss[1:] {
+			u.union(ss[0], s)
+		}
+	}
 	members := map[string][]int{}
 	var roots []string
-	for i, x := range occ {
+	for i, x := range all {
 		if active != nil && !active[i] {
 			continue
 		}
@@ -692,100 +915,6 @@ func components(occ []Occurrence, active []bool) ([]string, map[string][]int) {
 		members[r] = append(members[r], i)
 	}
 	return roots, members
-}
-
-// mergeChain is every ID a merge of from into to retired: from's alias chain
-// up to, but not including, the first ID on to's chain. On the merge's first
-// cycle that ends at Resolve(from); later the merge alias itself is on the
-// chain, and resolving would wrongly name the target. Every hop is marked,
-// not only the ends, so ident treats a campaign that had absorbed others
-// before the operator merged it as one identity. Empty when from already
-// resolves into to (nothing was merged).
-func mergeChain(aliases map[string]string, from, to string) []string {
-	onTarget := map[string]bool{}
-	for i, id := 0, to; i < 64; i++ {
-		onTarget[id] = true
-		next, ok := aliases[id]
-		if !ok || next == id {
-			break
-		}
-		id = next
-	}
-	var chain []string
-	for i, id := 0, from; i < 64 && !onTarget[id]; i++ {
-		chain = append(chain, id)
-		next, ok := aliases[id]
-		if !ok || next == id {
-			break
-		}
-		id = next
-	}
-	return chain
-}
-
-// ident is the identity a value's recorded ID stands for: explicit merge
-// aliases are followed (P merged into K is K's evidence), automatic ones are
-// not (D bridged into K is still D's, and gets D back when the bridge
-// breaks).
-func ident(aliases map[string]string, mergedFrom map[string]bool, id string) string {
-	for i := 0; i < 64 && mergedFrom[id]; i++ {
-		next, ok := aliases[id]
-		if !ok || next == id {
-			break
-		}
-		id = next
-	}
-	return id
-}
-
-// chainOwner walks raw's alias chain, past raw itself, to the first ID some
-// component owns and reports that owner (held). With no owned hop it reports
-// the chain's end instead.
-func chainOwner(aliases map[string]string, owner map[string]holder, raw string) (end string, own string, held bool) {
-	id := raw
-	for i := 0; i < 64; i++ {
-		next, ok := aliases[id]
-		if !ok || next == id {
-			return id, "", false
-		}
-		if h, ok := owner[next]; ok {
-			return "", h.root, true
-		}
-		id = next
-	}
-	return id, "", false
-}
-
-// chainReaches reports whether from's alias chain, past from itself, passes
-// through target.
-func chainReaches(aliases map[string]string, from, target string) bool {
-	for i, id := 0, from; i < 64; i++ {
-		next, ok := aliases[id]
-		if !ok || next == id {
-			return false
-		}
-		if next == target {
-			return true
-		}
-		id = next
-	}
-	return false
-}
-
-// chainHits reports whether id's alias chain, past id itself, passes
-// through an ID in set.
-func chainHits(aliases map[string]string, id string, set map[string]bool) bool {
-	for i := 0; i < 64; i++ {
-		next, ok := aliases[id]
-		if !ok || next == id {
-			return false
-		}
-		if set[next] {
-			return true
-		}
-		id = next
-	}
-	return false
 }
 
 // uniqueID mints an ID from the anchor value, never reusing an ID that is

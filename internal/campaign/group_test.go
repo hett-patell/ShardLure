@@ -752,3 +752,137 @@ func TestSplitAwardsIDToHolderOfItsEarliestValue(t *testing.T) {
 		}
 	})
 }
+
+// campOf returns the campaign holding actor, or an empty Campaign.
+func campOf(out Output, actor string) Campaign {
+	for _, c := range out.Campaigns {
+		if hasActor(c, actor) {
+			return c
+		}
+	}
+	return Campaign{}
+}
+
+// R1: an explicit merge outlives the evidence that was live when it was made.
+// P is merged into K and P's operator keeps working with a new payload P2;
+// when P's old sessions age out, P2's piece must still be K.
+func TestMergeSurvivesSourceEvidenceTurnover(t *testing.T) {
+	k := []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0)}
+	p := []Occurrence{o("payload", "P", "p1", "b1", 1), o("payload", "P", "p2", "b2", 1)}
+	out := Group(Input{Occurrences: append(append([]Occurrence{}, k...), p...)})
+	kid, pid := campOf(out, "a1").ID, campOf(out, "b1").ID
+	edits := []Edit{{ID: 1, CampaignID: pid, Action: "merge", Arg: kid}, {ID: 2, CampaignID: pid, Action: "rename", Arg: "P-ops"}}
+	out = feed(out, append(append([]Occurrence{}, k...), p...), edits)
+	withP2 := append(append(append([]Occurrence{}, k...), p...),
+		o("payload", "P", "p3", "b1", 2), o("payload", "P2", "p3", "b1", 2), o("payload", "P2", "p4", "b2", 3))
+	out = feed(out, withP2, edits)
+	rest := append(append([]Occurrence{}, k...), o("payload", "P2", "p4", "b2", 3), o("payload", "P2", "p5", "b1", 4))
+	settle(t, out, rest, edits, 3, func(cycle int, out Output) {
+		c := campOf(out, "b1")
+		if len(out.Campaigns) != 1 || c.ID != kid || c.Name != "P-ops" || !reflect.DeepEqual(actorsOf(c), []string{"a1", "a2", "b1", "b2"}) {
+			t.Fatalf("cycle %d: merge lost after P aged out: %+v", cycle, out.Campaigns)
+		}
+	})
+}
+
+// R2: a long bridge through a shared script X outlives both sides' pre-bridge
+// evidence. Each side's new value is attributed to the side it was seen with,
+// so after the break K keeps its ID and name and D never takes them.
+func TestBridgeTurnoverDoesNotSwapIdentities(t *testing.T) {
+	base := []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0),
+		o("payload", "D", "d1", "b1", 1), o("payload", "D", "d2", "b2", 1)}
+	out := Group(Input{Occurrences: base})
+	kid, did := campOf(out, "a1").ID, campOf(out, "b1").ID
+	edits := []Edit{{ID: 1, CampaignID: kid, Action: "rename", Arg: "K-ops"}}
+	bridge := []Occurrence{
+		o("script", "X", "x1", "a1", 2), o("ssh_key", "K", "x1", "a1", 2),
+		o("script", "X", "x2", "b1", 2), o("payload", "D", "x2", "b1", 2),
+		o("payload", "D2", "x3", "b2", 3), o("script", "X", "x3", "b2", 3), o("payload", "D2", "d3", "b1", 3), o("payload", "D", "d3", "b1", 3),
+		o("ssh_key", "K2", "x4", "a2", 4), o("script", "X", "x4", "a2", 4), o("ssh_key", "K2", "k3", "a1", 4), o("ssh_key", "K", "k3", "a1", 4),
+	}
+	out = feed(out, append(append([]Occurrence{}, base...), bridge...), edits)
+	drop := func(occ []Occurrence, keep func(Occurrence) bool) []Occurrence {
+		var out []Occurrence
+		for _, x := range occ {
+			if keep(x) {
+				out = append(out, x)
+			}
+		}
+		return out
+	}
+	noD := append(drop(append(append([]Occurrence{}, base...), bridge...), func(x Occurrence) bool { return x.Value != "D" }), o("payload", "D2", "d4", "b2", 5))
+	out = feed(out, noD, edits)
+	noK := append(drop(noD, func(x Occurrence) bool { return x.Value != "K" }), o("ssh_key", "K2", "k4", "a2", 6))
+	out = feed(out, noK, edits)
+	after := append(drop(noK, func(x Occurrence) bool { return x.SessionID[0] != 'x' }), o("payload", "D2", "d5", "b1", 7), o("ssh_key", "K2", "k5", "a1", 7))
+	settle(t, out, after, edits, 3, func(cycle int, out Output) {
+		ck, cd := campOf(out, "a1"), campOf(out, "b1")
+		if ck.ID != kid || ck.Name != "K-ops" || cd.ID != did || cd.Name != "" {
+			t.Fatalf("cycle %d: identities swapped after turnover: K=%s %q D=%s %q", cycle, ck.ID, ck.Name, cd.ID, cd.Name)
+		}
+	})
+}
+
+// bridgedKD builds K, D and T, then bridges K and D through one session.
+func bridgedKD(t *testing.T) (base, bridge []Occurrence, out Output, kid, did, tid string) {
+	t.Helper()
+	base = []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0),
+		o("payload", "D", "d1", "b1", 1), o("payload", "D", "d2", "b2", 1),
+		o("script", "T", "t1", "c1", 2), o("script", "T", "t2", "c2", 2)}
+	out = Group(Input{Occurrences: base})
+	kid, did, tid = campOf(out, "a1").ID, campOf(out, "b1").ID, campOf(out, "c1").ID
+	bridge = []Occurrence{o("ssh_key", "K", "z1", "z", 3), o("payload", "D", "z1", "z", 3)}
+	out = feed(out, append(append([]Occurrence{}, base...), bridge...), nil)
+	if Resolve(out.Aliases, did) != kid && Resolve(out.Aliases, kid) != did {
+		t.Fatalf("setup: K and D not bridged: %v", out.Aliases)
+	}
+	return
+}
+
+// R3/R4: a merge names an ID that is only an automatic alias at the time. The
+// merge binds the lineage named, not the bridge's other side: once the bridge
+// ends, K is on its own again in both directions of the edit.
+func TestMergeNamingBridgedIDDoesNotFuseThirdCampaign(t *testing.T) {
+	for _, dir := range []string{"T into D", "D into T"} {
+		base, bridge, out, kid, did, tid := bridgedKD(t)
+		e := Edit{ID: 1, CampaignID: tid, Action: "merge", Arg: did}
+		if dir == "D into T" {
+			e = Edit{ID: 1, CampaignID: did, Action: "merge", Arg: tid}
+		}
+		edits := []Edit{e}
+		out = feed(out, append(append([]Occurrence{}, base...), bridge...), edits)
+		settle(t, out, base, edits, 3, func(cycle int, out Output) {
+			k, d, tt := campOf(out, "a1"), campOf(out, "b1"), campOf(out, "c1")
+			if k.ID != kid || d.ID == kid || d.ID != tt.ID {
+				t.Fatalf("%s cycle %d: K=%s D=%s T=%s (K %s)", dir, cycle, k.ID, d.ID, tt.ID, kid)
+			}
+		})
+	}
+}
+
+// R5: P merged into K, K renamed, a3 removed from K. When K's own evidence
+// ages out, the merge, the name and the removal all stay with K's operator.
+func TestMergeTargetKeepsIDNameAndRemovalThroughTurnover(t *testing.T) {
+	k := []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0), o("ssh_key", "K", "k3", "a3", 0)}
+	p := []Occurrence{o("payload", "P", "p1", "b1", 1), o("payload", "P", "p2", "b2", 1)}
+	out := Group(Input{Occurrences: append(append([]Occurrence{}, k...), p...)})
+	kid, pid := campOf(out, "a1").ID, campOf(out, "b1").ID
+	edits := []Edit{{ID: 1, CampaignID: pid, Action: "merge", Arg: kid}, {ID: 2, CampaignID: kid, Action: "rename", Arg: "K-ops"},
+		{ID: 3, CampaignID: kid, Action: "remove_actor", Arg: "a3"}}
+	all := append(append([]Occurrence{}, k...), p...)
+	out = feed(out, all, edits)
+	all = append(all, o("payload", "P", "p3", "b1", 2), o("payload", "P2", "p3", "b1", 2))
+	out = feed(out, all, edits)
+	all = append(all, o("ssh_key", "K", "k4", "a1", 3), o("ssh_key", "K2", "k4", "a1", 3))
+	out = feed(out, all, edits)
+	rest := []Occurrence{
+		o("payload", "P", "p3", "b1", 2), o("payload", "P2", "p3", "b1", 2), o("payload", "P2", "p4", "b2", 4),
+		o("ssh_key", "K2", "k4", "a1", 3), o("ssh_key", "K2", "k5", "a2", 4), o("ssh_key", "K2", "k6", "a3", 4),
+	}
+	settle(t, out, rest, edits, 3, func(cycle int, out Output) {
+		c := campOf(out, "a1")
+		if len(out.Campaigns) != 1 || c.ID != kid || c.Name != "K-ops" || !reflect.DeepEqual(actorsOf(c), []string{"a1", "a2", "b1", "b2"}) {
+			t.Fatalf("cycle %d: K's operator lost ID, name or removal: %+v", cycle, out.Campaigns)
+		}
+	})
+}
