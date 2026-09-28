@@ -4700,7 +4700,35 @@ async function openScript(fp) {
 // (the ledger is append-only, so wiping a half-written note would cost a
 // second edit); otherwise only the lists refresh. A merge reopens its target:
 // the source ID has just been merged away.
-async function campaignEdit(id, action, arg) {
+// _cmPending is the one scheduled reload for the current view. Each successful
+// edit reschedules it, so the reload runs 6 s after the LAST edit: two edits
+// a few seconds apart both show, and the first reload cannot render (and
+// baseline) the dialog before the worker applied the second edit. A reload
+// only ever clears the pending entry it belongs to.
+var _cmPending = null;
+
+function scheduleCampaignReload(view, target) {
+  if (_cmPending && _cmPending.view === view) {
+    clearTimeout(_cmPending.timer);
+    // A pending merge target wins: the source ID has been merged away.
+    if (_cmPending.merged) target = _cmPending.target;
+  } else {
+    _cmPending = null;
+  }
+  const entry = { view: view, target: target.id, merged: target.merged || false, timer: 0 };
+  entry.timer = setTimeout(function () {
+    if (_cmPending === entry) _cmPending = null;
+    refreshCampaigns();
+    const modal = document.getElementById('campaign-modal');
+    if (entry.target && modal.open && entry.view === _cmView && !cmDirty()) openCampaign(entry.target);
+  }, 6000);
+  _cmPending = entry;
+}
+
+// raw is the field's value at click time (arg may be trimmed): it, not the
+// live field, becomes the saved baseline, so keystrokes typed while the POST
+// is in flight stay unsaved and block the reload instead of being wiped.
+async function campaignEdit(id, action, arg, raw) {
   const view = _cmView;
   const status = document.getElementById('cm-status');
   if (status) status.textContent = 'saving…';
@@ -4716,19 +4744,19 @@ async function campaignEdit(id, action, arg) {
     if (status) status.textContent = 'edit refused: ' + msg;
     return;
   }
-  if (view === _cmView && _cmRendered) {
-    // The saved field is now the baseline; typing after this point is unsaved.
-    if (action === 'rename') _cmRendered.name = document.getElementById('cm-name').value;
-    if (action === 'notes') _cmRendered.notes = document.getElementById('cm-notes').value;
-    if (action === 'merge') _cmRendered.merge = document.getElementById('cm-merge').value;
-  }
   if (status) status.textContent = 'applying…';
-  const reopen = action === 'merge' ? arg : id;
-  setTimeout(function () {
-    refreshCampaigns();
-    const modal = document.getElementById('campaign-modal');
-    if (reopen && modal.open && view === _cmView && !cmDirty()) openCampaign(reopen);
-  }, 6000);
+  if (view !== _cmView) {
+    // The analyst has moved on; only the lists need the result.
+    setTimeout(refreshCampaigns, 6000);
+    return;
+  }
+  if (_cmRendered) {
+    const saved = raw == null ? arg : raw;
+    if (action === 'rename') _cmRendered.name = saved;
+    if (action === 'notes') _cmRendered.notes = saved;
+    if (action === 'merge') _cmRendered.merge = saved;
+  }
+  scheduleCampaignReload(view, action === 'merge' ? { id: arg, merged: true } : { id: id });
 }
 
 function closeCampaign() {
@@ -4746,14 +4774,15 @@ document.getElementById('campaign-modal').addEventListener('click', function (e)
   if (a === 'session') { closeCampaign(); openSession(b.dataset.session); return; }
   if (a === 'actor') { closeCampaign(); setActiveView('overview'); selectedActor = b.dataset.actor; loadActorDetail(b.dataset.actor); return; }
   if (a === 'script') { openScript(b.dataset.fp); return; }
-  let arg = b.dataset.arg || '';
+  let arg = b.dataset.arg || '', raw;
   if (a === 'rename') {
-    arg = document.getElementById('cm-name').value.trim();
+    raw = document.getElementById('cm-name').value;
+    arg = raw.trim();
     if (!arg) { document.getElementById('cm-status').textContent = 'a name is required'; return; }
   }
-  if (a === 'notes') arg = document.getElementById('cm-notes').value;
-  if (a === 'merge') arg = document.getElementById('cm-merge').value.trim();
-  campaignEdit(b.dataset.id || '', a, arg);
+  if (a === 'notes') arg = raw = document.getElementById('cm-notes').value;
+  if (a === 'merge') { raw = document.getElementById('cm-merge').value; arg = raw.trim(); }
+  campaignEdit(b.dataset.id || '', a, arg, raw);
 });
 function rowOpens(table, attr, fn) {
   const tb = document.querySelector(table + ' tbody');
