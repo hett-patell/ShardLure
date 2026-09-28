@@ -17,7 +17,7 @@ const evidenceCursorSource, evidenceCursorPath = "campaign", "evidence-v1"
 // and kind out of index selection: commands are ~1% of events, so answering
 // source='cowrie' from idx_events_session would scan most Cowrie rows under
 // writeMu — the v2.8.0 HASSH-repair regression on ARM.
-const evidenceScanQuery = `SELECT id, ts, kind, COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(src_ip,''),
+const evidenceScanQuery = `SELECT id, ts, COALESCE(ts_unix_ns,0), kind, COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(src_ip,''),
   substr(COALESCE(command,''),1,65536), COALESCE(sha256,''), substr(COALESCE(filename,''),1,4096)
 FROM events WHERE id>? AND id<=? AND +source='cowrie' AND +kind IN ('command','file_download','file_upload') ORDER BY id`
 
@@ -27,8 +27,13 @@ var maxEvidenceWindowBytes = 8 << 20
 const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 type EvidenceRecordResult struct {
-	Scanned, Recorded int
-	Done              bool
+	// Scanned counts Cowrie command/file events read from the window.
+	Scanned int
+	// Recorded counts events processed into lines or evidence, including
+	// replays the dedup then ignored and lines dropped by the session caps;
+	// it is not a count of new rows.
+	Recorded int
+	Done     bool
 }
 
 // RecordCampaignEvidence turns Cowrie events in the next rowid window past a
@@ -54,7 +59,7 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			return nil
 		}
 		type ev struct {
-			id                                         int64
+			id, tsNS                                   int64
 			ts, kind, session, actor, ip, cmd, sha, fn string
 		}
 		rows, err := tx.QueryContext(ctx, evidenceScanQuery, cursor, end)
@@ -65,7 +70,7 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 		budget := 0
 		for rows.Next() {
 			var e ev
-			if err := rows.Scan(&e.id, &e.ts, &e.kind, &e.session, &e.actor, &e.ip, &e.cmd, &e.sha, &e.fn); err != nil {
+			if err := rows.Scan(&e.id, &e.ts, &e.tsNS, &e.kind, &e.session, &e.actor, &e.ip, &e.cmd, &e.sha, &e.fn); err != nil {
 				rows.Close()
 				return err
 			}
@@ -76,6 +81,13 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			}
 			batch = append(batch, e)
 		}
+		// rows.Next returning false can mean an error, not the end: without
+		// this check an I/O or corruption failure mid-scan would still advance
+		// the cursor to end and silently drop the rest of the window.
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
 		if err := rows.Close(); err != nil {
 			return err
 		}
@@ -85,10 +97,16 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			if e.session == "" || e.actor == "" {
 				continue // admin exemption or sessionless row
 			}
-			// Legacy (pre-v20) rows carry variable-width RFC3339Nano text;
-			// normalise so max()/< comparisons order correctly.
-			if t, err := time.Parse(time.RFC3339Nano, e.ts); err == nil {
+			// Stored times must be fixed-width UTC text so min()/max()/<
+			// order correctly. Prefer the exact v20 column; legacy rows carry
+			// variable-width RFC3339Nano text. A row with neither usable is
+			// skipped (still counted as scanned), never stored raw.
+			if e.tsNS != 0 {
+				e.ts = formatFixedUTC(time.Unix(0, e.tsNS))
+			} else if t, err := time.Parse(time.RFC3339Nano, e.ts); err == nil {
 				e.ts = formatFixedUTC(t)
+			} else {
+				continue
 			}
 			switch models.EventKind(e.kind) {
 			case models.KindCommand:
@@ -122,7 +140,8 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 
 // appendSessionLineTx stores one command line (O(1) per command; the script
 // is assembled once when the session settles). Caps: MaxCommands lines and
-// MaxNormalizedBytes per session.
+// MaxNormalizedBytes per session, where bytes is len(script.Join(lines)):
+// every line after the first also costs its one-byte separator.
 func appendSessionLineTx(tx *sql.Tx, eventID int64, session, actor, ip, cmd, ts, now string) error {
 	line := script.EncodeLine(cmd)
 	if line == "" {
@@ -132,7 +151,11 @@ func appendSessionLineTx(tx *sql.Tx, eventID int64, session, actor, ip, cmd, ts,
 	if err := tx.QueryRow(`SELECT line_count, bytes FROM session_scripts WHERE session_id=?`, session).Scan(&count, &bytes); err != nil && err != sql.ErrNoRows {
 		return err
 	}
-	if count >= script.MaxCommands || bytes+len(line) > script.MaxNormalizedBytes {
+	add := len(line)
+	if count > 0 {
+		add++ // script.Join separator
+	}
+	if count >= script.MaxCommands || bytes+add > script.MaxNormalizedBytes {
 		return nil
 	}
 	r, err := tx.Exec(`INSERT OR IGNORE INTO session_script_lines(session_id,event_id,line) VALUES(?,?,?)`, session, eventID, line)
@@ -145,7 +168,7 @@ func appendSessionLineTx(tx *sql.Tx, eventID int64, session, actor, ip, cmd, ts,
 	_, err = tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at) VALUES(?,?,?,1,?,?,?,?)
 ON CONFLICT(session_id) DO UPDATE SET actor_id=excluded.actor_id, line_count=line_count+1, bytes=bytes+excluded.bytes,
   first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen), updated_at=excluded.updated_at`,
-		session, actor, ip, len(line), ts, ts, now)
+		session, actor, ip, add, ts, ts, now)
 	return err
 }
 
@@ -191,9 +214,12 @@ func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) erro
 		q        string
 		cutoffed bool
 	}{
-		// EXISTS: only sessions that still have lines, or the loop re-selects the same 500 forever.
-		{`DELETE FROM session_script_lines WHERE session_id IN (SELECT ss.session_id FROM session_scripts ss WHERE ss.last_seen < ?
-  AND EXISTS (SELECT 1 FROM session_script_lines l WHERE l.session_id=ss.session_id) LIMIT 500)`, true},
+		// Selected by line rowid so each chunk is at most 5000 rows under
+		// writeMu (a session batch could be 300 lines per session). The join
+		// is the existence guard: every selected row is deleted, so the next
+		// chunk cannot re-select it and the loop ends at zero.
+		{`DELETE FROM session_script_lines WHERE rowid IN (SELECT l.rowid FROM session_scripts ss
+  JOIN session_script_lines l ON l.session_id=ss.session_id WHERE ss.last_seen < ? LIMIT 5000)`, true},
 		{`DELETE FROM session_scripts WHERE rowid IN (SELECT ss.rowid FROM session_scripts ss WHERE ss.last_seen < ?
   AND NOT EXISTS (SELECT 1 FROM session_script_lines l WHERE l.session_id=ss.session_id) LIMIT 5000)`, true},
 		{`DELETE FROM session_script_lines WHERE rowid IN (SELECT l.rowid FROM session_script_lines l

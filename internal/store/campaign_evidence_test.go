@@ -2,11 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/script"
 	"github.com/networkshard/shardlure/pkg/models"
 )
 
@@ -137,8 +139,12 @@ func TestEvidenceFollowsHASSHRekey(t *testing.T) {
 	if _, err := s.RecordCampaignEvidence(context.Background(), 1000); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`INSERT INTO campaign_members(campaign_id,actor_id,sessions,ips,reasons) VALUES('c-000000000001','cowrie:203.0.113.7',1,1,'ssh_key')`); err != nil {
+		t.Fatal(err)
+	}
+	// The IP actor ends up empty, so reconcile deletes it; its membership must go too.
 	stub := func(map[string]*ActorState, func(func(*models.Event) error) error) ([]*models.AggregatedActor, error) {
-		return nil, nil
+		return []*models.AggregatedActor{{Actor: &models.Actor{ID: "cowrie:203.0.113.7", Source: models.SourceCowrie}}}, nil
 	}
 	if err := s.ReconcileSessionHASSH("s1", "cowrie:hh", "hh", stub); err != nil {
 		t.Fatal(err)
@@ -148,6 +154,11 @@ func TestEvidenceFollowsHASSHRekey(t *testing.T) {
 	s.db.QueryRow(`SELECT actor_id FROM campaign_evidence WHERE session_id='s1'`).Scan(&a2)
 	if a1 != "cowrie:hh" || a2 != "cowrie:hh" {
 		t.Fatalf("evidence did not follow the re-key: %q %q", a1, a2)
+	}
+	var ghost int
+	s.db.QueryRow(`SELECT COUNT(*) FROM campaign_members WHERE actor_id='cowrie:203.0.113.7'`).Scan(&ghost)
+	if ghost != 0 {
+		t.Fatal("deleted IP actor left a ghost campaign member")
 	}
 }
 
@@ -227,5 +238,126 @@ func TestReplaceClearsCampaignDerived(t *testing.T) {
 	s.db.QueryRow(`SELECT group_concat(id) FROM campaigns`).Scan(&campaigns)
 	if n := count(); n != 0 || campaigns != "c-named" {
 		t.Fatalf("derived=%d campaigns=%q", n, campaigns)
+	}
+}
+
+// Stored bytes must equal the length of the joined script, separators
+// included, and never exceed MaxNormalizedBytes.
+func TestSessionScriptByteCapCountsSeparators(t *testing.T) {
+	s := newTestStore(t, "evidence-cap.db")
+	cmd := strings.Repeat("x", 218) // 300 lines fit without separators, not with
+	if l := script.EncodeLine(cmd); len(l) != 218 {
+		t.Fatalf("encoding changed: %d", len(l))
+	}
+	now := time.Now().UTC()
+	for i := 0; i < script.MaxCommands; i++ {
+		cowrieEvent(t, s, "cap", "cowrie:a", "command", cmd, "", "", now.Add(time.Duration(i)*time.Millisecond))
+	}
+	if _, err := s.RecordCampaignEvidence(context.Background(), 1000); err != nil {
+		t.Fatal(err)
+	}
+	var stored int
+	if err := s.db.QueryRow(`SELECT bytes FROM session_scripts WHERE session_id='cap'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`SELECT line FROM session_script_lines WHERE session_id='cap' ORDER BY event_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for rows.Next() {
+		var l string
+		if err := rows.Scan(&l); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, l)
+	}
+	rows.Close()
+	joined := len(script.Join(lines))
+	if stored > script.MaxNormalizedBytes || joined > script.MaxNormalizedBytes || stored != joined {
+		t.Fatalf("stored=%d joined=%d lines=%d cap=%d", stored, joined, len(lines), script.MaxNormalizedBytes)
+	}
+}
+
+func TestPayloadEvidenceRejectsUnusableHashes(t *testing.T) {
+	s := newTestStore(t, "evidence-payload.db")
+	now := time.Now().UTC()
+	cowrieEvent(t, s, "p1", "cowrie:a", "file_download", "", "not-a-hash", "x.sh", now)
+	cowrieEvent(t, s, "p2", "cowrie:a", "file_download", "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "empty", now)
+	cowrieEvent(t, s, "p3", "cowrie:a", "file_download", "", "", "nohash", now)
+	res, err := s.RecordCampaignEvidence(context.Background(), 1000)
+	if err != nil || res.Scanned != 3 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM campaign_evidence`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d payload evidence rows from unusable hashes", n)
+	}
+}
+
+// Stored times are always fixed-width UTC: ts_unix_ns wins, a parseable ts is
+// normalised, and a row with neither is skipped rather than stored raw.
+func TestEvidenceTimestampsAreFixedWidth(t *testing.T) {
+	s := newTestStore(t, "evidence-ts.db")
+	at := time.Date(2026, 9, 1, 12, 0, 0, 5, time.UTC)
+	cowrieEvent(t, s, "ns", "cowrie:a", "command", "id", "", "", at)
+	cowrieEvent(t, s, "legacy", "cowrie:a", "command", "id", "", "", at)
+	cowrieEvent(t, s, "bad", "cowrie:a", "command", "id", "", "", at)
+	if _, err := s.db.Exec(`UPDATE events SET ts='garbage' WHERE session_id='ns'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE events SET ts='2026-09-01T14:00:00.000000005+02:00', ts_unix_ns=NULL WHERE session_id='legacy'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE events SET ts='garbage', ts_unix_ns=NULL WHERE session_id='bad'`); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.RecordCampaignEvidence(context.Background(), 1000)
+	if err != nil || res.Scanned != 3 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	want := formatFixedUTC(at)
+	for _, sess := range []string{"ns", "legacy"} {
+		var first, last string
+		if err := s.db.QueryRow(`SELECT first_seen, last_seen FROM session_scripts WHERE session_id=?`, sess).Scan(&first, &last); err != nil || first != want || last != want {
+			t.Fatalf("%s: %q %q %v", sess, first, last, err)
+		}
+	}
+	var bad int
+	s.db.QueryRow(`SELECT COUNT(*) FROM session_scripts WHERE session_id='bad'`).Scan(&bad)
+	if bad != 0 {
+		t.Fatal("unparseable timestamp was stored")
+	}
+}
+
+// Sessions with many lines each must be purged in bounded chunks and finish.
+func TestRetentionPurgesLongSessionsInChunks(t *testing.T) {
+	s := newTestStore(t, "retention-long.db")
+	old := formatFixedUTC(time.Now().UTC().AddDate(0, 0, -120))
+	err := s.WithTx(func(tx *sql.Tx) error {
+		for i := 0; i < 30; i++ {
+			sess := fmt.Sprintf("long%d", i)
+			if _, err := tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,line_count,bytes,first_seen,last_seen,updated_at) VALUES(?,?,300,0,?,?,?)`, sess, "cowrie:x", old, old, old); err != nil {
+				return err
+			}
+			for j := 0; j < 300; j++ {
+				if _, err := tx.Exec(`INSERT INTO session_script_lines(session_id,event_id,line) VALUES(?,?,'id')`, sess, i*1000+j); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.purgeCampaignDerived(context.Background(), time.Now().UTC().AddDate(0, 0, -90)); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)`).Scan(&left)
+	if left != 0 {
+		t.Fatalf("%d rows left", left)
 	}
 }
