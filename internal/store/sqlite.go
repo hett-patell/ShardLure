@@ -1572,7 +1572,9 @@ WHERE COALESCE(campaigns,'')=''
 			return err
 		}
 		rows.Close()
-		for _, child := range []string{"actor_ips", "actor_users"} {
+		// The campaign tables only change what is deleted for an actor the
+		// three guards above already selected; they never widen the selection.
+		for _, child := range []string{"actor_ips", "actor_users", "session_scripts", "campaign_evidence", "campaign_members"} {
 			if err := deleteStringRowsByKey(tx, child, "actor_id", orphanIDs); err != nil {
 				return err
 			}
@@ -1586,6 +1588,13 @@ WHERE COALESCE(campaigns,'')=''
 	}
 
 	if err := s.purgeCaptureDiagnostics(cutoffTime); err != nil {
+		return err
+	}
+
+	// Runs after the orphan sweep (which may leave script lines without their
+	// session row) and before the checkpoint block: purgeCampaignDerived takes
+	// writeMu per chunk via WithTxContext, and writeMu is not reentrant.
+	if err := s.purgeCampaignDerived(ctx, cutoffTime); err != nil {
 		return err
 	}
 
@@ -1743,7 +1752,8 @@ func deleteRowsByRowID(tx *sql.Tx, table string, ids []int64) error {
 
 func deleteStringRowsByKey(tx *sql.Tx, table, column string, values []string) error {
 	valid := (table == "actors" && column == "id") ||
-		((table == "actor_ips" || table == "actor_users") && column == "actor_id")
+		((table == "actor_ips" || table == "actor_users" || table == "session_scripts" ||
+			table == "campaign_evidence" || table == "campaign_members") && column == "actor_id")
 	if !valid {
 		return fmt.Errorf("unsupported purge target %s.%s", table, column)
 	}
