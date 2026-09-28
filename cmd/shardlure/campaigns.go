@@ -12,6 +12,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/networkshard/shardlure/internal/store"
@@ -31,6 +32,9 @@ func cmdCampaigns(st *store.Store, args []string) {
 	if fs.NArg() > 0 {
 		fatal(fmt.Errorf("unexpected argument %q (usage: shardlure campaigns [--limit=N])", fs.Arg(0)))
 	}
+	if err := validateListLimit(*limit); err != nil {
+		fatal(err)
+	}
 	list, err := st.ListCampaigns(context.Background(), *limit)
 	if err != nil {
 		fatal(err)
@@ -46,6 +50,16 @@ func writeCampaigns(out io.Writer, list []store.CampaignSummary) {
 			termSafe(strings.Join(c.Kinds, ",")), formatDay(c.LastSeen))
 	}
 	w.Flush()
+}
+
+// validateListLimit refuses what the store would otherwise silently replace
+// with its default of 200: an operator asking for 5000 rows must not quietly
+// get 200 and read it as the whole population.
+func validateListLimit(n int) error {
+	if n < 1 || n > 1000 {
+		return fmt.Errorf("--limit must be 1..1000, got %d", n)
+	}
+	return nil
 }
 
 func campaignDisplayName(c store.CampaignSummary) string {
@@ -174,6 +188,9 @@ func cmdScripts(st *store.Store, args []string) {
 	if fs.NArg() > 0 {
 		fatal(fmt.Errorf("unexpected argument %q (usage: shardlure scripts [--limit=N])", fs.Arg(0)))
 	}
+	if err := validateListLimit(*limit); err != nil {
+		fatal(err)
+	}
 	fams, err := st.ListScriptFamilies(context.Background(), *limit)
 	if err != nil {
 		fatal(err)
@@ -204,11 +221,13 @@ func writeScripts(out io.Writer, fams []store.ScriptFamilyRow) {
 
 // termSafe makes attacker-controlled text inert on an operator's terminal.
 // Every C0 control (newline and tab included: one would break a table row,
-// the other a tabwriter column), DEL, C1 control and the bidi/line-separator
-// format characters that can visually reorder output are replaced with a
+// the other a tabwriter column), DEL, C1 control, every format character
+// (unicode.Cf: bidi overrides, zero-width characters, U+FEFF, soft hyphen,
+// tag characters) and the line/paragraph separators are replaced with a
 // visible escape. Bytes that are not valid UTF-8 are escaped individually,
 // so a lone 0x9b (8-bit CSI on terminals that honour C1) can never slip
-// through as "invalid, pass it along".
+// through as "invalid, pass it along". A backslash is doubled so literal
+// attacker text such as `\x1b` cannot pass for a sanitised ESC.
 func termSafe(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
@@ -216,11 +235,13 @@ func termSafe(s string) string {
 		switch {
 		case r == utf8.RuneError && size <= 1:
 			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case r == '\\':
+			b.WriteString(`\\`)
 		case r < 0x20 || r == 0x7f:
 			fmt.Fprintf(&b, `\x%02x`, r)
-		case (r >= 0x80 && r <= 0x9f) || r == 0x2028 || r == 0x2029 ||
-			(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) ||
-			r == 0x200e || r == 0x200f || r == 0x061c:
+		case r > 0xffff && unicode.Is(unicode.Cf, r):
+			fmt.Fprintf(&b, `\U%08x`, r)
+		case (r >= 0x80 && r <= 0x9f) || r == 0x2028 || r == 0x2029 || unicode.Is(unicode.Cf, r):
 			fmt.Fprintf(&b, `\u%04x`, r)
 		default:
 			b.WriteString(s[i : i+size])

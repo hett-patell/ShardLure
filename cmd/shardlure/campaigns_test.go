@@ -66,6 +66,13 @@ func TestTermSafe(t *testing.T) {
 		"line\nbreak":      `line\x0abreak`,
 		"bidi\u202eevil":   `bidi\u202eevil`,
 		"unicode ok: café": "unicode ok: café",
+		// A literal attacker "\x1b" must not look like a sanitised ESC.
+		`lit \x1b`:      `lit \\x1b`,
+		"zw\u200bsp":    `zw\u200bsp`,
+		"bom\ufeff":     `bom\ufeff`,
+		"shy\u00ad":     `shy\u00ad`,
+		"tag\U000e0041": `tag\U000e0041`,
+		"ls\u2028":      `ls\u2028`,
 	} {
 		if got := termSafe(in); got != want {
 			t.Errorf("termSafe(%q) = %q, want %q", in, got, want)
@@ -116,5 +123,20 @@ func TestShowCampaignAmbiguousAndUnknown(t *testing.T) {
 	}
 	if !strings.Contains(b.String(), "c-cccccccccccc") || !strings.Contains(b.String(), "cowrie:c") {
 		t.Errorf("detail output:\n%s", b.String())
+	}
+}
+
+func TestValidateListLimit(t *testing.T) {
+	for _, n := range []int{1, 50, 1000} {
+		if err := validateListLimit(n); err != nil {
+			t.Errorf("limit %d rejected: %v", n, err)
+		}
+	}
+	// The store silently substitutes 200 for these; the CLI must refuse.
+	for _, n := range []int{0, -1, 1001, 5000} {
+		err := validateListLimit(n)
+		if err == nil || !strings.Contains(err.Error(), "--limit must be 1..1000") {
+			t.Errorf("limit %d: err=%v, want range error", n, err)
+		}
 	}
 }
