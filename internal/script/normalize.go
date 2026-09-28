@@ -29,8 +29,8 @@ const (
 )
 
 var (
-	tokenRe  = regexp.MustCompile(`<<-?|\d*>>?&\d+|&>>?|\d+>>?|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
-	redirRe  = regexp.MustCompile(`^(?:\d*>>?&\d+|&>>?|\d+>>?)$`)
+	tokenRe  = regexp.MustCompile(`<<<|<<-?|\d*>>?&\d+|&>>?|\d+>>?|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
+	redirRe  = regexp.MustCompile(`^(?:<<<|\d*>>?&\d+|&>>?|\d+>>?)$`)
 	bareRe   = regexp.MustCompile(`^[a-z_][a-z0-9_.+-]*$`)
 	keyTypes = regexp.MustCompile(`^(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-\S+|sk-\S+@openssh\.com)$`)
 	keyBody  = regexp.MustCompile(`AAAA[0-9A-Za-z+/]{36,}={0,3}`)
@@ -67,13 +67,23 @@ func NormalizeCommand(cmd string) []string {
 		// line, so `cat <<EOF\nid\nw\nEOF` stays one command.
 		if inBody {
 			if t == "\n" && i+1 < len(raw) && strings.Trim(raw[i+1], `"'`) == heredoc {
-				i++
-				heredoc, inBody = "", false
+				// Heredoc terminates only if delimiter is on its own line
+				// (next token after delimiter is newline or EOF)
+				isTerminator := (i+2 >= len(raw)) || (raw[i+2] == "\n")
+				if isTerminator {
+					i++
+					heredoc, inBody = "", false
+				}
 			}
 			continue
 		}
 		if heredoc != "" && t == "\n" {
 			inBody = true
+			continue
+		}
+		if t == "<<<" {
+			out = append(out, t)
+			start = false
 			continue
 		}
 		if t == "<<" || t == "<<-" {
