@@ -492,3 +492,42 @@ func TestEditsApplyInIDOrder(t *testing.T) {
 		t.Fatalf("got %+v", out.Campaigns)
 	}
 }
+
+// An explicit merge persists every cycle, even when a session briefly
+// bridges the merged-from evidence to an unrelated campaign D. While the
+// bridge exists the combined component is K's (the operator's merge outranks
+// an automatic ID); when it breaks, K holds its merged evidence again and D
+// gets its own ID back.
+func TestMergeSurvivesTransientBridgeToAnotherCampaign(t *testing.T) {
+	all := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0),
+		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
+		o("script", "D", "e1", "e", 2), o("script", "D", "f1", "f", 2)}
+	first := Group(Input{Occurrences: all})
+	ids := map[string]string{}
+	for _, c := range first.Campaigns {
+		ids[c.AnchorValue] = c.ID
+	}
+	edits := []Edit{{ID: 1, CampaignID: ids["P"], Action: "merge", Arg: ids["K"]}}
+	merged := feed(feed(first, all, edits), all, edits)
+	// c2 carries P and D together.
+	bridge := append(append([]Occurrence{}, all...), o("script", "D", "c2", "c", 3), o("payload", "P", "c2", "c", 3))
+	bridged := settle(t, merged, bridge, edits, 3, func(cycle int, out Output) {
+		k, ok := byID(out)[ids["K"]]
+		if len(out.Campaigns) != 1 || !ok || !reflect.DeepEqual(actorsOf(k), []string{"a", "b", "c", "d", "e", "f"}) {
+			t.Fatalf("bridge cycle %d: want one campaign under K: %+v", cycle, out.Campaigns)
+		}
+		for _, a := range out.Assignments {
+			if a.Value == "P" && a.CampaignID != ids["P"] {
+				t.Fatalf("bridge cycle %d: merged-from value P rewritten to %s", cycle, a.CampaignID)
+			}
+		}
+	})
+	settle(t, bridged, all, edits, 3, func(cycle int, out Output) {
+		k, okK := byID(out)[ids["K"]]
+		d, okD := byID(out)[ids["D"]]
+		if len(out.Campaigns) != 2 || !okK || !okD ||
+			!reflect.DeepEqual(actorsOf(k), []string{"a", "b", "c", "d"}) || !reflect.DeepEqual(actorsOf(d), []string{"e", "f"}) {
+			t.Fatalf("after bridge cycle %d: merge or D's identity lost: %+v", cycle, out.Campaigns)
+		}
+	})
+}

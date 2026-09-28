@@ -255,6 +255,8 @@ func Group(in Input) Output {
 		raw, target string
 		seq         int64
 		direct      bool // raw ID is not retired
+		merged      bool // raw ID was explicitly merged from
+		viaMerge    bool // raw ID was absorbed into an ID merged from
 	}
 	claims := map[string][]claim{}
 	for _, r := range roots {
@@ -274,10 +276,19 @@ func Group(in Input) Output {
 		}
 		for id, seq := range best {
 			t := Resolve(aliases, id)
-			claims[r] = append(claims[r], claim{raw: id, target: t, seq: seq, direct: t == id})
+			claims[r] = append(claims[r], claim{raw: id, target: t, seq: seq, direct: t == id,
+				merged: mergedFrom[id], viaMerge: !mergedFrom[id] && chainHits(aliases, id, mergedFrom)})
 		}
+		// An explicit merge outranks every automatic ID: a component holding
+		// merged-from evidence stays in the merge target's lineage. Ranking a
+		// direct claim first let a transient bridge from P to an unrelated
+		// campaign D hand P's piece D's ID, rewrite P's assignment to it, and
+		// lose the merge (and D's identity) for good once the bridge broke.
 		sort.Slice(claims[r], func(i, j int) bool {
 			a, b := claims[r][i], claims[r][j]
+			if a.merged != b.merged {
+				return a.merged
+			}
 			if a.direct != b.direct {
 				return a.direct
 			}
@@ -290,14 +301,19 @@ func Group(in Input) Output {
 			return a.raw < b.raw
 		})
 	}
-	hasDirect := func(r string) bool { return len(claims[r]) > 0 && claims[r][0].direct }
+	hasDirect := map[string]bool{}
+	for _, r := range roots {
+		for _, cl := range claims[r] {
+			hasDirect[r] = hasDirect[r] || cl.direct
+		}
+	}
 	// Components with a direct claim choose first, oldest first; components
 	// that reach an ID only through an alias come after, so a broken bridge
 	// never lets the formerly bridged-in piece take the name.
 	sort.Slice(roots, func(i, j int) bool {
 		a, b := roots[i], roots[j]
-		if hasDirect(a) != hasDirect(b) {
-			return hasDirect(a)
+		if hasDirect[a] != hasDirect[b] {
+			return hasDirect[a]
 		}
 		ca, cb := comps[a], comps[b]
 		switch {
@@ -323,10 +339,19 @@ func Group(in Input) Output {
 		c := comps[r]
 		for _, cl := range claims[r] {
 			switch {
-			case mergedFrom[cl.raw]:
+			case cl.merged:
 				// An explicit merge: keep the retired ID; output resolves it
 				// into the merge target, so the merge persists every cycle.
 				c.id = cl.raw
+			case cl.viaMerge:
+				// Absorbed into merged-from evidence by an automatic bridge
+				// that has since broken: the operator merged that evidence,
+				// not this, so revive this piece's own ID rather than take
+				// the merge target's.
+				if !taken[cl.raw] {
+					c.id = cl.raw
+					delete(aliases, cl.raw)
+				}
 			case !taken[cl.target]:
 				c.id = cl.target
 			case !cl.direct && !taken[cl.raw]:
@@ -431,6 +456,10 @@ func Group(in Input) Output {
 		}
 		prev, had := raw[k]
 		switch {
+		case had && mergedFrom[prev.CampaignID]:
+			// Merged-from evidence is never rewritten to another campaign's
+			// ID, so the merge resolves into its target again every cycle.
+			newAssign[k] = prev
 		case had && (prev.CampaignID == compID || Resolve(aliases, prev.CampaignID) == Resolve(aliases, compID)):
 			newAssign[k] = prev
 		case had:
@@ -542,6 +571,22 @@ func mergeSource(aliases map[string]string, from, to string) string {
 		id = next
 	}
 	return prev
+}
+
+// chainHits reports whether id's alias chain, past id itself, passes
+// through an ID in set.
+func chainHits(aliases map[string]string, id string, set map[string]bool) bool {
+	for i := 0; i < 64; i++ {
+		next, ok := aliases[id]
+		if !ok || next == id {
+			return false
+		}
+		if set[next] {
+			return true
+		}
+		id = next
+	}
+	return false
 }
 
 // uniqueID mints an ID from the anchor value, never reusing an ID that is
