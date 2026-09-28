@@ -608,14 +608,14 @@ func cmdActors(st *store.Store, args []string) {
 	fmt.Fprintln(w, "ACTOR\tIP\tPLAYBOOK\tEVENTS\tUSR\tRATE/h\tLAST\tCONF")
 	for _, a := range actors {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f\t%s\t%s\n",
-			actor.TrimActorPrefix(a.ID), a.PrimaryIP, a.Playbook, a.EventCount, a.UniqueUsers,
+			termSafe(actor.TrimActorPrefix(a.ID)), termSafe(a.PrimaryIP), termSafe(a.Playbook), a.EventCount, a.UniqueUsers,
 			a.AttemptsPerHour, a.LastSeen.Format(time.RFC3339), actor.ConfidenceTier(a.Confidence))
 	}
 	w.Flush()
 }
 
 func cmdActor(st *store.Store, args []string) {
-	if len(args) < 2 || args[0] != "show" {
+	if len(args) != 2 || args[0] != "show" {
 		fatal(fmt.Errorf("usage: shardlure actor show <id|ip>"))
 	}
 	id := args[1]
@@ -631,12 +631,26 @@ func cmdActor(st *store.Store, args []string) {
 		fatal(err)
 	}
 	users, _ := st.ActorUsers(id)
-	b, _ := json.MarshalIndent(a, "", "  ")
-	fmt.Println(string(b))
-	fmt.Println("\nTop usernames:")
-	for _, u := range users {
-		fmt.Printf("  %6d  %s\n", u.Count, u.Username)
+	if err := writeActor(os.Stdout, a, users); err != nil {
+		fatal(err)
 	}
+}
+
+// writeActor prints an actor for `actor show`. Usernames, the SSH client
+// string, notes and the actor ID are attacker bytes: the JSON is re-escaped
+// by jsonTermSafe (still valid, lossless JSON) and the username list goes
+// through termSafe, so neither can drive the operator's terminal.
+func writeActor(w io.Writer, a *models.Actor, users []models.ActorUser) error {
+	b, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, jsonTermSafe(string(b)))
+	fmt.Fprintln(w, "\nTop usernames:")
+	for _, u := range users {
+		fmt.Fprintf(w, "  %6d  %s\n", u.Count, termSafe(u.Username))
+	}
+	return nil
 }
 
 func cmdStatus(st *store.Store) {
@@ -653,7 +667,7 @@ func cmdIOC(st *store.Store) {
 	fmt.Println("# ShardLure IOC slice (all actors)")
 	for _, a := range actors {
 		fmt.Printf("%s  playbook=%s  events=%d  rate=%.0f/h  probe=%d\n",
-			a.PrimaryIP, a.Playbook, a.EventCount, a.AttemptsPerHour, a.ProbeScore)
+			termSafe(a.PrimaryIP), termSafe(a.Playbook), a.EventCount, a.AttemptsPerHour, a.ProbeScore)
 	}
 }
 

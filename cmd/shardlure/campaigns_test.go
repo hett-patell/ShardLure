@@ -56,30 +56,6 @@ func TestCampaignOutputEscapesTerminalControls(t *testing.T) {
 	}
 }
 
-func TestTermSafe(t *testing.T) {
-	for in, want := range map[string]string{
-		"plain ascii":      "plain ascii",
-		"tab\there":        `tab\x09here`,
-		"del\x7f":          `del\x7f`,
-		"c1\u009b31m":      `c1\u009b31m`,
-		"raw c1 \x9b31m":   `raw c1 \x9b31m`, // invalid UTF-8 byte: escaped, never passed through
-		"line\nbreak":      `line\x0abreak`,
-		"bidi\u202eevil":   `bidi\u202eevil`,
-		"unicode ok: café": "unicode ok: café",
-		// A literal attacker "\x1b" must not look like a sanitised ESC.
-		`lit \x1b`:      `lit \\x1b`,
-		"zw\u200bsp":    `zw\u200bsp`,
-		"bom\ufeff":     `bom\ufeff`,
-		"shy\u00ad":     `shy\u00ad`,
-		"tag\U000e0041": `tag\U000e0041`,
-		"ls\u2028":      `ls\u2028`,
-	} {
-		if got := termSafe(in); got != want {
-			t.Errorf("termSafe(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // Sibling components routinely share a suggested name; the CLI must refuse
 // to pick one and point the operator at the IDs instead.
 func TestShowCampaignAmbiguousAndUnknown(t *testing.T) {

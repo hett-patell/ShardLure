@@ -12,8 +12,6 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/networkshard/shardlure/internal/store"
 )
@@ -217,36 +215,4 @@ func writeScripts(out io.Writer, fams []store.ScriptFamilyRow) {
 		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%v\t%s\n", shortID(termSafe(f.Family)), f.Sessions, f.Actors, f.IPs, f.Links, termSafe(first))
 	}
 	w.Flush()
-}
-
-// termSafe makes attacker-controlled text inert on an operator's terminal.
-// Every C0 control (newline and tab included: one would break a table row,
-// the other a tabwriter column), DEL, C1 control, every format character
-// (unicode.Cf: bidi overrides, zero-width characters, U+FEFF, soft hyphen,
-// tag characters) and the line/paragraph separators are replaced with a
-// visible escape. Bytes that are not valid UTF-8 are escaped individually,
-// so a lone 0x9b (8-bit CSI on terminals that honour C1) can never slip
-// through as "invalid, pass it along". A backslash is doubled so literal
-// attacker text such as `\x1b` cannot pass for a sanitised ESC.
-func termSafe(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case r == utf8.RuneError && size <= 1:
-			fmt.Fprintf(&b, `\x%02x`, s[i])
-		case r == '\\':
-			b.WriteString(`\\`)
-		case r < 0x20 || r == 0x7f:
-			fmt.Fprintf(&b, `\x%02x`, r)
-		case r > 0xffff && unicode.Is(unicode.Cf, r):
-			fmt.Fprintf(&b, `\U%08x`, r)
-		case (r >= 0x80 && r <= 0x9f) || r == 0x2028 || r == 0x2029 || unicode.Is(unicode.Cf, r):
-			fmt.Fprintf(&b, `\u%04x`, r)
-		default:
-			b.WriteString(s[i : i+size])
-		}
-		i += size
-	}
-	return b.String()
 }
