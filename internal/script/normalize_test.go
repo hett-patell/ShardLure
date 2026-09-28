@@ -112,6 +112,7 @@ func FuzzNormalizeCommand(f *testing.F) {
 		_ = Fingerprint(enc)
 		_ = Distinctive(Split(enc))
 		_ = Display(enc, 2048)
+		_ = ExtractKeys(s)
 	})
 }
 
