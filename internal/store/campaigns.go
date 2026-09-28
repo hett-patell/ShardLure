@@ -89,6 +89,12 @@ type ScriptDetail struct {
 
 var ErrStaleGrouping = errors.New("store: campaign edits changed during grouping")
 
+// ErrAmbiguousCampaign is returned by GetCampaign when a name or suggested
+// name matches more than one campaign (several "Outlaw/Dota" components are
+// normal). Callers must ask for the ID; picking one would silently show the
+// operator a different campaign from the one they meant.
+var ErrAmbiguousCampaign = errors.New("store: campaign name is ambiguous")
+
 // ErrInvalidGrouping rejects a grouping carrying an empty identifier. An
 // assignment whose campaign ID is "" is fed back into the next run and makes
 // it emit a campaign whose ID is "", so nothing empty is ever persisted.
@@ -434,7 +440,8 @@ func (s *Store) CampaignsForActor(ctx context.Context, actorID string) ([]Campai
 }
 
 // GetCampaign resolves aliases, then a case-insensitive name or suggested
-// name. sql.ErrNoRows when nothing matches.
+// name. sql.ErrNoRows when nothing matches; ErrAmbiguousCampaign when a name
+// matches more than one campaign.
 func (s *Store) GetCampaign(ctx context.Context, idOrName string) (CampaignDetail, error) {
 	var d CampaignDetail
 	idOrName = strings.TrimSpace(idOrName)
@@ -446,13 +453,31 @@ func (s *Store) GetCampaign(ctx context.Context, idOrName string) (CampaignDetai
 	if err != nil {
 		return d, err
 	}
-	id, _, err := s.resolveCampaignID(ctx, aliases, idOrName)
+	id, exists, err := s.resolveCampaignID(ctx, aliases, idOrName)
 	if err != nil {
 		return d, err
 	}
+	if !exists {
+		// Not an ID: a case-insensitive name or suggested name. Anything
+		// matching more than one campaign is ambiguous. Name and suggested
+		// name are pooled on purpose: an operator who renamed one "Outlaw/Dota"
+		// component to "Outlaw/Dota" still has siblings answering to it.
+		ids, err := s.campaignStrings(ctx, idOrName, `SELECT id FROM campaigns
+WHERE lower(name)=lower(?1) OR lower(suggested_name)=lower(?1) ORDER BY id LIMIT 2`)
+		if err != nil {
+			return d, err
+		}
+		switch len(ids) {
+		case 0:
+			return d, sql.ErrNoRows
+		case 1:
+			id = ids[0]
+		default:
+			return d, ErrAmbiguousCampaign
+		}
+	}
 	row := s.db.QueryRowContext(ctx, `SELECT `+campaignSummaryColumns+`, c.notes, c.anchor_kind, c.anchor_value FROM campaigns c
-WHERE c.id=?1 OR lower(c.name)=lower(?2) OR lower(c.suggested_name)=lower(?2)
-ORDER BY (c.id=?1) DESC, (lower(c.name)=lower(?2)) DESC, c.id LIMIT 1`, id, idOrName)
+WHERE c.id=?`, id)
 	summary, err := scanCampaignSummary(row, &d.Notes, &d.AnchorKind, &d.AnchorValue)
 	if err != nil {
 		return d, err // sql.ErrNoRows when absent

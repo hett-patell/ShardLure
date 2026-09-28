@@ -1015,6 +1015,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
 	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guardRead(s.handleAbuseIPDBSuggestions))
 	mux.HandleFunc("/api/intel/tunnels", s.guardRead(s.handleIntelTunnels))
+	s.registerCampaignRoutes(mux)
 	mux.HandleFunc("/api/intel/timeline", s.guardRead(s.handleIntelTimeline))
 	// Settings panel: read masked snapshot, save/clear one setting, test a
 	// provider key, rotate the dashboard token. Guarded like every other /api.
@@ -1833,6 +1834,17 @@ func (s *Server) guardRead(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
+}
+
+// registerCampaignRoutes lives in server.go so route_method_test.go sees the
+// guardRead/guard wrapping of each route. The edit endpoint takes bare guard
+// and enforces POST itself.
+func (s *Server) registerCampaignRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/intel/campaigns", s.guardRead(s.handleCampaigns))
+	mux.HandleFunc("/api/intel/campaign", s.guardRead(s.handleCampaign))
+	mux.HandleFunc("/api/intel/scripts", s.guardRead(s.handleScripts))
+	mux.HandleFunc("/api/intel/script", s.guardRead(s.handleScript))
+	mux.HandleFunc("/api/intel/campaign/edit", s.guard(s.handleCampaignEdit))
 }
 
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {

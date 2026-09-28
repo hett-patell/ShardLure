@@ -288,3 +288,42 @@ func TestCowrieActorPopulationBoundIsExact(t *testing.T) {
 		t.Fatalf("population after %d %v", n, err)
 	}
 }
+
+// A name or suggested name shared by several campaigns (several "Outlaw/Dota"
+// components) must be reported as ambiguous, never resolved to the lowest ID.
+func TestGetCampaignAmbiguousNameIsReported(t *testing.T) {
+	s := newTestStore(t, "campaigns-ambiguous.db")
+	ctx := context.Background()
+	rows := []CampaignRow{
+		{ID: "c-aaaaaaaaaaa1", SuggestedName: "Outlaw/Dota"},
+		{ID: "c-aaaaaaaaaaa2", SuggestedName: "outlaw/dota"},
+		{ID: "c-aaaaaaaaaaa3", Name: "Outlaw/Dota"},
+		{ID: "c-aaaaaaaaaaa4", Name: "Solo", SuggestedName: "Mirai"},
+	}
+	if err := s.SaveGrouping(ctx, rows, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCampaign(ctx, "OUTLAW/DOTA"); !errors.Is(err, ErrAmbiguousCampaign) {
+		t.Fatalf("ambiguous lookup err = %v", err)
+	}
+	if d, err := s.GetCampaign(ctx, "solo"); err != nil || d.ID != "c-aaaaaaaaaaa4" {
+		t.Fatalf("unique name %+v %v", d.ID, err)
+	}
+	if d, err := s.GetCampaign(ctx, "mirai"); err != nil || d.ID != "c-aaaaaaaaaaa4" {
+		t.Fatalf("unique suggested name %+v %v", d.ID, err)
+	}
+	// An exact ID always wins, even when it also equals some campaign's name.
+	if d, err := s.GetCampaign(ctx, "c-aaaaaaaaaaa1"); err != nil || d.ID != "c-aaaaaaaaaaa1" {
+		t.Fatalf("id lookup %+v %v", d.ID, err)
+	}
+}
+
+// GetCampaign filters edits with campaign_id IN (...); without an index that
+// is a scan of the whole never-purged edit history on every detail request.
+func TestCampaignEditsIndexed(t *testing.T) {
+	s := newTestStore(t, "campaigns-edit-index.db")
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_campaign_edits_campaign' AND tbl_name='campaign_edits'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("index count = %d err = %v", n, err)
+	}
+}

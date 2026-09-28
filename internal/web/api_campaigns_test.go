@@ -1,0 +1,267 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/networkshard/shardlure/internal/settings"
+	"github.com/networkshard/shardlure/internal/store"
+	"github.com/networkshard/shardlure/pkg/models"
+)
+
+func campaignServer(t *testing.T) (*Server, *http.ServeMux) {
+	t.Helper()
+	s, st := hasshTestServer(t)
+	mux := http.NewServeMux()
+	s.registerCampaignRoutes(mux)
+	row := store.CampaignRow{ID: "c-0123456789ab", Actors: 2, Members: []store.CampaignMemberRow{{ActorID: "cowrie:a", Reasons: "[]"}, {ActorID: "cowrie:b", Reasons: "[]"}}}
+	if err := st.SaveGrouping(context.Background(), []store.CampaignRow{row}, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	return s, mux
+}
+
+func TestCampaignRoutesMethods(t *testing.T) {
+	_, mux := campaignServer(t)
+	for _, p := range []string{"/api/intel/campaigns", "/api/intel/scripts", "/api/intel/campaign?id=c-0123456789ab"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, p, nil))
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") == "" {
+			t.Errorf("POST %s = %d", p, rec.Code)
+		}
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d", p, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/intel/campaign/edit", nil))
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != http.MethodPost {
+		t.Errorf("GET edit = %d allow=%q", rec.Code, rec.Header().Get("Allow"))
+	}
+}
+
+func TestCampaignRoutesRequireTokenWhenSet(t *testing.T) {
+	s, _ := hasshTestServer(t)
+	if err := s.keys.Set(settings.KeyDashToken, "s3cret"); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	s.registerCampaignRoutes(mux)
+	for _, p := range []string{"/api/intel/campaigns", "/api/intel/campaign?id=c-0123456789ab", "/api/intel/scripts", "/api/intel/script?fp=" + strings.Repeat("a", 64)} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("no token %s = %d", p, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/intel/campaign/edit", strings.NewReader("id=c-0123456789ab&action=rename&arg=x")))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("edit without token = %d", rec.Code)
+	}
+}
+
+func postCampaignEdit(mux *http.ServeMux, form url.Values) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, "/api/intel/campaign/edit", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r)
+	return rec
+}
+
+func TestCampaignEditValidatesAndWakes(t *testing.T) {
+	s, mux := campaignServer(t)
+	woke := 0
+	s.onCampaignEdit = func() { woke++ }
+	post := func(form url.Values) int { return postCampaignEdit(mux, form).Code }
+	for _, bad := range []url.Values{
+		{"id": {"c-0123456789ab"}, "action": {"drop_table"}},
+		{"id": {"c-0123456789ab"}, "action": {"rename"}, "arg": {strings.Repeat("x", 201)}},
+		{"id": {"c-0123456789ab"}, "action": {"rename"}, "arg": {""}},
+		{"id": {"c-0123456789ab"}, "action": {"rename"}, "arg": {"a\nb"}},
+		{"id": {"c-0123456789ab"}, "action": {"notes"}, "arg": {strings.Repeat("n", 4001)}},
+		{"id": {"c-ffffffffffff"}, "action": {"rename"}, "arg": {"x"}}, // unknown campaign
+		{"id": {""}, "action": {"rename"}, "arg": {"x"}},               // empty campaign
+		{"action": {"ignore_evidence"}, "arg": {"hassh:abc"}},
+		{"action": {"ignore_evidence"}, "arg": {"ssh_key:"}},
+		{"action": {"ignore_evidence"}, "arg": {"payload"}},
+		{"id": {"c-ffffffffffff"}, "action": {"ignore_evidence"}, "arg": {"payload:abc"}},
+		{"id": {"c-0123456789ab"}, "action": {"merge"}, "arg": {"c-0123456789ab"}},
+		{"id": {"c-0123456789ab"}, "action": {"merge"}, "arg": {"c-ffffffffffff"}}, // unknown target
+		{"id": {"c-0123456789ab"}, "action": {"merge"}, "arg": {""}},
+		{"id": {"c-0123456789ab"}, "action": {"remove_actor"}, "arg": {""}},
+	} {
+		if c := post(bad); c != http.StatusBadRequest {
+			t.Errorf("%v = %d", bad, c)
+		}
+	}
+	if c := post(url.Values{"id": {"c-0123456789ab"}, "action": {"notes"}, "arg": {strings.Repeat("n", 70<<10)}}); c != http.StatusBadRequest {
+		t.Errorf("oversized body = %d", c)
+	}
+	if woke != 0 {
+		t.Fatalf("a rejected edit woke the worker %d times", woke)
+	}
+	if c := post(url.Values{"id": {"c-0123456789ab"}, "action": {"rename"}, "arg": {"Outlaw"}}); c != http.StatusOK || woke != 1 {
+		t.Fatalf("valid rename = %d woke=%d", c, woke)
+	}
+	for _, good := range []url.Values{
+		{"id": {"c-0123456789ab"}, "action": {"notes"}, "arg": {"line one\r\nline two"}},
+		{"id": {"c-0123456789ab"}, "action": {"remove_actor"}, "arg": {"cowrie:a"}},
+		{"action": {"ignore_evidence"}, "arg": {"script:" + strings.Repeat("f", 64)}},
+		{"id": {"c-0123456789ab"}, "action": {"ignore_evidence"}, "arg": {"payload:abc"}},
+	} {
+		if rec := postCampaignEdit(mux, good); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"applying":true`) {
+			t.Errorf("%v = %d %s", good, rec.Code, rec.Body.String())
+		}
+	}
+	if woke != 5 {
+		t.Fatalf("woke = %d, want 5", woke)
+	}
+	edits, err := s.st.CampaignEdits(context.Background())
+	if err != nil || len(edits) != 5 || edits[0].Who != "dashboard" || edits[0].Arg != "Outlaw" {
+		t.Fatalf("edits %+v %v", edits, err)
+	}
+}
+
+// A merge resolves both sides through the alias map, so merging a campaign
+// into an ID that already resolves to it is refused as a self-merge, and an
+// alias to a live campaign is accepted as a target.
+func TestCampaignEditMergeResolvesAliases(t *testing.T) {
+	s, st := hasshTestServer(t)
+	mux := http.NewServeMux()
+	s.registerCampaignRoutes(mux)
+	rows := []store.CampaignRow{{ID: "c-aaaaaaaaaaaa"}, {ID: "c-bbbbbbbbbbbb"}}
+	if err := st.SaveGrouping(context.Background(), rows, nil, map[string]string{"c-000000000001": "c-aaaaaaaaaaaa"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if c := postCampaignEdit(mux, url.Values{"id": {"c-aaaaaaaaaaaa"}, "action": {"merge"}, "arg": {"c-000000000001"}}).Code; c != http.StatusBadRequest {
+		t.Fatalf("self-merge through alias = %d", c)
+	}
+	if c := postCampaignEdit(mux, url.Values{"id": {"c-bbbbbbbbbbbb"}, "action": {"merge"}, "arg": {"c-000000000001"}}).Code; c != http.StatusOK {
+		t.Fatalf("merge into alias of live campaign = %d", c)
+	}
+	// The resolved target is recorded: the edit lands on the campaign the
+	// operator saw, not on a retired ID.
+	if edits, err := st.CampaignEdits(context.Background()); err != nil || len(edits) != 1 || edits[0].CampaignID != "c-bbbbbbbbbbbb" || edits[0].Arg != "c-aaaaaaaaaaaa" {
+		t.Fatalf("recorded merge %+v %v", edits, err)
+	}
+}
+
+func TestCampaignDetailContractAndAmbiguity(t *testing.T) {
+	s, st := hasshTestServer(t)
+	mux := http.NewServeMux()
+	s.registerCampaignRoutes(mux)
+	rows := []store.CampaignRow{
+		{ID: "c-aaaaaaaaaaaa", SuggestedName: "Outlaw/Dota", Kinds: "ssh_key", Members: []store.CampaignMemberRow{{ActorID: "cowrie:a", Reasons: `[{"kind":"ssh_key","value":"k","label":"key","firstSeen":"2026-09-01T00:00:00Z"}]`}}},
+		{ID: "c-bbbbbbbbbbbb", SuggestedName: "Outlaw/Dota", Members: []store.CampaignMemberRow{{ActorID: "cowrie:b", Reasons: "not json"}}},
+	}
+	if err := st.SaveGrouping(context.Background(), rows, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	get := func(p string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		return rec
+	}
+	if rec := get("/api/intel/campaign?id=outlaw%2Fdota"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "ambiguous") {
+		t.Fatalf("ambiguous name = %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := get("/api/intel/campaign?id=nobody"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown = %d", rec.Code)
+	}
+	rec := get("/api/intel/campaign?id=c-aaaaaaaaaaaa")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail = %d", rec.Code)
+	}
+	var d map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"id", "name", "suggestedName", "actors", "ips", "sessions", "firstSeen", "lastSeen", "kinds", "search", "notes", "anchor", "members", "hasshes", "clients", "hosts", "edits"} {
+		if _, ok := d[k]; !ok {
+			t.Errorf("detail missing %q", k)
+		}
+	}
+	m := d["members"].([]any)[0].(map[string]any)
+	for _, k := range []string{"actorId", "primaryIp", "playbook", "sessions", "ips", "reasons"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("member missing %q", k)
+		}
+	}
+	if r := m["reasons"].([]any)[0].(map[string]any); r["label"] != "key" {
+		t.Errorf("reasons not passed through: %+v", r)
+	}
+	// Invalid stored JSON degrades to an empty list, never breaks the response.
+	rec = get("/api/intel/campaign?id=c-bbbbbbbbbbbb")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"reasons":[]`) {
+		t.Fatalf("bad reasons = %d %s", rec.Code, rec.Body.String())
+	}
+	// The list contract.
+	rec = get("/api/intel/campaigns")
+	var l struct {
+		GeneratedAt string           `json:"generatedAt"`
+		Campaigns   []map[string]any `json:"campaigns"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &l); err != nil || l.GeneratedAt == "" || len(l.Campaigns) != 2 {
+		t.Fatalf("list %s %v", rec.Body.String(), err)
+	}
+	if k, ok := l.Campaigns[0]["kinds"].([]any); !ok || k == nil {
+		t.Errorf("kinds must be an array: %+v", l.Campaigns[0])
+	}
+}
+
+func TestScriptRoutesContract(t *testing.T) {
+	_, mux := campaignServer(t)
+	get := func(p string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		return rec
+	}
+	if c := get("/api/intel/script?fp=nothex").Code; c != http.StatusBadRequest {
+		t.Fatalf("bad fp = %d", c)
+	}
+	if c := get("/api/intel/script?fp=" + strings.Repeat("a", 64)).Code; c != http.StatusNotFound {
+		t.Fatalf("unknown fp = %d", c)
+	}
+	rec := get("/api/intel/scripts")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"families":[]`) {
+		t.Fatalf("scripts = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The actor view carries a campaigns badge; a campaign lookup failure only
+// omits it.
+func TestActorDetailCarriesCampaigns(t *testing.T) {
+	s, st := hasshTestServer(t)
+	const id = "journal:198.51.100.3"
+	e := &models.Event{TS: time.Now().UTC(), ActorID: id, Source: models.SourceJournal, Kind: models.KindFailedPass, SrcIP: "198.51.100.3", Username: "root"}
+	if _, err := st.AppendJournalEventAtomic(e, &store.JournalActorUpdate{Actor: &models.Actor{ID: id}, Username: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	row := store.CampaignRow{ID: "c-0123456789ab", Name: "Outlaw", SuggestedName: "Dota", Members: []store.CampaignMemberRow{{ActorID: id, Reasons: "[]"}}}
+	if err := st.SaveGrouping(context.Background(), []store.CampaignRow{row}, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleActorDetail(w, httptest.NewRequest(http.MethodGet, "/api/intel/actor?id="+id, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	var resp struct {
+		Campaigns []map[string]string `json:"campaigns"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Campaigns) != 1 || resp.Campaigns[0]["id"] != row.ID || resp.Campaigns[0]["name"] != "Outlaw" || resp.Campaigns[0]["suggestedName"] != "Dota" {
+		t.Fatalf("campaigns badge %+v", resp.Campaigns)
+	}
+}

@@ -113,7 +113,10 @@ CREATE TABLE IF NOT EXISTS campaign_edits (
   arg TEXT NOT NULL DEFAULT '',
   who TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
-);`
+);
+-- GetCampaign reads a campaign's edits with campaign_id IN (...); the
+-- history is never purged, so an unindexed filter grows without bound.
+CREATE INDEX IF NOT EXISTS idx_campaign_edits_campaign ON campaign_edits(campaign_id);`
 
 func (s *Store) migrateCampaigns(now string) error {
 	return s.WithTx(func(tx *sql.Tx) error {

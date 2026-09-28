@@ -97,6 +97,15 @@ type actorDetailResponse struct {
 	// the report path enforces. The dashboard shows the "Report" button only
 	// when true, so a mis-click can't file a report the backend would reject.
 	ReportEligible bool `json:"reportEligible"`
+	// Campaigns is the actor's campaign badge; omitted when it has none or
+	// the lookup failed (a badge never fails the actor view).
+	Campaigns []actorCampaignJSON `json:"campaigns,omitempty"`
+}
+
+type actorCampaignJSON struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	SuggestedName string `json:"suggestedName"`
 }
 
 func (s *Server) handleIntelPage(w http.ResponseWriter, r *http.Request) {
@@ -365,11 +374,19 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var camps []actorCampaignJSON
+	if cs, err := s.st.CampaignsForActor(r.Context(), a.ID); err == nil {
+		for _, c := range cs {
+			camps = append(camps, actorCampaignJSON{ID: c.ID, Name: c.Name, SuggestedName: c.SuggestedName})
+		}
+	}
+
 	_ = json.NewEncoder(w).Encode(actorDetailResponse{
 		Actor:          row,
 		Commands:       cmds,
 		Events:         all,
 		ReportEligible: reportEligible,
+		Campaigns:      camps,
 	})
 }
 
