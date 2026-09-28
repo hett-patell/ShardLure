@@ -64,21 +64,30 @@ func NormalizeCommand(cmd string) []string {
 	for i := 0; i < len(raw); i++ {
 		t := raw[i]
 		// A heredoc body is data, not commands: drop it up to the delimiter
-		// line, so `cat <<EOF\nid\nw\nEOF` stays one command.
+		// line, so `cat <<EOF\nid\nw\nEOF` stays one command. The newline that
+		// opens the body is also the first possible terminator line, so it
+		// falls through to the check below instead of being consumed:
+		// consuming it made `cat <<EOF\nEOF\nid` swallow every later command,
+		// and any dropper prefixed with an empty heredoc collapsed to one
+		// non-distinctive command with a shared fingerprint (review I1).
+		if heredoc != "" && t == "\n" {
+			inBody = true
+		}
 		if inBody {
-			if t == "\n" && i+1 < len(raw) && strings.Trim(raw[i+1], `"'`) == heredoc {
-				// Heredoc terminates only if delimiter is on its own line
-				// (next token after delimiter is newline or EOF)
-				isTerminator := (i+2 >= len(raw)) || (raw[i+2] == "\n")
-				if isTerminator {
+			// The terminator is the delimiter word exactly, alone on its line
+			// (followed by a newline or the end). Quotes are not trimmed: bash
+			// compares the raw line, so a quoted `"EOF"` line does not end the
+			// body. Known limitation: the tokenizer discards whitespace, so an
+			// indented `  EOF` line terminates here where bash would not
+			// (except `<<-` with tabs). That is unreachable at the token level
+			// and fails safe: it can only surface commands, never hide them,
+			// and the fingerprint stays deterministic per script.
+			if t == "\n" && i+1 < len(raw) && raw[i+1] == heredoc {
+				if i+2 >= len(raw) || raw[i+2] == "\n" {
 					i++
 					heredoc, inBody = "", false
 				}
 			}
-			continue
-		}
-		if heredoc != "" && t == "\n" {
-			inBody = true
 			continue
 		}
 		if t == "<<<" {

