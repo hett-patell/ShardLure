@@ -133,9 +133,14 @@ func Group(in Input) Output {
 		maxSeq = max(maxSeq, a.Seq)
 	}
 
+	// Edits apply in the order they were recorded, whatever order the caller
+	// passes them in (a later rename wins).
+	edits := append([]Edit(nil), in.Edits...)
+	sort.SliceStable(edits, func(i, j int) bool { return edits[i].ID < edits[j].ID })
+
 	// Edits that act before union, keyed by resolved campaign ID.
 	ignored, removed, edited, mergedFrom := map[string]bool{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for _, e := range in.Edits {
+	for _, e := range edits {
 		id := Resolve(aliases, e.CampaignID)
 		switch e.Action {
 		case "ignore_evidence":
@@ -152,62 +157,98 @@ func Group(in Input) Output {
 			edited[id] = true
 		case "merge":
 			edited[id] = true
+			// Only the IDs merged *from* keep their retired identity: the
+			// edit's own ID and what it resolved to before the merge. The
+			// merge target is an ordinary campaign that can still split
+			// (marking it made every automatic bridge into it permanent).
 			mergedFrom[e.CampaignID] = true
-			mergedFrom[id] = true
+			if src := mergeSource(aliases, e.CampaignID, e.Arg); src != "" {
+				mergedFrom[src] = true
+			}
 		}
 	}
-	var occ []Occurrence
+	var all []Occurrence
 	for _, x := range in.Occurrences {
 		if x.SessionID == "" || x.ActorID == "" || ignored[vkey(x.Kind, x.Value)] {
 			continue
 		}
-		if a, ok := raw[vkey(x.Kind, x.Value)]; ok && removed[Resolve(aliases, a.CampaignID)][x.ActorID] {
-			continue
-		}
-		occ = append(occ, x)
+		all = append(all, x)
 	}
-	sort.Slice(occ, func(i, j int) bool {
-		a, b := occ[i], occ[j]
-		if !a.FirstSeen.Equal(b.FirstSeen) {
-			return a.FirstSeen.Before(b.FirstSeen)
+	sort.Slice(all, func(i, j int) bool { return occLess(all[i], all[j]) })
+
+	// remove_actor applies before union, and must hold every cycle. A
+	// per-value filter ("drop the actor where the value is assigned to the
+	// edited campaign") only held once: the split pieces fell below two
+	// actors and lost their assignments, or a piece minted a new ID and its
+	// values no longer named the edited campaign, and the actor bridged
+	// again. So the rule is structural: union everything, and wherever a
+	// component reaches the edited campaign (a value assigned to it or to an
+	// ID aliased into it) drop the removed actor's occurrences from that
+	// whole component, then union again. A piece split out of the edited
+	// campaign stays connected to it through the removed actor's own
+	// sessions, so the actor is kept out of that piece too, and so is any
+	// new evidence it brings. Each pass only shrinks components, and a
+	// shrunken piece reaches no campaign its parent did not, so the second
+	// pass drops nothing.
+	active := make([]bool, len(all))
+	for i := range active {
+		active[i] = true
+	}
+	resolved := map[string]string{}
+	resolve := func(id string) string {
+		r, ok := resolved[id]
+		if !ok {
+			r = Resolve(aliases, id)
+			resolved[id] = r
 		}
-		if a.Kind != b.Kind {
-			return a.Kind < b.Kind
+		return r
+	}
+	var dropped []Occurrence
+	for len(removed) > 0 {
+		roots, members := components(all, active)
+		changed := false
+		for _, r := range roots {
+			var sets []map[string]bool
+			hit := map[string]bool{}
+			for _, i := range members[r] {
+				a, ok := raw[vkey(all[i].Kind, all[i].Value)]
+				if !ok {
+					continue
+				}
+				for _, id := range [2]string{a.CampaignID, resolve(a.CampaignID)} {
+					if set := removed[id]; set != nil && !hit[id] {
+						hit[id] = true
+						sets = append(sets, set)
+					}
+				}
+			}
+			for _, i := range members[r] {
+				for _, set := range sets {
+					if set[all[i].ActorID] {
+						active[i], changed = false, true
+						break
+					}
+				}
+			}
 		}
-		if a.Value != b.Value {
-			return a.Value < b.Value
+		if !changed {
+			break
 		}
-		if a.SessionID != b.SessionID {
-			return a.SessionID < b.SessionID
+	}
+	var occ []Occurrence
+	for i, x := range all {
+		if active[i] {
+			occ = append(occ, x)
+		} else {
+			dropped = append(dropped, x)
 		}
-		return a.ActorID < b.ActorID
-	})
+	}
 
 	// Union sessions sharing a value.
-	u := unionFind{}
-	firstOf := map[string]int{}
-	for i, x := range occ {
-		if _, ok := u[x.SessionID]; !ok {
-			u[x.SessionID] = x.SessionID
-		}
-		k := vkey(x.Kind, x.Value)
-		if f, ok := firstOf[k]; ok {
-			u.union(occ[f].SessionID, x.SessionID)
-		} else {
-			firstOf[k] = i
-		}
-	}
+	roots, compIdx := components(occ, nil)
 	comps := map[string]*component{}
-	var roots []string
-	for i, x := range occ {
-		r := u.find(x.SessionID)
-		c := comps[r]
-		if c == nil {
-			c = &component{minSeq: -1}
-			comps[r] = c
-			roots = append(roots, r)
-		}
-		c.idx = append(c.idx, i)
+	for _, r := range roots {
+		comps[r] = &component{idx: compIdx[r], minSeq: -1}
 	}
 	// Per component: the raw IDs its values carry, each with its earliest seq.
 	type claim struct {
@@ -282,7 +323,7 @@ func Group(in Input) Output {
 		c := comps[r]
 		for _, cl := range claims[r] {
 			switch {
-			case mergedFrom[cl.raw] || mergedFrom[cl.target] && !cl.direct:
+			case mergedFrom[cl.raw]:
 				// An explicit merge: keep the retired ID; output resolves it
 				// into the merge target, so the merge persists every cycle.
 				c.id = cl.raw
@@ -314,7 +355,7 @@ func Group(in Input) Output {
 		}
 	}
 	// Explicit merges, in edit order.
-	for _, e := range in.Edits {
+	for _, e := range edits {
 		if e.Action != "merge" {
 			continue
 		}
@@ -335,7 +376,7 @@ func Group(in Input) Output {
 		}
 	}
 	names, notes := map[string]string{}, map[string]string{}
-	for _, e := range in.Edits {
+	for _, e := range edits {
 		id := Resolve(aliases, e.CampaignID)
 		switch e.Action {
 		case "rename":
@@ -399,6 +440,22 @@ func Group(in Input) Output {
 			newAssign[k] = Assignment{Kind: x.Kind, Value: x.Value, CampaignID: compID, Seq: maxSeq}
 		}
 	}
+	// A value whose campaign carries an operator edit keeps its assignment
+	// even when its piece is not a campaign this cycle (or its occurrence was
+	// dropped by remove_actor). Dropping it forgot which campaign the value
+	// belonged to, so the removed actor bridged again next cycle under a
+	// freshly minted ID that the edit did not reach.
+	for _, set := range [2][]Occurrence{occ, dropped} {
+		for _, x := range set {
+			k := vkey(x.Kind, x.Value)
+			if _, done := newAssign[k]; done {
+				continue
+			}
+			if prev, had := raw[k]; had && (edited[prev.CampaignID] || edited[Resolve(in.Aliases, prev.CampaignID)] || edited[Resolve(aliases, prev.CampaignID)]) {
+				newAssign[k] = prev
+			}
+		}
+	}
 	keys := make([]string, 0, len(newAssign))
 	for k := range newAssign {
 		keys = append(keys, k)
@@ -408,6 +465,83 @@ func Group(in Input) Output {
 		out.Assignments = append(out.Assignments, newAssign[k])
 	}
 	return out
+}
+
+// occLess is a total order on occurrences (time first), so which duplicate
+// supplies a label, family or suggested name never depends on input order.
+func occLess(a, b Occurrence) bool {
+	if !a.FirstSeen.Equal(b.FirstSeen) {
+		return a.FirstSeen.Before(b.FirstSeen)
+	}
+	for _, p := range [...][2]string{{a.Kind, b.Kind}, {a.Value, b.Value}, {a.SessionID, b.SessionID}, {a.ActorID, b.ActorID},
+		{a.Label, b.Label}, {a.Family, b.Family}, {a.IP, b.IP}} {
+		if p[0] != p[1] {
+			return p[0] < p[1]
+		}
+	}
+	return a.LastSeen.Before(b.LastSeen)
+}
+
+// components unions sessions that share a value among the occurrences
+// marked active (all when active is nil). It returns the component roots in
+// order of first occurrence and each root's occurrence indexes, ascending.
+func components(occ []Occurrence, active []bool) ([]string, map[string][]int) {
+	u := unionFind{}
+	firstOf := map[string]int{}
+	for i, x := range occ {
+		if active != nil && !active[i] {
+			continue
+		}
+		if _, ok := u[x.SessionID]; !ok {
+			u[x.SessionID] = x.SessionID
+		}
+		k := vkey(x.Kind, x.Value)
+		if f, ok := firstOf[k]; ok {
+			u.union(occ[f].SessionID, x.SessionID)
+		} else {
+			firstOf[k] = i
+		}
+	}
+	members := map[string][]int{}
+	var roots []string
+	for i, x := range occ {
+		if active != nil && !active[i] {
+			continue
+		}
+		r := u.find(x.SessionID)
+		if _, ok := members[r]; !ok {
+			roots = append(roots, r)
+		}
+		members[r] = append(members[r], i)
+	}
+	return roots, members
+}
+
+// mergeSource is the ID a merge of from into to retired: the last ID on
+// from's alias chain before it joins to's chain. On the merge's first cycle
+// that is Resolve(from); later the merge alias itself is on the chain, and
+// resolving would wrongly name the target. "" when from already resolves
+// into to (nothing was merged).
+func mergeSource(aliases map[string]string, from, to string) string {
+	onTarget := map[string]bool{}
+	for i, id := 0, to; i < 64; i++ {
+		onTarget[id] = true
+		next, ok := aliases[id]
+		if !ok || next == id {
+			break
+		}
+		id = next
+	}
+	prev := ""
+	for i, id := 0, from; i < 64 && !onTarget[id]; i++ {
+		prev = id
+		next, ok := aliases[id]
+		if !ok || next == id {
+			break
+		}
+		id = next
+	}
+	return prev
 }
 
 // uniqueID mints an ID from the anchor value, never reusing an ID that is

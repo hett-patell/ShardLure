@@ -240,8 +240,6 @@ func TestNameDoesNotDriftAfterBridgeAndSplit(t *testing.T) {
 func TestMintedIDIsStableAndRenameable(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 1), o("payload", "P", "c1", "c", 2), o("payload", "P", "d1", "d", 3)}
 	first := Group(Input{Occurrences: occ})
-	ign := []Edit{{ID: 1, Action: "ignore_evidence", Arg: "payload:P"}, {ID: 2, Action: "ignore_evidence", Arg: "ssh_key:K"}}
-	_ = ign
 	// Split by dropping the bridging session b1's payload.
 	split := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "c1", "c", 2), o("payload", "P", "d1", "d", 3)}
 	second := feed(first, split, nil)
@@ -300,5 +298,197 @@ func TestGroupIsDeterministicUnderShuffle(t *testing.T) {
 		if got := Group(Input{Occurrences: sh}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("shuffle %d differs", i)
 		}
+	}
+}
+
+// settle runs cycles of regroup with the same data and edits, checking inv
+// after each, that shuffled input gives the same output, and finally that one
+// more cycle changes nothing (the persisted identity is a fixed point).
+func settle(t *testing.T, prev Output, occ []Occurrence, edits []Edit, cycles int, inv func(cycle int, out Output)) Output {
+	t.Helper()
+	r := rand.New(rand.NewSource(7))
+	out := prev
+	for i := 0; i < cycles; i++ {
+		in := out
+		out = feed(in, occ, edits)
+		sh := append([]Occurrence(nil), occ...)
+		r.Shuffle(len(sh), func(a, b int) { sh[a], sh[b] = sh[b], sh[a] })
+		as := append([]Assignment(nil), in.Assignments...)
+		r.Shuffle(len(as), func(a, b int) { as[a], as[b] = as[b], as[a] })
+		ed := append([]Edit(nil), edits...)
+		r.Shuffle(len(ed), func(a, b int) { ed[a], ed[b] = ed[b], ed[a] })
+		if got := Group(Input{Occurrences: sh, Assignments: as, Aliases: in.Aliases, Edits: ed}); !reflect.DeepEqual(got, out) {
+			t.Fatalf("cycle %d: shuffled input differs:\n%+v\n%+v", i, got, out)
+		}
+		inv(i, out)
+	}
+	if next := feed(out, occ, edits); !reflect.DeepEqual(next, out) {
+		t.Fatalf("not a fixed point:\n%+v\n%+v", out, next)
+	}
+	return out
+}
+
+func hasActor(c Campaign, actor string) bool {
+	for _, a := range actorsOf(c) {
+		if a == actor {
+			return true
+		}
+	}
+	return false
+}
+
+// noActor fails if actor is a member of any campaign, and if any campaign
+// holds both of the pair the removed actor used to bridge.
+func noActor(t *testing.T, actor, x, y string) func(int, Output) {
+	return func(cycle int, out Output) {
+		t.Helper()
+		for _, c := range out.Campaigns {
+			if hasActor(c, actor) {
+				t.Fatalf("cycle %d: removed actor %s is back in %s %v", cycle, actor, c.ID, actorsOf(c))
+			}
+			if hasActor(c, x) && hasActor(c, y) {
+				t.Fatalf("cycle %d: %s and %s re-bridged in %s", cycle, x, y, c.ID)
+			}
+		}
+	}
+}
+
+// remove_actor must hold every cycle, not only the first. Here both pieces
+// fall below two actors, so neither is a campaign; their evidence must still
+// remember the edited campaign or the actor bridges again next cycle.
+func TestRemoveActorPersistsWhenBothPiecesAreSmall(t *testing.T) {
+	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3)}
+	first := Group(Input{Occurrences: occ})
+	edits := []Edit{{ID: 1, CampaignID: first.Campaigns[0].ID, Action: "remove_actor", Arg: "b"}}
+	settle(t, first, occ, edits, 3, noActor(t, "b", "a", "c"))
+}
+
+// Both pieces survive the removal: the older keeps the ID, the other mints
+// one. The minted piece came out of the edited campaign, so the removed actor
+// must not join it either.
+func TestRemoveActorPersistsWhenBothPiecesSurvive(t *testing.T) {
+	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "a2", "a2", 0), o("ssh_key", "K", "b1", "b", 1),
+		o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3), o("payload", "P", "d1", "d", 3)}
+	first := Group(Input{Occurrences: occ})
+	id := first.Campaigns[0].ID
+	edits := []Edit{{ID: 1, CampaignID: id, Action: "remove_actor", Arg: "b"}}
+	var minted string
+	settle(t, first, occ, edits, 3, func(cycle int, out Output) {
+		noActor(t, "b", "a", "c")(cycle, out)
+		if len(out.Campaigns) != 2 {
+			t.Fatalf("cycle %d: want the K and P pieces, got %+v", cycle, out.Campaigns)
+		}
+		if c, ok := byID(out)[id]; !ok || !reflect.DeepEqual(actorsOf(c), []string{"a", "a2"}) {
+			t.Fatalf("cycle %d: the older piece lost the edited ID: %+v", cycle, out.Campaigns)
+		}
+		for _, c := range out.Campaigns {
+			if c.ID != id && minted == "" {
+				minted = c.ID
+			}
+			if c.ID != id && c.ID != minted {
+				t.Fatalf("cycle %d: the split piece changed ID %s -> %s", cycle, minted, c.ID)
+			}
+		}
+	})
+}
+
+// Evidence that arrives after the removal (the actor keeps attacking with
+// the same key and payload) must not bridge the campaign either.
+func TestRemoveActorHoldsAgainstNewEvidence(t *testing.T) {
+	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "a2", "a2", 0), o("ssh_key", "K", "b1", "b", 1),
+		o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3), o("payload", "P", "d1", "d", 3)}
+	first := Group(Input{Occurrences: occ})
+	edits := []Edit{{ID: 1, CampaignID: first.Campaigns[0].ID, Action: "remove_actor", Arg: "b"}}
+	removed := feed(first, occ, edits)
+	later := append(append([]Occurrence{}, occ...),
+		o("ssh_key", "K", "b2", "b", 5),                                  // only the key
+		o("payload", "P", "b3", "b", 6),                                  // only the payload
+		o("ssh_key", "K", "b4", "b", 7), o("payload", "P", "b4", "b", 7), // a fresh bridge
+		o("script", "S", "b4", "b", 7), o("script", "S", "e1", "e", 7)) // and a new value pulled in through it
+	settle(t, removed, later, edits, 3, func(cycle int, out Output) {
+		noActor(t, "b", "a", "c")(cycle, out)
+		for _, c := range out.Campaigns {
+			if hasActor(c, "e") {
+				t.Fatalf("cycle %d: e joined through the removed actor: %v", cycle, actorsOf(c))
+			}
+		}
+	})
+}
+
+// A merge target is an ordinary campaign: an automatic bridge into it must
+// break again when the bridging evidence goes, and the bridged-in piece gets
+// its own ID back.
+func TestMergeTargetSplitsAfterTransientBridge(t *testing.T) {
+	all := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0),
+		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
+		o("script", "W", "e1", "e", 2), o("script", "W", "f1", "f", 2)}
+	first := Group(Input{Occurrences: all})
+	ids := map[string]string{}
+	for _, c := range first.Campaigns {
+		ids[c.AnchorValue] = c.ID
+	}
+	edits := []Edit{{ID: 1, CampaignID: ids["P"], Action: "merge", Arg: ids["K"]}}
+	merged := feed(feed(first, all, edits), all, edits)
+	bridged := feed(merged, append(append([]Occurrence{}, all...), o("script", "W", "a1", "a", 3)), edits)
+	if len(bridged.Campaigns) != 1 {
+		t.Fatalf("the bridge did not join W: %+v", bridged.Campaigns)
+	}
+	settle(t, bridged, all, edits, 3, func(cycle int, out Output) {
+		k, okK := byID(out)[ids["K"]]
+		w, okW := byID(out)[ids["W"]]
+		if len(out.Campaigns) != 2 || !okK || !okW ||
+			!reflect.DeepEqual(actorsOf(k), []string{"a", "b", "c", "d"}) || !reflect.DeepEqual(actorsOf(w), []string{"e", "f"}) {
+			t.Fatalf("cycle %d: W did not split off the merge target: %+v", cycle, out.Campaigns)
+		}
+	})
+}
+
+// remove_actor on a campaign that absorbed another by merge still splits the
+// false bridge, and the merge itself survives.
+func TestRemoveActorSplitsAMergedCampaign(t *testing.T) {
+	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3),
+		o("script", "S", "x1", "x", 4), o("script", "S", "y1", "y", 4)}
+	first := Group(Input{Occurrences: occ})
+	var kid, sid string
+	for _, c := range first.Campaigns {
+		if c.AnchorValue == "S" {
+			sid = c.ID
+		} else {
+			kid = c.ID
+		}
+	}
+	edits := []Edit{{ID: 1, CampaignID: sid, Action: "merge", Arg: kid}}
+	merged := feed(feed(first, occ, edits), occ, edits)
+	edits = append(edits, Edit{ID: 2, CampaignID: kid, Action: "remove_actor", Arg: "b"})
+	settle(t, merged, occ, edits, 3, func(cycle int, out Output) {
+		noActor(t, "b", "a", "c")(cycle, out)
+		if c, ok := byID(out)[kid]; len(out.Campaigns) != 1 || !ok || !reflect.DeepEqual(actorsOf(c), []string{"a", "x", "y"}) {
+			t.Fatalf("cycle %d: want the merged campaign without b and c: %+v", cycle, out.Campaigns)
+		}
+	})
+}
+
+// Occurrences that differ only in label, family or IP must not let input
+// order decide what a campaign shows.
+func TestOccurrenceTieBreakIsTotal(t *testing.T) {
+	x1, x2 := o("payload", "K", "a1", "a", 0), o("payload", "K", "a1", "a", 0)
+	x1.Label, x2.Label = "one", "two"
+	x1.Family, x2.Family = "", "redtail"
+	x1.IP, x2.IP = "ip-2", "ip-1"
+	y := o("payload", "K", "b1", "b", 0)
+	want := Group(Input{Occurrences: []Occurrence{x1, x2, y}})
+	for _, in := range [][]Occurrence{{x2, y, x1}, {y, x1, x2}, {x2, x1, y}} {
+		if got := Group(Input{Occurrences: in}); !reflect.DeepEqual(got, want) {
+			t.Fatalf("input order changed the output:\n%+v\n%+v", got, want)
+		}
+	}
+}
+
+// Edits apply in ID (recorded) order whatever order they are passed in.
+func TestEditsApplyInIDOrder(t *testing.T) {
+	id := CampaignID("payload", "X")
+	edits := []Edit{{ID: 2, CampaignID: id, Action: "rename", Arg: "second"}, {ID: 1, CampaignID: id, Action: "rename", Arg: "first"}}
+	if out := Group(Input{Edits: edits}); len(out.Campaigns) != 1 || out.Campaigns[0].Name != "second" {
+		t.Fatalf("got %+v", out.Campaigns)
 	}
 }
