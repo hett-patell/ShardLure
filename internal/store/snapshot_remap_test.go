@@ -48,7 +48,7 @@ func TestRemapOnlyStorageAndReplayPointers(t *testing.T) {
 		t.Fatalf("unsafe replay cursor %q %d %d %v", replay, inode, offset, err)
 	}
 	checked, err := InspectSnapshot(context.Background(), path)
-	if err != nil || checked.Schema != 24 {
+	if err != nil || checked.Schema != 25 {
 		t.Fatalf("remap changed schema or journal state: %+v %v", checked, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

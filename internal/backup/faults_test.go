@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/safefile"
+	"github.com/networkshard/shardlure/internal/store"
 )
 
 func TestCreateRetainsIncompleteOutputOnLateFailures(t *testing.T) {
@@ -165,7 +166,7 @@ func TestManifestLimitsBeforeMaterializingOrCopying(t *testing.T) {
 	if _, err := Verify(context.Background(), root); !errors.Is(err, ErrManifestLimit) {
 		t.Fatalf("oversized manifest not bounded: %v", err)
 	}
-	m := Manifest{FormatVersion: 1, Complete: true, Schema: 24, CreatedAt: time.Now().UTC(), Entries: make([]Entry, maxManifestEntries+1)}
+	m := Manifest{FormatVersion: 1, Complete: true, Schema: store.LatestSnapshotSchema, CreatedAt: time.Now().UTC(), Entries: make([]Entry, maxManifestEntries+1)}
 	if _, _, err := validateManifest(m); !errors.Is(err, ErrManifestLimit) {
 		t.Fatalf("entry count not bounded: %v", err)
 	}

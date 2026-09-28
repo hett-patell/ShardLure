@@ -760,6 +760,11 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	if current < 25 {
+		if err := s.migrateCampaigns(now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

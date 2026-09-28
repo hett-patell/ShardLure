@@ -16,7 +16,7 @@ func TestCreateVerifyProtectedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !manifest.Complete || manifest.FormatVersion != 1 || manifest.Schema != 24 {
+	if !manifest.Complete || manifest.FormatVersion != 1 || manifest.Schema != 25 {
 		t.Fatalf("unverified manifest: %+v", manifest)
 	}
 	report, err := Verify(context.Background(), out)

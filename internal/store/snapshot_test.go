@@ -95,7 +95,7 @@ func TestSnapshotLiveWALKeepsCommittedPrefixAndMetadata(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(info, checked) {
 		t.Fatalf("inspection mismatch: %+v %+v %v", info, checked, err)
 	}
-	if info.Schema != 24 || info.TableCounts["events"] < 700 || info.TableCounts["events"] > 740 || info.TableCounts["bazaar_uploads"] != 1 || info.TableCounts["urlhaus_submissions"] != 1 {
+	if info.Schema != 25 || info.TableCounts["events"] < 700 || info.TableCounts["events"] > 740 || info.TableCounts["bazaar_uploads"] != 1 || info.TableCounts["urlhaus_submissions"] != 1 {
 		t.Fatalf("snapshot counts %+v", info)
 	}
 	db := snapshotTestDB(t, dest)
