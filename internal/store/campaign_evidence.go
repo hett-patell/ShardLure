@@ -24,6 +24,10 @@ FROM events WHERE id>? AND id<=? AND +source='cowrie' AND +kind IN ('command','f
 // maxEvidenceWindowBytes bounds memory and writeMu hold time per window.
 var maxEvidenceWindowBytes = 8 << 20
 
+// maxEvidenceWindow is the largest rowid window one RecordCampaignEvidence
+// transaction covers (see there).
+const maxEvidenceWindow = 5000
+
 const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 type EvidenceRecordResult struct {
@@ -40,9 +44,15 @@ type EvidenceRecordResult struct {
 // durable cursor into per-event script lines and linking evidence, in one
 // transaction. Line inserts are keyed by event id, so replaying a range after
 // a cursor reset does not double-append.
+//
+// window is clamped to maxEvidenceWindow rowids. The whole window is one
+// writeMu transaction with no time cap inside it; 50,000 rowids held writeMu
+// for about 0.4-1 s on ARM, 10x the 5,000-row chunk MaintenancePurge uses so
+// ingest is never stalled behind a batch. Callers loop over windows instead,
+// releasing writeMu in between.
 func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (EvidenceRecordResult, error) {
-	if window <= 0 || window > 50000 {
-		window = 50000
+	if window <= 0 || window > maxEvidenceWindow {
+		window = maxEvidenceWindow
 	}
 	var res EvidenceRecordResult
 	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {

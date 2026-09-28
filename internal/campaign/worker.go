@@ -17,13 +17,18 @@ import (
 )
 
 const (
-	regroupEvery      = 10 * time.Minute
-	settleIdle        = 10 * time.Minute
-	recordWindow      = 50000
-	maxWindowsPerTick = 4
-	// recordBudget stops a tick's backlog recording early; each window is its
-	// own short transaction (RecordCampaignEvidence also caps the bytes it
-	// reads), so ingest gets writeMu between windows.
+	regroupEvery = 10 * time.Minute
+	settleIdle   = 10 * time.Minute
+	// recordWindow is one RecordCampaignEvidence transaction, i.e. one writeMu
+	// hold. 5,000 rowids matches the MaintenancePurge chunk convention (a
+	// 50,000 window held writeMu 0.4-1 s on ARM); the store clamps to it too.
+	recordWindow = 5000
+	// maxWindowsPerTick is high enough that recordBudget, not the window
+	// count, sets backlog throughput. writeMu is released between windows,
+	// so ingest interleaves with a long backfill.
+	maxWindowsPerTick = 40
+	// recordBudget stops a tick's backlog recording early (RecordCampaignEvidence
+	// also caps the bytes each window reads).
 	recordBudget = 5 * time.Second
 	settleBatch  = 2000
 	familyBatch  = 500
@@ -56,6 +61,9 @@ type Worker struct {
 	retentionDays int
 	evidenceRoot  string
 	classify      func(path string) (string, error)
+	// window and maxWindows are recordWindow and maxWindowsPerTick; fields so
+	// a test can make a small backlog span several windows and ticks.
+	window, maxWindows int
 
 	wake atomic.Bool
 
@@ -74,6 +82,7 @@ type Worker struct {
 
 func NewWorker(st *store.Store, retentionDays int, evidenceRoot string) *Worker {
 	return &Worker{st: st, retentionDays: retentionDays, evidenceRoot: evidenceRoot, families: map[string]string{},
+		window: recordWindow, maxWindows: maxWindowsPerTick,
 		classify: func(p string) (string, error) {
 			c, err := bazaar.Classify(p)
 			return c.Family, err
@@ -104,17 +113,22 @@ func (w *Worker) Tick(ctx context.Context) error {
 
 func (w *Worker) tick(ctx context.Context) error {
 	start := time.Now()
-	for i := 0; i < maxWindowsPerTick && ctx.Err() == nil && time.Since(start) < recordBudget; i++ {
-		res, err := w.st.RecordCampaignEvidence(ctx, recordWindow)
+	for i := 0; i < w.maxWindows && ctx.Err() == nil && time.Since(start) < recordBudget; i++ {
+		res, err := w.st.RecordCampaignEvidence(ctx, w.window)
 		if err != nil {
 			return err
 		}
-		if res.Done {
-			if !w.drained {
-				w.drained, w.pending = true, true
-			}
-			break
+		if !res.Done {
+			// A backlog (first start, a burst, or a replace-ingest that
+			// rewound the cursor): scheduled regroups wait until it drains,
+			// then one runs. A Wake still regroups at once.
+			w.drained = false
+			continue
 		}
+		if !w.drained {
+			w.drained, w.pending = true, true
+		}
+		break
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -197,6 +211,9 @@ func (w *Worker) regroup(ctx context.Context) error {
 	seen := map[string]bool{}
 	in.Occurrences = linkingOccurrences(ev, scripts, population, func(sha string) string {
 		seen[sha] = true
+		if ctx.Err() != nil { // cancelled: stop reading files, fail closed
+			return unclassified
+		}
 		return w.familyOf(ctx, sha)
 	})
 	for sha := range w.families { // keep the memo to payloads still in evidence
@@ -276,7 +293,7 @@ func (w *Worker) familyOf(ctx context.Context, sha string) string {
 	if f, ok := w.families[sha]; ok {
 		return f
 	}
-	if w.evidenceRoot == "" {
+	if w.evidenceRoot == "" || ctx.Err() != nil {
 		return unclassified
 	}
 	p, ok, err := w.st.ArtifactPathForSHA256(ctx, sha)

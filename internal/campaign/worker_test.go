@@ -298,3 +298,59 @@ func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 		t.Fatalf("no evidence root must not read files: %q %v", f, read)
 	}
 }
+
+// A backlog reappearing after the first drain (a replace-ingest rewinds the
+// cursor, or a burst larger than one window) makes scheduled regroups wait
+// for it again; a Wake still regroups at once.
+func TestBacklogAfterDrainDefersScheduledRegroup(t *testing.T) {
+	st := openStore(t)
+	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
+	ctx := context.Background()
+	w := NewWorker(st, 90, t.TempDir())
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.drained {
+		t.Fatal("initial backlog not drained")
+	}
+	for i := 0; i < 3; i++ {
+		if err := st.InsertEvent(&models.Event{TS: time.Now().UTC(), Source: models.SourceCowrie, Kind: models.KindCommand,
+			SessionID: fmt.Sprintf("late%d", i), ActorID: "cowrie:c", SrcIP: "198.51.100.2", Command: "uname -a"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.window, w.maxWindows = 1, 1
+	w.lastGroup = time.Now().Add(-time.Hour) // the schedule alone would be due
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w.drained || w.lastGroup.After(time.Now().Add(-time.Minute)) {
+		t.Fatalf("scheduled regroup ran during a backlog: drained=%v lastGroup=%v", w.drained, w.lastGroup)
+	}
+	w.Wake()
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w.lastGroup.Before(time.Now().Add(-time.Minute)) {
+		t.Fatal("wake did not regroup during a backlog")
+	}
+	w.window, w.maxWindows = recordWindow, maxWindowsPerTick
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.drained || w.pending {
+		t.Fatalf("drain did not trigger the owed regroup: drained=%v pending=%v", w.drained, w.pending)
+	}
+}
+
+// A cancelled regroup never classifies: familyOf fails closed.
+func TestFamilyOfFailsClosedOnCancel(t *testing.T) {
+	st := openStore(t)
+	w := NewWorker(st, 90, t.TempDir())
+	w.classify = func(string) (string, error) { t.Fatal("classified after cancel"); return "", nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if f := w.familyOf(ctx, "aa"); f != unclassified {
+		t.Fatalf("family %q", f)
+	}
+}

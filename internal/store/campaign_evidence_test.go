@@ -361,3 +361,26 @@ func TestRetentionPurgesLongSessionsInChunks(t *testing.T) {
 		t.Fatalf("%d rows left", left)
 	}
 }
+
+// A window request above the clamp is cut to 5,000 rowids: one window is one
+// writeMu transaction, and 5,000 matches the MaintenancePurge chunk size.
+func TestRecordCampaignEvidenceClampsWindowTo5000(t *testing.T) {
+	s := newTestStore(t, "clamp.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cowrieEvent(t, s, "a", "cowrie:a", "command", "id", "", "", now)
+	cowrieEvent(t, s, "b", "cowrie:b", "command", "id", "", "", now)
+	if _, err := s.db.Exec(`UPDATE events SET id=9000 WHERE id=(SELECT MAX(id) FROM events)`); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.RecordCampaignEvidence(ctx, 50000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Done || res.Scanned != 1 {
+		t.Fatalf("window not clamped to 5000: %+v", res)
+	}
+	if res, err = s.RecordCampaignEvidence(ctx, 50000); err != nil || !res.Done || res.Scanned != 1 {
+		t.Fatalf("second window %+v %v", res, err)
+	}
+}
