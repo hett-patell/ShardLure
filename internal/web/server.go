@@ -51,10 +51,13 @@ type Server struct {
 	originPolicy OriginPolicy
 	originError  error
 	onListening  func(net.Addr)
-	monitor      *observability.Monitor
-	st           *store.Store
-	addr         string
-	geo          *geoResolver
+	// onCampaignEdit wakes the campaign worker after an operator edit; nil
+	// when no worker runs (the edit is still recorded).
+	onCampaignEdit func()
+	monitor        *observability.Monitor
+	st             *store.Store
+	addr           string
+	geo            *geoResolver
 	// keys is the live runtime keystore. Secrets (dashboard token, bazaar +
 	// abuseipdb API keys) and the tunable knobs below are read THROUGH it at
 	// request time so a value saved from the Settings panel takes effect
@@ -685,7 +688,9 @@ type Options struct {
 	PublicOrigin   string
 	TrustedProxies []string
 	// OnListening announces successful binding before long application seeding.
-	OnListening     func(net.Addr)
+	OnListening func(net.Addr)
+	// OnCampaignEdit is called after a campaign edit is recorded.
+	OnCampaignEdit  func()
 	Monitor         *observability.Monitor
 	HomeLat         float64
 	HomeLon         float64
@@ -805,6 +810,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	}
 	server := &Server{
 		onListening:           firstOpt.OnListening,
+		onCampaignEdit:        firstOpt.OnCampaignEdit,
 		monitor:               firstOpt.Monitor,
 		st:                    st,
 		addr:                  addr,

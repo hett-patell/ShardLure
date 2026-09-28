@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/campaign"
 	"github.com/networkshard/shardlure/internal/capture"
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/ingest/cowrie"
@@ -28,11 +29,17 @@ type runtimeOptions struct {
 }
 
 func workerCycle(m *observability.Monitor, id observability.Worker, budget time.Duration) func(bool, error) {
+	return workerCycleWith(m, id, budget, true)
+}
+
+// workerCycleWith reports a worker's cycles to the monitor. A worker that is
+// not required still shows its failures in /metrics but never gates /readyz.
+func workerCycleWith(m *observability.Monitor, id observability.Worker, budget time.Duration, required bool) func(bool, error) {
 	return func(begin bool, err error) {
 		now := time.Now().UTC()
 		state := m.Snapshot().Workers[id]
 		state.Enabled = true
-		state.Required = true
+		state.Required = required
 		state.Running = true
 		state.Completed = false
 		state.LastProgress = now
@@ -60,6 +67,40 @@ func workerStopped(m *observability.Monitor, id observability.Worker, completed 
 
 func runPeriodicWorker(ctx context.Context, m *observability.Monitor, id observability.Worker, gap, budget time.Duration, fn func(context.Context) error) {
 	notify := workerCycle(m, id, budget)
+	defer workerStopped(m, id, false)
+	for ctx.Err() == nil {
+		notify(true, nil)
+		work, cancel := context.WithTimeout(ctx, budget)
+		err := fn(work)
+		if err == nil && work.Err() != nil {
+			err = work.Err()
+		}
+		cancel()
+		notify(false, err)
+		timer := time.NewTimer(gap)
+		heartbeat := time.NewTicker(5 * time.Second)
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				heartbeat.Stop()
+				return
+			case <-timer.C:
+				break wait
+			case <-heartbeat.C:
+				state := m.Snapshot().Workers[id]
+				state.LastProgress = time.Now().UTC()
+				_ = m.SetWorker(id, state)
+			}
+		}
+		heartbeat.Stop()
+	}
+}
+
+// runOptionalWorker is runPeriodicWorker for auxiliary analysis: failures are reported in /metrics but never make the daemon not-ready.
+func runOptionalWorker(ctx context.Context, m *observability.Monitor, id observability.Worker, gap, budget time.Duration, fn func(context.Context) error) {
+	notify := workerCycleWith(m, id, budget, false)
 	defer workerStopped(m, id, false)
 	for ctx.Err() == nil {
 		notify(true, nil)
@@ -148,6 +189,8 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 			opts.OnListening(addr)
 		}
 	}
+	campaigns := campaign.NewWorker(st, cfg.RetentionDays, cfg.CaptureEvidenceDir())
+	options.OnCampaignEdit = campaigns.Wake
 	server := web.New(st, keys, opts.Addr, options)
 	probe := observability.NewFilesystemProbe(st.Probe, cfg.DataDir, cfg.CaptureEvidenceDir(), opts.Live && cfg.Capture.Enabled)
 	serve := func(parent context.Context) error {
@@ -212,6 +255,9 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				cursor = next
 				return err
 			})
+		})
+		start(func() {
+			runOptionalWorker(ctx, m, observability.Campaigns, 5*time.Second, 2*time.Minute, campaigns.Tick)
 		})
 		if opts.Live {
 			start(func() {
