@@ -19,6 +19,7 @@ fuzz:
 	go test ./internal/ingest/journal/ -run=XXX -fuzz=FuzzParseLine     -fuzztime=$(FUZZTIME)
 	go test ./internal/ingest/cowrie/  -run=XXX -fuzz=FuzzParseReader    -fuzztime=$(FUZZTIME)
 	go test ./internal/capture/        -run=XXX -fuzz=FuzzDecodeTTYReader -fuzztime=$(FUZZTIME)
+	go test ./internal/script/         -run=XXX -fuzz=FuzzNormalizeCommand -fuzztime=$(FUZZTIME)
 
 deploy:
 	bash scripts/push-sources.sh arm
