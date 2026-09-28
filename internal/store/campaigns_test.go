@@ -218,3 +218,73 @@ func TestScriptAndArtifactReads(t *testing.T) {
 		t.Fatalf("population %d %v", n, err)
 	}
 }
+
+// Group was validated against replace semantics: the next run is fed exactly
+// the previous Output.Assignments. A value it left unassigned (an attribution
+// tie, a floating value in an unemitted component, a purged value) must not
+// survive as a stale ownership claim.
+func TestSaveGroupingReplacesAssignments(t *testing.T) {
+	s := newTestStore(t, "campaigns-replace.db")
+	ctx := context.Background()
+	a := CampaignAssignmentRow{Kind: "ssh_key", Value: "A", CampaignID: "c-1", Seq: 1}
+	b := CampaignAssignmentRow{Kind: "ssh_key", Value: "B", CampaignID: "c-1", Seq: 2}
+	if err := s.SaveGrouping(ctx, nil, []CampaignAssignmentRow{a, b}, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveGrouping(ctx, nil, []CampaignAssignmentRow{a}, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.CampaignIdentity(ctx)
+	if err != nil || len(got) != 1 || got[0].Value != "A" {
+		t.Fatalf("identity %+v %v", got, err)
+	}
+}
+
+// Edits are filtered to the campaign's own ID and every alias that resolves
+// to it (including chains), never another campaign's.
+func TestGetCampaignEditsFollowAliases(t *testing.T) {
+	s := newTestStore(t, "campaigns-edit-alias.db")
+	ctx := context.Background()
+	aliases := map[string]string{"c-old2": "c-old", "c-old": "c-new", "c-else": "c-other"}
+	if err := s.SaveGrouping(ctx, []CampaignRow{{ID: "c-new"}, {ID: "c-other"}}, nil, aliases, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"c-new", "c-old", "c-old2", "c-other", "c-else"} {
+		if err := s.AppendCampaignEdit(ctx, id, "notes", id, "cli"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := s.GetCampaign(ctx, "c-old2")
+	if err != nil || d.ID != "c-new" {
+		t.Fatalf("detail %+v %v", d, err)
+	}
+	var args []string
+	for _, e := range d.Edits {
+		args = append(args, e.Arg)
+	}
+	if len(args) != 3 || args[0] != "c-new" || args[1] != "c-old" || args[2] != "c-old2" {
+		t.Fatalf("edits %v", args)
+	}
+	al, err := s.CampaignAliases(ctx)
+	if err != nil || len(al) != 3 {
+		t.Fatalf("aliases %+v %v", al, err)
+	}
+}
+
+// actors.last_seen is formatFixedUTC text; a variable-width RFC3339Nano bound
+// misorders an actor seen at exactly `since` (".500000000Z" < ".5Z").
+func TestCowrieActorPopulationBoundIsExact(t *testing.T) {
+	s := newTestStore(t, "campaigns-pop.db")
+	ctx := context.Background()
+	at := time.Date(2026, 9, 1, 12, 0, 5, 500_000_000, time.UTC)
+	if _, err := s.db.Exec(`INSERT INTO actors(id,source,first_seen,last_seen) VALUES('cowrie:a','cowrie',?,?)`,
+		formatFixedUTC(at), formatFixedUTC(at)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CowrieActorPopulation(ctx, at); err != nil || n != 1 {
+		t.Fatalf("population %d %v", n, err)
+	}
+	if n, err := s.CowrieActorPopulation(ctx, at.Add(time.Nanosecond)); err != nil || n != 0 {
+		t.Fatalf("population after %d %v", n, err)
+	}
+}

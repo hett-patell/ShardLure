@@ -180,15 +180,15 @@ WHERE ss.fingerprint<>'' AND ss.actor_id<>'' ORDER BY ss.fingerprint, ss.session
 }
 
 // CowrieActorPopulation counts Cowrie actors seen since `since` (zero: all).
-// actors.last_seen is RFC3339Nano text; the comparison can misorder within
-// one second, which is irrelevant at a days-long window.
+// actors.last_seen is fixed-width formatFixedUTC text, so the bound uses the
+// same format and the string comparison is exact.
 func (s *Store) CowrieActorPopulation(ctx context.Context, since time.Time) (int, error) {
 	var n int
 	var err error
 	if since.IsZero() {
 		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM actors WHERE source='cowrie'`).Scan(&n)
 	} else {
-		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM actors WHERE source='cowrie' AND last_seen >= ?`, since.UTC().Format(time.RFC3339Nano)).Scan(&n)
+		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM actors WHERE source='cowrie' AND last_seen >= ?`, formatFixedUTC(since)).Scan(&n)
 	}
 	return n, err
 }
@@ -201,20 +201,31 @@ func (s *Store) CampaignIdentity(ctx context.Context) ([]CampaignAssignmentRow, 
 	if err != nil {
 		return nil, nil, err
 	}
-	arows, err := s.db.QueryContext(ctx, `SELECT old_id, new_id FROM campaign_aliases WHERE old_id<>'' AND new_id<>''`)
+	aliases, err := s.CampaignAliases(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer arows.Close()
+	return assign, aliases, nil
+}
+
+// CampaignAliases returns only the alias map (old ID -> newer ID). Request
+// paths resolve IDs through it without loading every campaign_ids row, which
+// grows with every distinct evidence value ever assigned.
+func (s *Store) CampaignAliases(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT old_id, new_id FROM campaign_aliases WHERE old_id<>'' AND new_id<>''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	aliases := map[string]string{}
-	for arows.Next() {
+	for rows.Next() {
 		var o, n string
-		if err := arows.Scan(&o, &n); err != nil {
-			return nil, nil, err
+		if err := rows.Scan(&o, &n); err != nil {
+			return nil, err
 		}
 		aliases[o] = n
 	}
-	return assign, aliases, arows.Err()
+	return aliases, rows.Err()
 }
 
 func (s *Store) campaignAssignments(ctx context.Context) ([]CampaignAssignmentRow, error) {
@@ -275,10 +286,14 @@ func campaignAliasTarget(aliases map[string]string, id string) string {
 
 // ResolveCampaignID follows aliases and reports whether the campaign exists.
 func (s *Store) ResolveCampaignID(ctx context.Context, id string) (string, bool, error) {
-	_, aliases, err := s.CampaignIdentity(ctx)
+	aliases, err := s.CampaignAliases(ctx)
 	if err != nil {
 		return "", false, err
 	}
+	return s.resolveCampaignID(ctx, aliases, id)
+}
+
+func (s *Store) resolveCampaignID(ctx context.Context, aliases map[string]string, id string) (string, bool, error) {
 	id = campaignAliasTarget(aliases, id)
 	var n int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM campaigns WHERE id=?`, id).Scan(&n); err != nil {
@@ -296,6 +311,13 @@ func (s *Store) ResolveCampaignID(ctx context.Context, id string) (string, bool,
 // sees it). lastEditID must be the largest edit ID the grouping read; edit IDs
 // are AUTOINCREMENT and never reused, so MAX(id) only grows.
 //
+// campaign_ids is replaced, not upserted: Group was validated against a
+// contract where the next run is fed exactly the previous Output.Assignments.
+// An upsert would resurrect rows Group deliberately dropped (attribution ties
+// left unassigned, floating values in unemitted components, values purged by
+// retention) as stale ownership claims, which fuse campaigns that Group kept
+// apart.
+//
 // A grouping carrying any empty identifier is rejected whole with
 // ErrInvalidGrouping; the previous grouping stays in place.
 func (s *Store) SaveGrouping(ctx context.Context, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64) error {
@@ -311,7 +333,7 @@ func (s *Store) SaveGrouping(ctx context.Context, rows []CampaignRow, assign []C
 		if maxEdit != lastEditID {
 			return ErrStaleGrouping
 		}
-		for _, q := range []string{`DELETE FROM campaign_members`, `DELETE FROM campaigns`} {
+		for _, q := range []string{`DELETE FROM campaign_members`, `DELETE FROM campaigns`, `DELETE FROM campaign_ids`} {
 			if _, err := tx.Exec(q); err != nil {
 				return err
 			}
@@ -330,8 +352,8 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.ID, c.AnchorKind, c.AnchorValue, c.Sugge
 			}
 		}
 		for _, a := range assign {
-			if _, err := tx.Exec(`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES(?,?,?,?)
-ON CONFLICT(kind,value) DO UPDATE SET campaign_id=excluded.campaign_id, seq=excluded.seq`, a.Kind, a.Value, a.CampaignID, a.Seq); err != nil {
+			if _, err := tx.Exec(`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES(?,?,?,?)`,
+				a.Kind, a.Value, a.CampaignID, a.Seq); err != nil {
 				return err
 			}
 		}
@@ -420,7 +442,11 @@ func (s *Store) GetCampaign(ctx context.Context, idOrName string) (CampaignDetai
 		// A blank name would match every campaign whose name is unset.
 		return d, sql.ErrNoRows
 	}
-	id, _, err := s.ResolveCampaignID(ctx, idOrName)
+	aliases, err := s.CampaignAliases(ctx)
+	if err != nil {
+		return d, err
+	}
+	id, _, err := s.resolveCampaignID(ctx, aliases, idOrName)
 	if err != nil {
 		return d, err
 	}
@@ -473,20 +499,52 @@ FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_i
 		}
 	}
 	sort.Strings(d.Hosts)
-	edits, err := s.CampaignEdits(ctx)
-	if err != nil {
-		return d, err
-	}
-	_, aliases, err := s.CampaignIdentity(ctx)
-	if err != nil {
-		return d, err
-	}
-	for _, e := range edits {
-		if campaignAliasTarget(aliases, e.CampaignID) == d.ID {
-			d.Edits = append(d.Edits, e)
+	d.Edits, err = s.campaignEditsFor(ctx, campaignIDsResolvingTo(aliases, d.ID))
+	return d, err
+}
+
+// campaignIDsResolvingTo is the campaign's own ID plus every alias source
+// (including chains) that resolves to it: the small set edits can be filed
+// under.
+func campaignIDsResolvingTo(aliases map[string]string, id string) []string {
+	ids := []string{id}
+	for old := range aliases {
+		if old != id && campaignAliasTarget(aliases, old) == id {
+			ids = append(ids, old)
 		}
 	}
-	return d, nil
+	sort.Strings(ids[1:])
+	return ids
+}
+
+// campaignEditsFor reads only the edits filed under ids, so a detail request
+// never scans the whole campaign_edits history.
+func (s *Store) campaignEditsFor(ctx context.Context, ids []string) ([]CampaignEditRow, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	q := `SELECT id, campaign_id, action, arg, who, created_at FROM campaign_edits WHERE campaign_id IN (?` +
+		strings.Repeat(",?", len(ids)-1) + `) ORDER BY id`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CampaignEditRow
+	for rows.Next() {
+		var r CampaignEditRow
+		var at string
+		if err := rows.Scan(&r.ID, &r.CampaignID, &r.Action, &r.Arg, &r.Who, &at); err != nil {
+			return nil, err
+		}
+		r.CreatedAt = parseCampaignTime(at)
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) campaignStrings(ctx context.Context, id, query string) ([]string, error) {
