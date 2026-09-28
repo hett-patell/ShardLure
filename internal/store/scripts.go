@@ -49,7 +49,7 @@ func (s *Store) SettleSessionScripts(ctx context.Context, idleBefore time.Time, 
 		// use the partial index (EXPLAIN: SEARCH session_scripts USING INDEX
 		// idx_session_scripts_pending (last_seen<?)). Idle is required on
 		// both clocks: last_seen is event time; updated_at is ingest time.
-		// Without the second, the history seed (recording in 1000-event
+		// Without the second, the history seed (recording in 5,000-rowid
 		// windows) would fingerprint a session's prefix before the rest of
 		// its old events were recorded. No prefix rows are ever written.
 		cut := formatFixedUTC(idleBefore)
