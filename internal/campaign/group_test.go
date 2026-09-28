@@ -620,3 +620,135 @@ func TestMergedPieceOutlivesItsTargetWithoutAliasCycle(t *testing.T) {
 		}
 	})
 }
+
+// noAliasCycle fails if any alias chain in out loops.
+func noAliasCycle(t *testing.T, cycle int, out Output) {
+	t.Helper()
+	for from := range out.Aliases {
+		seen := map[string]bool{}
+		for id := from; ; {
+			if seen[id] {
+				t.Fatalf("cycle %d: alias cycle through %s: %v", cycle, id, out.Aliases)
+			}
+			seen[id] = true
+			next, ok := out.Aliases[id]
+			if !ok || next == id {
+				break
+			}
+			id = next
+		}
+	}
+}
+
+// Two merges, P into K and Q into D. P's actors pick up Y, then a session
+// bridges K's own evidence with Q. Retiring K into the bridged piece while
+// P's piece also held K (through Y) once produced {P->K, K->P}: an alias
+// cycle. Only the piece holding K's earliest value may retire it, and the
+// guard checks the whole chain. When the bridge breaks, K and D separate
+// again with their merges intact.
+func TestBridgeBetweenMergeTargetsHasNoAliasCycle(t *testing.T) {
+	all := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0),
+		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
+		o("script", "D", "e1", "e", 2), o("script", "D", "f1", "f", 2),
+		o("script", "Q", "g1", "g", 3), o("script", "Q", "h1", "h", 3)}
+	first := Group(Input{Occurrences: all})
+	ids := map[string]string{}
+	for _, c := range first.Campaigns {
+		ids[c.AnchorValue] = c.ID
+	}
+	edits := []Edit{{ID: 1, CampaignID: ids["P"], Action: "merge", Arg: ids["K"]}, {ID: 2, CampaignID: ids["Q"], Action: "merge", Arg: ids["D"]}}
+	merged := feed(feed(first, all, edits), all, edits)
+	withY := append(append([]Occurrence{}, all...), o("payload", "P", "c2", "c", 4), o("payload", "Y", "c2", "c", 4), o("payload", "Y", "d2", "d", 4))
+	afterY := settle(t, merged, withY, edits, 3, func(cycle int, out Output) {
+		for _, a := range out.Assignments {
+			if a.Value == "Y" && a.CampaignID != ids["K"] {
+				t.Fatalf("cycle %d: Y seen only with merged evidence was written under %s, want the merge target", cycle, a.CampaignID)
+			}
+		}
+	})
+	bridge := append(append([]Occurrence{}, withY...), o("ssh_key", "K", "z1", "z", 5), o("script", "Q", "z1", "z", 5))
+	bridged := settle(t, afterY, bridge, edits, 3, func(cycle int, out Output) {
+		noAliasCycle(t, cycle, out)
+		if len(out.Campaigns) != 1 || len(out.Campaigns[0].Members) != 9 {
+			t.Fatalf("bridge cycle %d: want one campaign of nine actors: %+v", cycle, out.Campaigns)
+		}
+	})
+	settle(t, bridged, withY, edits, 3, func(cycle int, out Output) {
+		noAliasCycle(t, cycle, out)
+		k, okK := byID(out)[ids["K"]]
+		d, okD := byID(out)[ids["D"]]
+		if len(out.Campaigns) != 2 || !okK || !okD ||
+			!reflect.DeepEqual(actorsOf(k), []string{"a", "b", "c", "d"}) || !reflect.DeepEqual(actorsOf(d), []string{"e", "f", "g", "h"}) {
+			t.Fatalf("after bridge cycle %d: merges or identities lost: %+v", cycle, out.Campaigns)
+		}
+	})
+}
+
+// D is older than K, and P is merged into K. A session of K's actor bridges
+// K and D; while bridged, D's actors pick up a new value Y. Y must be
+// written under D (the identity it was seen with), never under the bridged
+// component's winner: stamped with K's ID it handed D's older piece a direct
+// claim on K after the break, and D walked off with K's ID and merge.
+func TestValueSeenWithOlderCampaignDuringBridgeStaysWithIt(t *testing.T) {
+	all := []Occurrence{o("script", "D", "e1", "e", 0), o("script", "D", "f1", "f", 0),
+		o("ssh_key", "K", "a1", "a", 1), o("ssh_key", "K", "b1", "b", 1),
+		o("payload", "P", "c1", "c", 2), o("payload", "P", "d1", "d", 2)}
+	first := Group(Input{Occurrences: all})
+	ids := map[string]string{}
+	for _, c := range first.Campaigns {
+		ids[c.AnchorValue] = c.ID
+	}
+	edits := []Edit{{ID: 1, CampaignID: ids["P"], Action: "merge", Arg: ids["K"]}}
+	merged := feed(feed(first, all, edits), all, edits)
+	withY := append(append([]Occurrence{}, all...), o("script", "D", "e3", "e", 4), o("payload", "Y", "e3", "e", 4), o("payload", "Y", "f3", "f", 4))
+	bridge := append(append([]Occurrence{}, withY...), o("ssh_key", "K", "a2", "a", 3), o("script", "D", "a2", "a", 3))
+	bridged := settle(t, merged, bridge, edits, 3, func(cycle int, out Output) {
+		if k, ok := byID(out)[ids["K"]]; len(out.Campaigns) != 1 || !ok || len(k.Members) != 6 {
+			t.Fatalf("bridge cycle %d: want one campaign under K: %+v", cycle, out.Campaigns)
+		}
+		for _, a := range out.Assignments {
+			if a.Value == "Y" && a.CampaignID != ids["D"] {
+				t.Fatalf("bridge cycle %d: Y seen only with D written under %s", cycle, a.CampaignID)
+			}
+		}
+	})
+	settle(t, bridged, withY, edits, 3, func(cycle int, out Output) {
+		k, okK := byID(out)[ids["K"]]
+		d, okD := byID(out)[ids["D"]]
+		if len(out.Campaigns) != 2 || !okK || !okD ||
+			!reflect.DeepEqual(actorsOf(k), []string{"a", "b", "c", "d"}) || !reflect.DeepEqual(actorsOf(d), []string{"e", "f"}) {
+			t.Fatalf("after bridge cycle %d: merge or D's identity lost: %+v", cycle, out.Campaigns)
+		}
+	})
+}
+
+// The spec's split rule: when two pieces claim one ID, the piece holding
+// that ID's earliest-assigned value keeps it. Here stored assignments put
+// K's value K (seq 2) and Y (seq 3) both under K's ID, and Y sits with the
+// older campaign D. D's piece is older overall, but K's earliest value is in
+// K's piece, so K keeps its ID and name; Y is rewritten to D.
+func TestSplitAwardsIDToHolderOfItsEarliestValue(t *testing.T) {
+	did, kid := CampaignID("script", "D"), CampaignID("ssh_key", "K")
+	occ := []Occurrence{o("script", "D", "e1", "e", 0), o("script", "D", "f1", "f", 0),
+		o("ssh_key", "K", "a1", "a", 1), o("ssh_key", "K", "b1", "b", 1),
+		o("script", "D", "e3", "e", 4), o("payload", "Y", "e3", "e", 4), o("payload", "Y", "f3", "f", 4)}
+	prev := Output{Assignments: []Assignment{
+		{Kind: "script", Value: "D", CampaignID: did, Seq: 1},
+		{Kind: "ssh_key", Value: "K", CampaignID: kid, Seq: 2},
+		{Kind: "payload", Value: "Y", CampaignID: kid, Seq: 3},
+	}, Aliases: map[string]string{}}
+	edits := []Edit{{ID: 1, CampaignID: kid, Action: "rename", Arg: "Kname"}}
+	settle(t, prev, occ, edits, 3, func(cycle int, out Output) {
+		k, okK := byID(out)[kid]
+		d, okD := byID(out)[did]
+		if len(out.Campaigns) != 2 || !okK || !okD || k.Name != "Kname" || d.Name != "" ||
+			!reflect.DeepEqual(actorsOf(k), []string{"a", "b"}) || !reflect.DeepEqual(actorsOf(d), []string{"e", "f"}) {
+			t.Fatalf("cycle %d: K's ID did not stay with K's earliest value: %+v", cycle, out.Campaigns)
+		}
+		for _, a := range out.Assignments {
+			if a.Value == "Y" && a.CampaignID != did {
+				t.Fatalf("cycle %d: Y still assigned to %s, want D", cycle, a.CampaignID)
+			}
+		}
+	})
+}

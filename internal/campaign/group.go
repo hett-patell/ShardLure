@@ -116,7 +116,13 @@ type component struct {
 	idx    []int
 	minSeq int64 // -1 when no value was assigned before
 	id     string
-	assign string // ID written for this component's new or rewritten values
+}
+
+// holder is the earliest-assigned value of a campaign ID and the component
+// holding it: that component owns the ID this cycle.
+type holder struct {
+	seq       int64
+	key, root string
 }
 
 func Group(in Input) Output {
@@ -163,7 +169,7 @@ func Group(in Input) Output {
 			// merge target is an ordinary campaign that can still split
 			// (marking it made every automatic bridge into it permanent).
 			mergedFrom[e.CampaignID] = true
-			if src := mergeSource(aliases, e.CampaignID, e.Arg); src != "" {
+			for _, src := range mergeChain(aliases, e.CampaignID, e.Arg) {
 				mergedFrom[src] = true
 			}
 		}
@@ -251,20 +257,29 @@ func Group(in Input) Output {
 	for _, r := range roots {
 		comps[r] = &component{idx: compIdx[r], minSeq: -1}
 	}
+	// Ownership implements the spec's split rule directly: "if two
+	// components claim one ID, the one holding the earliest-assigned value
+	// keeps it". Every raw ID is owned by the component holding its
+	// earliest-assigned value, and only the owner may keep, revive or retire
+	// that ID. Ranking whole components by their overall oldest value let an
+	// older campaign D, briefly bridged to K, walk off with K's ID (and its
+	// name) once the bridge broke: D's piece was older, but K's earliest value
+	// was never D's.
+	owner := map[string]holder{}
 	// Per component: the raw IDs its values carry, each with its earliest seq.
 	type claim struct {
-		raw, target string
-		seq         int64
-		direct      bool // raw ID is not retired
-		merged      bool // raw ID was explicitly merged from
-		viaMerge    bool // raw ID was absorbed into an ID merged from
+		raw      string
+		seq      int64
+		merged   bool // raw ID was explicitly merged from
+		viaMerge bool // raw ID was absorbed into an ID merged from
 	}
 	claims := map[string][]claim{}
 	for _, r := range roots {
 		c := comps[r]
 		best := map[string]int64{}
 		for _, i := range c.idx {
-			a, ok := raw[vkey(occ[i].Kind, occ[i].Value)]
+			k := vkey(occ[i].Kind, occ[i].Value)
+			a, ok := raw[k]
 			if !ok {
 				continue
 			}
@@ -274,27 +289,26 @@ func Group(in Input) Output {
 			if c.minSeq < 0 || a.Seq < c.minSeq {
 				c.minSeq = a.Seq
 			}
+			h := holder{seq: a.Seq, key: k, root: r}
+			if cur, ok := owner[a.CampaignID]; !ok || h.seq < cur.seq || h.seq == cur.seq && h.key < cur.key {
+				owner[a.CampaignID] = h
+			}
 		}
 		for id, seq := range best {
-			t := Resolve(aliases, id)
-			claims[r] = append(claims[r], claim{raw: id, target: t, seq: seq, direct: t == id,
-				merged: mergedFrom[id], viaMerge: !mergedFrom[id] && chainHits(aliases, id, mergedFrom)})
+			claims[r] = append(claims[r], claim{raw: id, seq: seq, merged: mergedFrom[id],
+				viaMerge: !mergedFrom[id] && chainHits(aliases, id, mergedFrom)})
 		}
 		// An explicit merge outranks every automatic ID: a component holding
-		// merged-from evidence stays in the merge target's lineage. Ranking a
-		// direct claim first let a transient bridge from P to an unrelated
-		// campaign D hand P's piece D's ID, rewrite P's assignment to it, and
-		// lose the merge (and D's identity) for good once the bridge broke.
+		// merged-from evidence stays in the merge target's lineage. Then the
+		// spec's order: IDs carrying operator edits, then the earliest
+		// assigned.
 		sort.Slice(claims[r], func(i, j int) bool {
 			a, b := claims[r][i], claims[r][j]
 			if a.merged != b.merged {
 				return a.merged
 			}
-			if a.direct != b.direct {
-				return a.direct
-			}
-			if edited[a.target] != edited[b.target] {
-				return edited[a.target]
+			if ea, eb := edited[Resolve(aliases, a.raw)], edited[Resolve(aliases, b.raw)]; ea != eb {
+				return ea
 			}
 			if a.seq != b.seq {
 				return a.seq < b.seq
@@ -302,21 +316,41 @@ func Group(in Input) Output {
 			return a.raw < b.raw
 		})
 	}
-	hasDirect := map[string]bool{}
+	owns := func(r, id string) bool {
+		h, ok := owner[id]
+		return ok && h.root == r
+	}
+	// Revive broken bridges. An automatic alias raw -> ... records that raw's
+	// campaign was absorbed into another; it stays only while raw's owner
+	// still shares a component with the ID it was absorbed into. Walk the
+	// chain: the first hop owned by this component means the bridge holds;
+	// one owned by another component means it broke, so raw's owner takes
+	// its own ID back. This is decided per alias, before any ID is chosen,
+	// because a piece that also holds merged-from evidence must still shed
+	// the automatic hop (D with Q merged into it, bridged into K and back)
+	// or its merge target resolves into K for good. Only owners delete and
+	// the walk stops at the first owned hop, so processing order is
+	// irrelevant. A chain ending unheld is kept for now (the piece may carry
+	// that campaign on), unless it passes through a merged-from ID: the
+	// operator merged that evidence, not this, so it never takes the target.
 	for _, r := range roots {
 		for _, cl := range claims[r] {
-			hasDirect[r] = hasDirect[r] || cl.direct
+			if cl.merged || !owns(r, cl.raw) {
+				continue
+			}
+			if _, aliased := aliases[cl.raw]; !aliased {
+				continue
+			}
+			if end, own, held := chainOwner(aliases, owner, cl.raw); (held && own != r) || (!held && end != "" && cl.viaMerge) {
+				delete(aliases, cl.raw)
+			}
 		}
 	}
-	// Components with a direct claim choose first, oldest first; components
-	// that reach an ID only through an alias come after, so a broken bridge
-	// never lets the formerly bridged-in piece take the name.
+	// Components choose oldest first; the order only settles which of two
+	// pieces that both lost their bridge into a campaign whose own evidence
+	// aged out carries that campaign on.
 	sort.Slice(roots, func(i, j int) bool {
-		a, b := roots[i], roots[j]
-		if hasDirect[a] != hasDirect[b] {
-			return hasDirect[a]
-		}
-		ca, cb := comps[a], comps[b]
+		ca, cb := comps[roots[i]], comps[roots[j]]
 		switch {
 		case ca.minSeq >= 0 && cb.minSeq >= 0 && ca.minSeq != cb.minSeq:
 			return ca.minSeq < cb.minSeq
@@ -339,29 +373,35 @@ func Group(in Input) Output {
 	for _, r := range roots {
 		c := comps[r]
 		for _, cl := range claims[r] {
-			switch {
-			case cl.merged:
+			if cl.merged {
 				// An explicit merge: keep the retired ID; output resolves it
 				// into the merge target, so the merge persists every cycle.
 				c.id = cl.raw
-			case cl.viaMerge:
-				// Absorbed into merged-from evidence by an automatic bridge
-				// that has since broken: the operator merged that evidence,
-				// not this, so revive this piece's own ID rather than take
-				// the merge target's.
-				if !taken[cl.raw] {
-					c.id = cl.raw
-					delete(aliases, cl.raw)
-				}
-			case !taken[cl.target]:
-				c.id = cl.target
-			case !cl.direct && !taken[cl.raw]:
-				// A bridge broke: revive this piece's own former ID.
-				c.id = cl.raw
-				delete(aliases, cl.raw)
+				break
 			}
+		}
+		for _, cl := range claims[r] {
 			if c.id != "" {
 				break
+			}
+			if !owns(r, cl.raw) {
+				continue // another piece holds this ID's earliest value
+			}
+			if _, aliased := aliases[cl.raw]; !aliased {
+				c.id = cl.raw
+				continue
+			}
+			end, own, held := chainOwner(aliases, owner, cl.raw)
+			switch {
+			case held && own == r:
+				// Leads to an ID this piece holds; that claim decides.
+			case !held && !taken[end]:
+				// The campaign this evidence was absorbed into has no
+				// evidence of its own left: carry it on under its ID.
+				c.id = end
+			default:
+				c.id = cl.raw
+				delete(aliases, cl.raw)
 			}
 		}
 		if c.id == "" {
@@ -371,16 +411,23 @@ func Group(in Input) Output {
 		taken[c.id] = true
 		reserved[c.id] = true
 	}
-	// Other direct IDs a component absorbed (a new bridge) retire into it,
-	// except the ID it already resolves to: a merged-from piece holding its
+	// Other IDs a component owns and did not choose retire into it (a new
+	// bridge). Never one on c.id's own chain: a merged-from piece holding its
 	// own merge target's ID (when the target's other evidence has aged out)
-	// would otherwise alias the target back into the merged-from ID, a cycle.
+	// would alias the target back into the merged-from ID, a cycle. The
+	// check walks the whole chain because the cycle can be several hops
+	// long (K -> Q -> D with P -> K already stored gave {P->K, K->P} when it
+	// compared only the chain's end).
 	for _, r := range roots {
 		c := comps[r]
 		for _, cl := range claims[r] {
-			if cl.direct && cl.raw != c.id && !taken[cl.raw] && Resolve(aliases, c.id) != cl.raw {
-				aliases[cl.raw] = c.id
+			if cl.raw == c.id || !owns(r, cl.raw) {
+				continue
 			}
+			if _, aliased := aliases[cl.raw]; aliased || chainReaches(aliases, c.id, cl.raw) {
+				continue
+			}
+			aliases[cl.raw] = c.id
 		}
 	}
 	// Explicit merges, in edit order.
@@ -393,43 +440,12 @@ func Group(in Input) Output {
 		}
 	}
 
-	// Merged-from status belongs only to evidence that already carried the
-	// merged-from ID when the operator merged; it must never spread. A
-	// component that took a merged-from ID therefore writes new or rewritten
-	// values under its best other claim in the same lineage (typically an
-	// unrelated campaign's ID, aliased in for the length of a bridge, which
-	// it revives when the bridge breaks). Writing the merged-from ID instead
-	// let a value first seen during a bridge carry the merge to the other
-	// side and swallow that campaign for good. With no such claim, the
-	// values were only ever seen with merged evidence, so they belong to the
-	// merge target itself: they are written under its resolved ID, which is
-	// never a merged-from ID, so the status still cannot spread.
-	for _, r := range roots {
-		c := comps[r]
-		c.assign = c.id
-		if !mergedFrom[c.id] {
-			continue
-		}
-		final := Resolve(aliases, c.id)
-		c.assign = final
-		for _, cl := range claims[r] {
-			if !cl.merged && Resolve(aliases, cl.raw) == final {
-				c.assign = cl.raw
-				break
-			}
-		}
-	}
-
 	// Collect occurrences per final campaign ID.
 	members := map[string][]int{}
-	compOf := map[int]*component{}
 	for _, r := range roots {
 		c := comps[r]
 		id := Resolve(aliases, c.id)
 		members[id] = append(members[id], c.idx...)
-		for _, i := range c.idx {
-			compOf[i] = c
-		}
 	}
 	names, notes := map[string]string{}, map[string]string{}
 	for _, e := range edits {
@@ -472,44 +488,144 @@ func Group(in Input) Output {
 		emitted[id] = true
 		out.Campaigns = append(out.Campaigns, c)
 	}
-	// Assignments, in occurrence (time) order so fresh sequence numbers mean
-	// "oldest first". A value keeps its recorded ID unless its component had
-	// to take a different identity (a split that minted or revived an ID).
-	newAssign := map[string]Assignment{}
+
+	// Decide each value's assignment per emitted component. A value whose
+	// recorded ID resolves into the component's campaign is stable and keeps
+	// it (merged-from evidence always does, so the merge resolves into its
+	// target again every cycle). Every other value, new or carried in from a
+	// campaign this piece no longer belongs to, is attributed to the identity
+	// it was actually seen with: values sharing a session are grouped, and a
+	// group is stamped only when the stable evidence in its sessions has one
+	// identity. A value born in a bridging session, or in a bridge of new
+	// values, touches two and stays unassigned; it follows connectivity
+	// after the break and is stamped then. Stamping it with the winner's ID
+	// was what dragged that ID, a merge target's or a renamed campaign's,
+	// onto the wrong side once the bridge broke. Identity here follows
+	// explicit merge aliases only (P merged into K is K's evidence) and
+	// never an automatic one (D bridged into K stays D's), so a long-lived
+	// merge keeps accumulating evidence under a stable ID.
+	stamp, keep := map[string]string{}, map[string]bool{}
+	decided := map[string]bool{}
+	sessOcc := map[string][]int{}
 	for i, x := range occ {
-		comp, ok := compOf[i]
-		if !ok || !emitted[Resolve(aliases, comp.id)] {
+		sessOcc[x.SessionID] = append(sessOcc[x.SessionID], i)
+	}
+	for _, r := range roots {
+		c := comps[r]
+		final := Resolve(aliases, c.id)
+		if !emitted[final] {
 			continue
 		}
-		compID := comp.assign
+		assign := c.id
+		if mergedFrom[c.id] {
+			assign = final
+		}
+		stable := map[string]string{} // value key -> identity
+		floating := unionFind{}
+		var sessions []string
+		seenSess := map[string]bool{}
+		for _, i := range c.idx {
+			x := occ[i]
+			if !seenSess[x.SessionID] {
+				seenSess[x.SessionID] = true
+				sessions = append(sessions, x.SessionID)
+			}
+			k := vkey(x.Kind, x.Value)
+			if decided[k] {
+				continue
+			}
+			decided[k] = true
+			if prev, had := raw[k]; had && (mergedFrom[prev.CampaignID] || Resolve(aliases, prev.CampaignID) == final) {
+				stable[k] = ident(aliases, mergedFrom, prev.CampaignID)
+				keep[k] = true
+			} else {
+				floating[k] = k
+			}
+		}
+		if len(floating) == 0 {
+			continue
+		}
+		for _, s := range sessions {
+			first := ""
+			for _, i := range sessOcc[s] {
+				k := vkey(occ[i].Kind, occ[i].Value)
+				if _, ok := floating[k]; !ok {
+					continue
+				}
+				if first == "" {
+					first = k
+				} else {
+					floating.union(first, k)
+				}
+			}
+		}
+		touched := map[string]map[string]bool{}
+		for _, s := range sessions {
+			var idents []string
+			for _, i := range sessOcc[s] {
+				if id, ok := stable[vkey(occ[i].Kind, occ[i].Value)]; ok {
+					idents = append(idents, id)
+				}
+			}
+			if len(idents) == 0 {
+				continue
+			}
+			for _, i := range sessOcc[s] {
+				k := vkey(occ[i].Kind, occ[i].Value)
+				if _, ok := floating[k]; !ok {
+					continue
+				}
+				g := floating.find(k)
+				if touched[g] == nil {
+					touched[g] = map[string]bool{}
+				}
+				for _, id := range idents {
+					touched[g][id] = true
+				}
+			}
+		}
+		for k := range floating {
+			switch t := touched[floating.find(k)]; len(t) {
+			case 0:
+				// Only floating values in every session: the whole piece
+				// is new, or was rewritten into a minted ID.
+				stamp[k] = assign
+			case 1:
+				for id := range t {
+					stamp[k] = id
+				}
+			}
+		}
+	}
+	// Assignments, in occurrence (time) order so fresh sequence numbers mean
+	// "oldest first".
+	newAssign := map[string]Assignment{}
+	for _, x := range occ {
 		k := vkey(x.Kind, x.Value)
 		if _, done := newAssign[k]; done {
 			continue
 		}
 		prev, had := raw[k]
-		switch {
-		case had && mergedFrom[prev.CampaignID]:
-			// Merged-from evidence is never rewritten to another campaign's
-			// ID, so the merge resolves into its target again every cycle.
+		switch id, stamped := stamp[k]; {
+		case keep[k]:
 			newAssign[k] = prev
-		case had && (prev.CampaignID == compID || Resolve(aliases, prev.CampaignID) == Resolve(aliases, compID)):
-			newAssign[k] = prev
-		case had:
-			newAssign[k] = Assignment{Kind: x.Kind, Value: x.Value, CampaignID: compID, Seq: prev.Seq}
-		default:
+		case stamped && had:
+			newAssign[k] = Assignment{Kind: x.Kind, Value: x.Value, CampaignID: id, Seq: prev.Seq}
+		case stamped:
 			maxSeq++
-			newAssign[k] = Assignment{Kind: x.Kind, Value: x.Value, CampaignID: compID, Seq: maxSeq}
+			newAssign[k] = Assignment{Kind: x.Kind, Value: x.Value, CampaignID: id, Seq: maxSeq}
 		}
 	}
 	// A value whose campaign carries an operator edit keeps its assignment
 	// even when its piece is not a campaign this cycle (or its occurrence was
 	// dropped by remove_actor). Dropping it forgot which campaign the value
 	// belonged to, so the removed actor bridged again next cycle under a
-	// freshly minted ID that the edit did not reach.
+	// freshly minted ID that the edit did not reach. A value an emitted
+	// piece deliberately left unassigned is not revived here.
 	for _, set := range [2][]Occurrence{occ, dropped} {
 		for _, x := range set {
 			k := vkey(x.Kind, x.Value)
-			if _, done := newAssign[k]; done {
+			if _, done := newAssign[k]; done || decided[k] {
 				continue
 			}
 			if prev, had := raw[k]; had && (edited[prev.CampaignID] || edited[Resolve(in.Aliases, prev.CampaignID)] || edited[Resolve(aliases, prev.CampaignID)]) {
@@ -578,12 +694,14 @@ func components(occ []Occurrence, active []bool) ([]string, map[string][]int) {
 	return roots, members
 }
 
-// mergeSource is the ID a merge of from into to retired: the last ID on
-// from's alias chain before it joins to's chain. On the merge's first cycle
-// that is Resolve(from); later the merge alias itself is on the chain, and
-// resolving would wrongly name the target. "" when from already resolves
-// into to (nothing was merged).
-func mergeSource(aliases map[string]string, from, to string) string {
+// mergeChain is every ID a merge of from into to retired: from's alias chain
+// up to, but not including, the first ID on to's chain. On the merge's first
+// cycle that ends at Resolve(from); later the merge alias itself is on the
+// chain, and resolving would wrongly name the target. Every hop is marked,
+// not only the ends, so ident treats a campaign that had absorbed others
+// before the operator merged it as one identity. Empty when from already
+// resolves into to (nothing was merged).
+func mergeChain(aliases map[string]string, from, to string) []string {
 	onTarget := map[string]bool{}
 	for i, id := 0, to; i < 64; i++ {
 		onTarget[id] = true
@@ -593,16 +711,65 @@ func mergeSource(aliases map[string]string, from, to string) string {
 		}
 		id = next
 	}
-	prev := ""
+	var chain []string
 	for i, id := 0, from; i < 64 && !onTarget[id]; i++ {
-		prev = id
+		chain = append(chain, id)
 		next, ok := aliases[id]
 		if !ok || next == id {
 			break
 		}
 		id = next
 	}
-	return prev
+	return chain
+}
+
+// ident is the identity a value's recorded ID stands for: explicit merge
+// aliases are followed (P merged into K is K's evidence), automatic ones are
+// not (D bridged into K is still D's, and gets D back when the bridge
+// breaks).
+func ident(aliases map[string]string, mergedFrom map[string]bool, id string) string {
+	for i := 0; i < 64 && mergedFrom[id]; i++ {
+		next, ok := aliases[id]
+		if !ok || next == id {
+			break
+		}
+		id = next
+	}
+	return id
+}
+
+// chainOwner walks raw's alias chain, past raw itself, to the first ID some
+// component owns and reports that owner (held). With no owned hop it reports
+// the chain's end instead.
+func chainOwner(aliases map[string]string, owner map[string]holder, raw string) (end string, own string, held bool) {
+	id := raw
+	for i := 0; i < 64; i++ {
+		next, ok := aliases[id]
+		if !ok || next == id {
+			return id, "", false
+		}
+		if h, ok := owner[next]; ok {
+			return "", h.root, true
+		}
+		id = next
+	}
+	return id, "", false
+}
+
+// chainReaches reports whether from's alias chain, past from itself, passes
+// through target.
+func chainReaches(aliases map[string]string, from, target string) bool {
+	for i, id := 0, from; i < 64; i++ {
+		next, ok := aliases[id]
+		if !ok || next == id {
+			return false
+		}
+		if next == target {
+			return true
+		}
+		id = next
+	}
+	return false
 }
 
 // chainHits reports whether id's alias chain, past id itself, passes
