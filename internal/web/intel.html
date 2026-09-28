@@ -4581,12 +4581,28 @@ async function refreshScripts() {
 
 function cmBody(html) { document.getElementById('cm-body').innerHTML = html; }
 
+// _cmView is a monotonic token for what the dialog shows: every open bumps it,
+// so a slow response for an earlier open (or a post-edit reload the analyst
+// has since navigated away from) sees a stale token and leaves the dialog
+// alone. _cmRendered holds the editable fields' values as last rendered (or
+// last saved), so a reload never discards typing that has not been saved.
+var _cmView = 0, _cmRendered = null;
+
 function showCampaignDialog(title) {
   const modal = document.getElementById('campaign-modal');
+  _cmView++;
+  _cmRendered = null;
   document.getElementById('cm-title').textContent = title;
   document.getElementById('cm-sub').textContent = '';
   cmBody('<div class="empty">loading…</div>');
   if (!modal.open) modal.showModal();
+  return _cmView;
+}
+
+function cmDirty() {
+  if (!_cmRendered) return false;
+  const n = document.getElementById('cm-name'), t = document.getElementById('cm-notes'), m = document.getElementById('cm-merge');
+  return (n && n.value !== _cmRendered.name) || (t && t.value !== _cmRendered.notes) || (m && m.value !== _cmRendered.merge);
 }
 
 // errorText reads a failed response's plain-text body (the edit and lookup
@@ -4598,12 +4614,17 @@ async function errorText(r) {
 }
 
 async function openCampaign(id) {
-  showCampaignDialog('campaign ' + id);
+  const view = showCampaignDialog('campaign ' + id);
   try {
     const r = await fetch('/api/intel/campaign?id=' + encodeURIComponent(id) + '&_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) { cmBody('<div class="empty">' + esc(await errorText(r)) + '</div>'); return; }
-    renderCampaign(await r.json());
-  } catch (e) { cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
+    if (!r.ok) {
+      const msg = await errorText(r);
+      if (view === _cmView) cmBody('<div class="empty">' + esc(msg) + '</div>');
+      return;
+    }
+    const c = await r.json();
+    if (view === _cmView) renderCampaign(c);
+  } catch (e) { if (view === _cmView) cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
 }
 
 function renderCampaign(c) {
@@ -4634,7 +4655,8 @@ function renderCampaign(c) {
   }).join('');
   cmBody(
     '<div id="cm-status" class="cm-status" role="status"></div>' +
-    '<div class="cm-row"><label for="cm-name">name</label> <input id="cm-name" maxlength="200" value="' + esc(c.name || c.suggestedName || '') + '"> ' +
+    '<div class="cm-row"><label for="cm-name">name</label> <input id="cm-name" maxlength="200" value="' + esc(c.name || '') + '"' +
+      (c.suggestedName ? ' placeholder="' + esc(c.suggestedName) + '"' : '') + '> ' +
       actionButton('rename', 'save name', { id: c.id }) + '</div>' +
     '<div class="cm-row"><label for="cm-merge">merge into campaign ID</label> <input id="cm-merge" maxlength="14" placeholder="c-…" autocomplete="off"> ' +
       actionButton('merge', 'merge', { id: c.id }) + '</div>' +
@@ -4644,14 +4666,21 @@ function renderCampaign(c) {
     '<h3 class="cm-h">notes</h3><textarea id="cm-notes" class="cm-notes" maxlength="4000" aria-label="Campaign notes">' + esc(c.notes) + '</textarea> ' +
       actionButton('notes', 'save notes', { id: c.id }) +
     (edits ? '<h3 class="cm-h">edit history</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + edits + '</tbody></table></div>' : ''));
+  // Baseline from the DOM: the browser normalises textarea newlines.
+  _cmRendered = { name: document.getElementById('cm-name').value, notes: document.getElementById('cm-notes').value, merge: '' };
 }
 
 async function openScript(fp) {
-  showCampaignDialog('script ' + String(fp || '').slice(0, 12));
+  const view = showCampaignDialog('script ' + String(fp || '').slice(0, 12));
   try {
     const r = await fetch('/api/intel/script?fp=' + encodeURIComponent(fp) + '&_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) { cmBody('<div class="empty">' + esc(await errorText(r)) + '</div>'); return; }
+    if (!r.ok) {
+      const msg = await errorText(r);
+      if (view === _cmView) cmBody('<div class="empty">' + esc(msg) + '</div>');
+      return;
+    }
     const d = await r.json();
+    if (view !== _cmView) return;
     document.getElementById('cm-sub').textContent = (d.sessions || []).length + ' sessions · ' + (d.actors || []).length + ' actors';
     const sessions = (d.sessions || []).map(function (x) {
       return '<tr><td>' + actionButton('session', x.sessionId, { session: x.sessionId }, 'replay session ' + x.sessionId) + '</td><td>' +
@@ -4660,14 +4689,19 @@ async function openScript(fp) {
     }).join('');
     cmBody('<pre class="sm-tty">' + esc(d.display) + '</pre><h3 class="cm-h">sessions</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' +
       (sessions || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>');
-  } catch (e) { cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
+  } catch (e) { if (view === _cmView) cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
 }
 
 // campaignEdit records one edit. The server only appends it and wakes the
 // campaign worker, which applies it on its next tick (5 s), so the dialog says
 // "applying…" and reloads after that. The ID is always the API's own campaign
-// id: edits are recorded literally, and a name may be ambiguous.
+// id: edits are recorded literally, and a name may be ambiguous. The reload
+// only happens while the same view is still shown with no unsaved typing
+// (the ledger is append-only, so wiping a half-written note would cost a
+// second edit); otherwise only the lists refresh. A merge reopens its target:
+// the source ID has just been merged away.
 async function campaignEdit(id, action, arg) {
+  const view = _cmView;
   const status = document.getElementById('cm-status');
   if (status) status.textContent = 'saving…';
   let r;
@@ -4682,11 +4716,18 @@ async function campaignEdit(id, action, arg) {
     if (status) status.textContent = 'edit refused: ' + msg;
     return;
   }
+  if (view === _cmView && _cmRendered) {
+    // The saved field is now the baseline; typing after this point is unsaved.
+    if (action === 'rename') _cmRendered.name = document.getElementById('cm-name').value;
+    if (action === 'notes') _cmRendered.notes = document.getElementById('cm-notes').value;
+    if (action === 'merge') _cmRendered.merge = document.getElementById('cm-merge').value;
+  }
   if (status) status.textContent = 'applying…';
+  const reopen = action === 'merge' ? arg : id;
   setTimeout(function () {
     refreshCampaigns();
     const modal = document.getElementById('campaign-modal');
-    if (id && modal.open) openCampaign(id);
+    if (reopen && modal.open && view === _cmView && !cmDirty()) openCampaign(reopen);
   }, 6000);
 }
 
@@ -4706,7 +4747,10 @@ document.getElementById('campaign-modal').addEventListener('click', function (e)
   if (a === 'actor') { closeCampaign(); setActiveView('overview'); selectedActor = b.dataset.actor; loadActorDetail(b.dataset.actor); return; }
   if (a === 'script') { openScript(b.dataset.fp); return; }
   let arg = b.dataset.arg || '';
-  if (a === 'rename') arg = document.getElementById('cm-name').value;
+  if (a === 'rename') {
+    arg = document.getElementById('cm-name').value.trim();
+    if (!arg) { document.getElementById('cm-status').textContent = 'a name is required'; return; }
+  }
   if (a === 'notes') arg = document.getElementById('cm-notes').value;
   if (a === 'merge') arg = document.getElementById('cm-merge').value.trim();
   campaignEdit(b.dataset.id || '', a, arg);
