@@ -52,6 +52,14 @@ func Distance(a, b []string) float64 {
 	return float64(prev[lb]) / float64(max(la, lb))
 }
 
+// InLengthBand is AssignFamily's pre-filter: two scripts are compared only
+// when both have tokens and the shorter is at least minLengthRatio of the
+// longer. Exported so callers can skip loading representatives AssignFamily
+// would ignore, without re-implementing (and drifting from) the rule.
+func InLengthBand(a, b int) bool {
+	return a != 0 && b != 0 && float64(min(a, b))/float64(max(a, b)) >= minLengthRatio
+}
+
 type Rep struct {
 	Fingerprint string
 	Tokens      []string
@@ -62,8 +70,7 @@ type Rep struct {
 func AssignFamily(tokens []string, reps []Rep) (string, float64, bool) {
 	best, bestD := "", 2.0
 	for _, r := range reps {
-		la, lb := len(tokens), len(r.Tokens)
-		if la == 0 || lb == 0 || float64(min(la, lb))/float64(max(la, lb)) < minLengthRatio {
+		if !InLengthBand(len(tokens), len(r.Tokens)) {
 			continue
 		}
 		if d := Distance(tokens, r.Tokens); d < bestD {

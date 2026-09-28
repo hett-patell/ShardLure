@@ -11,6 +11,14 @@ import (
 
 const scriptDisplayBytes = 2048
 
+// familyPassBudget caps the wall-clock distance work of one family pass; a
+// var so tests can shrink it.
+var familyPassBudget = 2 * time.Second
+
+// familyRepLoaded, when set (tests only), observes each representative whose
+// normalized text a family pass loads.
+var familyRepLoaded func(fingerprint string)
+
 // SettleSessionScripts computes each idle session's script once: the
 // fingerprint of its lines in event order. Sessions that received commands
 // after their last settle (updated_at > settled_at) are re-settled; the
@@ -32,15 +40,21 @@ func (s *Store) SettleSessionScripts(ctx context.Context, idleBefore time.Time, 
 	type pending struct {
 		id, first, last, updated string
 		fp, enc, display         string
-		cmds                     int
+		cmds, tokens             int
 		distinctive              int
 	}
 	var list []*pending
 	err := func() error {
 		// Same predicate as idx_session_scripts_pending so the planner can
-		// use the partial index.
+		// use the partial index (EXPLAIN: SEARCH session_scripts USING INDEX
+		// idx_session_scripts_pending (last_seen<?)). Idle is required on
+		// both clocks: last_seen is event time; updated_at is ingest time.
+		// Without the second, the history seed (recording in 1000-event
+		// windows) would fingerprint a session's prefix before the rest of
+		// its old events were recorded. No prefix rows are ever written.
+		cut := formatFixedUTC(idleBefore)
 		rows, err := s.db.QueryContext(ctx, `SELECT session_id, first_seen, last_seen, updated_at FROM session_scripts
-WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? ORDER BY last_seen LIMIT ?`, formatFixedUTC(idleBefore), limit)
+WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? AND updated_at < ? ORDER BY last_seen LIMIT ?`, cut, cut, limit)
 		if err != nil {
 			return err
 		}
@@ -77,6 +91,7 @@ WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? ORDER BY last_s
 		p.display = script.Display(p.enc, scriptDisplayBytes)
 		p.cmds = script.CommandCount(cmds)
 		p.distinctive = scriptBool(script.Distinctive(cmds))
+		p.tokens = len(script.Tokens(p.enc)) // capped at MaxDistanceTokens, as distance sees it
 		ready = append(ready, p)
 	}
 	settled := 0
@@ -94,9 +109,9 @@ WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? ORDER BY last_s
 			if n, _ := r.RowsAffected(); n == 0 {
 				continue // late line or purge since the read: next pass
 			}
-			if _, err := tx.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen) VALUES(?,?,?,?,?,?,?)
+			if _, err := tx.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,token_count,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?)
 ON CONFLICT(fingerprint) DO UPDATE SET first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen)`,
-				p.fp, p.enc, p.display, p.cmds, p.distinctive, p.first, p.last); err != nil {
+				p.fp, p.enc, p.display, p.cmds, p.distinctive, p.tokens, p.first, p.last); err != nil {
 				return err
 			}
 			settled++
@@ -127,11 +142,29 @@ func (s *Store) sessionScriptLines(ctx context.Context, sessionID string) ([]str
 	return lines, rows.Err()
 }
 
+// familyRep is a representative as a family pass lists it: no script text.
+type familyRep struct {
+	fp     string
+	tokens int
+}
+
 // AssignScriptFamilies places up to limit unassigned scripts, oldest first,
-// into the closest representative's family or starts a family. Bounded and
-// cancellable: compute cost is scripts x representatives x tokens^2, all of
-// it done before the write transaction, so writeMu is held only for the
-// UPDATEs. Families are display-only; they never link sessions.
+// into the closest representative's family or starts a family. Families are
+// display-only; they never link sessions.
+//
+// Bounded three ways, because the representative set is attacker-driven and
+// unbounded: representatives are listed by (fingerprint, token_count) only;
+// a representative's normalized text is loaded (once per pass, memoised) only
+// when its token count is inside AssignFamily's length-ratio band for some
+// pending script; and the distance work stops after familyPassBudget, leaving
+// the rest for the next pass in the same order, so the outcome is the same
+// as one unbounded pass. At least one script is always processed so a pass
+// makes progress. All of it runs before the write transaction; writeMu is
+// held only for the UPDATEs.
+//
+// Assumes a single sequential caller (the live ticker): a concurrent
+// PruneOrphanScripts could delete a representative this pass has loaded, and
+// two concurrent passes could each start a family for near-identical scripts.
 func (s *Store) AssignScriptFamilies(ctx context.Context, limit int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -139,56 +172,105 @@ func (s *Store) AssignScriptFamilies(ctx context.Context, limit int) (int, error
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
-	type row struct {
+	type pendingScript struct {
 		fp, enc     string
 		distinctive bool
 	}
-	load := func(q string, args ...any) ([]row, error) {
-		rows, err := s.db.QueryContext(ctx, q, args...)
+	var pending []pendingScript
+	err := func() error {
+		rows, err := s.db.QueryContext(ctx, `SELECT fingerprint, normalized, distinctive FROM scripts WHERE family='' ORDER BY first_seen, fingerprint LIMIT ?`, limit)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		defer rows.Close()
-		var out []row
 		for rows.Next() {
-			var r row
+			var p pendingScript
 			var d int
-			if err := rows.Scan(&r.fp, &r.enc, &d); err != nil {
-				return nil, err
+			if err := rows.Scan(&p.fp, &p.enc, &d); err != nil {
+				return err
 			}
-			r.distinctive = d == 1
-			out = append(out, r)
+			p.distinctive = d == 1
+			pending = append(pending, p)
 		}
-		return out, rows.Err()
-	}
-	pending, err := load(`SELECT fingerprint, normalized, distinctive FROM scripts WHERE family='' ORDER BY first_seen, fingerprint LIMIT ?`, limit)
+		return rows.Err()
+	}()
 	if err != nil || len(pending) == 0 {
 		return 0, err
 	}
-	repRows, err := load(`SELECT fingerprint, normalized, distinctive FROM scripts WHERE family=fingerprint AND distinctive=1 ORDER BY fingerprint`)
+	var reps []familyRep // sorted by fingerprint: AssignFamily's tie rule
+	err = func() error {
+		rows, err := s.db.QueryContext(ctx, `SELECT fingerprint, token_count FROM scripts WHERE family=fingerprint AND distinctive=1 ORDER BY fingerprint`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r familyRep
+			if err := rows.Scan(&r.fp, &r.tokens); err != nil {
+				return err
+			}
+			reps = append(reps, r)
+		}
+		return rows.Err()
+	}()
 	if err != nil {
 		return 0, err
 	}
-	reps := make([]script.Rep, 0, len(repRows))
-	for _, r := range repRows {
-		reps = append(reps, script.Rep{Fingerprint: r.fp, Tokens: script.Tokens(r.enc)})
+	memo := map[string][]string{} // representative tokens, loaded on demand
+	repTokens := func(fp string) ([]string, bool, error) {
+		if t, ok := memo[fp]; ok {
+			return t, t != nil, nil
+		}
+		if familyRepLoaded != nil {
+			familyRepLoaded(fp)
+		}
+		var enc string
+		err := s.db.QueryRowContext(ctx, `SELECT normalized FROM scripts WHERE fingerprint=?`, fp).Scan(&enc)
+		if err == sql.ErrNoRows {
+			memo[fp] = nil // pruned since listed
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		t := script.Tokens(enc)
+		memo[fp] = t
+		return t, true, nil
 	}
 	type assign struct {
 		fp, family string
 		dist       float64
 	}
 	out := make([]assign, 0, len(pending))
+	start := time.Now()
 	for _, p := range pending {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
+		if len(out) > 0 && time.Since(start) >= familyPassBudget {
+			break // the rest waits for the next pass, same order
+		}
 		family, dist := p.fp, 0.0
 		if p.distinctive {
 			toks := script.Tokens(p.enc)
-			if f, d, ok := script.AssignFamily(toks, reps); ok {
+			var cands []script.Rep
+			for _, r := range reps {
+				if !script.InLengthBand(len(toks), r.tokens) {
+					continue // AssignFamily would skip it: never load it
+				}
+				t, ok, err := repTokens(r.fp)
+				if err != nil {
+					return 0, err
+				}
+				if ok {
+					cands = append(cands, script.Rep{Fingerprint: r.fp, Tokens: t})
+				}
+			}
+			if f, d, ok := script.AssignFamily(toks, cands); ok {
 				family, dist = f, d
 			} else {
-				reps = insertRep(reps, script.Rep{Fingerprint: p.fp, Tokens: toks})
+				reps = insertRep(reps, familyRep{p.fp, len(toks)})
+				memo[p.fp] = toks
 			}
 		}
 		out = append(out, assign{p.fp, family, dist})
@@ -215,12 +297,12 @@ func (s *Store) AssignScriptFamilies(ctx context.Context, limit int) (int, error
 
 // insertRep keeps reps sorted by fingerprint (AssignFamily's tie rule: the
 // smallest fingerprint wins).
-func insertRep(reps []script.Rep, r script.Rep) []script.Rep {
+func insertRep(reps []familyRep, r familyRep) []familyRep {
 	i := 0
-	for i < len(reps) && reps[i].Fingerprint < r.Fingerprint {
+	for i < len(reps) && reps[i].fp < r.fp {
 		i++
 	}
-	reps = append(reps, script.Rep{})
+	reps = append(reps, familyRep{})
 	copy(reps[i+1:], reps[i:])
 	reps[i] = r
 	return reps
@@ -341,6 +423,15 @@ func scriptBool(b bool) int {
 // PruneOrphanScripts drops scripts no session points at any more (retention,
 // or a re-settle that moved the session to a new fingerprint) unless they
 // represent a family that still has members.
+//
+// Freeing a representative is not transitive within one call: the members
+// and the representative are judged against the same pre-delete state, so a
+// representative is freed on the pass after its last member goes.
+//
+// Assumes a single sequential caller alongside AssignScriptFamilies: run
+// concurrently, it could delete a representative an in-flight assign pass
+// has loaded, and that pass would then file new members under a family
+// whose representative row no longer exists.
 func (s *Store) PruneOrphanScripts(ctx context.Context) error {
 	return s.WithTxContext(ctx, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`DELETE FROM scripts WHERE NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=scripts.fingerprint)

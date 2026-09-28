@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS scripts (
   distinctive INTEGER NOT NULL,
   family TEXT NOT NULL DEFAULT '',
   family_distance REAL NOT NULL DEFAULT 0,
+  token_count INTEGER NOT NULL DEFAULT 0,
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL
 );
