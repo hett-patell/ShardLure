@@ -103,6 +103,12 @@ func main() {
 		cmdActors(st, args[1:])
 	case "actor":
 		cmdActor(st, args[1:])
+	case "campaigns":
+		cmdCampaigns(st, args[1:])
+	case "campaign":
+		cmdCampaign(st, args[1:])
+	case "scripts":
+		cmdScripts(st, args[1:])
 	case "reclassify":
 		cmdReclassify(st, cfg, args[1:])
 	case "dashboard", "dash", "tui":
@@ -663,6 +669,9 @@ Usage:
   shardlure ingest <journal|cowrie> <file> [--replace]
   shardlure actors [--limit=25]
   shardlure actor show <ip>
+  shardlure campaigns [--limit=N]
+  shardlure campaign show <id|name>
+  shardlure scripts [--limit=N]
   shardlure reclassify cowrie [--dry-run]
   shardlure dashboard
   shardlure web [:8080] [--tailscale]

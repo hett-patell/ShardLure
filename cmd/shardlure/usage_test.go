@@ -31,6 +31,9 @@ func TestUsageDocumentsEveryDispatchedCommand(t *testing.T) {
 		"share urlhaus",
 		"share threatfox",
 		"report abuseipdb",
+		"campaigns",
+		"campaign show",
+		"scripts",
 	} {
 		if !strings.Contains(got, "shardlure "+cmd) {
 			t.Errorf("usage() does not document %q\n---\n%s", cmd, got)
