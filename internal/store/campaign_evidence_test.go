@@ -384,3 +384,149 @@ func TestRecordCampaignEvidenceClampsWindowTo5000(t *testing.T) {
 		t.Fatalf("second window %+v %v", res, err)
 	}
 }
+
+func evidenceCursorValue(t *testing.T, s *Store) int64 {
+	t.Helper()
+	c, err := evidenceCursor(context.Background(), s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// The recorder normalises outside writeMu and re-reads the window inside it.
+// Rows deleted between the phases (a purge) leave nothing to insert, and the
+// cursor still advances past them.
+func TestEvidenceRowsDeletedBetweenPhasesAdvanceCursor(t *testing.T) {
+	s := newTestStore(t, "evidence-phases-delete.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "id", "", "", now)
+	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	cowrieEvent(t, s, "s2", "cowrie:b", "command", injector, "", "", now)
+	cowrieEvent(t, s, "s2", "cowrie:b", "command", "uname -a", "", "", now)
+	var maxID int64
+	s.db.QueryRow(`SELECT MAX(id) FROM events`).Scan(&maxID)
+	evidenceBetweenPhases = func() {
+		evidenceBetweenPhases = nil
+		if _, err := s.db.Exec(`DELETE FROM events WHERE session_id='s2'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { evidenceBetweenPhases = nil })
+	res, err := s.RecordCampaignEvidence(ctx, 1000)
+	if err != nil || !res.Done || res.Scanned != 2 || res.Recorded != 0 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if c := evidenceCursorValue(t, s); c != maxID {
+		t.Fatalf("cursor %d, want %d (past the deleted rows)", c, maxID)
+	}
+	var n int
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts WHERE session_id='s2')+(SELECT COUNT(*) FROM session_script_lines WHERE session_id='s2')+(SELECT COUNT(*) FROM campaign_evidence WHERE session_id='s2')`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d derived rows written for deleted events", n)
+	}
+}
+
+// A --replace between the phases resets the cursor. Advancing it to this
+// window's end would overwrite the reset and skip the re-ingested rows, so
+// the recorder drops the window and reports Done:false for the tick to retry.
+func TestEvidenceReplaceBetweenPhasesKeepsResetCursor(t *testing.T) {
+	s := newTestStore(t, "evidence-phases-replace.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "id", "", "", now)
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "w", "", "", now)
+	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	cowrieEvent(t, s, "s2", "cowrie:b", "command", injector, "", "", now)
+	var want int64
+	evidenceBetweenPhases = func() {
+		evidenceBetweenPhases = nil
+		if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		want = evidenceCursorValue(t, s)
+	}
+	t.Cleanup(func() { evidenceBetweenPhases = nil })
+	res, err := s.RecordCampaignEvidence(ctx, 1000)
+	if err != nil || res.Done || res.Recorded != 0 {
+		t.Fatalf("a window overtaken by a replace must be retried, not committed: %+v %v", res, err)
+	}
+	if got := evidenceCursorValue(t, s); got != want {
+		t.Fatalf("cursor %d, the replace left %d", got, want)
+	}
+	var n int
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_script_lines)+(SELECT COUNT(*) FROM campaign_evidence)`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d derived rows written after the replace", n)
+	}
+}
+
+// No normalisation runs under writeMu: every EncodeLine and ExtractKeys call
+// happens before the between-phases seam, none after it (the attacker-shaped
+// CPU stays outside the write transaction).
+func TestEvidenceNormalisesOutsideWriteLock(t *testing.T) {
+	s := newTestStore(t, "evidence-phases-cpu.db")
+	now := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		cowrieEvent(t, s, "s1", "cowrie:a", "command", injector, "", "", now.Add(time.Duration(i)*time.Second))
+	}
+	oldEnc, oldKeys := evidenceEncodeLine, evidenceExtractKeys
+	var calls, atSeam int
+	evidenceEncodeLine = func(c string) string { calls++; return oldEnc(c) }
+	evidenceExtractKeys = func(c string) []script.Key { calls++; return oldKeys(c) }
+	evidenceBetweenPhases = func() { atSeam = calls }
+	t.Cleanup(func() { evidenceEncodeLine, evidenceExtractKeys, evidenceBetweenPhases = oldEnc, oldKeys, nil })
+	res, err := s.RecordCampaignEvidence(context.Background(), 1000)
+	if err != nil || !res.Done || res.Recorded != 3 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if atSeam != 6 || calls != atSeam {
+		t.Fatalf("normaliser calls: %d before the write transaction, %d in total (want 6 and 6)", atSeam, calls)
+	}
+	var lines, keys int
+	s.db.QueryRow(`SELECT line_count FROM session_scripts WHERE session_id='s1'`).Scan(&lines)
+	s.db.QueryRow(`SELECT COUNT(*) FROM campaign_evidence WHERE kind='ssh_key' AND session_id='s1'`).Scan(&keys)
+	if lines != 3 || keys != 1 {
+		t.Fatalf("lines=%d keys=%d", lines, keys)
+	}
+}
+
+// A session already at MaxCommands does not pay EncodeLine for further
+// commands (the transaction would drop the line anyway); keys are still
+// extracted, because a key is evidence past the line cap.
+func TestEvidenceSkipsNormalisingCappedSessions(t *testing.T) {
+	s := newTestStore(t, "evidence-phases-cap.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for i := 0; i < script.MaxCommands; i++ {
+		cowrieEvent(t, s, "cap", "cowrie:a", "command", "id", "", "", now.Add(time.Duration(i)*time.Millisecond))
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	cowrieEvent(t, s, "cap", "cowrie:a", "command", injector, "", "", now.Add(time.Second))
+	cowrieEvent(t, s, "cap", "cowrie:a", "command", "uname -a", "", "", now.Add(2*time.Second))
+	oldEnc, oldKeys := evidenceEncodeLine, evidenceExtractKeys
+	var enc, keys int
+	evidenceEncodeLine = func(c string) string { enc++; return oldEnc(c) }
+	evidenceExtractKeys = func(c string) []script.Key { keys++; return oldKeys(c) }
+	t.Cleanup(func() { evidenceEncodeLine, evidenceExtractKeys = oldEnc, oldKeys })
+	res, err := s.RecordCampaignEvidence(ctx, 1000)
+	if err != nil || res.Scanned != 2 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if enc != 0 || keys != 2 {
+		t.Fatalf("capped session: EncodeLine calls=%d (want 0), ExtractKeys calls=%d (want 2)", enc, keys)
+	}
+	var count, evidence int
+	s.db.QueryRow(`SELECT line_count FROM session_scripts WHERE session_id='cap'`).Scan(&count)
+	s.db.QueryRow(`SELECT COUNT(*) FROM campaign_evidence WHERE kind='ssh_key' AND session_id='cap'`).Scan(&evidence)
+	if count != script.MaxCommands || evidence != 1 {
+		t.Fatalf("line_count=%d evidence=%d", count, evidence)
+	}
+}

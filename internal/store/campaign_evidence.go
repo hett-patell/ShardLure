@@ -21,8 +21,94 @@ const evidenceScanQuery = `SELECT id, ts, COALESCE(ts_unix_ns,0), kind, COALESCE
   substr(COALESCE(command,''),1,65536), COALESCE(sha256,''), substr(COALESCE(filename,''),1,4096)
 FROM events WHERE id>? AND id<=? AND +source='cowrie' AND +kind IN ('command','file_download','file_upload') ORDER BY id`
 
-// maxEvidenceWindowBytes bounds memory and writeMu hold time per window.
-var maxEvidenceWindowBytes = 8 << 20
+// maxEvidenceWindowBytes bounds the command text one window normalises, and
+// so worker CPU and memory per window, not writeMu hold time: the recorder
+// normalises outside the lock (see RecordCampaignEvidence). At the measured
+// worst of 0.85 us/byte on x86 (2-3x on ARM) a hostile 1 MB window costs about
+// 1-3 s of CPU inside the tick's 2-minute context and no lock time. It never
+// binds on normal data (prod's ~17.5k commands total about 2 MB), so only an
+// attacker padding commands to the 64 KiB cap reaches it.
+var maxEvidenceWindowBytes = 1 << 20
+
+// evidenceEncodeLine and evidenceExtractKeys are the normalisers phase 1 of
+// RecordCampaignEvidence runs; variables so a test can count calls and pin
+// that none happen under writeMu. evidenceBetweenPhases, when set, runs
+// between the two phases so a test can delete rows or reset the cursor there.
+var (
+	evidenceEncodeLine    = script.EncodeLine
+	evidenceExtractKeys   = script.ExtractKeys
+	evidenceBetweenPhases func()
+)
+
+type ctxRowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+type ctxQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// evidenceCursor reads the recorder's durable cursor (0 when unset) from a
+// connection or an open transaction.
+func evidenceCursor(ctx context.Context, q ctxRowQueryer) (int64, error) {
+	var cursor int64
+	err := q.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, evidenceCursorSource, evidenceCursorPath).Scan(&cursor)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	return cursor, nil
+}
+
+type evidenceEvent struct {
+	id, tsNS                                   int64
+	ts, kind, session, actor, ip, cmd, sha, fn string
+}
+
+// scanEvidenceWindow reads the Cowrie command/file rows in (cursor, end] in
+// id order and hands each to visit until it returns false.
+func scanEvidenceWindow(ctx context.Context, q ctxQueryer, cursor, end int64, visit func(evidenceEvent) bool) error {
+	rows, err := q.QueryContext(ctx, evidenceScanQuery, cursor, end)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var e evidenceEvent
+		if err := rows.Scan(&e.id, &e.ts, &e.tsNS, &e.kind, &e.session, &e.actor, &e.ip, &e.cmd, &e.sha, &e.fn); err != nil {
+			rows.Close()
+			return err
+		}
+		if !visit(e) {
+			break
+		}
+	}
+	// rows.Next returning false can mean an error, not the end: without this
+	// check an I/O or corruption failure mid-scan would still let the caller
+	// advance the cursor to end and silently drop the rest of the window.
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	return rows.Close()
+}
+
+// sessionAtCap is phase 1's read-only look at the caps appendSessionLineTx
+// enforces, so a session already holding MaxCommands lines or
+// MaxNormalizedBytes does not pay normalisation for commands the transaction
+// would drop anyway. It is an optimisation only and deliberately weaker than
+// the in-transaction check (bytes >= cap, not bytes+add > cap), so it never
+// skips a line the transaction would have accepted; the transaction re-reads
+// the counters and decides.
+func (s *Store) sessionAtCap(ctx context.Context, session string) (bool, error) {
+	var count, bytes int
+	err := s.db.QueryRowContext(ctx, `SELECT line_count, bytes FROM session_scripts WHERE session_id=?`, session).Scan(&count, &bytes)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return count >= script.MaxCommands || bytes >= script.MaxNormalizedBytes, nil
+}
 
 // maxEvidenceWindow is the largest rowid window one RecordCampaignEvidence
 // transaction covers (see there).
@@ -40,72 +126,138 @@ type EvidenceRecordResult struct {
 	Done     bool
 }
 
+// precomputed is what phase 1 of RecordCampaignEvidence derives from a
+// command row outside writeMu: its encoded line ("" when the session was
+// already at cap or the command normalised to nothing) and the SSH keys in
+// its text. File rows get a zero value, so "present in the map" means "seen
+// in phase 1" for every kind.
+type precomputed struct {
+	line string
+	keys []script.Key
+}
+
 // RecordCampaignEvidence turns Cowrie events in the next rowid window past a
-// durable cursor into per-event script lines and linking evidence, in one
-// transaction. Line inserts are keyed by event id, so replaying a range after
-// a cursor reset does not double-append.
+// durable cursor into per-event script lines and linking evidence. Line
+// inserts are keyed by event id, so replaying a range after a cursor reset
+// does not double-append.
 //
-// window is clamped to maxEvidenceWindow rowids. The whole window is one
-// writeMu transaction with no time cap inside it; 50,000 rowids held writeMu
-// for about 0.4-1 s on ARM, 10x the 5,000-row chunk MaintenancePurge uses so
-// ingest is never stalled behind a batch. Callers loop over windows instead,
-// releasing writeMu in between.
+// It is split into read -> compute -> short write because the normaliser's
+// cost is attacker-controlled: EncodeLine and ExtractKeys run 0.12-0.85 us per
+// byte on x86 (2-3x on ARM) and a command is up to 64 KiB, so normalising a
+// window inside the write transaction put up to 7 s (x86) or 14-24 s (ARM) of
+// attacker-proportional CPU under writeMu; 128 `ssh ... exec` sessions of
+// padded commands produced one such window, repeatable indefinitely, and
+// during each hold the Cowrie ticker, journal tail, purge and dashboard edits
+// all blocked. Ingest must never stall behind derived analysis.
+//
+//  1. Phase 1, no lock: read the cursor and MAX(id), scan (cursor, end] and
+//     normalise every command into a map keyed by event id. Event ids are
+//     AUTOINCREMENT and sqlite_sequence is never reset, so an id names one
+//     immutable command forever: a row can only disappear (purge, --replace)
+//     or change actor_id (HASSH re-key). The byte budget applies here.
+//  2. Phase 2, one writeMu transaction: re-read the cursor and give up
+//     (Done:false, no error, the tick retries) if another writer moved it,
+//     because advancing to end would overwrite a --replace's reset and skip
+//     the re-ingested rows. Re-run the same rowid seek for the same
+//     (cursor, end], take session_id/actor_id fresh from each row (re-key
+//     correctness) and the line and keys from the map; a row absent from the
+//     map or from the table is skipped. Then advance the cursor to end. The
+//     hold is the SQL alone: at most three statements per command row.
+//
+// The session caps are still enforced inside the transaction
+// (appendSessionLineTx); phase 1 only reads them to avoid normalising commands
+// a capped session would drop.
+//
+// window is clamped to maxEvidenceWindow rowids: 50,000 rowids held writeMu
+// for about 0.4-1 s on ARM for the SQL alone, 10x the 5,000-row chunk
+// MaintenancePurge uses so ingest is never stalled behind a batch. Callers
+// loop over windows instead, releasing writeMu in between.
 func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (EvidenceRecordResult, error) {
 	if window <= 0 || window > maxEvidenceWindow {
 		window = maxEvidenceWindow
 	}
 	var res EvidenceRecordResult
-	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
-		var cursor, maxID int64
-		if err := tx.QueryRow(`SELECT offset FROM ingest_state WHERE source=? AND path=?`, evidenceCursorSource, evidenceCursorPath).Scan(&cursor); err != nil && err != sql.ErrNoRows {
-			return err
+	cursor, err := evidenceCursor(ctx, s.db)
+	if err != nil {
+		return res, err
+	}
+	var maxID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM events`).Scan(&maxID); err != nil {
+		return res, err
+	}
+	end := min(cursor+int64(window), maxID)
+	res.Done = end >= maxID
+	if end <= cursor {
+		return res, nil
+	}
+	var batch []evidenceEvent
+	budget := 0
+	err = scanEvidenceWindow(ctx, s.db, cursor, end, func(e evidenceEvent) bool {
+		budget += len(e.cmd) + len(e.fn)
+		if budget > maxEvidenceWindowBytes && len(batch) > 0 {
+			end, res.Done = batch[len(batch)-1].id, false
+			return false
 		}
-		if err := tx.QueryRow(`SELECT COALESCE(MAX(id),0) FROM events`).Scan(&maxID); err != nil {
-			return err
+		batch = append(batch, e)
+		return true
+	})
+	if err != nil {
+		return res, err
+	}
+	res.Scanned = len(batch)
+	pre := make(map[int64]precomputed, len(batch))
+	capped := map[string]bool{} // per session, read once per window
+	for _, e := range batch {
+		if err := ctx.Err(); err != nil {
+			return res, err
 		}
-		end := min(cursor+int64(window), maxID)
-		res.Done = end >= maxID
-		if end <= cursor {
-			return nil
+		if e.session == "" || e.actor == "" {
+			continue // admin exemption or sessionless row: counted, never recorded
 		}
-		type ev struct {
-			id, tsNS                                   int64
-			ts, kind, session, actor, ip, cmd, sha, fn string
+		var p precomputed
+		if models.EventKind(e.kind) == models.KindCommand {
+			// Keys are extracted unconditionally: a key is evidence even past
+			// the session's line cap.
+			p.keys = evidenceExtractKeys(e.cmd)
+			atCap, seen := capped[e.session]
+			if !seen {
+				if atCap, err = s.sessionAtCap(ctx, e.session); err != nil {
+					return res, err
+				}
+				capped[e.session] = atCap
+			}
+			if !atCap {
+				p.line = evidenceEncodeLine(e.cmd)
+			}
 		}
-		rows, err := tx.QueryContext(ctx, evidenceScanQuery, cursor, end)
+		pre[e.id] = p
+	}
+	batch = nil // the command text is not needed under writeMu
+	if evidenceBetweenPhases != nil {
+		evidenceBetweenPhases()
+	}
+	err = s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		cur, err := evidenceCursor(ctx, tx)
 		if err != nil {
 			return err
 		}
-		var batch []ev
-		budget := 0
-		for rows.Next() {
-			var e ev
-			if err := rows.Scan(&e.id, &e.ts, &e.tsNS, &e.kind, &e.session, &e.actor, &e.ip, &e.cmd, &e.sha, &e.fn); err != nil {
-				rows.Close()
-				return err
-			}
-			budget += len(e.cmd) + len(e.fn)
-			if budget > maxEvidenceWindowBytes && len(batch) > 0 {
-				end, res.Done = batch[len(batch)-1].id, false
-				break
-			}
-			batch = append(batch, e)
+		if cur != cursor {
+			res = EvidenceRecordResult{}
+			return nil
 		}
-		// rows.Next returning false can mean an error, not the end: without
-		// this check an I/O or corruption failure mid-scan would still advance
-		// the cursor to end and silently drop the rest of the window.
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		var live []evidenceEvent
+		if err := scanEvidenceWindow(ctx, tx, cursor, end, func(e evidenceEvent) bool {
+			e.cmd = "" // normalised in phase 1; never touched here
+			live = append(live, e)
+			return true
+		}); err != nil {
 			return err
 		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		res.Scanned = len(batch)
 		now := formatFixedUTC(time.Now())
-		for _, e := range batch {
-			if e.session == "" || e.actor == "" {
-				continue // admin exemption or sessionless row
+		for _, e := range live {
+			p, ok := pre[e.id]
+			if !ok || e.session == "" || e.actor == "" {
+				continue // not seen in phase 1, admin exemption or sessionless row
 			}
 			// Stored times must be fixed-width UTC text so min()/max()/<
 			// order correctly. Prefer the exact v20 column; legacy rows carry
@@ -120,10 +272,10 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			}
 			switch models.EventKind(e.kind) {
 			case models.KindCommand:
-				if err := appendSessionLineTx(tx, e.id, e.session, e.actor, e.ip, e.cmd, e.ts, now); err != nil {
+				if err := appendSessionLineTx(tx, e.id, e.session, e.actor, e.ip, p.line, e.ts, now); err != nil {
 					return err
 				}
-				for _, k := range script.ExtractKeys(e.cmd) {
+				for _, k := range p.keys {
 					if err := upsertEvidenceTx(tx, "ssh_key", k.Fingerprint, k.Comment, e.session, e.actor, e.ip, e.ts); err != nil {
 						return err
 					}
@@ -149,11 +301,12 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 }
 
 // appendSessionLineTx stores one command line (O(1) per command; the script
-// is assembled once when the session settles). Caps: MaxCommands lines and
+// is assembled once when the session settles). line is the command already
+// encoded by script.EncodeLine outside writeMu ("" stores nothing): nothing
+// attacker-proportional may run here. Caps: MaxCommands lines and
 // MaxNormalizedBytes per session, where bytes is len(script.Join(lines)):
 // every line after the first also costs its one-byte separator.
-func appendSessionLineTx(tx *sql.Tx, eventID int64, session, actor, ip, cmd, ts, now string) error {
-	line := script.EncodeLine(cmd)
+func appendSessionLineTx(tx *sql.Tx, eventID int64, session, actor, ip, line, ts, now string) error {
 	if line == "" {
 		return nil
 	}
