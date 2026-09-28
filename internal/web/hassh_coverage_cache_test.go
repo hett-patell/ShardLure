@@ -44,6 +44,7 @@ func TestHASSHCoverageIsMemoizedBeyondStatsTTL(t *testing.T) {
 	addCowrieEvent(t, st, "aa:bb")
 	addCowrieEvent(t, st, "")
 
+	s.refreshHASSHCoverage()
 	f, total := s.hasshCoverageCached()
 	if f != 1 || total != 2 {
 		t.Fatalf("first call = (%d, %d), want (1, 2)", f, total)
@@ -70,6 +71,7 @@ func TestHASSHCoverageRefreshesAfterTTL(t *testing.T) {
 	s, st := hasshTestServer(t)
 	addCowrieEvent(t, st, "aa:bb")
 	addCowrieEvent(t, st, "")
+	s.refreshHASSHCoverage()
 	if f, total := s.hasshCoverageCached(); f != 1 || total != 2 {
 		t.Fatalf("first call = (%d, %d), want (1, 2)", f, total)
 	}
@@ -80,8 +82,13 @@ func TestHASSHCoverageRefreshesAfterTTL(t *testing.T) {
 	s.hasshAt = time.Now().Add(-hasshCoverageTTL - time.Second)
 	s.hasshMu.Unlock()
 
+	// The expired call serves the last value and refreshes in the background.
+	if f, total := s.hasshCoverageCached(); f != 1 || total != 2 {
+		t.Fatalf("expired call = (%d, %d), want the last-good (1, 2)", f, total)
+	}
+	s.bg.wait()
 	if f, total := s.hasshCoverageCached(); f != 2 || total != 4 {
-		t.Fatalf("after TTL = (%d, %d), want the refreshed (2, 4)", f, total)
+		t.Fatalf("after refresh = (%d, %d), want (2, 4)", f, total)
 	}
 }
 
@@ -98,6 +105,7 @@ func TestHASSHCoverageMatchesStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HASSHCoverage: %v", err)
 	}
+	s.refreshHASSHCoverage()
 	if f, total := s.hasshCoverageCached(); f != wantF || total != wantT {
 		t.Fatalf("cached = (%d, %d), store = (%d, %d)", f, total, wantF, wantT)
 	}

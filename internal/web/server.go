@@ -176,6 +176,12 @@ type Server struct {
 	hasshTotal         int
 	hasshAt            time.Time
 	hasshOK            bool
+	hasshRefreshing    bool
+	// hasshCoverage is store.HASSHCoverage unless a test substitutes it.
+	hasshCoverage func() (int, int, error)
+	// bg tracks background cache refreshes; RunContext joins it before
+	// returning so none of them outlives the store.
+	bg handlerDrain
 
 	// dashExtraCache memoizes the two remaining full-window scans that
 	// /api/dashboard ran UNCACHED on every 5s poll: the 72h hourly-by-kind
@@ -335,24 +341,43 @@ func lifetimeStamp(ok bool) time.Time {
 const hasshCoverageTTL = 5 * time.Minute
 
 // summaryStatsCached returns the memoized whole-table aggregates,
-// hasshCoverageCached returns the HASSH coverage pair, recomputing at most once
-// per hasshCoverageTTL rather than per statsTTL. Best-effort like the other
-// non-fatal aggregates: on a query error the last good pair is served (zeroes
-// before the first success), so a transient failure degrades the badge rather
-// than failing the whole stats refresh.
+// hasshCoverageCached returns the HASSH coverage pair and never waits for the
+// query. The value is refreshed at most once per hasshCoverageTTL, by one
+// background refresh at a time, and the last good pair (zeroes before the
+// first success, rendered as "-") is served meanwhile. The query is a scan of
+// every Cowrie event: 4-18 s cold on ARM's 1.68M rows, and every dashboard
+// request used to queue behind it after a restart and on each expiry.
+// WarmCaches fills it before the server reports ready.
 func (s *Server) hasshCoverageCached() (fingerprinted, total int) {
 	s.hasshMu.Lock()
 	defer s.hasshMu.Unlock()
-	if s.hasshOK && time.Since(s.hasshAt) < hasshCoverageTTL {
-		return s.hasshFingerprinted, s.hasshTotal
+	fresh := s.hasshOK && time.Since(s.hasshAt) < hasshCoverageTTL
+	if !fresh && !s.hasshRefreshing && s.bg.enter() {
+		s.hasshRefreshing = true
+		go func() {
+			defer s.bg.leave()
+			s.refreshHASSHCoverage()
+		}()
 	}
-	f, tot, err := s.st.HASSHCoverage()
+	return s.hasshFingerprinted, s.hasshTotal
+}
+
+// refreshHASSHCoverage runs the coverage query without holding hasshMu and
+// publishes the result. A failed query keeps the last good pair.
+func (s *Server) refreshHASSHCoverage() {
+	query := s.hasshCoverage
+	if query == nil {
+		query = s.st.HASSHCoverage
+	}
+	f, tot, err := query()
+	s.hasshMu.Lock()
+	defer s.hasshMu.Unlock()
+	s.hasshRefreshing = false
 	if err != nil {
-		return s.hasshFingerprinted, s.hasshTotal
+		return
 	}
 	s.hasshFingerprinted, s.hasshTotal = f, tot
 	s.hasshAt, s.hasshOK = time.Now(), true
-	return f, tot
 }
 
 func (s *Server) liveSummaryStatsCached() (*liveSummaryStats, error) {
@@ -1149,6 +1174,8 @@ func (s *Server) RunContext(ctx context.Context) error {
 		// out. Join handlers before closing their shared resources.
 		_ = srv.Close()
 		handlers.wait()
+		s.bg.stop()
+		s.bg.wait()
 	}()
 	select {
 	case <-ctx.Done():
