@@ -468,6 +468,16 @@ func (w *evidenceWriter) flush(ctx context.Context, tx *sql.Tx, cursor, end int6
 				add++ // script.Join separator
 			}
 			if c.lines >= script.MaxCommands || c.bytes+add > script.MaxNormalizedBytes {
+				// Past the cap nothing touches the session row, so its
+				// last_seen (and updated_at) stop at the last stored line
+				// while the session may run on. Harmless for linking: the
+				// script is the capped prefix, which can no longer change,
+				// so settling it early (idle is measured from that line)
+				// fingerprints the final value; keys and payloads past the
+				// cap are still recorded with their own times. The visible
+				// effects are that a script occurrence's last_seen can
+				// understate the session's end, and retention may drop the
+				// script row while the session's later events remain.
 				continue
 			}
 			c.lines++
