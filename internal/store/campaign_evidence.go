@@ -543,45 +543,87 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 	return err
 }
 
-// purgeOldScriptLinesQuery is retention step 1, selected by line rowid so
-// each chunk is at most 5000 rows under writeMu (a session batch could be 300
-// lines per session). The join is the existence guard: every selected row is
-// deleted, so the next chunk cannot re-select it and the loop ends at zero.
-// TestPurgeScriptLinesPlan pins that it seeks both tables.
-const purgeOldScriptLinesQuery = `DELETE FROM session_script_lines WHERE rowid IN (SELECT l.rowid FROM session_scripts ss
-  JOIN session_script_lines l ON l.session_id=ss.session_id WHERE ss.last_seen < ? LIMIT 5000)`
+// purgeOldSessionsQuery lists retention step 1's candidates through the
+// last_seen index (TestPurgeScriptLinesPlan pins it).
+const purgeOldSessionsQuery = `SELECT session_id, line_count FROM session_scripts WHERE last_seen < ? ORDER BY last_seen LIMIT 5000`
+
+// purgeLineBudget bounds the lines one retention transaction deletes, the
+// MaintenancePurge chunk size.
+const purgeLineBudget = 5000
 
 // purgeCampaignDerived applies event retention to derived rows, in bounded
 // chunks with writeMu released between them (like the events purge).
 //
-// There is no orphan-line step: lines lose their session row only if
-// something deletes session_scripts without its lines, and the one other
-// deleter (the orphan-actor sweep in MaintenancePurgeContext) removes both
-// together. The step it replaces was a LEFT JOIN over every line on every
-// purge.
+// Sessions go whole: each transaction takes old sessions in last_seen order
+// until their line_count reaches purgeLineBudget (at least one session, and
+// line_count is capped at MaxCommands, so a chunk is at most 5,299 lines) and
+// deletes their lines and their rows together. Deleting lines by line rowid
+// instead split a long session across chunks, and a settle running between
+// two chunks fingerprinted the surviving suffix as the session's script
+// (SettleSessionScripts reads outside writeMu; its guard checks updated_at,
+// which a purge does not change). Rows are deleted in the same transaction as
+// their lines, so no line is ever left without its session row.
+//
+// There is no orphan-line step: the one other deleter of session_scripts
+// (the orphan-actor sweep in MaintenancePurgeContext) removes lines with
+// their rows too. The step it replaces was a LEFT JOIN over every line on
+// every purge.
 func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) error {
 	c := formatFixedUTC(cutoff)
-	for _, q := range []string{
-		purgeOldScriptLinesQuery,
-		`DELETE FROM session_scripts WHERE rowid IN (SELECT ss.rowid FROM session_scripts ss WHERE ss.last_seen < ?
-  AND NOT EXISTS (SELECT 1 FROM session_script_lines l WHERE l.session_id=ss.session_id) LIMIT 5000)`,
-		`DELETE FROM campaign_evidence WHERE rowid IN (SELECT rowid FROM campaign_evidence WHERE last_seen < ? LIMIT 5000)`,
-	} {
+	steps := []func(tx *sql.Tx) (int64, error){
+		func(tx *sql.Tx) (int64, error) {
+			var ids []string
+			lines := 0
+			err := func() error {
+				rows, err := tx.QueryContext(ctx, purgeOldSessionsQuery, c)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for lines < purgeLineBudget && rows.Next() {
+					var id string
+					var n int
+					if err := rows.Scan(&id, &n); err != nil {
+						return err
+					}
+					ids, lines = append(ids, id), lines+n
+				}
+				return rows.Err()
+			}()
+			if err != nil || len(ids) == 0 {
+				return 0, err
+			}
+			for _, table := range []string{"session_script_lines", "session_scripts"} {
+				if err := execBatched(ctx, tx, `DELETE FROM `+table+` WHERE session_id IN (`, `?`, `)`, len(ids), func(i int) []any { return []any{ids[i]} }); err != nil {
+					return 0, err
+				}
+			}
+			return int64(len(ids)), nil
+		},
+		func(tx *sql.Tx) (int64, error) {
+			r, err := tx.Exec(`DELETE FROM campaign_evidence WHERE rowid IN (SELECT rowid FROM campaign_evidence WHERE last_seen < ? LIMIT 5000)`, c)
+			if err != nil {
+				return 0, err
+			}
+			return r.RowsAffected()
+		},
+	}
+	for _, step := range steps {
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			var n int64
 			err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
-				r, err := tx.Exec(q, c)
-				if err != nil {
-					return err
-				}
-				n, _ = r.RowsAffected()
-				return nil
+				var err error
+				n, err = step(tx)
+				return err
 			})
 			if err != nil {
 				return err
+			}
+			if purgeChunkDone != nil {
+				purgeChunkDone()
 			}
 			if n == 0 {
 				break
@@ -590,3 +632,7 @@ func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) erro
 	}
 	return nil
 }
+
+// purgeChunkDone, when set (tests only), runs after each committed retention
+// chunk.
+var purgeChunkDone func()

@@ -684,31 +684,88 @@ func TestOrphanSweepRemovesScriptLines(t *testing.T) {
 	}
 }
 
-// Retention step 1 selects old sessions through the last_seen index and
-// their lines through the (session_id, event_id) key: a scan of either table
-// under writeMu is what the chunking exists to avoid.
+// Retention step 1 lists old sessions through the last_seen index and
+// deletes their lines through the (session_id, event_id) key: a scan of
+// either table under writeMu is what the chunking exists to avoid.
 func TestPurgeScriptLinesPlan(t *testing.T) {
 	s := newTestStore(t, "retention-plan.db")
-	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+purgeOldScriptLinesQuery, formatFixedUTC(time.Now()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var plan []string
-	for rows.Next() {
-		var a, b, c int
-		var d string
-		if err := rows.Scan(&a, &b, &c, &d); err != nil {
+	plan := func(q string, args ...any) string {
+		t.Helper()
+		rows, err := s.db.Query("EXPLAIN QUERY PLAN "+q, args...)
+		if err != nil {
 			t.Fatal(err)
 		}
-		plan = append(plan, d)
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var a, b, c int
+			var d string
+			if err := rows.Scan(&a, &b, &c, &d); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, d)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(out, "\n")
 	}
-	if err := rows.Err(); err != nil {
+	if j := plan(purgeOldSessionsQuery, formatFixedUTC(time.Now())); !strings.Contains(j, "USING INDEX idx_session_scripts_last_seen (last_seen<?)") || strings.Contains(j, "SCAN ") {
+		t.Fatalf("session selection must seek the last_seen index:\n%s", j)
+	}
+	if j := plan(`DELETE FROM session_script_lines WHERE session_id IN (?,?)`, "a", "b"); !strings.Contains(j, "sqlite_autoindex_session_script_lines_1 (session_id=?)") || strings.Contains(j, "SCAN ") {
+		t.Fatalf("line delete must seek the line key:\n%s", j)
+	}
+}
+
+// Retention deletes a session's lines and its row in one transaction, so a
+// settle running between purge chunks never sees a session with some of its
+// lines gone and never fingerprints a partial script.
+func TestSettleNeverSeesPartlyPurgedSession(t *testing.T) {
+	s := newTestStore(t, "retention-settle.db")
+	ctx := context.Background()
+	old := formatFixedUTC(time.Now().UTC().AddDate(0, 0, -120))
+	// 17 sessions x 300 lines = 5,100 lines: more than one 5,000-row chunk.
+	if err := s.WithTx(func(tx *sql.Tx) error {
+		for i := 0; i < 17; i++ {
+			sess := fmt.Sprintf("p%02d", i)
+			if _, err := tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,line_count,bytes,first_seen,last_seen,updated_at) VALUES(?,?,300,0,?,?,?)`, sess, "cowrie:x", old, old, old); err != nil {
+				return err
+			}
+			for j := 0; j < 300; j++ {
+				if _, err := tx.Exec(`INSERT INTO session_script_lines(session_id,event_id,line) VALUES(?,?,'id')`, sess, i*1000+j); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	j := strings.Join(plan, "\n")
-	if !strings.Contains(j, "SEARCH ss USING INDEX idx_session_scripts_last_seen (last_seen<?)") ||
-		!strings.Contains(j, "sqlite_autoindex_session_script_lines_1 (session_id=?)") || strings.Contains(j, "SCAN ") {
-		t.Fatalf("retention step 1 must seek both tables:\n%s", j)
+	chunks := 0
+	purgeChunkDone = func() {
+		chunks++
+		var partial int
+		s.db.QueryRow(`SELECT COUNT(*) FROM session_scripts ss WHERE line_count <> (SELECT COUNT(*) FROM session_script_lines l WHERE l.session_id=ss.session_id)`).Scan(&partial)
+		if partial != 0 {
+			t.Errorf("chunk %d: %d sessions partly purged", chunks, partial)
+		}
+		if _, err := s.SettleSessionScripts(ctx, time.Now(), 0); err != nil {
+			t.Error(err)
+		}
+		var short int
+		s.db.QueryRow(`SELECT COUNT(*) FROM scripts WHERE command_count <> 300`).Scan(&short)
+		if short != 0 {
+			t.Errorf("chunk %d: %d scripts fingerprinted from a partial session", chunks, short)
+		}
+	}
+	t.Cleanup(func() { purgeChunkDone = nil })
+	if err := s.purgeCampaignDerived(ctx, time.Now().UTC().AddDate(0, 0, -90)); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)`).Scan(&left)
+	if chunks < 2 || left != 0 {
+		t.Fatalf("chunks=%d left=%d", chunks, left)
 	}
 }

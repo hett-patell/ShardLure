@@ -81,8 +81,10 @@ WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? AND updated_at 
 			return 0, err
 		}
 		if len(lines) == 0 {
-			// Retention removed the lines mid-purge; the purge's next step
-			// deletes this row. Never fingerprint an empty script.
+			// Retention deleted the session (lines and row together, see
+			// purgeCampaignDerived) after it was listed; the guarded UPDATE
+			// would find no row. Never fingerprint an empty script. A
+			// session is never partly purged, so non-empty lines are whole.
 			continue
 		}
 		p.enc = script.Join(lines)
