@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/script"
@@ -25,6 +26,60 @@ var settleBeforeWrite func()
 // normalized text a family pass loads.
 var familyRepLoaded func(fingerprint string)
 
+// settlePending is one session SettleSessionScripts read as pending, with the
+// fingerprint and script row computed from its lines.
+type settlePending struct {
+	id, first, last, updated string
+	fp, enc, display         string
+	cmds, tokens             int
+	distinctive              int
+}
+
+// settleSessionsBatched runs the guarded settle UPDATE for every ready
+// session in multi-row statements (batchParams-bounded, three parameters per
+// session plus one for now) and returns the session IDs it matched. Each
+// session keeps its own guard, session_id AND updated_at as read, through a
+// VALUES CTE joined in UPDATE ... FROM; RETURNING replaces the per-statement
+// RowsAffected.
+func settleSessionsBatched(ctx context.Context, tx *sql.Tx, ready []*settlePending, now string) (map[string]bool, error) {
+	matched := make(map[string]bool, len(ready))
+	per := max(1, (batchParams-1)/3) // 3 params per session, one for now
+	for lo := 0; lo < len(ready); lo += per {
+		hi := min(lo+per, len(ready))
+		var q strings.Builder
+		q.WriteString(`WITH v(sid, upd, fp) AS (VALUES `)
+		args := make([]any, 0, 3*(hi-lo)+1)
+		for i := lo; i < hi; i++ {
+			if i > lo {
+				q.WriteByte(',')
+			}
+			q.WriteString(`(?,?,?)`)
+			args = append(args, ready[i].id, ready[i].updated, ready[i].fp)
+		}
+		q.WriteString(`) UPDATE session_scripts SET fingerprint=v.fp, settled_at=max(?, session_scripts.updated_at)
+FROM v WHERE session_scripts.session_id=v.sid AND session_scripts.updated_at=v.upd RETURNING session_scripts.session_id`)
+		args = append(args, now)
+		rows, err := tx.QueryContext(ctx, q.String(), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			matched[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return matched, nil
+}
+
 // SettleSessionScripts computes each idle session's script once: the
 // fingerprint of its lines in event order. Sessions that received commands
 // after their last settle (updated_at > settled_at) are re-settled; the
@@ -43,13 +98,7 @@ func (s *Store) SettleSessionScripts(ctx context.Context, idleBefore time.Time, 
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
 	}
-	type pending struct {
-		id, first, last, updated string
-		fp, enc, display         string
-		cmds, tokens             int
-		distinctive              int
-	}
-	var list []*pending
+	var list []*settlePending
 	err := func() error {
 		// Same predicate as idx_session_scripts_pending so the planner can
 		// use the partial index (EXPLAIN: SEARCH session_scripts USING INDEX
@@ -66,7 +115,7 @@ WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? AND updated_at 
 		}
 		defer rows.Close()
 		for rows.Next() {
-			p := &pending{}
+			p := &settlePending{}
 			if err := rows.Scan(&p.id, &p.first, &p.last, &p.updated); err != nil {
 				return err
 			}
@@ -114,22 +163,47 @@ WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? AND updated_at 
 		// max(now, updated_at): a wall clock stepped back behind updated_at
 		// would otherwise leave the row pending and re-settle it every pass.
 		now := formatFixedUTC(time.Now())
-		for _, p := range ready {
-			r, err := tx.Exec(`UPDATE session_scripts SET fingerprint=?, settled_at=max(?, updated_at) WHERE session_id=? AND updated_at=?`,
-				p.fp, now, p.id, p.updated)
-			if err != nil {
-				return err
-			}
-			if n, _ := r.RowsAffected(); n == 0 {
-				continue // late line or purge since the read: next pass
-			}
-			if _, err := tx.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,token_count,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?)
-ON CONFLICT(fingerprint) DO UPDATE SET first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen)`,
-				p.fp, p.enc, p.display, p.cmds, p.distinctive, p.tokens, p.first, p.last); err != nil {
-				return err
-			}
-			settled++
+		// Multi-row statements, as RecordCampaignEvidence and SaveGrouping
+		// write (see batchParams): modernc re-prepares on every Exec, so two
+		// statements per session held writeMu for the statement count, not
+		// the row count. 2,000 sessions x 2 statements measured 121-138 ms
+		// of writeMu on x86 (a full settle pass runs ~11 times during a
+		// rebuild on prod's 21k sessions); batched, 60-64 ms, flat across
+		// 64-1,024 params per UPDATE, so batchParams is kept. The plan is
+		// SCAN v then SEARCH session_scripts by its primary key, O(batch)
+		// regardless of table size. The guarded UPDATE keeps
+		// its per-session check (session_id AND updated_at from the read)
+		// through a VALUES CTE joined in UPDATE ... FROM, and RETURNING says
+		// which sessions it matched, so the scripts upsert runs only for
+		// those, exactly as the per-row RowsAffected check did. A session
+		// that gained a line or was purged since the read matches nothing:
+		// next pass.
+		matched, err := settleSessionsBatched(ctx, tx, ready, now)
+		if err != nil {
+			return err
 		}
+		if len(matched) == 0 {
+			return nil
+		}
+		// One upsert row per matched session, in the read order. SQLite
+		// applies a multi-row INSERT ... ON CONFLICT row by row, so several
+		// sessions settling to one fingerprint in a batch fold their
+		// first/last_seen exactly as consecutive single-row statements did.
+		rows := make([]*settlePending, 0, len(matched))
+		for _, p := range ready {
+			if matched[p.id] {
+				rows = append(rows, p)
+			}
+		}
+		if err := execBatched(ctx, tx, `INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,token_count,first_seen,last_seen) VALUES `,
+			`(?,?,?,?,?,?,?,?)`, ` ON CONFLICT(fingerprint) DO UPDATE SET first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen)`,
+			len(rows), func(i int) []any {
+				p := rows[i]
+				return []any{p.fp, p.enc, p.display, p.cmds, p.distinctive, p.tokens, p.first, p.last}
+			}); err != nil {
+			return err
+		}
+		settled = len(rows)
 		return nil
 	})
 	if err != nil {
