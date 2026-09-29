@@ -181,6 +181,11 @@ type Server struct {
 	hasshRefreshing    bool
 	// hasshCoverage is store.HASSHCoverage unless a test substitutes it.
 	hasshCoverage func() (int, int, error)
+	// topActorRates is store.TopActorRatesFromCounts unless a test
+	// substitutes it.
+	topActorRates func(map[string]int, float64, int) ([]store.ActorRate, error)
+	// radarErrLog rate-limits the Brute-Force Radar's store-error log line.
+	radarErrLog opLogLimiter
 	// bg tracks background cache refreshes; RunContext joins it before
 	// returning so none of them outlives the store.
 	bg handlerDrain

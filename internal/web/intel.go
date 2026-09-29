@@ -171,7 +171,15 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// Derived from the cached per-actor counts (recentCountsCached): ranking is
 	// in memory and only the top 8 are read, by primary key.
 	if rc := s.recentCountsCached(); rc != nil {
-		if rad, err := s.st.TopActorRatesFromCounts(rc.counts, rc.hours, 8); err == nil {
+		top := s.st.TopActorRatesFromCounts
+		if s.topActorRates != nil {
+			top = s.topActorRates
+		}
+		// A store error drops only the radar: the rest of the page renders.
+		// It is logged once per radarErrLogEvery, not on every 5 s poll.
+		if rad, err := top(rc.counts, rc.hours, 8); err != nil {
+			s.radarErrLog.log("intel_radar", err)
+		} else {
 			for _, r := range rad {
 				resp.Radar = append(resp.Radar, radarRow{
 					IP:       r.Actor.PrimaryIP,
