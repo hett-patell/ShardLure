@@ -110,6 +110,14 @@ func showCampaign(ctx context.Context, st *store.Store, out io.Writer, args []st
 	return nil
 }
 
+// campaignEditsShown is how many of the newest edits campaign show prints;
+// the dashboard holds the full history.
+const campaignEditsShown = 5
+
+// writeCampaign prints a campaign detail. GetCampaign caps each list at
+// campaignDetailCap but returns the true totals, so every list printed short
+// of its total says "showing N of M": a campaign cut at 500 members must not
+// read as a 500-member campaign (audit I2).
 func writeCampaign(out io.Writer, d store.CampaignDetail) {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "campaign\t%s\n", termSafe(d.ID))
@@ -119,16 +127,44 @@ func writeCampaign(out io.Writer, d store.CampaignDetail) {
 	fmt.Fprintf(w, "linked by\t%s\n", orDash(termSafe(strings.Join(d.Kinds, ","))))
 	fmt.Fprintf(w, "actors\t%d\nIPs\t%d\nsessions\t%d\n", d.Actors, d.IPs, d.Sessions)
 	fmt.Fprintf(w, "first seen\t%s\nlast seen\t%s\n", formatDay(d.FirstSeen), formatDay(d.LastSeen))
-	fmt.Fprintf(w, "HASSH\t%s\n", orDash(termSafe(strings.Join(d.HASSHes, ", "))))
-	fmt.Fprintf(w, "clients\t%s\n", orDash(termSafe(strings.Join(d.Clients, ", "))))
-	fmt.Fprintf(w, "payload hosts\t%s\n", orDash(termSafe(strings.Join(d.Hosts, ", "))))
+	fmt.Fprintf(w, "HASSH\t%s\n", cappedList(d.HASSHes, d.HASSHesTotal))
+	fmt.Fprintf(w, "clients\t%s\n", cappedList(d.Clients, d.ClientsTotal))
+	fmt.Fprintf(w, "payload hosts\t%s\n", cappedList(d.Hosts, d.HostsTotal))
 	fmt.Fprintf(w, "notes\t%s\n\n", orDash(termSafe(d.Notes)))
 	fmt.Fprintln(w, "MEMBER\tIP\tPLAYBOOK\tSESSIONS\tWHY")
 	for _, m := range d.Members {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n", termSafe(m.ActorID), orDash(termSafe(m.PrimaryIP)),
 			orDash(termSafe(m.Playbook)), m.Sessions, memberReasons(m.Reasons))
 	}
+	if d.MembersTotal > len(d.Members) {
+		fmt.Fprintf(w, "(showing %d of %d members)\n", len(d.Members), d.MembersTotal)
+	}
+	if len(d.Edits) > 0 {
+		// The store returns edits oldest first; print the newest few.
+		shown := d.Edits[max(0, len(d.Edits)-campaignEditsShown):]
+		fmt.Fprintln(w, "\nEDIT\tWHEN\tWHO\tARG")
+		for _, e := range shown {
+			when := "-"
+			if !e.CreatedAt.IsZero() {
+				when = e.CreatedAt.UTC().Format("2006-01-02 15:04")
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", orDash(termSafe(e.Action)), when, orDash(termSafe(e.Who)), orDash(termSafe(e.Arg)))
+		}
+		if len(shown) < len(d.Edits) {
+			fmt.Fprintf(w, "(showing %d of %d edits; the dashboard has the full history)\n", len(shown), len(d.Edits))
+		}
+	}
 	w.Flush()
+}
+
+// cappedList joins an escaped list and discloses when the store returned
+// fewer entries than total.
+func cappedList(items []string, total int) string {
+	s := orDash(termSafe(strings.Join(items, ", ")))
+	if total > len(items) {
+		s += fmt.Sprintf(" (showing %d of %d)", len(items), total)
+	}
+	return s
 }
 
 // memberReasons renders the stored reasons JSON as "kind value (label)".

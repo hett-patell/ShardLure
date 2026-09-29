@@ -213,3 +213,87 @@ func TestScriptsRebuild(t *testing.T) {
 		t.Fatalf("listing still works: %v %q", err, b.String())
 	}
 }
+
+// GetCampaign caps each list at campaignDetailCap but returns the true
+// totals; campaign show must disclose "N of M" wherever it prints fewer than
+// the total, never a silently cut list (audit I2).
+func TestWriteCampaignDisclosesTruncatedLists(t *testing.T) {
+	members := make([]store.CampaignMemberDetail, 500)
+	for i := range members {
+		members[i] = store.CampaignMemberDetail{ActorID: fmt.Sprintf("cowrie:%03d", i)}
+	}
+	var b bytes.Buffer
+	writeCampaign(&b, store.CampaignDetail{
+		CampaignSummary: store.CampaignSummary{ID: "c-1", Actors: 600},
+		Members:         members, MembersTotal: 600,
+		HASSHes: []string{"h1", "h2"}, HASSHesTotal: 7,
+		Clients: []string{"SSH-2.0-a"}, ClientsTotal: 3,
+		Hosts: []string{"198.51.100.1"}, HostsTotal: 501,
+	})
+	out := b.String()
+	for _, want := range []string{"showing 500 of 600 members", "h1, h2 (showing 2 of 7)", "SSH-2.0-a (showing 1 of 3)", "198.51.100.1 (showing 1 of 501)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	// A complete list carries no note.
+	b.Reset()
+	writeCampaign(&b, store.CampaignDetail{
+		CampaignSummary: store.CampaignSummary{ID: "c-2"},
+		Members:         members[:2], MembersTotal: 2,
+		HASSHes: []string{"h1"}, HASSHesTotal: 1,
+	})
+	if strings.Contains(b.String(), "showing") {
+		t.Errorf("complete lists flagged as truncated:\n%s", b.String())
+	}
+}
+
+// campaign show prints the tail of the edit history the store already
+// fetches, escaped: who and arg are operator text that may be pasted from
+// attacker bytes (audit M5).
+func TestWriteCampaignPrintsRecentEdits(t *testing.T) {
+	var edits []store.CampaignEditRow
+	for i := range 7 {
+		edits = append(edits, store.CampaignEditRow{ID: int64(i + 1), Action: "rename", Arg: fmt.Sprintf("name-%d", i),
+			Who: "ops\x1b[31m", CreatedAt: time.Date(2026, 9, 1+i, 12, 0, 0, 0, time.UTC)})
+	}
+	var b bytes.Buffer
+	writeCampaign(&b, store.CampaignDetail{CampaignSummary: store.CampaignSummary{ID: "c-1"}, Edits: edits})
+	out := b.String()
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("raw ESC in edit history:\n%q", out)
+	}
+	for _, want := range []string{"EDIT", "name-6", "name-2", `ops\x1b[31m`, "2026-09-07", "showing 5 of 7 edits"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "name-1\n") || strings.Contains(out, "name-0") {
+		t.Errorf("older edits beyond the last 5 printed:\n%s", out)
+	}
+}
+
+// End to end through the store: 501 members, one over campaignDetailCap.
+func TestShowCampaignDisclosesStoreCap(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "cap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	row := store.CampaignRow{ID: "c-000000000501", Name: "Big", FirstSeen: now, LastSeen: now}
+	for i := range 501 {
+		row.Members = append(row.Members, store.CampaignMemberRow{ActorID: fmt.Sprintf("cowrie:%04d", i), Reasons: "[]"})
+	}
+	if err := st.SaveGrouping(ctx, []store.CampaignRow{row}, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if err := showCampaign(ctx, st, &b, []string{"show", "Big"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "(showing 500 of 501 members)") {
+		t.Fatalf("store cap not disclosed:\n%s", b.String()[max(0, b.Len()-400):])
+	}
+}
