@@ -142,6 +142,14 @@ var ErrRegroupHeld = errors.New("campaign: regroup held until rebuilt scripts se
 // tick is not a failure and starts no backoff); Regroup returns it.
 var ErrLeaseHeldElsewhere = errors.New("campaign: another process holds the campaign worker lease")
 
+// ErrLeaseLapsed means the lease this process held ran out during a phase
+// (recording, settling, classifying or grouping stalled past the TTL, or the
+// store no longer names this process as the holder), so the write the phase
+// led to was refused: another process may have run the pipeline meanwhile.
+// It is a failure (backoff, reported), and the next tick retakes the lease
+// as a takeover, which re-runs the version and hold checks.
+var ErrLeaseLapsed = errors.New("campaign: the worker lease lapsed during a phase; the write was refused")
+
 // campaignLeaseTTL bounds how long a crashed owner blocks the pipeline. The
 // holder renews at half-life (every ~30 s of ticks, one small write) and
 // again before the settle and regroup phases, so a tick can lose the lease
@@ -200,13 +208,22 @@ func (w *Worker) Close() {
 // database (`shardlure live` beside a separately started `shardlure web`)
 // both start this worker, and AssignScriptFamilies, PruneOrphanScripts, the
 // version reset and the hold release all assume a single sequential caller;
-// the lease gives them one. Regaining the lease re-reads the rebuild hold
-// from the store: the other holder may have run a version reset meanwhile,
-// and a stale holdClear would let this process regroup through its hold.
+// the lease gives them one.
+//
+// An acquire is a takeover, not a renewal, when this process holds no lease
+// or the one it held has lapsed on its own clock (a phase stalled past the
+// TTL: another process may have held and released it in between, unseen).
+// A takeover re-reads the rebuild hold from the store and re-runs the
+// normaliser version check: the other holder may have run a version reset,
+// or a `scripts --rebuild` may have deleted the version row, meanwhile, and
+// a stale holdClear let this process regroup through that hold (audit M-1),
+// while a stale versionChecked missed the rebuild until a restart (cmd audit
+// M2). Only a lease seen lost (leaseUntil zero) reset them before.
 func (w *Worker) holdLease(ctx context.Context, now time.Time) error {
 	if !w.leaseUntil.IsZero() && now.Before(w.leaseUntil.Add(-w.leaseTTL/2)) {
 		return nil
 	}
+	takeover := w.leaseUntil.IsZero() || !now.Before(w.leaseUntil)
 	held, err := w.st.AcquireCampaignLease(ctx, w.leaseOwner, now, w.leaseTTL)
 	if err != nil {
 		return err
@@ -220,8 +237,11 @@ func (w *Worker) holdLease(ctx context.Context, now time.Time) error {
 		w.leaseUntil = time.Time{}
 		return ErrLeaseHeldElsewhere
 	}
-	if w.leaseUntil.IsZero() {
-		w.holdClear = false
+	if takeover {
+		// The version check runs at the start of the next tick when the
+		// takeover happens mid-tick; the hold is re-read by this tick's
+		// rebuildHeld either way.
+		w.holdClear, w.versionChecked = false, false
 		if w.leaseLost {
 			logf("campaigns: this process now holds the campaign worker lease")
 			w.leaseLost = false
@@ -229,6 +249,38 @@ func (w *Worker) holdLease(ctx context.Context, now time.Time) error {
 	}
 	w.leaseUntil = now.Add(w.leaseTTL)
 	return nil
+}
+
+// fenceLease guards a write that assumes single ownership (SaveGrouping,
+// RebuildScriptFamilies): the lease must still be live on this process's
+// clock and renewable in the store under this owner, else ErrLeaseLapsed.
+// The clock alone is not a fence: holdLease skips the store for up to half
+// the TTL on the process's monotonic clock, while the other process judges
+// expiry on the wall-clock expiry stored in the row, so a wall-clock step
+// forward of more than the half-life lets it take over unseen; the renewal
+// asks the row (audit M-2). One small write per regroup.
+func (w *Worker) fenceLease(ctx context.Context) error {
+	now := w.clock()
+	if !w.leaseLive(now) {
+		return ErrLeaseLapsed
+	}
+	held, err := w.st.AcquireCampaignLease(ctx, w.leaseOwner, now, w.leaseTTL)
+	if err != nil {
+		return err
+	}
+	if !held {
+		w.leaseUntil = time.Time{}
+		return ErrLeaseLapsed
+	}
+	w.leaseUntil = now.Add(w.leaseTTL)
+	return nil
+}
+
+// leaseLive reports whether the lease this process holds is unexpired on
+// its own clock; the cheap half of the fence, enough before a bounded write
+// that only ever runs right after a phase that renewed against the store.
+func (w *Worker) leaseLive(now time.Time) bool {
+	return !w.leaseUntil.IsZero() && now.Before(w.leaseUntil)
 }
 
 // Wake asks for a regroup on the next tick (an operator edit arrived). It
@@ -400,6 +452,13 @@ func (w *Worker) tick(ctx context.Context) error {
 	if settled == 0 && !regrouped {
 		return nil
 	}
+	// Prune assumes the single caller too: a concurrent prune can delete a
+	// representative an in-flight assign pass loaded. The settle and assign
+	// phases before it are bounded (a batch and a 2 s budget), so the clock
+	// half of the fence is enough here.
+	if !w.leaseLive(w.clock()) {
+		return ErrLeaseLapsed
+	}
 	return w.st.PruneOrphanScripts(ctx)
 }
 
@@ -490,6 +549,12 @@ func (w *Worker) regroup(ctx context.Context) error {
 			delete(w.families, sha)
 		}
 	}
+	// Classifying can open thousands of payload files on the first regroup
+	// of a process (the memo is empty): renew the lease before grouping so
+	// the fence below does not refuse a save for that alone.
+	if err := w.holdLease(ctx, w.clock()); err != nil {
+		return err
+	}
 	// Group takes the tick context: a regroup that outlives the cycle budget
 	// or a shutdown stops inside Group and never reaches SaveGrouping.
 	out, err := Group(ctx, in)
@@ -499,6 +564,12 @@ func (w *Worker) regroup(ctx context.Context) error {
 	rows, assign := groupingRows(out)
 	if beforeSave != nil {
 		beforeSave()
+	}
+	// The save replaces every derived row and assumes no other process is
+	// doing the same: the lease must still be this process's, in the store,
+	// right here (audit M-2).
+	if err := w.fenceLease(ctx); err != nil {
+		return err
 	}
 	if err := w.st.SaveGrouping(ctx, rows, assign, out.Aliases, lastEdit); err != nil {
 		return err
