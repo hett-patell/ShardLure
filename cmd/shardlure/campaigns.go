@@ -95,9 +95,12 @@ func showCampaign(ctx context.Context, st *store.Store, out io.Writer, args []st
 	case errors.Is(err, sql.ErrNoRows):
 		return fmt.Errorf("no such campaign: %s", termSafe(args[1]))
 	case errors.Is(err, store.ErrAmbiguousCampaign):
+		// The IDs are the store's own matches (same lower() rule, uncapped),
+		// never a second lookup that could disagree with it.
 		msg := fmt.Sprintf("ambiguous name %s; use the campaign ID", termSafe(args[1]))
-		if ids := campaignsNamed(ctx, st, args[1]); len(ids) > 0 {
-			msg += ": " + termSafe(strings.Join(ids, ", "))
+		var amb *store.AmbiguousCampaignError
+		if errors.As(err, &amb) && len(amb.IDs) > 0 {
+			msg += ": " + termSafe(strings.Join(amb.IDs, ", "))
 		}
 		return errors.New(msg)
 	case err != nil:
@@ -105,24 +108,6 @@ func showCampaign(ctx context.Context, st *store.Store, out io.Writer, args []st
 	}
 	writeCampaign(out, d)
 	return nil
-}
-
-// campaignsNamed lists the IDs matching name the way GetCampaign matches
-// (case-insensitive name or suggested name), among the most recent campaigns
-// ListCampaigns will return. Best effort: it only decorates the error.
-func campaignsNamed(ctx context.Context, st *store.Store, name string) []string {
-	list, err := st.ListCampaigns(ctx, 1000)
-	if err != nil {
-		return nil
-	}
-	name = strings.TrimSpace(name)
-	var ids []string
-	for _, c := range list {
-		if strings.EqualFold(c.Name, name) || strings.EqualFold(c.SuggestedName, name) {
-			ids = append(ids, c.ID)
-		}
-	}
-	return ids
 }
 
 func writeCampaign(out io.Writer, d store.CampaignDetail) {

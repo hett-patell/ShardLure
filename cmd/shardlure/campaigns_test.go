@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,6 +54,37 @@ func TestCampaignOutputEscapesTerminalControls(t *testing.T) {
 	}
 	if !strings.Contains(out, `SHA256:x`) || !strings.Contains(out, "ssh_key") {
 		t.Errorf("reason not rendered:\n%s", out)
+	}
+}
+
+// The IDs printed are exactly the store's matches (errors.As on
+// *store.AmbiguousCampaignError), not a second, capped lookup: the old
+// helper read only the 1,000 newest campaigns, so the oldest match here was
+// missing from the list the operator was told to pick from.
+func TestShowCampaignAmbiguousListsEveryStoreMatch(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "many.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-2000 * time.Hour)
+	var rows []store.CampaignRow
+	for i := 0; i < 1001; i++ {
+		at := base.Add(time.Duration(i) * time.Hour)
+		rows = append(rows, store.CampaignRow{ID: fmt.Sprintf("c-%012d", i), SuggestedName: "Outlaw/Dota", FirstSeen: at, LastSeen: at})
+	}
+	if err := st.SaveGrouping(ctx, rows, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	err = showCampaign(ctx, st, &b, []string{"show", "outlaw/dota"})
+	if err == nil || strings.Count(err.Error(), "c-") != 1001 || !strings.Contains(err.Error(), "c-000000000000") {
+		n := 0
+		if err != nil {
+			n = strings.Count(err.Error(), "c-")
+		}
+		t.Fatalf("ambiguous error lists %d IDs (want 1001, including the oldest)", n)
 	}
 }
 
