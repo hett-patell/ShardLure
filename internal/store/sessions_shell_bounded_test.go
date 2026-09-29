@@ -44,6 +44,9 @@ func seedShellWindow(t *testing.T, st *Store, since time.Time) {
 	}
 	// A download carries its URL in command: it counts as a command-bearing event.
 	native(since.Add(time.Hour), "dl", "file_download", "http://198.51.100.1/x")
+	// An empty command text is not a command: the candidate predicate and the
+	// aggregate's COALESCE(command,'')<>'' must agree on it.
+	native(since.Add(90*time.Minute), "emptycmd", "command", "")
 	// Legacy command session inside the window, written with a far-west offset.
 	legacy(since.Add(30*time.Minute).In(time.FixedZone("w", -14*3600)).Format(time.RFC3339Nano), "legacyshell", "command", "id")
 	legacy(since.Add(31*time.Minute).Format(time.RFC3339Nano), "legacyshell", "connect", "")
@@ -101,7 +104,7 @@ func TestRecentShellSessionsMatchesWholeWindowGrouping(t *testing.T) {
 	for _, s := range want {
 		ids[s.ID] = true
 	}
-	if len(want) != 42 || !ids["legacyshell"] || !ids["dl"] || ids["oldshell"] || ids["stale"] {
+	if len(want) != 42 || !ids["legacyshell"] || !ids["dl"] || ids["oldshell"] || ids["stale"] || ids["emptycmd"] {
 		t.Fatalf("fixture population wrong (%d): %v", len(want), ids)
 	}
 }
@@ -134,6 +137,12 @@ func TestShellSessionQueryAggregatesOnlyCandidateSessions(t *testing.T) {
 	joined := strings.Join(plan, "\n")
 	if !strings.Contains(joined, "idx_events_session (source=? AND session_id=?") {
 		t.Fatalf("candidate sessions are not aggregated through idx_events_session:\n%s", joined)
+	}
+	// The candidates themselves come from the v26 partial command index, so
+	// the step is proportional to command rows (~1% of the window), not to
+	// every in-window event: COALESCE(command,'')<>'' could not use it.
+	if !strings.Contains(joined, "SEARCH events USING INDEX idx_events_cmd_ts (ts>?") {
+		t.Fatalf("candidate sessions are not read from idx_events_cmd_ts:\n%s", joined)
 	}
 	for _, line := range plan {
 		if strings.HasPrefix(line, "SCAN events") && !strings.Contains(line, "idx_events_legacy_ts") {

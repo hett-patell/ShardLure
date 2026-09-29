@@ -118,17 +118,25 @@ func (s *Store) sessionSummaryPage(since time.Time, minCommands, limit int) ([]S
 // commands" page from grouping every session of the window (3.5 s of a 60 s
 // ARM profile with the landing dashboard polled every 10 s).
 //
-// The native branch reads the window through the ts index; the unary + keeps
-// source out of index selection, because answering source='cowrie' from
-// idx_events_session walks every Cowrie row ever stored (the planner's choice
-// on an un-ANALYZEd database). The legacy branch stays on the pinned partial
-// index and puts the exact-time check FIRST, so a malformed legacy row in the
-// window still fails the query even when it carries no command, as it did when
-// the whole window was grouped.
+// The native branch reads the window through idx_events_cmd_ts, the v26
+// partial index over command-bearing events, so it visits only the ~1% of
+// in-window rows that carry a command. Its predicate must be the index's
+// WHERE clause character for character: SQLite's partial-index implication
+// check is syntactic, and the earlier COALESCE(command,”)<>” spelling of
+// the same condition left the planner on the plain ts index, walking every
+// in-window event (fix-all review M2). INDEXED BY makes a future drift an
+// error rather than a silent plan change; the unary + keeps source out of
+// index selection, because answering source='cowrie' from idx_events_session
+// walks every Cowrie row ever stored (the planner's choice on an un-ANALYZEd
+// database). The legacy branch stays on the pinned legacy index and puts the
+// exact-time check FIRST, so a malformed legacy row in the window still fails
+// the query even when it carries no command, as it did when the whole window
+// was grouped.
 func shellCandidates(since time.Time) (string, []any) {
 	key := formatFixedUTC(since)
-	return `SELECT session_id FROM events WHERE ts_unix_ns IS NOT NULL AND ts>=? AND +source='cowrie' AND session_id<>'' AND COALESCE(command,'')<>''
-UNION SELECT session_id FROM events INDEXED BY idx_events_legacy_ts WHERE ts_unix_ns IS NULL AND ` + legacyEventTimeSQL + `>=? AND source='cowrie' AND session_id<>'' AND COALESCE(command,'')<>''`,
+	const pred = "command IS NOT NULL AND command != ''"
+	return `SELECT session_id FROM events INDEXED BY idx_events_cmd_ts WHERE ` + pred + ` AND ts_unix_ns IS NOT NULL AND ts>=? AND +source='cowrie' AND session_id<>''
+UNION SELECT session_id FROM events INDEXED BY idx_events_legacy_ts WHERE ts_unix_ns IS NULL AND ` + legacyEventTimeSQL + `>=? AND source='cowrie' AND session_id<>'' AND ` + pred,
 		[]any{key, key}
 }
 
