@@ -98,10 +98,20 @@ func runPeriodicWorker(ctx context.Context, m *observability.Monitor, id observa
 	}
 }
 
-// runOptionalWorker is runPeriodicWorker for auxiliary analysis: failures are reported in /metrics but never make the daemon not-ready.
+// runOptionalWorker is runPeriodicWorker for auxiliary analysis: failures are
+// reported in /metrics but never make the daemon not-ready.
+//
+// It also logs them, because /metrics is not read on every deployment: the
+// first failure of a streak and each change of the error text, then the
+// recovery. Not every cycle, since a worker in backoff returns the same
+// retained error on each 5 s tick (campaign.Worker.Tick) and a permanent
+// failure would otherwise fill the journal; the failing tick before this
+// logged nothing at all, which is how a worker dead from its first tick went
+// unnoticed on the upgrade rehearsal (fix-all review I1).
 func runOptionalWorker(ctx context.Context, m *observability.Monitor, id observability.Worker, gap, budget time.Duration, fn func(context.Context) error) {
 	notify := workerCycleWith(m, id, budget, false)
 	defer workerStopped(m, id, false)
+	logged := "" // text of the failure last logged; "" while healthy
 	for ctx.Err() == nil {
 		notify(true, nil)
 		work, cancel := context.WithTimeout(ctx, budget)
@@ -111,6 +121,16 @@ func runOptionalWorker(ctx context.Context, m *observability.Monitor, id observa
 		}
 		cancel()
 		notify(false, err)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			// Shutdown cancelled the cycle: not a worker failure.
+		case err != nil && err.Error() != logged:
+			logged = err.Error()
+			log.Printf("%s worker failed (reported in /metrics until it succeeds): %v", id, err)
+		case err == nil && logged != "":
+			logged = ""
+			log.Printf("%s worker recovered", id)
+		}
 		timer := time.NewTimer(gap)
 		heartbeat := time.NewTicker(5 * time.Second)
 	wait:

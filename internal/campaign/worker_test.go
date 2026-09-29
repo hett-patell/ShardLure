@@ -139,11 +139,33 @@ func TestWorkerBacksOffAfterFailure(t *testing.T) {
 	}
 	w := NewWorker(st, 90, t.TempDir())
 	st.Close() // every query now fails
-	if err := w.Tick(context.Background()); err == nil {
+	first := w.Tick(context.Background())
+	if first == nil {
 		t.Fatal("expected failure")
 	}
+	// Inside the window nothing runs, but the failure is still reported: a
+	// nil here let a permanently failing worker read healthy in /metrics for
+	// all but a few seconds of every backoff window. The very same error
+	// value comes back, so a caller logging on change logs the streak once.
+	if err := w.Tick(context.Background()); err != first {
+		t.Fatalf("tick inside the backoff window returned %v, want the retained failure %v", err, first)
+	}
+	if w.failures != 1 {
+		t.Fatalf("a tick inside the window counted as an attempt: failures=%d", w.failures)
+	}
+}
+
+// A success after a failure streak clears the retained error, so the monitor
+// sees the recovery on the first good tick.
+func TestWorkerClearsRetainedErrorOnSuccess(t *testing.T) {
+	st := openStore(t)
+	w := NewWorker(st, 90, t.TempDir())
+	w.failures, w.retryAt, w.lastErr = 3, time.Now().Add(-time.Second), errors.New("earlier")
 	if err := w.Tick(context.Background()); err != nil {
-		t.Fatalf("tick inside the backoff window must be a no-op, got %v", err)
+		t.Fatal(err)
+	}
+	if w.failures != 0 || !w.retryAt.IsZero() || w.lastErr != nil {
+		t.Fatalf("streak state not cleared: failures=%d retryAt=%v lastErr=%v", w.failures, w.retryAt, w.lastErr)
 	}
 }
 

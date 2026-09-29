@@ -96,6 +96,9 @@ type Worker struct {
 	pending   bool // regroup owed: backlog just drained, or the last attempt failed
 	failures  int
 	retryAt   time.Time
+	// lastErr is the failure that started the current backoff; Tick returns
+	// it on every tick inside the window so the caller keeps reporting it.
+	lastErr error
 	// versionChecked is set once the stored script lines are known to match
 	// scriptVersion (see the start of tick).
 	versionChecked bool
@@ -140,19 +143,30 @@ func (w *Worker) Wake() { w.wake.Store(true) }
 
 // Tick runs one pass. After a failure it backs off exponentially (10 s
 // doubling, capped at 10 min) so a persistent error cannot burn CPU every
-// tick; ticks inside the window are no-ops.
+// tick. A tick inside the window does no work but returns the failure that
+// started it, so the monitor keeps the worker's error flag up and its last
+// success stale for as long as the worker is not actually succeeding.
+// Returning nil here made a permanently failing worker read healthy: the
+// error flag was set for the <=5 s between a real attempt and the next
+// cycle, then cleared and "last success" advanced, so with the backoff at
+// 10 min /metrics said healthy more than 99% of the time. That is how the
+// rc1->rc2 upgrade failure (a missing table on the first statement of every
+// tick) stayed invisible on the rehearsal box (fix-all review I1). The same
+// error value is returned on every tick of a window, so a caller that logs
+// on change logs a streak once.
 func (w *Worker) Tick(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if time.Now().Before(w.retryAt) {
-		return nil
+		return w.lastErr
 	}
 	if err := w.tick(ctx); err != nil {
 		w.failures++
 		w.retryAt = time.Now().Add(min(5*time.Second<<min(w.failures, 7), maxBackoff))
+		w.lastErr = err
 		return err
 	}
-	w.failures, w.retryAt = 0, time.Time{}
+	w.failures, w.retryAt, w.lastErr = 0, time.Time{}, nil
 	return nil
 }
 
