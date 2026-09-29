@@ -18,6 +18,15 @@ import (
 	"time"
 )
 
+// runtimeJoinBound caps the waits for readiness and for the join after a
+// shutdown. It is a hang detector, not a latency budget: the waits end on the
+// event (ready, exited) and only a stuck runtime reaches the bound. Fixed
+// 3-4 s deadlines failed under -race on a loaded GOMAXPROCS=2 host ("main
+// never wired operational readiness", "SIGTERM did not join runtime") with
+// nothing wrong: the same failures reproduce on the unmodified tree when the
+// machine is busy.
+const runtimeJoinBound = 60 * time.Second
+
 func TestRuntimeProductionAdapterServesAndJoins(t *testing.T) {
 	for _, live := range []bool{false, true} {
 		t.Run(map[bool]string{false: "web", true: "live"}[live], func(t *testing.T) {
@@ -49,12 +58,12 @@ func TestRuntimeProductionAdapterServesAndJoins(t *testing.T) {
 			case addr = <-bound:
 			case err := <-done:
 				t.Fatalf("startup: %v", err)
-			case <-time.After(3 * time.Second):
+			case <-time.After(runtimeJoinBound):
 				t.Fatal("no listener")
 			}
 			client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: time.Second}
 			defer client.CloseIdleConnections()
-			deadline := time.Now().Add(3 * time.Second)
+			deadline := time.Now().Add(runtimeJoinBound)
 			ready := false
 			for time.Now().Before(deadline) {
 				resp, err := client.Get("http://" + addr + "/readyz")
@@ -76,7 +85,7 @@ func TestRuntimeProductionAdapterServesAndJoins(t *testing.T) {
 				if err != nil {
 					t.Error(err)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(runtimeJoinBound):
 				t.Fatal("runtime did not join")
 			}
 			if _, err := st.EventCount(); err == nil {
@@ -156,10 +165,10 @@ func TestRuntimeMainUsesProductionLifecycle(t *testing.T) {
 	defer child.Process.Kill()
 	done := make(chan error, 1)
 	go func() { done <- child.Wait() }()
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 200 * time.Millisecond}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: time.Second}
 	defer client.CloseIdleConnections()
 	ready := false
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(runtimeJoinBound)
 	for time.Now().Before(deadline) {
 		res, err := client.Get("http://" + addr + "/readyz")
 		if err == nil {
@@ -169,7 +178,11 @@ func TestRuntimeMainUsesProductionLifecycle(t *testing.T) {
 		if ready {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case err := <-done: // the child died before it was ready: fail now, not at the bound
+			t.Fatalf("main exited before readiness: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	if !ready {
 		child.Process.Kill()
@@ -184,7 +197,7 @@ func TestRuntimeMainUsesProductionLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(runtimeJoinBound):
 		t.Fatal("SIGTERM did not join runtime")
 	}
 }
