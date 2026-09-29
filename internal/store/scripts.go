@@ -639,12 +639,21 @@ func scriptBool(b bool) int {
 }
 
 // PruneOrphanScripts drops scripts no session points at any more (retention,
-// or a re-settle that moved the session to a new fingerprint) unless they
-// represent a family that still has members.
+// or a re-settle that moved the session to a new fingerprint).
 //
-// Freeing a representative is not transitive within one call: the members
-// and the representative are judged against the same pre-delete state, so a
-// representative is freed on the pass after its last member goes.
+// A representative is no exception. It used to be kept while any member still
+// had sessions, so its normalized text (attacker commands, possibly typed
+// passwords) outlived retention_days for as long as the family kept recurring,
+// against the rule that settled scripts follow event retention
+// (store-pipeline audit M8). Now a representative with no session of its own
+// dissolves its family in the same transaction: every member's family is
+// cleared and the representative is deleted with the other orphans. The next
+// AssignScriptFamilies pass regroups the members around a live
+// representative. Families are display only (they never link), so the only
+// visible effect is a new family ID in the Scripts view, which
+// RebuildScriptFamilies rewrites on the next regroup. Re-electing a member in
+// place was rejected: every other member's family_distance is measured to the
+// old representative, and recomputing it needs script.* under writeMu.
 //
 // Assumes a single sequential caller alongside AssignScriptFamilies: run
 // concurrently, it could delete a representative an in-flight assign pass
@@ -652,6 +661,14 @@ func scriptBool(b bool) int {
 // whose representative row no longer exists.
 func (s *Store) PruneOrphanScripts(ctx context.Context) error {
 	return s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		// idx_scripts_family serves the member lookup; the representative
+		// set is bounded by families whose own sessions retention just took.
+		if _, err := tx.Exec(`UPDATE scripts SET family='', family_distance=0 WHERE family IN (
+  SELECT r.fingerprint FROM scripts r WHERE r.family=r.fingerprint
+    AND NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=r.fingerprint)
+    AND EXISTS (SELECT 1 FROM scripts m WHERE m.family=r.fingerprint AND m.fingerprint<>r.fingerprint))`); err != nil {
+			return err
+		}
 		_, err := tx.Exec(`DELETE FROM scripts WHERE NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=scripts.fingerprint)
   AND NOT EXISTS (SELECT 1 FROM scripts m WHERE m.family=scripts.fingerprint AND m.fingerprint<>scripts.fingerprint)`)
 		return err

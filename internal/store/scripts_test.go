@@ -87,15 +87,21 @@ func TestAssignScriptFamiliesHonoursCancellation(t *testing.T) {
 	}
 }
 
-// A family representative outlives its own sessions while members remain,
-// then goes once the last member is pruned.
-func TestPruneKeepsRepresentativeWithMembers(t *testing.T) {
+// Settled scripts follow event retention, representatives included. A
+// representative whose own sessions are gone used to be kept while any member
+// still had sessions, so its normalized text (attacker commands, possibly
+// typed passwords) outlived retention_days for as long as the family kept
+// recurring (store-pipeline audit M8). Its family is now dissolved: the
+// representative goes in the same pass and the surviving members return to
+// the family pass, which regroups them around a live representative.
+func TestPruneDissolvesFamilyOfExpiredRepresentative(t *testing.T) {
 	s := newTestStore(t, "prune-rep.db")
 	ctx := context.Background()
 	old := time.Now().UTC().Add(-time.Hour)
 	base := `cd ~; chattr -ia .ssh; rm -rf .ssh && mkdir .ssh && chmod 700 .ssh && echo "root\n%s\n%s" | passwd && crontab -r`
 	cowrieEvent(t, s, "s1", "cowrie:a", "command", strings.ReplaceAll(base, "%s", "Abc123xyz789"), "", "", old)
 	cowrieEvent(t, s, "s2", "cowrie:b", "command", strings.ReplaceAll(base, "%s", "Qwe987rty654")+" && history -c", "", "", old)
+	cowrieEvent(t, s, "s3", "cowrie:c", "command", strings.ReplaceAll(base, "%s", "Zxc555vbn111")+" && w", "", "", old)
 	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +112,9 @@ func TestPruneKeepsRepresentativeWithMembers(t *testing.T) {
 		t.Fatal(err)
 	}
 	var rep string
-	if err := s.db.QueryRow(`SELECT fingerprint FROM scripts WHERE family=fingerprint`).Scan(&rep); err != nil {
-		t.Fatal(err)
+	var members int
+	if err := s.db.QueryRow(`SELECT fingerprint, (SELECT COUNT(*) FROM scripts m WHERE m.family=r.fingerprint) FROM scripts r WHERE family=fingerprint`).Scan(&rep, &members); err != nil || members != 3 {
+		t.Fatalf("fixture: one family of 3, got rep %q members %d, %v", rep, members, err)
 	}
 	if _, err := s.db.Exec(`DELETE FROM session_scripts WHERE fingerprint=?`, rep); err != nil {
 		t.Fatal(err)
@@ -120,16 +127,34 @@ func TestPruneKeepsRepresentativeWithMembers(t *testing.T) {
 	if err := s.PruneOrphanScripts(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := count(); n != 2 {
-		t.Fatalf("representative with members pruned: %d scripts", n)
+	var kept int
+	s.db.QueryRow(`SELECT COUNT(*) FROM scripts WHERE fingerprint=?`, rep).Scan(&kept)
+	if kept != 0 || count() != 2 {
+		t.Fatalf("expired representative kept=%d, scripts=%d; want it gone and the two live members left", kept, count())
+	}
+	var unassigned int
+	s.db.QueryRow(`SELECT COUNT(*) FROM scripts WHERE family=''`).Scan(&unassigned)
+	if unassigned != 2 {
+		t.Fatalf("members still filed under the dead representative: %d unassigned", unassigned)
+	}
+	// The family pass regroups them around a live representative.
+	if _, err := s.AssignScriptFamilies(ctx, 500); err != nil {
+		t.Fatal(err)
+	}
+	var newRep string
+	if err := s.db.QueryRow(`SELECT fingerprint, (SELECT COUNT(*) FROM scripts m WHERE m.family=r.fingerprint) FROM scripts r WHERE family=fingerprint`).Scan(&newRep, &members); err != nil || members != 2 {
+		t.Fatalf("regrouped: rep %q members %d, %v", newRep, members, err)
+	}
+	var live int
+	s.db.QueryRow(`SELECT COUNT(*) FROM session_scripts WHERE fingerprint=?`, newRep).Scan(&live)
+	if live == 0 {
+		t.Fatal("new representative has no session")
 	}
 	if _, err := s.db.Exec(`DELETE FROM session_scripts`); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
-		if err := s.PruneOrphanScripts(ctx); err != nil {
-			t.Fatal(err)
-		}
+	if err := s.PruneOrphanScripts(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if n := count(); n != 0 {
 		t.Fatalf("orphans kept: %d", n)
