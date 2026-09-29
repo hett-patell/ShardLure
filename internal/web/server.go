@@ -51,6 +51,9 @@ type Server struct {
 	originPolicy OriginPolicy
 	originError  error
 	onListening  func(net.Addr)
+	// testRoutes lets a test register an extra handler on the live mux that
+	// RunContext serves; nil in production.
+	testRoutes func(*http.ServeMux)
 	// onCampaignEdit wakes the campaign worker after an operator edit; nil
 	// when no worker runs (the edit is still recorded).
 	onCampaignEdit func()
@@ -1084,6 +1087,9 @@ func (s *Server) RunContext(ctx context.Context) error {
 		return s.originError
 	}
 	mux := s.routes()
+	if s.testRoutes != nil {
+		s.testRoutes(mux)
+	}
 
 	// With SHARDLURE_DASH_TOKEN unset every /api/* endpoint is open —
 	// including the credential/password wordlist export. (/debug/* is the
@@ -1168,6 +1174,14 @@ func (s *Server) RunContext(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		handlers.stop()
+		// Cancel the drain's context BEFORE waiting for requests: a cache's
+		// first value is computed synchronously inside a request handler on
+		// that context, and srv.Shutdown only cancels request contexts after
+		// its timeout. Without this a cold dashboard request in flight made
+		// shutdown sit out the whole 30 s window and then the rest of the
+		// scan in handlers.wait() (fix-D M1). stop is idempotent; the defer
+		// still joins the background refreshes last.
+		s.bg.stop()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		err := srv.Shutdown(shutdownCtx)
