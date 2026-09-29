@@ -239,8 +239,9 @@ func TestTickTreatsStaleSaveAsRetryNotFailure(t *testing.T) {
 	}
 }
 
-// Wake regroups on the next tick; without it an edit waits for the 10-minute
-// schedule.
+// Wake regroups on the next tick; without a wake, a new edit in the store
+// (TestEditRecordedByAnotherProcessRegroupsOnNextTick) or the 10-minute
+// schedule, an idle tick does not regroup.
 func TestWakeRegroupsWithinOneTick(t *testing.T) {
 	st := openStore(t)
 	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
@@ -249,22 +250,19 @@ func TestWakeRegroupsWithinOneTick(t *testing.T) {
 	if err := w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	list, _ := st.ListCampaigns(ctx, 10)
-	if err := st.AppendCampaignEdit(ctx, list[0].ID, "rename", "Outlaw", "test"); err != nil {
-		t.Fatal(err)
-	}
+	grouped := w.lastGroup
 	if err := w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if list, _ := st.ListCampaigns(ctx, 10); list[0].Name != "" {
-		t.Fatalf("regrouped without a wake or schedule: %+v", list)
+	if !w.lastGroup.Equal(grouped) {
+		t.Fatal("regrouped without a wake, a new edit or the schedule")
 	}
 	w.Wake()
 	if err := w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if list, _ := st.ListCampaigns(ctx, 10); list[0].Name != "Outlaw" {
-		t.Fatalf("wake did not regroup: %+v", list)
+	if !w.lastGroup.After(grouped) {
+		t.Fatal("wake did not regroup on the next tick")
 	}
 }
 

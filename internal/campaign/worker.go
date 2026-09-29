@@ -122,6 +122,15 @@ type Worker struct {
 	leaseTTL   time.Duration
 	leaseUntil time.Time
 	leaseLost  bool
+	// clock is time.Now for the lease decisions; a field so a test can expire
+	// a lease without sleeping (the store takes the time explicitly).
+	clock func() time.Time
+	// editsSeen is the largest campaign_edits ID the last regroup read. Wake
+	// is per process, and with the lease only one process regroups: an edit
+	// POSTed to a `shardlure web` beside the `live` daemon wakes the wrong
+	// process, so each tick also compares the store's latest edit ID with
+	// this and regroups on a new one, whichever process recorded it.
+	editsSeen int64
 }
 
 // ErrRegroupHeld is Regroup's answer while a script rebuild holds regroups
@@ -142,7 +151,7 @@ const campaignLeaseTTL = time.Minute
 func NewWorker(st *store.Store, retentionDays int, evidenceRoot string) *Worker {
 	return &Worker{st: st, retentionDays: retentionDays, evidenceRoot: evidenceRoot, families: map[string]string{},
 		window: recordWindow, maxWindows: maxWindowsPerTick, scriptVersion: script.Version, idle: settleIdle,
-		leaseOwner: leaseOwnerID(), leaseTTL: campaignLeaseTTL,
+		leaseOwner: leaseOwnerID(), leaseTTL: campaignLeaseTTL, clock: time.Now,
 		classify: func(f *os.File) (string, error) {
 			c, err := bazaar.ClassifyFile(f)
 			return c.Family, err
@@ -263,7 +272,7 @@ func (w *Worker) Tick(ctx context.Context) error {
 func (w *Worker) tick(ctx context.Context) error {
 	// The lease first: a process that does not hold it runs nothing below,
 	// the version reset included.
-	if err := w.holdLease(ctx, time.Now()); err != nil {
+	if err := w.holdLease(ctx, w.clock()); err != nil {
 		return err
 	}
 	// Once per process, before recording: stored lines are pre-computed
@@ -320,7 +329,7 @@ func (w *Worker) tick(ctx context.Context) error {
 	}
 	// Recording can run up to its 5 s budget: renew the lease before the
 	// phases that assume a single caller, and stop here if it was lost.
-	if err := w.holdLease(ctx, time.Now()); err != nil {
+	if err := w.holdLease(ctx, w.clock()); err != nil {
 		return err
 	}
 	// settle -> assign -> (regroup, rebuild) -> prune, sequentially in this
@@ -341,11 +350,22 @@ func (w *Worker) tick(ctx context.Context) error {
 	}
 	// While held, nothing regroups, a Wake included: the wake flag and
 	// pending stay set, so the regroup owed runs on the first tick after the
-	// hold ends (the edit itself is already recorded).
-	woken := !held && w.wake.Swap(false)
+	// hold ends (the edit itself is already recorded). An edit recorded by
+	// another process (see editsSeen) counts as a wake too.
+	woken := false
+	if !held {
+		latest, err := w.st.LatestCampaignEditID(ctx)
+		if err != nil {
+			return err
+		}
+		woken = w.wake.Swap(false) || latest > w.editsSeen
+	}
 	regrouped := false
 	if !held && (woken || w.pending || (w.drained && time.Since(w.lastGroup) >= regroupEvery)) {
-		if err := w.holdLease(ctx, time.Now()); err != nil {
+		if err := w.holdLease(ctx, w.clock()); err != nil {
+			if woken {
+				w.Wake() // not regrouped: keep the edit's wake for when the lease is back
+			}
 			return err
 		}
 		err := w.regroup(ctx)
@@ -377,7 +397,7 @@ func (w *Worker) tick(ctx context.Context) error {
 func (w *Worker) Regroup(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.holdLease(ctx, time.Now()); err != nil {
+	if err := w.holdLease(ctx, w.clock()); err != nil {
 		return err
 	}
 	held, err := w.rebuildHeld(ctx)
@@ -470,6 +490,7 @@ func (w *Worker) regroup(ctx context.Context) error {
 	if err := w.st.SaveGrouping(ctx, rows, assign, out.Aliases, lastEdit); err != nil {
 		return err
 	}
+	w.editsSeen = lastEdit // the saved grouping includes every edit up to here
 	return w.st.RebuildScriptFamilies(ctx, population)
 }
 

@@ -320,6 +320,16 @@ func (s *Store) CampaignEdits(ctx context.Context) ([]CampaignEditRow, error) {
 	return out, rows.Err()
 }
 
+// LatestCampaignEditID is the largest edit ID recorded (0 when none): one
+// primary-key read per tick lets the campaign worker holding the lease notice
+// an edit recorded by another process (a `shardlure web` beside the `live`
+// daemon), whose in-process Wake it cannot see.
+func (s *Store) LatestCampaignEditID(ctx context.Context) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM campaign_edits`).Scan(&id)
+	return id, err
+}
+
 func (s *Store) AppendCampaignEdit(ctx context.Context, campaignID, action, arg, who string) error {
 	return s.WithTxContext(ctx, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`INSERT INTO campaign_edits(campaign_id,action,arg,who,created_at) VALUES(?,?,?,?,?)`,

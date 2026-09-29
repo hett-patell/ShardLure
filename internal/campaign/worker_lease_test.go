@@ -65,20 +65,26 @@ func TestLeaseExpiryHandsThePipelineOver(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
 	logs := captureLog(t)
+	// A shared fake clock: the lease is decided on the time the worker passes
+	// to the store, so the test advances time instead of sleeping (a real
+	// 40 ms TTL lapsed before the second tick under a loaded test host).
+	now := time.Now()
+	clock := func() time.Time { return now }
 	w1 := NewWorker(st, 90, t.TempDir())
-	w1.leaseTTL = 40 * time.Millisecond
+	w1.clock = clock
 	w2 := NewWorker(st, 90, t.TempDir())
-	w2.leaseTTL = 40 * time.Millisecond
+	w2.clock = clock
 	if err := w1.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	now = now.Add(10 * time.Second)
 	if err := w2.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != w1.leaseOwner {
 		t.Fatalf("w2 took a live lease: holder %q", owner)
 	}
-	time.Sleep(60 * time.Millisecond) // w1 "crashed": no renewal
+	now = now.Add(campaignLeaseTTL) // w1 "crashed": no renewal, the lease has expired
 	if err := w2.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +95,7 @@ func TestLeaseExpiryHandsThePipelineOver(t *testing.T) {
 		t.Fatalf("takeover not logged:\n%s", logs.String())
 	}
 	// w1 comes back: its in-memory expiry has passed, the renewal is refused.
+	now = now.Add(time.Second)
 	if err := w1.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +105,7 @@ func TestLeaseExpiryHandsThePipelineOver(t *testing.T) {
 	// Regaining the lease re-reads the hold from the store (holdClear reset).
 	w2.Close()
 	w1.holdClear = true
+	now = now.Add(time.Second)
 	if err := w1.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -129,5 +137,44 @@ func TestCloseReleasesTheLease(t *testing.T) {
 	}
 	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != w2.leaseOwner {
 		t.Fatalf("released lease not taken: holder %q", owner)
+	}
+}
+
+// With the lease, only one process regroups, but edits are POSTed to whichever
+// process serves the dashboard: an edit recorded straight into the store (as a
+// `shardlure web` beside the `live` daemon would, with its own Wake going to
+// the wrong process) must still be applied by the holder on its next tick, not
+// at the next 10-minute scheduled regroup.
+func TestEditRecordedByAnotherProcessRegroupsOnNextTick(t *testing.T) {
+	st := openStore(t)
+	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
+	ctx := context.Background()
+	w := NewWorker(st, 90, t.TempDir())
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	list, err := st.ListCampaigns(ctx, 10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("campaigns %+v %v", list, err)
+	}
+	if err := st.AppendCampaignEdit(ctx, list[0].ID, "rename", "From The Other Process", "web"); err != nil {
+		t.Fatal(err)
+	}
+	// No Wake: the other process called its own. The holder's tick must see
+	// the new edit ID and regroup now.
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	list, err = st.ListCampaigns(ctx, 10)
+	if err != nil || len(list) != 1 || list[0].Name != "From The Other Process" {
+		t.Fatalf("edit from another process not applied on the next tick: %+v %v", list, err)
+	}
+	// And an idle tick with nothing new does not regroup (lastGroup unchanged).
+	before := w.lastGroup
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.lastGroup.Equal(before) {
+		t.Fatal("an idle tick regrouped although no edit arrived")
 	}
 }
