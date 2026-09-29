@@ -68,6 +68,9 @@ type Worker struct {
 	// window and maxWindows are recordWindow and maxWindowsPerTick; fields so
 	// a test can make a small backlog span several windows and ticks.
 	window, maxWindows int
+	// scriptVersion is script.Version; a field so a test can run a worker
+	// built with another normaliser version.
+	scriptVersion int
 
 	wake atomic.Bool
 
@@ -82,11 +85,14 @@ type Worker struct {
 	pending   bool // regroup owed: backlog just drained, or the last attempt failed
 	failures  int
 	retryAt   time.Time
+	// versionChecked is set once the stored script lines are known to match
+	// scriptVersion (see the start of tick).
+	versionChecked bool
 }
 
 func NewWorker(st *store.Store, retentionDays int, evidenceRoot string) *Worker {
 	return &Worker{st: st, retentionDays: retentionDays, evidenceRoot: evidenceRoot, families: map[string]string{},
-		window: recordWindow, maxWindows: maxWindowsPerTick,
+		window: recordWindow, maxWindows: maxWindowsPerTick, scriptVersion: script.Version,
 		classify: func(p string) (string, error) {
 			c, err := bazaar.Classify(p)
 			return c.Family, err
@@ -116,6 +122,23 @@ func (w *Worker) Tick(ctx context.Context) error {
 }
 
 func (w *Worker) tick(ctx context.Context) error {
+	// Once per process, before recording: stored lines are pre-computed
+	// encodings, so lines from an older normaliser would fingerprint the same
+	// script differently from new sessions. On a version mismatch the store
+	// drops the script-derived rows (chunked) and rewinds the recorder, and
+	// this tick starts re-recording from the first event. Evidence and
+	// campaign identity are kept. A failure retries on the next tick, with
+	// the usual backoff; nothing is recorded until it succeeds.
+	if !w.versionChecked {
+		reset, err := w.st.ResetScriptsForVersion(ctx, w.scriptVersion)
+		if err != nil {
+			return err
+		}
+		w.versionChecked = true
+		if reset {
+			logf("campaigns: script normaliser version %d: rebuilding script lines and fingerprints from the retained commands", w.scriptVersion)
+		}
+	}
 	start := time.Now()
 	skipped := 0
 	// Reported even when a later window fails: earlier windows' rows are

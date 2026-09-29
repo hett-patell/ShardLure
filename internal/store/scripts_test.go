@@ -473,3 +473,63 @@ func TestFamilyPassBoundsRepresentativesPerScript(t *testing.T) {
 		t.Fatalf("loaded %d representatives for one script, want %d", loaded, familyNearestReps)
 	}
 }
+
+// A normaliser version change deletes only the script-derived tables, in
+// more than one chunk when they are large, rewinds the recorder to 0 and
+// stores the version; evidence and campaign identity are untouched. A
+// matching version is a no-op.
+func TestResetScriptsForVersion(t *testing.T) {
+	s := newTestStore(t, "script-version.db")
+	ctx := context.Background()
+	ts := formatFixedUTC(time.Now())
+	if err := s.WithTx(func(tx *sql.Tx) error {
+		for i := 0; i < scriptResetChunk+1500; i++ {
+			if _, err := tx.Exec(`INSERT INTO session_script_lines(session_id,event_id,line) VALUES(?,?,'id')`, fmt.Sprintf("s%d", i/300), i); err != nil {
+				return err
+			}
+		}
+		for _, q := range []string{
+			`INSERT INTO session_scripts(session_id,actor_id,first_seen,last_seen,updated_at) VALUES('s0','cowrie:a','` + ts + `','` + ts + `','` + ts + `')`,
+			`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen) VALUES('fp','n','d',1,1,'` + ts + `','` + ts + `')`,
+			`INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen) VALUES('fp','d','[]',1,1,1,1,1,0,'r','` + ts + `','` + ts + `')`,
+			`INSERT INTO campaign_evidence(kind,value,session_id,actor_id,first_seen,last_seen) VALUES('ssh_key','k','s0','cowrie:a','` + ts + `','` + ts + `')`,
+			`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('ssh_key','k','c-1',1)`,
+			`INSERT INTO campaign_aliases(old_id,new_id,created_at) VALUES('c-0','c-1','` + ts + `')`,
+			`INSERT INTO campaigns(id,name,updated_at) VALUES('c-1','Keep','` + ts + `')`,
+			`INSERT INTO campaign_edits(campaign_id,action,arg,created_at) VALUES('c-1','rename','Keep','` + ts + `')`,
+			`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('campaign','evidence-v1',0,999,'','` + ts + `')`,
+		} {
+			if _, err := tx.Exec(q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	count := func(q string) int {
+		var n int
+		if err := s.db.QueryRow(q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if reset, err := s.ResetScriptsForVersion(ctx, 7); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	if n := count(`SELECT (SELECT COUNT(*) FROM session_script_lines)+(SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM scripts)+(SELECT COUNT(*) FROM script_families)`); n != 0 {
+		t.Fatalf("%d script-derived rows left", n)
+	}
+	if n := count(`SELECT (SELECT COUNT(*) FROM campaign_evidence)+(SELECT COUNT(*) FROM campaign_ids)+(SELECT COUNT(*) FROM campaign_aliases)+(SELECT COUNT(*) FROM campaigns)+(SELECT COUNT(*) FROM campaign_edits)`); n != 5 {
+		t.Fatalf("identity/evidence rows = %d, want 5 untouched", n)
+	}
+	if c := evidenceCursorValue(t, s); c != 0 {
+		t.Fatalf("cursor %d, want 0", c)
+	}
+	if v := count(`SELECT offset FROM ingest_state WHERE source='script_version' AND path='normaliser'`); v != 7 {
+		t.Fatalf("stored version %d", v)
+	}
+	if reset, err := s.ResetScriptsForVersion(ctx, 7); err != nil || reset {
+		t.Fatalf("matching version: reset=%v err=%v", reset, err)
+	}
+}

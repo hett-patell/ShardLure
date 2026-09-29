@@ -489,3 +489,86 @@ func (s *Store) PruneOrphanScripts(ctx context.Context) error {
 		return err
 	})
 }
+
+// The normaliser version the stored script lines were encoded with lives in
+// ingest_state, beside the recorder cursor it governs.
+const scriptVersionSource, scriptVersionPath = "script_version", "normaliser"
+
+// scriptResetChunk bounds one reset transaction, the MaintenancePurge chunk
+// size: prod ARM holds ~21k sessions and a few hundred thousand lines, and
+// one DELETE of them all would hold writeMu for seconds.
+const scriptResetChunk = 5000
+
+// ResetScriptsForVersion makes the script-derived rows match normaliser
+// version (script.Version). When the stored version differs (or none is
+// stored: rows written before versioning), it deletes session_script_lines,
+// session_scripts, scripts and script_families in 5,000-row transactions,
+// then, in one final transaction, rewinds the campaign recorder's cursor to 0
+// and stores version. The next recorder windows re-encode every retained
+// command with the current normaliser, and settle re-fingerprints them. It
+// reports whether it reset anything: a database with no script rows and the
+// recorder at 0 (a fresh install) only has the version stored.
+//
+// campaign_evidence, campaign_ids, campaign_aliases, campaign_edits and
+// campaigns are left alone: key and payload evidence does not depend on the
+// normaliser and its replay is idempotent (ON CONFLICT keeps min/max
+// times), and campaign identity lives in those tables, so campaigns linked by
+// a key or payload keep their IDs and edits. Script values change fingerprint
+// by design, so a campaign held together only by a script is regrouped under
+// its new fingerprint.
+//
+// The version is written last: a reset interrupted between chunks (crash,
+// shutdown) leaves the old version stored and simply runs again. The caller
+// is the campaign worker, before it records, so nothing re-adds rows between
+// chunks.
+func (s *Store) ResetScriptsForVersion(ctx context.Context, version int) (bool, error) {
+	var stored int64
+	err := s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptVersionPath).Scan(&stored)
+	if err == nil && stored == int64(version) {
+		return false, nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	cursor, err := evidenceCursor(ctx, s.db)
+	if err != nil {
+		return false, err
+	}
+	reset := cursor != 0
+	for _, table := range []string{"session_script_lines", "session_scripts", "scripts", "script_families"} {
+		for {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			var n int64
+			if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+				r, err := tx.Exec(`DELETE FROM `+table+` WHERE rowid IN (SELECT rowid FROM `+table+` LIMIT ?)`, scriptResetChunk)
+				if err != nil {
+					return err
+				}
+				n, err = r.RowsAffected()
+				return err
+			}); err != nil {
+				return false, err
+			}
+			if n == 0 {
+				break
+			}
+			reset = true
+		}
+	}
+	err = s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		now := formatFixedUTC(time.Now())
+		for _, row := range []struct {
+			source, path string
+			offset       int64
+		}{{evidenceCursorSource, evidenceCursorPath, 0}, {scriptVersionSource, scriptVersionPath, int64(version)}} {
+			if _, err := tx.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'',?)
+ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=excluded.updated_at`, row.source, row.path, row.offset, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return reset && err == nil, err
+}

@@ -15,6 +15,24 @@ import (
 	"unicode/utf8"
 )
 
+// Version identifies the encoding EncodeLine produces. Stored script lines
+// hold pre-computed encodings (the recorder encodes each command once), so a
+// normaliser change that alters any encoding would leave old sessions and new
+// sessions of the same script with different fingerprints, and settled
+// scripts keep values computed from the encoding (Distinctive, CommandCount,
+// Display). Bump Version with every change that can alter an encoding or one
+// of those values (tokenising, placeholders, program detection, escaping,
+// separators, the recon list; not a pure refactor or a comment): the
+// campaign worker compares it with the version stored in the database and,
+// on a mismatch, deletes the script-derived rows and rewinds the recorder so
+// every line is re-encoded (store.ResetScriptsForVersion).
+//
+// History: 1 = first release (implicit: no stored version); 2 = wrapped
+// programs keep their name (nice/sudo/timeout/env/nohup/stdbuf), literal
+// < and > in attacker text are escaped, redirection targets are skipped,
+// command/type/hash probes count as recon.
+const Version = 2
+
 const (
 	MaxNormalizedBytes = 65536
 	MaxCommands        = 300

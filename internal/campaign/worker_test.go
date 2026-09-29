@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/script"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 )
@@ -443,5 +444,95 @@ func TestTickLogsSkippedTimestamps(t *testing.T) {
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], "skipped 1 ") {
 		t.Fatalf("logged %q", logged)
+	}
+}
+
+// A normaliser version change re-encodes every stored line: the worker drops
+// the script-derived rows, rewinds the recorder and re-records, while the
+// campaign keeps its ID and its operator edits (identity lives in the
+// evidence and campaign tables, which the reset leaves alone).
+func TestNormaliserVersionChangeReencodesLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
+	old := NewWorker(st, 90, t.TempDir())
+	old.scriptVersion = script.Version - 1
+	if err := old.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	list, err := st.ListCampaigns(ctx, 10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("campaigns %+v %v", list, err)
+	}
+	id := list[0].ID
+	if err := st.AppendCampaignEdit(ctx, id, "rename", "Keep", "cli"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// What the old normaliser left behind: lines in an encoding the current
+	// one no longer produces.
+	if _, err := raw.Exec(`UPDATE session_script_lines SET line='old-encoding'`); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	oldLog := logf
+	logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() { logf = oldLog })
+
+	w := NewWorker(st, 90, t.TempDir()) // the upgraded binary
+	w.Wake()                            // the rename above
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := raw.Query(`SELECT line FROM session_script_lines ORDER BY event_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for rows.Next() {
+		var l string
+		if err := rows.Scan(&l); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, l)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if len(lines) != 2 || lines[0] != script.EncodeLine(outlawCmd) || lines[1] != script.EncodeLine(outlawCmd) {
+		t.Fatalf("lines not re-encoded: %q", lines)
+	}
+	var stored int
+	if err := raw.QueryRow(`SELECT offset FROM ingest_state WHERE source='script_version'`).Scan(&stored); err != nil || stored != script.Version {
+		t.Fatalf("stored version %d %v", stored, err)
+	}
+	list, err = st.ListCampaigns(ctx, 10)
+	if err != nil || len(list) != 1 || list[0].ID != id || list[0].Name != "Keep" {
+		t.Fatalf("identity changed: %+v %v (want %s named Keep)", list, err, id)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "rebuilding") {
+		t.Fatalf("logged %q", logged)
+	}
+	// Same version on the next start: nothing is reset again.
+	if _, err := raw.Exec(`UPDATE session_script_lines SET line='kept'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewWorker(st, 90, t.TempDir()).Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var kept int
+	raw.QueryRow(`SELECT COUNT(*) FROM session_script_lines WHERE line='kept'`).Scan(&kept)
+	if kept != 2 {
+		t.Fatalf("a matching version reset the lines (%d kept)", kept)
 	}
 }
