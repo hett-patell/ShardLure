@@ -392,3 +392,34 @@ func TestRedirectionTargetKeepsSubstitution(t *testing.T) {
 		}
 	}
 }
+
+// >& and <& are redirections, not a redirection plus the background
+// operator: `>& f id` reported f as the program and split the command at &.
+func TestFdRedirectionTokens(t *testing.T) {
+	for _, tc := range []struct {
+		in, want, prog string
+		cmds           int
+	}{
+		{`>& f id`, `>& f id`, "id", 1},
+		{`>&/tmp/a id`, `>& /tmp/<f> id`, "id", 1},
+		{`id >& /dev/null`, `id >& /dev/null`, "id", 1},
+		{`2>& f id`, `2>& f id`, "id", 1},
+		{`id <&3`, `id <&3`, "id", 1},
+		{`<&0 id`, `<&0 id`, "id", 1},
+		{`id 2>&-`, `id 2>&-`, "id", 1},
+		{`<& f id`, `<& f id`, "id", 1},
+		{`&>> f id`, `&>> f id`, "id", 1},
+		{`id 2>&1 & wget x`, `id 2>&1 & wget x`, "id", 2},
+	} {
+		got := NormalizeCommand(tc.in)
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, s, tc.want)
+		}
+		if p := program(segments([][]string{got})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+		if n := CommandCount([][]string{got}); n != tc.cmds {
+			t.Errorf("CommandCount(%q) = %d, want %d", tc.in, n, tc.cmds)
+		}
+	}
+}

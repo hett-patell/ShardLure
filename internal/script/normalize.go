@@ -32,7 +32,7 @@ import (
 // < and > in attacker text are escaped, redirection targets are skipped,
 // command/type/hash probes count as recon; 3 = a leading heredoc or
 // here-string keeps the program slot, a redirection target keeps its
-// $(...) group.
+// $(...) group, and >& / <& tokenise as redirections.
 const Version = 3
 
 const (
@@ -53,8 +53,8 @@ const (
 )
 
 var (
-	tokenRe  = regexp.MustCompile(`<<<|<<-?|\d*>>?&\d+|&>>?|\d+>>?|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
-	redirRe  = regexp.MustCompile(`^(?:<<<|\d*>>?&\d+|&>>?|\d+>>?)$`)
+	tokenRe  = regexp.MustCompile(`<<<|<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
+	redirRe  = regexp.MustCompile(`^(?:<<<|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?)$`)
 	bareRe   = regexp.MustCompile(`^[a-z_][a-z0-9_.+-]*$`)
 	keyTypes = regexp.MustCompile(`^(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-\S+|sk-\S+@openssh\.com)$`)
 	keyBody  = regexp.MustCompile(`AAAA[0-9A-Za-z+/]{36,}={0,3}`)
@@ -179,7 +179,7 @@ func NormalizeCommand(cmd string) []string {
 				continue
 			}
 			if t == ">" || t == ">>" || t == "<" || redirRe.MatchString(t) {
-				target = !strings.Contains(t, ">&")
+				target = takesTarget(t)
 				out = append(out, t)
 				continue
 			}
@@ -525,6 +525,15 @@ var recon = map[string]bool{
 	"command": true, "type": true, "hash": true,
 }
 
+// takesTarget reports whether redirection t is followed by a target word.
+// fd duplications and closes (2>&1, <&3, 2>&-) carry theirs inside the
+// token; a bare >& or <& (`>& f`, bash's redirect-both form) and every other
+// redirection (>, <, 2>, &>, <<<) take the next word.
+func takesTarget(t string) bool {
+	i := strings.LastIndexByte(t, '&')
+	return i <= 0 || i == len(t)-1
+}
+
 // groupEnd returns the index of the last word of a redirection target that
 // starts at toks[i]. The tokenizer splits an unquoted `$(evil)` at "(", so a
 // "(" right after the target opens a group that belongs to it, up to the
@@ -578,7 +587,7 @@ func program(seg []string) string {
 		// wrapper's word, wherever they sit: `2>/dev/null id` runs id.
 		// fd duplications (2>&1) hold their target inside the token.
 		if t == ">" || t == ">>" || t == "<" || t == "<<" || redirRe.MatchString(t) {
-			target = !strings.Contains(t, ">&")
+			target = takesTarget(t)
 			continue
 		}
 		if wrap != nil {
