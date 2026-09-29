@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,9 +49,11 @@ func TestOptionalWorkerFailureIsNotRequired(t *testing.T) {
 // those cycles. The failure is logged once per streak (on the first cycle and
 // on a change of text), never on every 5 s tick, and the recovery once.
 func TestOptionalWorkerPersistentFailureStaysReportedAndLogsOnce(t *testing.T) {
-	var logs bytes.Buffer
+	// The worker goroutine writes the log while the test reads it, so the sink
+	// is mutex-guarded: a bare bytes.Buffer here was a data race under -race.
+	logs := &lockedBuffer{}
 	prev := log.Writer()
-	log.SetOutput(&logs)
+	log.SetOutput(logs)
 	defer log.SetOutput(prev)
 
 	m := observability.New(time.Now, 0)
@@ -105,4 +108,23 @@ func TestOptionalWorkerPersistentFailureStaysReportedAndLogsOnce(t *testing.T) {
 	if n := strings.Count(logs.String(), "recovered"); n != 1 {
 		t.Fatalf("recovery logged %d times:\n%s", n, logs.String())
 	}
+}
+
+// lockedBuffer is a goroutine-safe log sink for tests that read what a
+// background worker logged while it is still running.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
