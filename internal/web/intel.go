@@ -167,12 +167,17 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// attempts_per_hour, which is a lifetime average, so a widget captioned
 	// "most aggressive" put an actor mid-escalation below one that was briefly
 	// loud a month ago, and printed a figure 2-3x below the real current rate.
-	if rad, err := s.st.TopActorsByRecentRate(time.Now().Add(-recentRateWindow), 8); err == nil {
-		for _, r := range rad {
-			resp.Radar = append(resp.Radar, radarRow{
-				IP:       r.Actor.PrimaryIP,
-				RateHour: r.PerHour,
-			})
+	//
+	// Derived from the cached per-actor counts (recentCountsCached): ranking is
+	// in memory and only the top 8 are read, by primary key.
+	if rc := s.recentCountsCached(); rc != nil {
+		if rad, err := s.st.TopActorRatesFromCounts(rc.counts, rc.hours, 8); err == nil {
+			for _, r := range rad {
+				resp.Radar = append(resp.Radar, radarRow{
+					IP:       r.Actor.PrimaryIP,
+					RateHour: r.PerHour,
+				})
+			}
 		}
 	}
 

@@ -127,15 +127,20 @@ func (s *Store) recentEventCountsByActor(ctx context.Context, since time.Time) (
 	return counts, rows.Err()
 }
 
+// RecentEventCountsByActor is the per-actor event count over the window, the
+// raw material of both RecentRatesByActor and TopActorRatesFromCounts. The web
+// layer caches it once and derives both, so a poll does not count the window
+// twice.
+func (s *Store) RecentEventCountsByActor(ctx context.Context, since time.Time) (map[string]int, error) {
+	return s.recentEventCountsByActor(ctx, since)
+}
+
 // TopActorsByRecentRate ranks actors by how hard they are hitting IN THE WINDOW,
 // which is what the Brute-Force Radar claims to show.
 //
 // It replaces ORDER BY attempts_per_hour, which ordered by lifetime average: an
 // actor mid-escalation sorted below one that was briefly loud a month ago.
 func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, error) {
-	if limit <= 0 {
-		limit = 8
-	}
 	hours := time.Since(since).Hours()
 	if hours <= 0 {
 		hours = RecentRateWindow.Hours()
@@ -143,6 +148,19 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 	counts, err := s.recentEventCountsByActor(context.Background(), since)
 	if err != nil {
 		return nil, err
+	}
+	return s.TopActorRatesFromCounts(counts, hours, limit)
+}
+
+// TopActorRatesFromCounts ranks already-counted actors (highest count first,
+// ties by ID) and loads the top `limit` by primary key. hours is the window
+// length the counts cover.
+func (s *Store) TopActorRatesFromCounts(counts map[string]int, hours float64, limit int) ([]ActorRate, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+	if hours <= 0 {
+		hours = RecentRateWindow.Hours()
 	}
 	type hit struct {
 		id string
@@ -158,12 +176,12 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 		}
 		return hits[i].id < hits[j].id
 	})
-	if len(hits) > limit {
-		hits = hits[:limit]
-	}
 
-	out := make([]ActorRate, 0, len(hits))
+	out := make([]ActorRate, 0, limit)
 	for _, h := range hits {
+		if len(out) >= limit {
+			break
+		}
 		a, err := s.GetActor(h.id)
 		if err != nil || a == nil {
 			// An actor row can legitimately be missing: purge removes actors

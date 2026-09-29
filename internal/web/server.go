@@ -195,7 +195,7 @@ type Server struct {
 	threatAt     time.Time
 
 	// Windowed per-actor attack rates; see report_candidate.go.
-	ratesCache swrCache[map[string]float64]
+	ratesCache swrCache[*recentCounts]
 
 	// Advisory per-IP evidence only; actual report POSTs bypass this cache.
 	reportEvidenceMu     sync.Mutex

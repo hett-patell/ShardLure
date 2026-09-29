@@ -256,9 +256,10 @@ func TestNoRateDisplayUsesTheLifetimeAverage(t *testing.T) {
 				name, m)
 		}
 	}
-	// And the radar must use the windowed ranking query.
-	if !strings.Contains(readSource(t, "intel.go"), "TopActorsByRecentRate") {
-		t.Error("radar no longer ranks by TopActorsByRecentRate")
+	// And the radar must use the windowed ranking (from the cached windowed
+	// counts, TopActorRatesFromCounts, since fix round 1).
+	if !strings.Contains(readSource(t, "intel.go"), "TopActorRatesFromCounts") {
+		t.Error("radar no longer ranks by the windowed counts")
 	}
 	if strings.Contains(readSource(t, "intel.go"), "TopActorsByRate(") {
 		t.Error("radar reverted to TopActorsByRate, which orders by the lifetime average")
