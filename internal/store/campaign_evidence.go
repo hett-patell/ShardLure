@@ -541,6 +541,17 @@ func rekeyCampaignEvidenceTx(tx *sql.Tx, sessionID, newActorID string) error {
 // MAX(id) is the pre-delete maximum, and seq is at least that even when the
 // top rows were deleted earlier; max() of the two never sits above the next
 // id to be issued, so no re-ingested row is skipped.
+//
+// During a script rebuild hold (ResetScriptsForVersion) the parked cursor is
+// at or past the hold's high-water mark, so the next check would find nothing
+// pending, release, and drop script_version_carry before any re-ingested
+// session settled: every script row in campaign_ids orphaned. The re-ingested
+// events keep their session IDs, so the carry still applies once they are
+// re-recorded. The hold is therefore kept: script_version_carry stays, the
+// deadline anchor is dropped, and the high-water mark is set to
+// scriptHoldRemeasure so the next ScriptRebuildHold re-reads MAX(events.id).
+// clearSourceTx runs this before the replace re-inserts the events in the
+// same transaction, so any check sees the re-inserted rows in that maximum.
 func clearCampaignDerivedTx(tx *sql.Tx) error {
 	for _, q := range []string{
 		`DELETE FROM session_script_lines`, `DELETE FROM session_scripts`, `DELETE FROM scripts`, `DELETE FROM script_families`,
@@ -554,9 +565,19 @@ func clearCampaignDerivedTx(tx *sql.Tx) error {
 	if err := tx.QueryRow(`SELECT max(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0), COALESCE((SELECT MAX(id) FROM events),0))`).Scan(&floor); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'',?)
-ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=excluded.updated_at`,
-		evidenceCursorSource, evidenceCursorPath, floor, formatFixedUTC(time.Now()))
+	stamp := formatFixedUTC(time.Now())
+	if err := upsertIngestOffsetTx(tx, evidenceCursorSource, evidenceCursorPath, floor, stamp); err != nil {
+		return err
+	}
+	// Only an active hold is touched; without one this is a no-op.
+	r, err := tx.Exec(`UPDATE ingest_state SET offset=?, updated_at=? WHERE source=? AND path=?`,
+		scriptHoldRemeasure, stamp, scriptVersionSource, scriptHoldHWMPath)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n > 0 {
+		_, err = tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath)
+	}
 	return err
 }
 

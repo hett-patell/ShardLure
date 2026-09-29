@@ -17,6 +17,11 @@ const (
 	scriptHoldDeadlinePath = "hold_deadline" // unix seconds; set once the recorder passes hold_hwm
 )
 
+// scriptHoldRemeasure is the hold_hwm sentinel a Cowrie --replace leaves
+// (clearCampaignDerivedTx): the next ScriptRebuildHold replaces it with the
+// current MAX(events.id), which then includes the re-inserted events.
+const scriptHoldRemeasure = -1
+
 // scriptResetChunk bounds one reset transaction, the MaintenancePurge chunk
 // size: prod ARM holds ~21k sessions and a few hundred thousand lines, and
 // one DELETE of them all would hold writeMu for seconds.
@@ -175,7 +180,7 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 // hold lives in the database, so it survives a restart.
 //
 // It never ends while the recorder is below the events high-water mark taken
-// at reset. Once the recorder has passed it, the first check stores a
+// at reset (re-measured after a --replace, see scriptHoldRemeasure). Once the recorder has passed it, the first check stores a
 // deadline of now + scriptHoldDuration (persisted, so a restart keeps it),
 // and the hold ends when no session with a line at or below the mark is
 // unsettled, or at that deadline, whichever comes first. Release is one
@@ -192,6 +197,20 @@ func (s *Store) ScriptRebuildHold(ctx context.Context, now time.Time) (bool, err
 	}
 	if err != nil {
 		return false, err
+	}
+	if hwm == scriptHoldRemeasure {
+		// A --replace ran during the hold: measure the mark again over the
+		// re-inserted events. The UPDATE is guarded by the sentinel so a
+		// concurrent re-measure cannot move it twice.
+		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`UPDATE ingest_state SET offset=(SELECT COALESCE(MAX(id),0) FROM events), updated_at=?
+WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSource, scriptHoldHWMPath, scriptHoldRemeasure); err != nil {
+				return err
+			}
+			return tx.QueryRow(`SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldHWMPath).Scan(&hwm)
+		}); err != nil {
+			return false, err
+		}
 	}
 	cursor, err := evidenceCursor(ctx, s.db)
 	if err != nil {
