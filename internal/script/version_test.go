@@ -25,7 +25,7 @@ import (
 var versionPin = struct {
 	version int
 	digest  string
-}{4, "a6769d1637970776e4d27d7c2edf780e175ed249971337c27faf70b881844e79"}
+}{4, "3cfaac85c76076d61a49049ba069e8dd92e3ec69e86b2b92182d75876cf21509"}
 
 var versionCorpus = []string{
 	`uname -s -v -n -r -m`,

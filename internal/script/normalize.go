@@ -75,9 +75,12 @@ const (
 	litCR      = "<cr>"
 	litMore    = "<more>"
 
-	// MaxHeredocBodyBytes bounds how much of one heredoc body enters its
-	// token (raw bytes, counted before normalising). Bodies are part of the
-	// fingerprint, but a dropper carrying a large payload in a heredoc must
+	// MaxHeredocBodyBytes bounds one heredoc body inside its token, counted
+	// as encoded: every line's litNL and its escapes (<lt>, <cr>) included,
+	// so the token is at most len(heredocTok) + MaxHeredocBodyBytes +
+	// len(litNL+litMore). Counting raw line bytes let blank lines through
+	// free (65,000 newlines encoded to 260 KB; re-review item 4). Bodies are
+	// part of the fingerprint, but a dropper carrying a large payload in a heredoc must
 	// not push its whole line past the per-session byte cap: the recorder
 	// refuses a line that does not fit, and the script's later commands
 	// with it. 4 KiB keeps any script a bot writes this way (the loader
@@ -251,7 +254,7 @@ type heredoc struct {
 	delim string
 	tabs  bool
 	slot  int
-	lines []string // raw, at most MaxHeredocBodyBytes in total
+	lines []string // encoded, with their litNLs at most MaxHeredocBodyBytes
 	cut   bool     // the body had more than that
 }
 
@@ -267,7 +270,7 @@ func (h heredoc) token() string {
 	b.WriteString(heredocTok)
 	for _, l := range h.lines {
 		b.WriteString(litNL)
-		b.WriteString(escapeLiterals(l))
+		b.WriteString(l)
 	}
 	if h.cut {
 		b.WriteString(litNL + litMore)
@@ -606,15 +609,29 @@ func (sc *scanner) skipBodies(docs []heredoc) []heredoc {
 				resume = e
 				break
 			}
-			switch {
-			case d.cut:
-			case len(line) > budget:
-				d.lines = append(d.lines, line[:runeCut(line, budget)])
-				d.cut, budget = true, 0
-			default:
-				d.lines = append(d.lines, line)
-				budget -= len(line)
+			if d.cut {
+				continue // still looking for the terminator
 			}
+			// Each line is encoded once. One that does not fit is cut to
+			// the raw prefix as long as the room left, or, if that still
+			// encodes too long, a quarter of it: no substitution or escape
+			// more than quadruples its bytes (< is <lt>, \r is <cr>), so
+			// that prefix fits. At most two more encodings of at most
+			// MaxHeredocBodyBytes each, so the pass stays linear.
+			enc := escapeLiterals(line)
+			if cost := len(litNL) + len(enc); cost <= budget {
+				d.lines = append(d.lines, enc)
+				budget -= cost
+				continue
+			}
+			if room := budget - len(litNL); room >= 0 {
+				enc = escapeLiterals(line[:runeCut(line, room)])
+				if len(enc) > room {
+					enc = escapeLiterals(line[:runeCut(line, room/4)])
+				}
+				d.lines = append(d.lines, enc)
+			}
+			d.cut = true
 		}
 	}
 	sc.pos = resume // the newline ending the last terminator, or the end

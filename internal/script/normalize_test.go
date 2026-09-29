@@ -550,7 +550,7 @@ func TestHeredocBodyIsFingerprinted(t *testing.T) {
 	// A large body is cut at MaxHeredocBodyBytes and marked.
 	big := strings.Repeat("x", 3000) + "\n" + strings.Repeat("y", 3000) + "\n" + strings.Repeat("z", 10)
 	got := NormalizeCommand("cat <<EOF\n" + big + "\nEOF\nid")
-	want := heredocTok + litNL + strings.Repeat("x", 3000) + litNL + strings.Repeat("y", MaxHeredocBodyBytes-3000) + litNL + litMore
+	want := heredocTok + litNL + strings.Repeat("x", 3000) + litNL + strings.Repeat("y", MaxHeredocBodyBytes-3000-2*len(litNL)) + litNL + litMore
 	if len(got) != 5 || got[2] != want || got[4] != "id" {
 		t.Errorf("bounded body: %d tokens, body %d bytes", len(got), len(got[2]))
 	}
@@ -729,5 +729,29 @@ func TestHeredocDelimiterMatchesBash(t *testing.T) {
 	// A quote left open is a bash syntax error: not a heredoc, nothing hidden.
 	if got := norm("cat <<\"EOF\nbody\nEOF\nid"); !strings.HasSuffix(got, "; id") {
 		t.Errorf("unclosed quote in a delimiter hid the tail: %q", got)
+	}
+}
+
+// MaxHeredocBodyBytes bounds the encoded body, line breaks and escapes
+// included: blank lines used to cost nothing, so 65,000 newlines encoded to
+// 260 KB (re-review item 4).
+func TestHeredocBodyBoundCountsEncoding(t *testing.T) {
+	bound := len(heredocTok) + MaxHeredocBodyBytes + len(litNL+litMore)
+	for name, body := range map[string]string{
+		"newlines": strings.Repeat("\n", 65000),
+		"crlf":     strings.Repeat("\r\n", 32000),
+		"cr":       strings.Repeat("\r", 20000),
+		"lt":       strings.Repeat("<", 60000),
+		"lt-lines": strings.Repeat("<\n", 30000),
+		"one-line": strings.Repeat("ab ", 20000),
+	} {
+		got := NormalizeCommand("cat <<EOF\n" + body + "\nEOF\nid")
+		if len(got) != 5 || got[4] != "id" {
+			t.Errorf("%s: lost the tail (%d tokens)", name, len(got))
+			continue
+		}
+		if tok := got[2]; len(tok) > bound || !strings.HasSuffix(tok, litNL+litMore) {
+			t.Errorf("%s: body token %d bytes, bound %d, cut marked %v", name, len(tok), bound, strings.HasSuffix(tok, litNL+litMore))
+		}
 	}
 }
