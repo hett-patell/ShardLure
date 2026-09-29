@@ -47,6 +47,11 @@ func TestAssignFamilyDoesNotChain(t *testing.T) {
 	if fp, _, ok := AssignFamily(b, reps); !ok || fp != "A" {
 		t.Fatalf("B not assigned to A: %v %v", fp, ok)
 	}
+	// Contrast: were B a representative too, C would join through it, so
+	// the fixture really chains and the next assertion is not vacuous.
+	if fp, _, ok := AssignFamily(c, []Rep{{Fingerprint: "A", Tokens: a}, {Fingerprint: "B", Tokens: b}}); !ok || fp != "B" {
+		t.Fatalf("setup: C beside rep B = %v %v, want B", fp, ok)
+	}
 	// B joined A's family as a member; only A represents it.
 	if fp, d, ok := AssignFamily(c, reps); ok {
 		t.Fatalf("C chained into A's family through B: %v at %v", fp, d)

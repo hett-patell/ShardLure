@@ -310,3 +310,41 @@ func TestFamilyPassSkipsRepsOutsideLengthBand(t *testing.T) {
 		t.Fatalf("loaded representatives outside the length band: %v", loaded)
 	}
 }
+
+// Families never chain through members: with A ~ B, B ~ C and A !~ C, B joins
+// A's family and C must become its own representative. AssignScriptFamilies
+// enforces this by adding only unassigned scripts as representatives; were B
+// added too, C would join through it.
+func TestFamilyPassDoesNotChainThroughMembers(t *testing.T) {
+	s := newTestStore(t, "families-chain.db")
+	ctx := context.Background()
+	mk := func(y int) string { // the first y of 10 commands differ from A
+		cmds := make([]string, 10)
+		for i := range cmds {
+			w := "x"
+			if i < y {
+				w = "y"
+			}
+			cmds[i] = fmt.Sprintf("mkdir %s%d", w, i)
+		}
+		return strings.Join(cmds, "; ")
+	}
+	a, b, c := mk(0), mk(2), mk(5)
+	tok := func(cmd string) []string { return script.Tokens(script.Join([]string{script.EncodeLine(cmd)})) }
+	ta, tb, tc := tok(a), tok(b), tok(c)
+	if script.Distance(ta, tb) > script.FamilyThreshold || script.Distance(tb, tc) > script.FamilyThreshold || script.Distance(ta, tc) <= script.FamilyThreshold {
+		t.Fatalf("precondition: A~B %.3f B~C %.3f A~C %.3f", script.Distance(ta, tb), script.Distance(tb, tc), script.Distance(ta, tc))
+	}
+	seedFamilyScripts(t, s, []string{a, b, c}) // first_seen order A, B, C: A is processed first
+	if n, err := s.AssignScriptFamilies(ctx, 500); err != nil || n != 3 {
+		t.Fatalf("assign: %d %v", n, err)
+	}
+	fp := func(cmd string) string { return script.Fingerprint(script.Join([]string{script.EncodeLine(cmd)})) }
+	fam := scriptFamilies(t, s)
+	if fam[fp(a)] != fp(a) || fam[fp(b)] != fp(a) {
+		t.Fatalf("A and B must share A's family: %v", fam)
+	}
+	if fam[fp(c)] != fp(c) {
+		t.Fatalf("C chained through member B: family %q, want its own %q", fam[fp(c)], fp(c))
+	}
+}
