@@ -70,7 +70,9 @@ func restoreWithOperations(ctx context.Context, opts RestoreOptions, ops fileOpe
 	if err != nil {
 		return report, err
 	}
-	source, err := openSource(input, false)
+	// The bundle is an operator-chosen path, not a configured source: the CLI
+	// attributes its refusal by path (--input), so it carries no role.
+	source, err := openSource(input, false, "")
 	if err != nil {
 		return report, err
 	}
