@@ -157,20 +157,13 @@ type Server struct {
 	eventsCache  map[int]windowedEvents
 	eventsUseSeq uint64
 
-	// statsCache contains only cheap or recent operational values that justify
+	// liveStats contains only cheap or recent operational values that justify
 	// the short dashboard TTL. Whole-table distributions and lifetime values
-	// have separate, longer-lived caches below.
-	statsMu     sync.Mutex
-	statsCached *liveSummaryStats
-	statsAt     time.Time
-
-	distributionMu     sync.Mutex
-	distributionCached *distributionSummaryStats
-	distributionAt     time.Time
-
-	lifetimeMu     sync.Mutex
-	lifetimeCached *lifetimeSummaryStats
-	lifetimeAt     time.Time
+	// have separate, longer-lived caches below. All three, extraCache and
+	// ratesCache serve stale-while-revalidate; see swrCache.
+	liveStats         swrCache[*liveSummaryStats]
+	distributionStats swrCache[*distributionSummaryStats]
+	lifetimeStats     swrCache[*lifetimeSummaryStats]
 
 	// HASSH coverage gets its OWN, much longer TTL than the rest of
 	// summaryStats. See hasshCoverageCached for why it cannot ride statsTTL.
@@ -190,11 +183,9 @@ type Server struct {
 	// /api/dashboard ran UNCACHED on every 5s poll: the 72h hourly-by-kind
 	// GROUP BY (substr(ts) grouping, whole-window sort) and RecentShellSessions
 	// (GROUP BY session_id + a ROW_NUMBER() CTE over the 24h cowrie window).
-	// Same cadence and staleness profile as statsCache — data only moves on
+	// Same cadence and staleness profile as liveStats — data only moves on
 	// the 5s ingest tick — so they share its TTL.
-	dashExtraMu     sync.Mutex
-	dashExtraCached *dashExtra
-	dashExtraAt     time.Time
+	extraCache swrCache[*dashExtra]
 
 	// Threat-gauge window aggregate. Same reasoning as the caches above: one
 	// indexed pass over the 24h window (~16ms cold on 670k rows), memoized so a
@@ -204,9 +195,7 @@ type Server struct {
 	threatAt     time.Time
 
 	// Windowed per-actor attack rates; see report_candidate.go.
-	ratesMu     sync.Mutex
-	ratesCached map[string]float64
-	ratesAt     time.Time
+	ratesCache swrCache[map[string]float64]
 
 	// Advisory per-IP evidence only; actual report POSTs bypass this cache.
 	reportEvidenceMu     sync.Mutex
@@ -384,100 +373,90 @@ func (s *Server) refreshHASSHCoverage() {
 }
 
 func (s *Server) liveSummaryStatsCached() (*liveSummaryStats, error) {
-	s.statsMu.Lock()
-	defer s.statsMu.Unlock()
-	if s.statsCached != nil && time.Since(s.statsAt) < statsTTL {
-		return s.statsCached, nil
-	}
+	return s.liveStats.get(&s.bg, statsTTL, s.computeLiveSummaryStats)
+}
+
+func (s *Server) computeLiveSummaryStats() (*liveSummaryStats, time.Time, error) {
 	ec, err := s.st.EventCount()
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
 	ac, err := s.st.ActorCount()
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
 	intents, err := s.st.CountsByIntent()
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
 	playbooks, err := s.st.CountsByPlaybook()
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
 	hourlyByKind, err := s.st.HourlyEventCountsByKind(72)
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
 	// Read-only liveness of the sibling honeypot unit. Best-effort: an unknown
 	// value simply hides the readout rather than failing the cache refresh.
 	//
 	// context.Background() is deliberate, NOT an oversight: this populates a
-	// shared 10s cache, so binding it to whichever request happened to trigger
-	// the refresh would let one client disconnecting abort the refresh for
-	// everyone. StartedAt applies its own 2s timeout, so nothing can hang.
+	// shared 10s cache (usually from a background refresh), so binding it to
+	// whichever request happened to trigger the refresh would let one client
+	// disconnecting abort the refresh for everyone. StartedAt applies its own
+	// 2s timeout, so nothing can hang.
 	cowrieUptime, cowrieUp := hostsvc.Uptime(context.Background(), s.cowrieUnit, time.Now())
-	s.statsCached = &liveSummaryStats{
+	return &liveSummaryStats{
 		Events: ec, Actors: ac, IntentCounts: intents, PlaybookCounts: playbooks,
 		HourlyByKind: hourlyByKind, CowrieUptime: cowrieUptime, CowrieUp: cowrieUp,
-	}
-	s.statsAt = time.Now()
-	return s.statsCached, nil
+	}, time.Now(), nil
 }
 
 func (s *Server) distributionSummaryStatsCached() (*distributionSummaryStats, error) {
-	s.distributionMu.Lock()
-	defer s.distributionMu.Unlock()
-	if s.distributionCached != nil && time.Since(s.distributionAt) < distributionStatsTTL {
-		return s.distributionCached, nil
-	}
-	kinds, err := s.st.CountsByKind()
-	if err != nil {
-		return s.distributionCached, err
-	}
-	sources, err := s.st.CountsBySource()
-	if err != nil {
-		return s.distributionCached, err
-	}
-	s.distributionCached = &distributionSummaryStats{KindCounts: kinds, SourceCounts: sources}
-	s.distributionAt = time.Now()
-	return s.distributionCached, nil
+	return s.distributionStats.get(&s.bg, distributionStatsTTL, func() (*distributionSummaryStats, time.Time, error) {
+		kinds, err := s.st.CountsByKind()
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		sources, err := s.st.CountsBySource()
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		return &distributionSummaryStats{KindCounts: kinds, SourceCounts: sources}, time.Now(), nil
+	})
 }
 
 func (s *Server) lifetimeSummaryStatsCached() (*lifetimeSummaryStats, error) {
-	s.lifetimeMu.Lock()
-	defer s.lifetimeMu.Unlock()
-	if s.lifetimeCached != nil && time.Since(s.lifetimeAt) < lifetimeStatsTTL {
-		return s.lifetimeCached, nil
-	}
+	return s.lifetimeStats.get(&s.bg, lifetimeStatsTTL, s.computeLifetimeSummaryStats)
+}
+
+func (s *Server) computeLifetimeSummaryStats() (*lifetimeSummaryStats, time.Time, error) {
 	ips, err := s.st.UniqueIPCount()
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
 	// Best-effort; 0 on error keeps the panel alive (and shortens the memo,
 	// see lifetimeStamp).
 	countries, countriesErr := s.st.DistinctGeoCountryCount()
 	topIPs, err := s.st.TopSourceIPs(25)
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
 	topUsers, err := s.st.TopUsernames(20)
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
 	topCommands, err := s.st.TopCommands(20)
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
 	// Best-effort like countries: 0 on error keeps the panel alive.
 	sessionCount, sessionsErr := s.st.CountSessions()
-	s.lifetimeCached = &lifetimeSummaryStats{
+	geoSettled := countriesErr == nil && (countries > 0 || !s.geo.isEnabled())
+	return &lifetimeSummaryStats{
 		UniqueIPs: ips, Countries: countries, TopIPs: topIPs, TopUsers: topUsers,
 		TopCommands: topCommands, Sessions: sessionCount,
-	}
-	geoSettled := countriesErr == nil && (countries > 0 || !s.geo.isEnabled())
-	s.lifetimeAt = lifetimeStamp(geoSettled && sessionsErr == nil)
-	return s.lifetimeCached, nil
+	}, lifetimeStamp(geoSettled && sessionsErr == nil), nil
 }
 
 // summaryStatsCached combines independently cached values according to how
@@ -517,33 +496,27 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 }
 
 // dashExtraCachedValues returns the memoized 72h hourly counts and recent shell
-// sessions, recomputing at most once per statsTTL. These two ran uncached on
+// sessions, refreshed at most once per statsTTL. These two ran uncached on
 // every 5s /api/dashboard poll; they share statsTTL because they change on the
-// same 5s ingest tick. On a recompute error the last-good value is served (nil
-// on first call), keeping the landing dashboard alive through a transient error.
+// same 5s ingest tick. An expired value is served while one background refresh
+// recomputes it (swrCache); a failed refresh keeps the last-good value, and a
+// first computation that fails yields nil, keeping the landing dashboard alive.
 func (s *Server) dashExtraCachedValues() ([]store.HourCount, []store.ShellSessionSummary) {
-	s.dashExtraMu.Lock()
-	defer s.dashExtraMu.Unlock()
-	if s.dashExtraCached != nil && time.Since(s.dashExtraAt) < statsTTL {
-		return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
-	}
-	hourly, err := s.st.HourlyEventCounts(72)
-	if err != nil {
-		if s.dashExtraCached != nil {
-			return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
+	extra, err := s.extraCache.get(&s.bg, statsTTL, func() (*dashExtra, time.Time, error) {
+		hourly, err := s.st.HourlyEventCounts(72)
+		if err != nil {
+			return nil, time.Time{}, err
 		}
+		shell, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		return &dashExtra{Hourly: hourly, ShellSessions: shell}, time.Now(), nil
+	})
+	if err != nil || extra == nil {
 		return nil, nil
 	}
-	shell, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
-	if err != nil {
-		if s.dashExtraCached != nil {
-			return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
-		}
-		return hourly, nil
-	}
-	s.dashExtraCached = &dashExtra{Hourly: hourly, ShellSessions: shell}
-	s.dashExtraAt = time.Now()
-	return hourly, shell
+	return extra.Hourly, extra.ShellSessions
 }
 
 type windowedEvents struct {

@@ -38,10 +38,13 @@ func TestSummaryStatsLifetimeValuesOutliveStatsTTL(t *testing.T) {
 	}
 
 	addSummaryEvent(t, s, "192.0.2.2")
-	s.statsMu.Lock()
-	s.statsAt = time.Now().Add(-statsTTL - time.Second)
-	s.statsMu.Unlock()
+	s.liveStats.expire(statsTTL + time.Second)
 
+	// The expired tier is served stale while it refreshes in the background.
+	if _, err := s.summaryStatsCached(); err != nil {
+		t.Fatalf("stale summaryStatsCached: %v", err)
+	}
+	s.bg.wait()
 	second, err := s.summaryStatsCached()
 	if err != nil {
 		t.Fatalf("second summaryStatsCached: %v", err)
@@ -62,10 +65,11 @@ func TestSummaryStatsLifetimeValuesRefreshAfterTheirTTL(t *testing.T) {
 	}
 	addSummaryEvent(t, s, "192.0.2.2")
 
-	s.lifetimeMu.Lock()
-	s.lifetimeAt = time.Now().Add(-lifetimeStatsTTL - time.Second)
-	s.lifetimeMu.Unlock()
-
+	s.lifetimeStats.expire(lifetimeStatsTTL + time.Second)
+	if _, err := s.summaryStatsCached(); err != nil {
+		t.Fatalf("stale summaryStatsCached: %v", err)
+	}
+	s.bg.wait()
 	got, err := s.summaryStatsCached()
 	if err != nil {
 		t.Fatalf("refreshed summaryStatsCached: %v", err)
@@ -87,10 +91,11 @@ func TestSummaryStatsDistributionsRefreshIndependently(t *testing.T) {
 	}
 
 	addSummaryEvent(t, s, "192.0.2.2")
-	s.distributionMu.Lock()
-	s.distributionAt = time.Now().Add(-distributionStatsTTL - time.Second)
-	s.distributionMu.Unlock()
-
+	s.distributionStats.expire(distributionStatsTTL + time.Second)
+	if _, err := s.summaryStatsCached(); err != nil {
+		t.Fatalf("stale summaryStatsCached: %v", err)
+	}
+	s.bg.wait()
 	second, err := s.summaryStatsCached()
 	if err != nil {
 		t.Fatalf("second summaryStatsCached: %v", err)
@@ -134,15 +139,19 @@ func TestSummaryStatsServesLastGoodWhenATierFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first summaryStatsCached: %v", err)
 	}
-	s.lifetimeMu.Lock()
-	s.lifetimeAt = time.Now().Add(-lifetimeStatsTTL - time.Second)
-	s.lifetimeMu.Unlock()
+	s.lifetimeStats.expire(lifetimeStatsTTL + time.Second)
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
 	got, err := s.summaryStatsCached()
 	if err != nil {
 		t.Fatalf("a failed lifetime refresh surfaced as an error: %v", err)
+	}
+	// The failed background refresh must keep the last-good value too.
+	s.bg.wait()
+	got, err = s.summaryStatsCached()
+	if err != nil {
+		t.Fatalf("after a failed background refresh: %v", err)
 	}
 	if got.UniqueIPs != first.UniqueIPs || got.Events != first.Events {
 		t.Fatalf("stale values not served: got ips %d events %d, want %d/%d", got.UniqueIPs, got.Events, first.UniqueIPs, first.Events)
@@ -175,7 +184,10 @@ func TestEmptyGeoResultsExpireOnTheShortTTL(t *testing.T) {
 	if _, err := s.lifetimeSummaryStatsCached(); err != nil {
 		t.Fatalf("lifetime tier: %v", err)
 	}
-	if age := time.Since(s.lifetimeAt); age < lifetimeStatsTTL-statsTTL-time.Second {
+	s.lifetimeStats.mu.Lock()
+	lifetimeAt := s.lifetimeStats.at
+	s.lifetimeStats.mu.Unlock()
+	if age := time.Since(lifetimeAt); age < lifetimeStatsTTL-statsTTL-time.Second {
 		t.Fatalf("zero-country lifetime value stamped for the long TTL (age %s)", age)
 	}
 }

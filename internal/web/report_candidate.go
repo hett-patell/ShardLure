@@ -65,22 +65,15 @@ func (s *Server) chooseReportCandidate(ip string, cands [2]abuseipdb.ReportCandi
 // recentRatesCached memoizes the per-actor windowed rates on the same 10s TTL as
 // the other poll-path aggregates: /api/intel builds candidates for up to 80
 // actors per poll, and re-running the GROUP BY for each would turn one indexed
-// scan into eighty.
+// scan into eighty. Stale-while-revalidate like the summary tiers (swrCache).
+// A failed refresh serves the previous map rather than an empty one: dropping
+// every rate to zero would silently de-prioritise every suggestion.
 func (s *Server) recentRatesCached() map[string]float64 {
-	s.ratesMu.Lock()
-	defer s.ratesMu.Unlock()
-	if s.ratesCached != nil && time.Since(s.ratesAt) < statsTTL {
-		return s.ratesCached
-	}
-	m, err := s.st.RecentRatesByActor(time.Now().Add(-recentRateWindow))
-	if err != nil {
-		// Serve the previous map rather than an empty one: dropping every rate to
-		// zero would silently de-prioritise every suggestion.
-		return s.ratesCached
-	}
-	s.ratesCached = m
-	s.ratesAt = time.Now()
-	return s.ratesCached
+	m, _ := s.ratesCache.get(&s.bg, statsTTL, func() (map[string]float64, time.Time, error) {
+		m, err := s.st.RecentRatesByActor(time.Now().Add(-recentRateWindow))
+		return m, time.Now(), err
+	})
+	return m
 }
 
 // primaryIPSeenCached memoizes actor→primary-IP-last-seen on the same TTL and
