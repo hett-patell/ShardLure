@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"debug/elf"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -43,7 +44,10 @@ func Classify(path string) (Classification, error) {
 		return Classification{}, err
 	}
 	defer f.Close()
-	return ClassifyFile(f)
+	// A read error is ignored here, as it always was: the share/intel callers
+	// tag whatever head was read (an unreadable file classifies "unknown").
+	c, _ := classifyOpen(f)
+	return c, nil
 }
 
 // ClassifyFile is Classify over an already-open file, for callers that pin
@@ -52,9 +56,26 @@ func Classify(path string) (Classification, error) {
 // It reads from offset 0 with ReadAt, so the file's own offset does not
 // matter, and it only reads: nothing is ever executed. The caller keeps
 // ownership of f.
+//
+// Unlike Classify it returns a read error (anything but a short file): a
+// caller that memoises families must not remember the answer for a partial
+// or empty head as the file's family.
 func ClassifyFile(f *os.File) (Classification, error) {
+	c, err := classifyOpen(f)
+	if err != nil {
+		return Classification{}, err
+	}
+	return c, nil
+}
+
+// classifyOpen classifies whatever head it could read and reports a read
+// error separately (io.EOF / io.ErrUnexpectedEOF only mean a short file).
+func classifyOpen(f *os.File) (Classification, error) {
 	buf := make([]byte, classifyScanBytes)
-	n, _ := io.ReadFull(io.NewSectionReader(f, 0, classifyScanBytes), buf)
+	n, readErr := io.ReadFull(io.NewSectionReader(f, 0, classifyScanBytes), buf)
+	if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+		readErr = nil
+	}
 	buf = buf[:n]
 
 	c := Classification{}
@@ -103,7 +124,7 @@ func ClassifyFile(f *os.File) (Classification, error) {
 	if !containsTag(c.Tags, "linux") {
 		c.Tags = append(c.Tags, "linux")
 	}
-	return c, nil
+	return c, readErr
 }
 
 // classifyELF reads the ELF header to attach format and arch tags.

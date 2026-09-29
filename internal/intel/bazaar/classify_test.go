@@ -369,6 +369,47 @@ func TestClassifyFileMatchesClassify(t *testing.T) {
 	}
 }
 
+// ClassifyFile reports a real read error instead of classifying an empty or
+// partial head (the campaign worker memoises families, so a failed read must
+// not become family ""). Classify(path) keeps ignoring read errors for its
+// share/intel callers: a directory opens but fails every read (EISDIR).
+func TestClassifyFileReturnsReadErrors(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.sh")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if c, err := ClassifyFile(f); err == nil || c.FileKind != "" || c.Family != "" || len(c.Tags) != 0 {
+		t.Fatalf("closed file: %+v, %v", c, err)
+	}
+	dir := t.TempDir()
+	d, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := ClassifyFile(d); err == nil {
+		t.Fatal("unreadable file classified without an error")
+	}
+	c, err := Classify(dir)
+	if err != nil || c.FileKind != "unknown" {
+		t.Fatalf("Classify must keep ignoring read errors: %+v, %v", c, err)
+	}
+	// A short file is not a read error.
+	g, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if c, err := ClassifyFile(g); err != nil || !containsTag(c.Tags, "script") {
+		t.Fatalf("short file: %+v, %v", c, err)
+	}
+}
+
 // TestFirstLineHandlesEmpty makes sure firstLine() doesn't panic on
 // odd inputs (the classifier shells out to it on every script).
 func TestFirstLineHandlesEmpty(t *testing.T) {

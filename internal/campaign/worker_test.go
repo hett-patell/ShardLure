@@ -461,6 +461,43 @@ func TestBurstDrainedWithinOneTickDoesNotForceRegroup(t *testing.T) {
 	}
 }
 
+// A classifier read error means unclassified and is not memoised: the next
+// lookup reads the file again and a success is remembered.
+func TestFamilyOfDoesNotMemoiseReadErrors(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	p := filepath.Join(root, "p.bin")
+	if err := os.WriteFile(p, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordArtifact(store.Artifact{TS: time.Now().UTC(), SHA256: "aa", LocalPath: p, SizeBytes: 100, Status: "fetched", Origin: "cowrie_download", URL: "cowrie-download:aa"}); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(st, 90, root)
+	t.Cleanup(func() { w.Close() })
+	calls := 0
+	w.classify = func(*os.File) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("read: input/output error")
+		}
+		return "RedTail", nil
+	}
+	if f := w.familyOf(ctx, "aa"); f != unclassified {
+		t.Fatalf("read error: family %q", f)
+	}
+	if _, ok := w.families["aa"]; ok {
+		t.Fatal("read error memoised")
+	}
+	if f := w.familyOf(ctx, "aa"); f != "redtail" || calls != 2 {
+		t.Fatalf("retry: family %q calls %d", f, calls)
+	}
+	if f := w.familyOf(ctx, "aa"); f != "redtail" || calls != 2 {
+		t.Fatalf("success not memoised: family %q calls %d", f, calls)
+	}
+}
+
 // A cancelled regroup never classifies: familyOf fails closed.
 func TestFamilyOfFailsClosedOnCancel(t *testing.T) {
 	st := openStore(t)
