@@ -319,3 +319,27 @@ func TestToolProbesAreRecon(t *testing.T) {
 		t.Error("a program run through `command -p` must still count")
 	}
 }
+
+// A leading redirection and its target keep the program slot open, so the
+// word after them keeps its literal name exactly as program() reports it.
+func TestLeadingRedirectionKeepsProgram(t *testing.T) {
+	for _, tc := range []struct{ in, want, prog string }{
+		{`> /tmp/a python3 x`, `> /tmp/<f> python3 x`, "python3"},
+		{`2>/dev/null python3 x`, `2> /dev/null python3 x`, "python3"},
+		{`2>&1 python3 x`, `2>&1 python3 x`, "python3"},
+		{`>/dev/null 2>&1 python3 x`, `> /dev/null 2>&1 python3 x`, "python3"},
+		{`< /tmp/kxhqwe python3`, `< /tmp/<f> python3`, "python3"},
+		{`> abc123def python3`, `> <tok> python3`, "python3"}, // the target is still normalised
+		{`sudo -u root > /tmp/a python3 x`, `sudo -u root > /tmp/<f> python3 x`, "python3"},
+		{`sudo > f -u root python3 x`, `sudo > f -u root python3 x`, "python3"},
+		{"id >\npython3 x", `id > ; python3 x`, "id"},
+	} {
+		got := NormalizeCommand(tc.in)
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, s, tc.want)
+		}
+		if p := program(segments([][]string{got})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+	}
+}

@@ -89,6 +89,7 @@ func NormalizeCommand(cmd string) []string {
 	out := make([]string, 0, len(raw))
 	start := true
 	var wrap *wrapState // non-nil while a wrapper's own words precede its program
+	target := false     // the previous word was a leading redirection awaiting its target
 	heredoc, inBody := "", false
 	for i := 0; i < len(raw); i++ {
 		t := raw[i]
@@ -134,6 +135,24 @@ func NormalizeCommand(cmd string) []string {
 			start = false
 			continue
 		}
+		// A redirection ahead of the program (`> /tmp/a python3`, `2>/dev/null
+		// id`) is not the program and neither is its target: both are kept
+		// (the target normalised) and the program slot stays open, matching
+		// program(). fd duplications (2>&1) hold their target in the token.
+		// A newline or operator ends a dangling redirection.
+		if start && t != "\n" && !operators[t] {
+			if target {
+				target = false
+				out = append(out, normalizeToken(t))
+				continue
+			}
+			if t == ">" || t == ">>" || t == "<" || redirRe.MatchString(t) {
+				target = !strings.Contains(t, ">&")
+				out = append(out, t)
+				continue
+			}
+		}
+		target = false
 		// A wrapper's options, option values and operands are ordinary
 		// arguments, but they keep the program slot open for the word after
 		// them. The role is decided on the normalised word, the form
