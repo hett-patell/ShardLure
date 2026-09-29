@@ -69,6 +69,12 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset`, source, p, v); e
 			t.Fatal(err)
 		}
 	}
+	// Event 400 exists: since fb814fd the recording target is the mark
+	// lowered to MAX(events.id), so a mark above every event would read as
+	// already recorded.
+	if _, err := raw.Exec(`INSERT INTO events(id,ts,source,kind) VALUES(400,'2026-09-01T00:00:00Z','cowrie','connect')`); err != nil {
+		t.Fatal(err)
+	}
 	set("script_version", "hold_hwm", 400)
 	set("campaign", "evidence-v1", 100)
 	if g := list(); !g.Held || g.Phase != "recording" || g.Progress != 0.25 || g.Until != "" {
@@ -132,6 +138,10 @@ func TestScriptsResponseCarriesRegroupHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
+	// Event 400 exists (see TestCampaignResponsesCarryRegroupHold).
+	if _, err := raw.Exec(`INSERT INTO events(id,ts,source,kind) VALUES(400,'2026-09-01T00:00:00Z','cowrie','connect')`); err != nil {
+		t.Fatal(err)
+	}
 	for _, row := range [][3]any{{"script_version", "hold_hwm", 400}, {"campaign", "evidence-v1", 100}} {
 		if _, err := raw.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'','x')
 ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset`, row[0], row[1], row[2]); err != nil {
