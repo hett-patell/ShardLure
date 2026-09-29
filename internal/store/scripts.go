@@ -16,6 +16,11 @@ const scriptDisplayBytes = 2048
 // var so tests can shrink it.
 var familyPassBudget = 2 * time.Second
 
+// settleBeforeWrite, when set (tests only), runs between
+// SettleSessionScripts' unlocked compute and its guarded write, so a test can
+// record a late line there.
+var settleBeforeWrite func()
+
 // familyRepLoaded, when set (tests only), observes each representative whose
 // normalized text a family pass loads.
 var familyRepLoaded func(fingerprint string)
@@ -96,6 +101,9 @@ WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? AND updated_at 
 		p.distinctive = scriptBool(script.Distinctive(cmds))
 		p.tokens = len(script.Tokens(p.enc)) // capped at MaxDistanceTokens, as distance sees it
 		ready = append(ready, p)
+	}
+	if settleBeforeWrite != nil {
+		settleBeforeWrite()
 	}
 	settled := 0
 	err = s.WithTxContext(ctx, func(tx *sql.Tx) error {

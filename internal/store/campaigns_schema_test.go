@@ -11,7 +11,9 @@ func TestSchemaV25(t *testing.T) {
 	for _, tbl := range []string{"session_script_lines", "session_scripts", "scripts", "script_families", "campaign_evidence",
 		"campaign_ids", "campaign_aliases", "campaigns", "campaign_members", "campaign_edits"} {
 		var n int
-		s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n)
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", tbl, err)
+		}
 		if n != 1 {
 			t.Errorf("missing table %s", tbl)
 		}
