@@ -49,7 +49,8 @@ var scriptHoldDuration = 30 * time.Minute
 //  2. deletes session_scripts, session_script_lines, scripts and
 //     script_families in 5,000-row transactions (rows before lines: a reader
 //     that finds a session row finds all its lines, and SettleSessionScripts'
-//     guarded UPDATE skips a session whose row is gone);
+//     guarded UPDATE skips a session whose row is gone), then ssh_key
+//     evidence the same way;
 //  3. in one final transaction, rewinds the campaign recorder's cursor to 0,
 //     stores version and, when there was anything to rebuild, sets the
 //     regroup hold: the events high-water mark (the deadline is set later,
@@ -68,10 +69,13 @@ var scriptHoldDuration = 30 * time.Minute
 // hold is active (ScriptRebuildHold), and releasing it carries the old
 // fingerprints' assignments to the new ones (carryScriptAssignments).
 //
-// campaign_evidence, campaign_ids, campaign_aliases, campaign_edits and
-// campaigns are left alone: key and payload evidence does not depend on the
-// normaliser and its replay is idempotent (ON CONFLICT keeps min/max
-// times), and campaign identity lives in those tables.
+// ssh_key evidence is deleted too (step 2b) and re-recorded by the replay:
+// key extraction is part of the script package and can change with it.
+// Payload evidence, campaign_ids, campaign_aliases, campaign_edits and
+// campaigns are left alone: payload evidence does not depend on the
+// normaliser and its replay is idempotent (ON CONFLICT keeps min/max times),
+// and campaign identity lives in those tables (a valid key re-records to the
+// same value, so its assignment still applies).
 //
 // The caller is the campaign worker, before it records, so nothing re-adds
 // rows between chunks.
@@ -133,6 +137,34 @@ SELECT session_id, fingerprint FROM session_scripts WHERE rowid>? AND rowid<=? A
 			}
 			reset = true
 		}
+	}
+	// 2b. Key evidence. ExtractKeys changed with the normaliser (script
+	// Version 4: older builds accepted some malformed key blobs), so an
+	// ssh_key row an older build wrote can hold a value the current
+	// extractor never produces, and the rewind below only re-adds rows. The
+	// valid ones come back identical when the recorder replays from 0, and
+	// the hold set in step 3 keeps every regroup off until the recorder has
+	// passed the mark, so their campaign_ids assignments are never seen
+	// missing. payload evidence does not depend on the normaliser and stays.
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		var n int64
+		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+			r, err := tx.Exec(`DELETE FROM campaign_evidence WHERE rowid IN (SELECT rowid FROM campaign_evidence WHERE kind='ssh_key' LIMIT ?)`, scriptResetChunk)
+			if err != nil {
+				return err
+			}
+			n, err = r.RowsAffected()
+			return err
+		}); err != nil {
+			return false, err
+		}
+		if n == 0 {
+			break
+		}
+		reset = true
 	}
 	// 3. Cursor, version and hold, the version last in effect: all one tx.
 	now := time.Now()

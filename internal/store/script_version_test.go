@@ -435,3 +435,65 @@ func TestInterruptedResetStillCarries(t *testing.T) {
 		t.Fatalf("old fingerprint rows left: %d, %v", stale, err)
 	}
 }
+
+// Older builds' ExtractKeys accepted some malformed key blobs (script Version
+// 4), so ssh_key evidence they wrote can hold values the current extractor
+// never produces. The version reset deletes key evidence and the replay from
+// cursor 0 re-creates only the valid rows; payload evidence and campaign
+// identity are untouched, and the hold keeps regroups off until the replay has
+// passed the mark.
+func TestVersionResetRebuildsKeyEvidence(t *testing.T) {
+	s := newTestStore(t, "reset-keys.db")
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-time.Hour)
+	sha := strings.Repeat("ab", 32)
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", injector, "", "", old)
+	cowrieEvent(t, s, "s2", "cowrie:b", "file_download", "", sha, "x.sh", old)
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	var validKey string
+	if err := s.db.QueryRow(`SELECT value FROM campaign_evidence WHERE kind='ssh_key' AND session_id='s1'`).Scan(&validKey); err != nil {
+		t.Fatalf("fixture: no valid key evidence: %v", err)
+	}
+	for _, q := range []string{
+		// What an older extractor recorded from a malformed blob.
+		`INSERT INTO campaign_evidence(kind,value,session_id,actor_id,first_seen,last_seen) VALUES('ssh_key','SHA256:stale-malformed','s1','cowrie:a','` + formatFixedUTC(old) + `','` + formatFixedUTC(old) + `')`,
+		`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('ssh_key','` + validKey + `','c-key',1)`,
+		`INSERT INTO campaigns(id,name,updated_at) VALUES('c-key','Outlaw/Dota','x')`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("%v\n%s", err, q)
+		}
+	}
+	evidence := func() string {
+		t.Helper()
+		var out string
+		if err := s.db.QueryRow(`SELECT COALESCE(group_concat(kind||'='||value||'@'||session_id, ' '),'') FROM (SELECT kind, value, session_id FROM campaign_evidence ORDER BY kind, value)`).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if reset, err := s.ResetScriptsForVersion(ctx, 99); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	if got, want := evidence(), "payload="+sha+"@s2"; got != want {
+		t.Fatalf("after reset evidence = %q, want only the payload row", got)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
+		t.Fatalf("key evidence deleted but no hold: held=%v err=%v", held, err)
+	}
+	if status, err := s.ScriptRebuildHoldStatus(ctx); err != nil || status.Phase != "recording" {
+		t.Fatalf("status %+v %v: regroups must wait for the replay", status, err)
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := evidence(), "payload="+sha+"@s2 ssh_key="+validKey+"@s1"; got != want {
+		t.Fatalf("after replay evidence = %q, want %q (stale key gone, valid key back)", got, want)
+	}
+	var cid, name string
+	if err := s.db.QueryRow(`SELECT c.campaign_id, k.name FROM campaign_ids c JOIN campaigns k ON k.id=c.campaign_id WHERE c.kind='ssh_key' AND c.value=?`, validKey).Scan(&cid, &name); err != nil || cid != "c-key" || name != "Outlaw/Dota" {
+		t.Fatalf("campaign identity = %q %q, %v", cid, name, err)
+	}
+}

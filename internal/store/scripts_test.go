@@ -495,10 +495,10 @@ func TestFamilyPassBoundsRepresentativesPerScript(t *testing.T) {
 	}
 }
 
-// A normaliser version change deletes only the script-derived tables, in
-// more than one chunk when they are large, rewinds the recorder to 0 and
-// stores the version; evidence and campaign identity are untouched. A
-// matching version is a no-op.
+// A normaliser version change deletes only the script-derived tables and key
+// evidence, in more than one chunk when they are large, rewinds the recorder
+// to 0 and stores the version; payload evidence and campaign identity are
+// untouched. A matching version is a no-op.
 func TestResetScriptsForVersion(t *testing.T) {
 	s := newTestStore(t, "script-version.db")
 	ctx := context.Background()
@@ -515,6 +515,7 @@ func TestResetScriptsForVersion(t *testing.T) {
 			`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen) VALUES('fp','n','d',1,1,'` + ts + `','` + ts + `')`,
 			`INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen) VALUES('fp','d','[]',1,1,1,1,1,0,'r','` + ts + `','` + ts + `')`,
 			`INSERT INTO campaign_evidence(kind,value,session_id,actor_id,first_seen,last_seen) VALUES('ssh_key','k','s0','cowrie:a','` + ts + `','` + ts + `')`,
+			`INSERT INTO campaign_evidence(kind,value,session_id,actor_id,first_seen,last_seen) VALUES('payload','` + strings.Repeat("ab", 32) + `','s0','cowrie:a','` + ts + `','` + ts + `')`,
 			`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('ssh_key','k','c-1',1)`,
 			`INSERT INTO campaign_aliases(old_id,new_id,created_at) VALUES('c-0','c-1','` + ts + `')`,
 			`INSERT INTO campaigns(id,name,updated_at) VALUES('c-1','Keep','` + ts + `')`,
@@ -543,7 +544,12 @@ func TestResetScriptsForVersion(t *testing.T) {
 		t.Fatalf("%d script-derived rows left", n)
 	}
 	if n := count(`SELECT (SELECT COUNT(*) FROM campaign_evidence)+(SELECT COUNT(*) FROM campaign_ids)+(SELECT COUNT(*) FROM campaign_aliases)+(SELECT COUNT(*) FROM campaigns)+(SELECT COUNT(*) FROM campaign_edits)`); n != 5 {
-		t.Fatalf("identity/evidence rows = %d, want 5 untouched", n)
+		t.Fatalf("identity/payload evidence rows = %d, want 5 untouched", n)
+	}
+	// Key extraction changes with the normaliser, so key evidence is
+	// rebuilt by the replay (TestVersionResetRebuildsKeyEvidence).
+	if n := count(`SELECT COUNT(*) FROM campaign_evidence WHERE kind='ssh_key'`); n != 0 {
+		t.Fatalf("%d ssh_key evidence rows survived the reset", n)
 	}
 	if c := evidenceCursorValue(t, s); c != 0 {
 		t.Fatalf("cursor %d, want 0", c)
