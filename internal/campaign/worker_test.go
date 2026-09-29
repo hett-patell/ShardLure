@@ -310,7 +310,7 @@ func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 	}
 	var read []string
 	w := NewWorker(st, 90, root)
-	t.Cleanup(func() { w.Close() })
+	t.Cleanup(w.Close)
 	w.classify = func(f *os.File) (string, error) {
 		b, err := io.ReadAll(f)
 		read = append(read, string(b))
@@ -358,7 +358,7 @@ func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "evidence")
 	w := NewWorker(st, 90, root)
-	t.Cleanup(func() { w.Close() })
+	t.Cleanup(w.Close)
 	w.classify = func(*os.File) (string, error) { return "", nil }
 	p := filepath.Join(root, "p.bin")
 	if err := st.RecordArtifact(store.Artifact{TS: time.Now().UTC(), SHA256: "aa", LocalPath: p, SizeBytes: 100, Status: "fetched", Origin: "cowrie_download", URL: "cowrie-download:aa"}); err != nil {
@@ -437,7 +437,7 @@ func TestBurstDrainedWithinOneTickDoesNotForceRegroup(t *testing.T) {
 	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
 	ctx := context.Background()
 	w := NewWorker(st, 90, t.TempDir())
-	t.Cleanup(func() { w.Close() })
+	t.Cleanup(w.Close)
 	if err := w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +475,7 @@ func TestFamilyOfDoesNotMemoiseReadErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := NewWorker(st, 90, root)
-	t.Cleanup(func() { w.Close() })
+	t.Cleanup(w.Close)
 	calls := 0
 	w.classify = func(*os.File) (string, error) {
 		calls++

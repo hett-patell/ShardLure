@@ -120,16 +120,18 @@ func NewWorker(st *store.Store, retentionDays int, evidenceRoot string) *Worker 
 }
 
 // Close releases the evidence root descriptor familyOf holds. The worker must
-// not tick afterwards.
-func (w *Worker) Close() error {
+// not tick afterwards. It runs at shutdown, where the caller cannot act on a
+// close error, so a failure is logged here rather than returned (and dropped).
+func (w *Worker) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.root == nil {
-		return nil
+		return
 	}
-	err := w.root.Close()
+	if err := w.root.Close(); err != nil {
+		logf("campaigns: closing the evidence root: %v", err)
+	}
 	w.root = nil
-	return err
 }
 
 // Wake asks for a regroup on the next tick (an operator edit arrived). It
