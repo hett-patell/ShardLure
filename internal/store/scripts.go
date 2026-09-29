@@ -80,6 +80,12 @@ FROM v WHERE session_scripts.session_id=v.sid AND session_scripts.updated_at=v.u
 	return matched, nil
 }
 
+// settlePendingQuery lists sessions due for a settle. Its WHERE carries
+// idx_session_scripts_pending's predicate verbatim so the planner can use the
+// partial index; TestPurgeScriptLinesPlan pins the plan.
+const settlePendingQuery = `SELECT session_id, first_seen, last_seen, updated_at FROM session_scripts
+WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? AND updated_at < ? ORDER BY last_seen LIMIT ?`
+
 // SettleSessionScripts computes each idle session's script once: the
 // fingerprint of its lines in event order. Sessions that received commands
 // after their last settle (updated_at > settled_at) are re-settled; the
@@ -108,8 +114,7 @@ func (s *Store) SettleSessionScripts(ctx context.Context, idleBefore time.Time, 
 		// windows) would fingerprint a session's prefix before the rest of
 		// its old events were recorded. No prefix rows are ever written.
 		cut := formatFixedUTC(idleBefore)
-		rows, err := s.db.QueryContext(ctx, `SELECT session_id, first_seen, last_seen, updated_at FROM session_scripts
-WHERE (settled_at='' OR updated_at>settled_at) AND last_seen < ? AND updated_at < ? ORDER BY last_seen LIMIT ?`, cut, cut, limit)
+		rows, err := s.db.QueryContext(ctx, settlePendingQuery, cut, cut, limit)
 		if err != nil {
 			return err
 		}

@@ -246,8 +246,7 @@ WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSourc
 		// The pending partial index lists unsettled sessions; each is probed
 		// on the line key for a line at or below the high-water mark.
 		var pending bool
-		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM session_scripts ss WHERE (ss.settled_at='' OR ss.updated_at>ss.settled_at)
-  AND EXISTS (SELECT 1 FROM session_script_lines l WHERE l.session_id=ss.session_id AND l.event_id<=?))`, hwm).Scan(&pending); err != nil {
+		if err := s.db.QueryRowContext(ctx, holdPendingQuery, hwm).Scan(&pending); err != nil {
 			return false, err
 		}
 		if pending {
@@ -265,6 +264,12 @@ WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSourc
 		return err
 	})
 }
+
+// holdPendingQuery asks whether any unsettled session has a line at or below
+// the hold's mark: the pending partial index lists unsettled sessions and each
+// is probed on the line primary key. TestPurgeScriptLinesPlan pins the plan.
+const holdPendingQuery = `SELECT EXISTS (SELECT 1 FROM session_scripts ss WHERE (ss.settled_at='' OR ss.updated_at>ss.settled_at)
+  AND EXISTS (SELECT 1 FROM session_script_lines l WHERE l.session_id=ss.session_id AND l.event_id<=?))`
 
 // holdRecordTarget is the id the recorder must reach before the hold can
 // leave its recording phase: the high-water mark taken at reset, lowered to

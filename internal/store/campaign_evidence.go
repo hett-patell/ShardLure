@@ -168,7 +168,9 @@ type precomputed struct {
 //     (cursor, end], take session_id/actor_id fresh from each row (re-key
 //     correctness) and the line and keys from the map; a row absent from the
 //     map or from the table is skipped. Then advance the cursor to end. The
-//     hold is the SQL alone: at most three statements per command row.
+//     hold is the SQL alone, written as multi-row statements of at most
+//     batchParams bound parameters each (execBatched), so it scales with the
+//     window's rows divided by the batch size, not with a statement per row.
 //
 // The session caps are still enforced inside the transaction
 // (evidenceWriter.flush); phase 1 only reads them to avoid normalising commands
@@ -353,7 +355,8 @@ func (w *evidenceWriter) upsertEvidence(kind, value, label, session, actor, ip, 
 const batchParams = 256
 
 // execBatched runs head + n row tuples (each `tuple`, joined by commas) +
-// tail in statements of at most batchRows rows. SQLite applies a multi-row
+// tail in statements of at most batchParams/(placeholders per tuple) rows, so
+// no statement binds more than batchParams parameters. SQLite applies a multi-row
 // INSERT ... ON CONFLICT row by row, so a later row in the same statement
 // sees an earlier one exactly as consecutive single-row statements would.
 func execBatched(ctx context.Context, tx *sql.Tx, head, tuple, tail string, n int, args func(i int) []any) error {
@@ -378,8 +381,8 @@ func execBatched(ctx context.Context, tx *sql.Tx, head, tuple, tail string, n in
 	return nil
 }
 
-// queryBatched runs head + an IN list of up to batchRows keys + tail, with
-// extra appended after the keys, and hands every row to scan.
+// queryBatched runs head + an IN list of up to batchParams-len(extra) keys +
+// tail, with extra appended after the keys, and hands every row to scan.
 func queryBatched(ctx context.Context, tx *sql.Tx, head, tail string, keys []string, extra []any, scan func(*sql.Rows) error) error {
 	per := max(1, batchParams-len(extra))
 	for lo := 0; lo < len(keys); lo += per {

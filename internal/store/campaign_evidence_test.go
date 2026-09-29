@@ -742,6 +742,15 @@ func TestPurgeScriptLinesPlan(t *testing.T) {
 		}
 		return strings.Join(out, "\n")
 	}
+	// The settle list and the hold's pending check state their plans in
+	// comments; pin them (store-pipeline audit M9). Both must go through the
+	// pending partial index, never a scan of every session.
+	if j := plan(settlePendingQuery, "x", "x", 10); !strings.Contains(j, "USING INDEX idx_session_scripts_pending (last_seen<?)") || strings.Contains(j, "SCAN session_scripts") {
+		t.Fatalf("settle list must seek the pending partial index:\n%s", j)
+	}
+	if j := plan(holdPendingQuery, 10); !strings.Contains(j, "idx_session_scripts_pending") || !strings.Contains(j, "sqlite_autoindex_session_script_lines_1 (session_id=? AND event_id<?)") || strings.Contains(j, "SCAN l") {
+		t.Fatalf("hold pending check must walk the pending index and probe the line key:\n%s", j)
+	}
 	if j := plan(purgeOldSessionsQuery, formatFixedUTC(time.Now())); !strings.Contains(j, "USING INDEX idx_session_scripts_last_seen (last_seen<?)") || strings.Contains(j, "SCAN ") {
 		t.Fatalf("session selection must seek the last_seen index:\n%s", j)
 	}
