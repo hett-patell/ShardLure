@@ -102,7 +102,9 @@ func writeCampaigns(out io.Writer, list []store.CampaignSummary) {
 
 // validateListLimit refuses what the store would otherwise silently replace
 // with its default of 200: an operator asking for 5000 rows must not quietly
-// get 200 and read it as the whole population.
+// get 200 and read it as the whole population. (That reason is specific to
+// ListCampaigns/ListScriptFamilies; actors reuses the range for consistency,
+// see parseActorsArgs.)
 func validateListLimit(n int) error {
 	if n < 1 || n > 1000 {
 		return fmt.Errorf("--limit must be 1..1000, got %d", n)
@@ -256,8 +258,12 @@ func cmdScripts(st *store.Store, args []string) {
 
 // scriptRebuildMessage says plainly what --rebuild did and did not do: the
 // worker reads the stored version once per process, so nothing happens until
-// the daemon restarts.
-const scriptRebuildMessage = "script rebuild requested: restart shardlure-live to rebuild script fingerprints (campaign names and IDs are kept)"
+// a restart. The campaign worker runs under web as well as live, and whichever
+// process holds the lease is the one that must restart: a long-running web
+// that kept the lease while live was down would otherwise hold the rebuild
+// back indefinitely (audit M2). Naming only shardlure-live sent the operator
+// to restart the wrong process.
+const scriptRebuildMessage = "script rebuild requested: restart every shardlure live and web process using this database to rebuild script fingerprints (campaign names and IDs are kept)"
 
 // runScripts lists script families, or with --rebuild forces a script
 // fingerprint rebuild (store.ForceScriptRebuild). --rebuild is an action, not
@@ -265,7 +271,7 @@ const scriptRebuildMessage = "script rebuild requested: restart shardlure-live t
 func runScripts(ctx context.Context, st *store.Store, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("scripts", flag.ContinueOnError)
 	limit := fs.Int("limit", 50, "max script families to list")
-	rebuild := fs.Bool("rebuild", false, "force a script fingerprint rebuild on the next shardlure-live start (after a downgrade and re-upgrade)")
+	rebuild := fs.Bool("rebuild", false, "force a script fingerprint rebuild when every shardlure live/web process on this database next starts (after a downgrade and re-upgrade)")
 	if err := parseCmdFlags(fs, args); err != nil {
 		return err
 	}

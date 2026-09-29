@@ -599,6 +599,12 @@ func planReclassify(st *store.Store, admin *netmatch.Set) (*reclassifyPlan, erro
 // 1..1000 bounds the list like the campaign commands (validateListLimit), and
 // a negative value - which used to reach ListActors and silently list every
 // actor too - is refused, as is a stray positional argument.
+//
+// The 1000 bound here is not validateListLimit's reason: ListActors has no
+// cap of its own and would honour --limit=1500. It is a deliberate, documented
+// narrowing (CLAUDE.md Conventions, "--limit") so every list command takes the
+// same range, with 0 as the one explicit way to ask for everything; asking for
+// more than 1000 gets an error pointing at 0, never a quietly shorter list.
 func parseActorsArgs(args []string) (int, error) {
 	fs := flag.NewFlagSet("actors", flag.ContinueOnError)
 	limit := fs.Int("limit", 25, "max actors to list, 1..1000 (0 = all)")

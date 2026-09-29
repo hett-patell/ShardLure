@@ -183,7 +183,7 @@ func TestScriptsRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(b.String()); got != scriptRebuildMessage ||
-		!strings.Contains(got, "restart shardlure-live") || !strings.Contains(got, "campaign names and IDs are kept") {
+		!strings.Contains(got, "every shardlure live and web process") || !strings.Contains(got, "campaign names and IDs are kept") {
 		t.Fatalf("output %q", got)
 	}
 	// The version row is gone: the next worker start sees "no version stored".
