@@ -602,7 +602,7 @@ func planReclassify(st *store.Store, admin *netmatch.Set) (*reclassifyPlan, erro
 func parseActorsArgs(args []string) (int, error) {
 	fs := flag.NewFlagSet("actors", flag.ContinueOnError)
 	limit := fs.Int("limit", 25, "max actors to list, 1..1000 (0 = all)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCmdFlags(fs, args); err != nil {
 		return 0, err
 	}
 	if fs.NArg() > 0 {
@@ -620,10 +620,7 @@ func parseActorsArgs(args []string) (int, error) {
 func cmdActors(st *store.Store, args []string) {
 	limit, err := parseActorsArgs(args)
 	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(0)
-		}
-		fatal(err)
+		exitCmd(err)
 	}
 	actors, err := st.ListActors(limit)
 	if err != nil {

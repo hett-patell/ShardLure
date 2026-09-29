@@ -22,22 +22,72 @@ import (
 // been pasted from them) goes through termSafe first.
 
 func cmdCampaigns(st *store.Store, args []string) {
-	fs := flag.NewFlagSet("campaigns", flag.ExitOnError)
-	limit := fs.Int("limit", 50, "max campaigns to list")
-	if err := fs.Parse(args); err != nil {
-		fatal(err)
+	if err := runCampaigns(context.Background(), st, args, os.Stdout); err != nil {
+		exitCmd(err)
+	}
+}
+
+func runCampaigns(ctx context.Context, st *store.Store, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("campaigns", flag.ContinueOnError)
+	limit := fs.Int("limit", 50, "max campaigns to list, 1..1000")
+	if err := parseCmdFlags(fs, args); err != nil {
+		return err
 	}
 	if fs.NArg() > 0 {
-		fatal(fmt.Errorf("unexpected argument %q (usage: shardlure campaigns [--limit=N])", fs.Arg(0)))
+		return fmt.Errorf("unexpected argument %q (usage: shardlure campaigns [--limit=N])", fs.Arg(0))
 	}
 	if err := validateListLimit(*limit); err != nil {
-		fatal(err)
+		return err
 	}
-	list, err := st.ListCampaigns(context.Background(), *limit)
+	list, err := st.ListCampaigns(ctx, *limit)
 	if err != nil {
+		return err
+	}
+	writeCampaigns(out, list)
+	return nil
+}
+
+// flagParseError marks an error the flag package has already printed, with
+// the usage, to the FlagSet's output (stderr).
+type flagParseError struct{ err error }
+
+func (e *flagParseError) Error() string { return e.err.Error() }
+func (e *flagParseError) Unwrap() error { return e.err }
+
+// parseCmdFlags parses a ContinueOnError FlagSet the way the rest of the CLI
+// uses flag.ExitOnError: the flag package reports the bad flag and the usage
+// once, on stderr. The returned error only carries that it happened, so the
+// caller does not print it a second time (audit M1: scripts and actors used to
+// print the error, the usage, then "error: <same text>").
+func parseCmdFlags(fs *flag.FlagSet, args []string) error {
+	err := fs.Parse(args)
+	if err != nil && !errors.Is(err, flag.ErrHelp) {
+		return &flagParseError{err}
+	}
+	return err
+}
+
+// cmdExitStatus maps a subcommand error to its exit code and whether it still
+// needs an "error:" line: --help exits 0 and a flag error exits 2 (both as
+// flag.ExitOnError does, already reported by the flag package); anything else
+// is a fatal error, exit 1.
+func cmdExitStatus(err error) (code int, report bool) {
+	var fe *flagParseError
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return 0, false
+	case errors.As(err, &fe):
+		return 2, false
+	}
+	return 1, true
+}
+
+func exitCmd(err error) {
+	code, report := cmdExitStatus(err)
+	if report {
 		fatal(err)
 	}
-	writeCampaigns(os.Stdout, list)
+	os.Exit(code)
 }
 
 func writeCampaigns(out io.Writer, list []store.CampaignSummary) {
@@ -200,10 +250,7 @@ func orDash(s string) string {
 
 func cmdScripts(st *store.Store, args []string) {
 	if err := runScripts(context.Background(), st, args, os.Stdout); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(0)
-		}
-		fatal(err)
+		exitCmd(err)
 	}
 }
 
@@ -219,7 +266,7 @@ func runScripts(ctx context.Context, st *store.Store, args []string, out io.Writ
 	fs := flag.NewFlagSet("scripts", flag.ContinueOnError)
 	limit := fs.Int("limit", 50, "max script families to list")
 	rebuild := fs.Bool("rebuild", false, "force a script fingerprint rebuild on the next shardlure-live start (after a downgrade and re-upgrade)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCmdFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {

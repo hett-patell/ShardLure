@@ -297,3 +297,35 @@ func TestShowCampaignDisclosesStoreCap(t *testing.T) {
 		t.Fatalf("store cap not disclosed:\n%s", b.String()[max(0, b.Len()-400):])
 	}
 }
+
+// campaigns, scripts and actors report a bad flag the same way: the flag
+// package prints it once with the usage, exit 2, no second "error:" line;
+// --help exits 0; a bad value is an "error:" line, exit 1 (audit M1).
+func TestListCommandsReportFlagErrorsOnce(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "f.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	run := map[string]func([]string) error{
+		"campaigns": func(a []string) error { return runCampaigns(ctx, st, a, &bytes.Buffer{}) },
+		"scripts":   func(a []string) error { return runScripts(ctx, st, a, &bytes.Buffer{}) },
+		"actors":    func(a []string) error { _, err := parseActorsArgs(a); return err },
+	}
+	for name, fn := range run {
+		for _, tc := range []struct {
+			args   []string
+			code   int
+			report bool
+		}{{[]string{"--bogus"}, 2, false}, {[]string{"-h"}, 0, false}, {[]string{"--limit=-1"}, 1, true}} {
+			err := fn(tc.args)
+			if err == nil {
+				t.Fatalf("%s %v accepted", name, tc.args)
+			}
+			if code, report := cmdExitStatus(err); code != tc.code || report != tc.report {
+				t.Errorf("%s %v: exit %d report=%v, want %d/%v (%v)", name, tc.args, code, report, tc.code, tc.report, err)
+			}
+		}
+	}
+}
