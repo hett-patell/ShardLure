@@ -601,3 +601,47 @@ func programs(s string) []string {
 	}
 	return out
 }
+
+// A quoted short program name keeps its name in the program slot: markerRe
+// turned 'id' and "ls" into the non-recon program <tok>, and "wget" x and
+// "curl" x collided (audit M2). Elsewhere a quoted short word is still <tok>.
+func TestQuotedProgramKeepsName(t *testing.T) {
+	for _, tc := range []struct{ in, want, prog string }{
+		{`'id'`, `'id'`, "id"},
+		{`"wget" x`, `"wget" x`, "wget"},
+		{`sudo 'ps' aux`, `sudo 'ps' aux`, "ps"},
+		{`echo 'vT'`, `echo <tok>`, "echo"},
+		{`'/tmp/x'`, `'/tmp/<f>'`, "<f>"},
+	} {
+		got := NormalizeCommand(tc.in)
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, s, tc.want)
+		}
+		if p := program(segments([][]string{got})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+	}
+	if Distinctive([][]string{NormalizeCommand(`'id'; "uname" -a; 'w'; 'ls'; 'ps'`)}) {
+		t.Error("quoted recon programs made the script Distinctive")
+	}
+	if EncodeLine(`"wget" x`) == EncodeLine(`"curl" x`) {
+		t.Error(`"wget" and "curl" collided`)
+	}
+}
+
+// URLs, IPs and /tmp paths stop at a backtick, so a command substitution
+// keeps its closing backtick (audit M3).
+func TestPlaceholdersStopAtBacktick(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"echo `wget http://x/y`", "echo `wget <url>`"},
+		{"echo `curl 1.2.3.4/a`", "echo `curl <ip>`"},
+		{"echo `cat /tmp/kxq`", "echo `cat /tmp/<f>`"},
+	} {
+		if got := norm(tc.in); got != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+	}
+	if EncodeLine("echo `wget http://x/y`") == EncodeLine("echo `wget http://x/y") {
+		t.Error("the closed and unclosed backtick forms collided")
+	}
+}

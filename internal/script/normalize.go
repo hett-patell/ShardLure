@@ -39,7 +39,9 @@ import (
 // (<<\EOF, <<E"OF" and <<"E O F" no longer hide every later command),
 // and a heredoc's body (normalised, at most MaxHeredocBodyBytes) is part of
 // its placeholder token; reserved words and braces are not programs (and
-// keep the program slot open), N<file, <> and >| are redirections.
+// keep the program slot open), N<file, <> and >| are redirections, a
+// quoted program name ('id') keeps its name, and URLs, IPs and /tmp names
+// stop at a backtick.
 const Version = 4
 
 const (
@@ -80,13 +82,16 @@ var (
 	bareRe   = regexp.MustCompile(`^[a-z_][a-z0-9_.+-]*$`)
 	keyTypes = regexp.MustCompile(`^(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-\S+|sk-\S+@openssh\.com)$`)
 	keyBody  = regexp.MustCompile(`AAAA[0-9A-Za-z+/]{36,}={0,3}`)
-	urlRe    = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'|;&<>()]+`)
-	ipRe     = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:/[^\s"'|;&<>()]*)?`)
+	// A backtick ends a URL, an IP's path and a /tmp name: it closes a
+	// command substitution, and swallowing it made `wget <url>` collide
+	// with the unclosed form (audit M3).
+	urlRe    = regexp.MustCompile("(?i)\\b[a-z][a-z0-9+.-]*://[^\\s\"'|;&<>()`]+")
+	ipRe     = regexp.MustCompile("\\b\\d{1,3}(?:\\.\\d{1,3}){3}(?::\\d+)?(?:/[^\\s\"'|;&<>()`]*)?")
 	hexRe    = regexp.MustCompile(`^[0-9a-fA-F]{16,}$`)
 	b64Re    = regexp.MustCompile(`^[0-9A-Za-z+/=]{24,}$`)
 	numRe    = regexp.MustCompile(`^\d+$`)
 	randRe   = regexp.MustCompile(`\b(?:[A-Za-z]*\d[A-Za-z0-9]*[A-Za-z]|[A-Za-z]+\d)[A-Za-z0-9]*\b`)
-	tmpRe    = regexp.MustCompile(`/tmp/[^\s/"'|;&<>()]+`)
+	tmpRe    = regexp.MustCompile("/tmp/[^\\s/\"'|;&<>()`]+")
 	markerRe = regexp.MustCompile(`^[A-Za-z0-9]{1,4}$`)
 )
 
@@ -208,9 +213,11 @@ func NormalizeCommand(cmd string) []string {
 		switch {
 		case t == "\n":
 			t = ";" // a newline separates commands exactly like ";"
-		case start && bareRe.MatchString(t):
+		case start && (bareRe.MatchString(t) || quotedBare(t)):
 			// A program resolved through PATH (base64, python3) is never
 			// per-victim random; paths such as /tmp/x or ./x still are.
+			// Quoted ('id', "wget") it is the same program: markerRe made
+			// short ones <tok>, a non-recon program (audit M2).
 		default:
 			t = normalizeToken(t)
 		}
@@ -571,6 +578,12 @@ func (w *wrapState) option(n string) wrapRole {
 		}
 	}
 	return wrapOwn
+}
+
+// quotedBare reports whether t is a quoted word whose text is a bare
+// program name.
+func quotedBare(t string) bool {
+	return len(t) >= 2 && (t[0] == '"' || t[0] == '\'') && t[len(t)-1] == t[0] && bareRe.MatchString(t[1:len(t)-1])
 }
 
 func isAssignment(t string) bool {
