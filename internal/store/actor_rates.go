@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -183,11 +185,19 @@ func (s *Store) TopActorRatesFromCounts(counts map[string]int, hours float64, li
 			break
 		}
 		a, err := s.GetActor(h.id)
-		if err != nil || a == nil {
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && a == nil) {
 			// An actor row can legitimately be missing: purge removes actors
 			// whose events aged out while a concurrent window still counted
 			// them. Skip rather than fail the whole radar.
 			continue
+		}
+		if err != nil {
+			// Any other error is the store failing, not a missing actor.
+			// Treating it as "missing" walked one point read per counted
+			// actor (thousands on prod) on every /api/intel poll and then
+			// returned an empty radar with no error (store-reads audit
+			// Minor 1).
+			return nil, err
 		}
 		out = append(out, ActorRate{Actor: *a, PerHour: float64(h.n) / hours, Events: h.n})
 	}

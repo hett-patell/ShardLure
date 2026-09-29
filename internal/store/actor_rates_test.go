@@ -382,3 +382,24 @@ func TestActorsForReportingExcludesDormantActors(t *testing.T) {
 			"ReportPoolMaxAge is a week precisely so a paused campaign stays reportable")
 	}
 }
+
+// A missing actor row is skipped (retention can remove it while a cached
+// window still counts it), but a store failure is an error, not "missing":
+// swallowing it read every counted actor on each poll and returned an empty
+// radar with no error (store-reads audit Minor 1).
+func TestTopActorRatesFromCountsSkipsMissingSurfacesErrors(t *testing.T) {
+	s := newTestStore(t, "rates-from-counts.db")
+	now := time.Now().UTC()
+	if err := s.UpsertActor(&models.Actor{ID: "cowrie:present", PrimaryIP: "198.51.100.7", FirstSeen: now, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{"cowrie:gone": 50, "cowrie:present": 10}
+	got, err := s.TopActorRatesFromCounts(counts, 24, 8)
+	if err != nil || len(got) != 1 || got[0].Actor.ID != "cowrie:present" || got[0].Events != 10 {
+		t.Fatalf("rates = %+v, %v; want the present actor only", got, err)
+	}
+	s.Close()
+	if got, err := s.TopActorRatesFromCounts(counts, 24, 8); err == nil {
+		t.Fatalf("closed store: rates = %+v with no error; a store failure must surface", got)
+	}
+}
