@@ -374,3 +374,48 @@ func TestCampaignAliasTargetFollowsLongChain(t *testing.T) {
 		t.Fatal("a cyclic map must still terminate")
 	}
 }
+
+// A detail response is bounded: members, HASSHes, clients and hosts are each
+// capped at campaignDetailCap, and the true totals travel with them so the UI
+// can say "N of M" instead of presenting a truncated list as complete.
+func TestGetCampaignBoundsListsAndReportsTotals(t *testing.T) {
+	s := newTestStore(t, "campaigns-bounds.db")
+	ctx := context.Background()
+	old := campaignDetailCap
+	campaignDetailCap = 2
+	t.Cleanup(func() { campaignDetailCap = old })
+	c := CampaignRow{ID: "c-big"}
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("cowrie:m%d", i)
+		c.Members = append(c.Members, CampaignMemberRow{ActorID: id, Reasons: "[]"})
+		if _, err := s.db.Exec(`INSERT INTO actors(id,source,primary_ip,hassh,ssh_client,first_seen,last_seen) VALUES(?,?,?,?,?,?,?)`,
+			id, "cowrie", "203.0.113.1", fmt.Sprintf("h%d", i), fmt.Sprintf("SSH-2.0-c%d", i), formatFixedUTC(time.Now()), formatFixedUTC(time.Now())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SaveGrouping(ctx, []CampaignRow{c}, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		t.Fatal(err)
+	}
+	// Four URLs, three distinct hosts.
+	for i, u := range []string{"http://a.example/x", "http://a.example/y", "http://b.example/x", "http://c.example:8080/x"} {
+		if _, err := s.db.Exec(`INSERT INTO artifacts(ts,actor_id,url,origin,status,created_at) VALUES(?,?,?,?,?,?)`,
+			formatFixedUTC(time.Now()), fmt.Sprintf("cowrie:m%d", i%3), u, "quarantine_fetch", "fetched", formatFixedUTC(time.Now())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := s.GetCampaign(ctx, "c-big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Members) != 2 || d.MembersTotal != 3 || len(d.HASSHes) != 2 || d.HASSHesTotal != 3 ||
+		len(d.Clients) != 2 || d.ClientsTotal != 3 || len(d.Hosts) != 2 || d.HostsTotal != 3 {
+		t.Fatalf("members %d/%d hasshes %d/%d clients %d/%d hosts %v/%d", len(d.Members), d.MembersTotal,
+			len(d.HASSHes), d.HASSHesTotal, len(d.Clients), d.ClientsTotal, d.Hosts, d.HostsTotal)
+	}
+	if d.Hosts[0] != "a.example" || d.Hosts[1] != "b.example" {
+		t.Fatalf("hosts must be the first in sort order: %v", d.Hosts)
+	}
+}

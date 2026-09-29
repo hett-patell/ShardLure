@@ -61,13 +61,23 @@ type CampaignMemberDetail struct {
 	Reasons                      string
 }
 
+// CampaignDetail lists at most campaignDetailCap members, HASSHes, clients
+// and hosts; the *Total fields are the true counts, so a caller can tell a
+// truncated list from a complete one.
 type CampaignDetail struct {
 	CampaignSummary
-	Notes, AnchorKind, AnchorValue string
-	Members                        []CampaignMemberDetail
-	HASSHes, Clients, Hosts        []string
-	Edits                          []CampaignEditRow
+	Notes, AnchorKind, AnchorValue                       string
+	Members                                              []CampaignMemberDetail
+	HASSHes, Clients, Hosts                              []string
+	MembersTotal, HASSHesTotal, ClientsTotal, HostsTotal int
+	Edits                                                []CampaignEditRow
 }
+
+// campaignDetailCap bounds each list in a campaign detail. A campaign's
+// membership is attacker-driven (the Outlaw/Dota component on prod holds 534
+// IPs), and every detail request would otherwise return and render all of
+// it. A var so tests can shrink it.
+var campaignDetailCap = 500
 
 type ScriptFamilyRow struct {
 	Family, Display, Variants, Reason   string // Variants is JSON
@@ -526,7 +536,7 @@ WHERE c.id=?`, id)
 	}
 	d.CampaignSummary = summary
 	mrows, err := s.db.QueryContext(ctx, `SELECT m.actor_id, COALESCE(a.primary_ip,''), COALESCE(a.playbook,''), m.sessions, m.ips, m.reasons
-FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_id=? ORDER BY m.actor_id`, d.ID)
+FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_id=? ORDER BY m.actor_id LIMIT ?`, d.ID, campaignDetailCap)
 	if err != nil {
 		return d, err
 	}
@@ -545,27 +555,27 @@ FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_i
 	if err := mrows.Close(); err != nil {
 		return d, err
 	}
-	if d.HASSHes, err = s.campaignStrings(ctx, d.ID, `SELECT DISTINCT a.hassh FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.hassh,'')<>'' ORDER BY 1`); err != nil {
-		return d, err
-	}
-	if d.Clients, err = s.campaignStrings(ctx, d.ID, `SELECT DISTINCT a.ssh_client FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.ssh_client,'')<>'' ORDER BY 1`); err != nil {
-		return d, err
-	}
-	if err := s.ensureArtifactsTable(); err != nil {
-		return d, err
-	}
-	urls, err := s.campaignStrings(ctx, d.ID, `SELECT DISTINCT ar.url FROM artifacts ar JOIN campaign_members m ON m.actor_id=ar.actor_id WHERE m.campaign_id=? AND ar.url LIKE 'http%' LIMIT 500`)
-	if err != nil {
-		return d, err
-	}
-	seen := map[string]bool{}
-	for _, raw := range urls {
-		if u, err := url.Parse(raw); err == nil && u.Hostname() != "" && !seen[u.Hostname()] {
-			seen[u.Hostname()] = true
-			d.Hosts = append(d.Hosts, u.Hostname())
+	for _, q := range []struct {
+		dst *int
+		sql string
+	}{
+		{&d.MembersTotal, `SELECT COUNT(*) FROM campaign_members WHERE campaign_id=?`},
+		{&d.HASSHesTotal, `SELECT COUNT(DISTINCT a.hassh) FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.hassh,'')<>''`},
+		{&d.ClientsTotal, `SELECT COUNT(DISTINCT a.ssh_client) FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.ssh_client,'')<>''`},
+	} {
+		if err := s.db.QueryRowContext(ctx, q.sql, d.ID).Scan(q.dst); err != nil {
+			return d, err
 		}
 	}
-	sort.Strings(d.Hosts)
+	if d.HASSHes, err = s.campaignStrings(ctx, d.ID, `SELECT DISTINCT a.hassh FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.hassh,'')<>'' ORDER BY 1 LIMIT ?`, campaignDetailCap); err != nil {
+		return d, err
+	}
+	if d.Clients, err = s.campaignStrings(ctx, d.ID, `SELECT DISTINCT a.ssh_client FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.ssh_client,'')<>'' ORDER BY 1 LIMIT ?`, campaignDetailCap); err != nil {
+		return d, err
+	}
+	if d.Hosts, d.HostsTotal, err = s.campaignHosts(ctx, d.ID); err != nil {
+		return d, err
+	}
 	d.Edits, err = s.campaignEditsFor(ctx, campaignIDsResolvingTo(aliases, d.ID))
 	return d, err
 }
@@ -614,8 +624,43 @@ func (s *Store) campaignEditsFor(ctx context.Context, ids []string) ([]CampaignE
 	return out, rows.Err()
 }
 
-func (s *Store) campaignStrings(ctx context.Context, id, query string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, query, id)
+// campaignHosts returns the first campaignDetailCap payload hosts in sort
+// order and the true number of distinct hosts. The host is parsed from the
+// URL in Go, so SQL cannot count it: the distinct URLs are streamed and only
+// the host set is held (the old code read the first 500 URLs, which both
+// under-counted and could drop a host that sorted early).
+func (s *Store) campaignHosts(ctx context.Context, id string) ([]string, int, error) {
+	if err := s.ensureArtifactsTable(); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT ar.url FROM artifacts ar JOIN campaign_members m ON m.actor_id=ar.actor_id WHERE m.campaign_id=? AND ar.url LIKE 'http%'`, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, 0, err
+		}
+		if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+			seen[u.Hostname()] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	hosts := make([]string, 0, len(seen))
+	for h := range seen {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts[:min(len(hosts), campaignDetailCap)], len(seen), nil
+}
+
+func (s *Store) campaignStrings(ctx context.Context, id, query string, extra ...any) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query, append([]any{id}, extra...)...)
 	if err != nil {
 		return nil, err
 	}

@@ -125,15 +125,22 @@ type campaignEditJSON struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+// campaignDetailJSON: members, hasshes, clients and hosts are bounded lists
+// (the store caps each); the *Total fields are the true counts, so a client
+// shows "N of M" when a list is shorter than its total.
 type campaignDetailJSON struct {
 	campaignSummaryJSON
-	Notes   string               `json:"notes"`
-	Anchor  map[string]string    `json:"anchor"`
-	Members []campaignMemberJSON `json:"members"`
-	HASSHes []string             `json:"hasshes"`
-	Clients []string             `json:"clients"`
-	Hosts   []string             `json:"hosts"`
-	Edits   []campaignEditJSON   `json:"edits"`
+	Notes        string               `json:"notes"`
+	Anchor       map[string]string    `json:"anchor"`
+	Members      []campaignMemberJSON `json:"members"`
+	MembersTotal int                  `json:"membersTotal"`
+	HASSHes      []string             `json:"hasshes"`
+	HASSHesTotal int                  `json:"hasshesTotal"`
+	Clients      []string             `json:"clients"`
+	ClientsTotal int                  `json:"clientsTotal"`
+	Hosts        []string             `json:"hosts"`
+	HostsTotal   int                  `json:"hostsTotal"`
+	Edits        []campaignEditJSON   `json:"edits"`
 }
 
 // handleCampaign looks a campaign up by ID (following aliases) or by a unique
@@ -159,7 +166,8 @@ func (s *Server) handleCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 	out := campaignDetailJSON{campaignSummaryJSON: campaignSummaryToJSON(d.CampaignSummary), Notes: d.Notes,
 		Anchor: map[string]string{"kind": d.AnchorKind, "value": d.AnchorValue}, Members: make([]campaignMemberJSON, 0, len(d.Members)),
-		HASSHes: nonNilStrings(d.HASSHes), Clients: nonNilStrings(d.Clients), Hosts: nonNilStrings(d.Hosts), Edits: make([]campaignEditJSON, 0, len(d.Edits))}
+		HASSHes: nonNilStrings(d.HASSHes), Clients: nonNilStrings(d.Clients), Hosts: nonNilStrings(d.Hosts), Edits: make([]campaignEditJSON, 0, len(d.Edits)),
+		MembersTotal: d.MembersTotal, HASSHesTotal: d.HASSHesTotal, ClientsTotal: d.ClientsTotal, HostsTotal: d.HostsTotal}
 	for _, m := range d.Members {
 		out.Members = append(out.Members, campaignMemberJSON{ActorID: m.ActorID, PrimaryIP: m.PrimaryIP, Playbook: m.Playbook,
 			Sessions: m.Sessions, IPs: m.IPs, Reasons: rawJSONList(m.Reasons)})

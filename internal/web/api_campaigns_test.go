@@ -197,10 +197,15 @@ func TestCampaignDetailContractAndAmbiguity(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"id", "name", "suggestedName", "actors", "ips", "sessions", "firstSeen", "lastSeen", "kinds", "search", "notes", "anchor", "members", "hasshes", "clients", "hosts", "edits"} {
+	for _, k := range []string{"id", "name", "suggestedName", "actors", "ips", "sessions", "firstSeen", "lastSeen", "kinds", "search", "notes", "anchor", "members", "hasshes", "clients", "hosts", "edits",
+		"membersTotal", "hasshesTotal", "clientsTotal", "hostsTotal"} {
 		if _, ok := d[k]; !ok {
 			t.Errorf("detail missing %q", k)
 		}
+	}
+	// The totals are the store's true counts, not the list lengths.
+	if d["membersTotal"] != float64(1) || d["hasshesTotal"] != float64(0) || d["clientsTotal"] != float64(0) || d["hostsTotal"] != float64(0) {
+		t.Errorf("totals: %v %v %v %v", d["membersTotal"], d["hasshesTotal"], d["clientsTotal"], d["hostsTotal"])
 	}
 	m := d["members"].([]any)[0].(map[string]any)
 	for _, k := range []string{"actorId", "primaryIp", "playbook", "sessions", "ips", "reasons"} {
