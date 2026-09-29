@@ -541,3 +541,107 @@ func TestResetScriptsForVersion(t *testing.T) {
 		t.Fatalf("matching version: reset=%v err=%v", reset, err)
 	}
 }
+
+// RebuildScriptFamilies runs on every regroup (every 10 min) and the family
+// count is attacker-driven: each non-distinctive script is its own family. It
+// used to DELETE the whole table and re-INSERT every row under writeMu
+// (10,000 families held it 204-230 ms on x86, ~0.5-0.7 s on ARM;
+// store-pipeline audit M3). It now writes only the rows whose content changed,
+// so an unchanged regroup takes no write at all. A trigger-fed counter sees
+// every row write regardless of which pooled connection makes it.
+func TestRebuildScriptFamiliesWritesOnlyChangedRows(t *testing.T) {
+	s := newTestStore(t, "families-diff.db")
+	ctx := context.Background()
+	stamp := "2026-09-20T10:00:00.000000000Z"
+	const families = 40
+	for i := range families {
+		fp := fmt.Sprintf("%064x", i+1)
+		if _, err := s.db.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen,family,family_distance)
+VALUES(?,?,?,1,0,?,?,?,0)`, fp, "id", "id", stamp, stamp, fp); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at,settled_at,fingerprint)
+VALUES(?,?,'198.51.100.7',1,2,?,?,?,?,?)`, fmt.Sprintf("s%d", i), fmt.Sprintf("cowrie:a%d", i), stamp, stamp, stamp, stamp, fp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []string{
+		`CREATE TABLE fam_writes(op TEXT)`,
+		`CREATE TRIGGER fam_w_i AFTER INSERT ON script_families BEGIN INSERT INTO fam_writes VALUES('insert'); END`,
+		`CREATE TRIGGER fam_w_u AFTER UPDATE ON script_families BEGIN INSERT INTO fam_writes VALUES('update'); END`,
+		`CREATE TRIGGER fam_w_d AFTER DELETE ON script_families BEGIN INSERT INTO fam_writes VALUES('delete'); END`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writes := func() string {
+		t.Helper()
+		var out string
+		if err := s.db.QueryRow(`SELECT COALESCE(group_concat(op||':'||n, ','),'') FROM (SELECT op, COUNT(*) n FROM fam_writes GROUP BY op ORDER BY op)`).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`DELETE FROM fam_writes`); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	snapshot := func() string {
+		t.Helper()
+		var out string
+		if err := s.db.QueryRow(`SELECT COALESCE(group_concat(r, char(10)),'') FROM (SELECT family||'|'||display||'|'||variants||'|'||sessions||'|'||actors||'|'||ips||'|'||command_count||'|'||distinctive||'|'||links||'|'||reason||'|'||first_seen||'|'||last_seen r FROM script_families ORDER BY family)`).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	// fromScratch is what the old full rewrite produced: the diffing rebuild
+	// must always land on the same table, so empty it and rebuild.
+	fromScratch := func() string {
+		t.Helper()
+		if _, err := s.db.Exec(`DELETE FROM script_families`); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RebuildScriptFamilies(ctx, 3000); err != nil {
+			t.Fatal(err)
+		}
+		return snapshot()
+	}
+
+	if err := s.RebuildScriptFamilies(ctx, 3000); err != nil {
+		t.Fatal(err)
+	}
+	if got := writes(); got != fmt.Sprintf("insert:%d", families) {
+		t.Fatalf("first rebuild writes = %q, want every family inserted", got)
+	}
+	if err := s.RebuildScriptFamilies(ctx, 3000); err != nil {
+		t.Fatal(err)
+	}
+	if got := writes(); got != "" {
+		t.Fatalf("unchanged rebuild writes = %q, want none", got)
+	}
+	// One family gains a session, one loses its only session, one is new.
+	fp0, fp1 := fmt.Sprintf("%064x", 1), fmt.Sprintf("%064x", 2)
+	fpNew := fmt.Sprintf("%064x", 1000)
+	for _, q := range []string{
+		`INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at,settled_at,fingerprint)
+VALUES('s-extra','cowrie:z','198.51.100.8',1,2,'` + stamp + `','2026-09-21T10:00:00.000000000Z','` + stamp + `','` + stamp + `','` + fp0 + `')`,
+		`DELETE FROM session_scripts WHERE fingerprint='` + fp1 + `'`,
+		`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen,family,family_distance) VALUES('` + fpNew + `','w','w',1,0,'` + stamp + `','` + stamp + `','` + fpNew + `',0)`,
+		`INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at,settled_at,fingerprint)
+VALUES('s-new','cowrie:y','198.51.100.9',1,2,'` + stamp + `','` + stamp + `','` + stamp + `','` + stamp + `','` + fpNew + `')`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("%v\n%s", err, q)
+		}
+	}
+	if err := s.RebuildScriptFamilies(ctx, 3000); err != nil {
+		t.Fatal(err)
+	}
+	if got := writes(); got != "delete:1,insert:1,update:1" {
+		t.Fatalf("changed rebuild writes = %q, want exactly the three changed families", got)
+	}
+	got := snapshot()
+	if want := fromScratch(); got != want {
+		t.Fatalf("diffed table differs from a full rebuild:\n got %s\nwant %s", got, want)
+	}
+}

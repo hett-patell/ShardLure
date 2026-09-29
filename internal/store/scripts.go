@@ -445,7 +445,24 @@ type familyVariant struct {
 
 // RebuildScriptFamilies materialises the Scripts view so the panel reads one
 // small table. population is the Cowrie actor count within retention. Reads
-// run in one read-only snapshot outside writeMu; only the replace is a write.
+// run in one read-only snapshot outside writeMu, and so does the comparison
+// with the stored rows: only families whose row would change are written.
+//
+// It runs on every regroup (every 10 minutes and after edits), and the family
+// count is attacker-driven, since each non-distinctive script is its own
+// family. The old DELETE-everything-then-INSERT held writeMu for every row on
+// every regroup: 10,000 families cost 204-230 ms on x86 (~0.5-0.7 s on ARM),
+// and batching the INSERTs saved under 10% because the cost is per row, not
+// per statement (store-pipeline audit M3). Between two regroups only the
+// families that gained or lost a session, or whose link decision moved with
+// the population, differ, so a steady-state regroup writes a handful of rows
+// or none; ARM carries ~164 families. The full-size writes that remain (the
+// first rebuild after a version reset, which empties the table) go in
+// familyWriteChunk-row transactions so ingest interleaves. Only the campaign
+// worker writes script_families (this and the version reset, one goroutine
+// under the cross-process lease), so the stored rows cannot move between the
+// snapshot and the write; a reader between two chunks sees some families
+// already updated, which is harmless for a display-only view.
 func (s *Store) RebuildScriptFamilies(ctx context.Context, population int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -459,6 +476,7 @@ func (s *Store) RebuildScriptFamilies(ctx context.Context, population int) error
 		variants              []familyVariant
 	}
 	fams := map[string]*fam{}
+	stored := map[string]familyRow{}
 	err := func() error {
 		rtx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
@@ -517,27 +535,100 @@ WHERE sc.family<>'' GROUP BY sc.fingerprint ORDER BY sc.family, sc.family_distan
 				f.links, f.reason = true, reason
 			}
 		}
-		return vrows.Err()
+		if err := vrows.Err(); err != nil {
+			return err
+		}
+		srows, err := rtx.QueryContext(ctx, `SELECT family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen FROM script_families`)
+		if err != nil {
+			return err
+		}
+		defer srows.Close()
+		for srows.Next() {
+			var id string
+			var r familyRow
+			if err := srows.Scan(&id, &r.display, &r.variants, &r.sessions, &r.actors, &r.ips, &r.cmds, &r.distinctive, &r.links, &r.reason, &r.first, &r.last); err != nil {
+				return err
+			}
+			stored[id] = r
+		}
+		return srows.Err()
 	}()
 	if err != nil {
 		return err
 	}
-	return s.WithTxContext(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`DELETE FROM script_families`); err != nil {
+	want := make(map[string]familyRow, len(fams))
+	for id, f := range fams {
+		v, err := json.Marshal(f.variants)
+		if err != nil {
 			return err
 		}
-		for id, f := range fams {
-			v, err := json.Marshal(f.variants)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-				id, f.display, string(v), f.sessions, f.actors, f.ips, f.cmds, scriptBool(f.distinctive), scriptBool(f.links), f.reason, f.first, f.last); err != nil {
-				return err
-			}
+		want[id] = familyRow{display: f.display, variants: string(v), sessions: f.sessions, actors: f.actors, ips: f.ips,
+			cmds: f.cmds, distinctive: scriptBool(f.distinctive), links: scriptBool(f.links), reason: f.reason, first: f.first, last: f.last}
+	}
+	var upserts, deletes []string
+	for _, id := range sortedFamilyKeys(want) {
+		if old, ok := stored[id]; !ok || old != want[id] {
+			upserts = append(upserts, id)
 		}
-		return nil
-	})
+	}
+	for _, id := range sortedFamilyKeys(stored) {
+		if _, ok := want[id]; !ok {
+			deletes = append(deletes, id)
+		}
+	}
+	for lo := 0; lo < len(deletes); lo += familyWriteChunk {
+		chunk := deletes[lo:min(lo+familyWriteChunk, len(deletes))]
+		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+			for _, id := range chunk {
+				if _, err := tx.Exec(`DELETE FROM script_families WHERE family=?`, id); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	for lo := 0; lo < len(upserts); lo += familyWriteChunk {
+		chunk := upserts[lo:min(lo+familyWriteChunk, len(upserts))]
+		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+			for _, id := range chunk {
+				f := want[id]
+				if _, err := tx.Exec(`INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(family) DO UPDATE SET display=excluded.display, variants=excluded.variants, sessions=excluded.sessions, actors=excluded.actors,
+  ips=excluded.ips, command_count=excluded.command_count, distinctive=excluded.distinctive, links=excluded.links, reason=excluded.reason,
+  first_seen=excluded.first_seen, last_seen=excluded.last_seen`,
+					id, f.display, f.variants, f.sessions, f.actors, f.ips, f.cmds, f.distinctive, f.links, f.reason, f.first, f.last); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// familyWriteChunk bounds one RebuildScriptFamilies write transaction: ~500
+// rows is ~10 ms of writeMu on x86 at the measured per-row cost, so even the
+// full rebuild after a version reset releases the lock between chunks.
+const familyWriteChunk = 500
+
+// familyRow is one script_families row minus its key, comparable with ==.
+type familyRow struct {
+	display, variants                               string
+	sessions, actors, ips, cmds, distinctive, links int
+	reason, first, last                             string
+}
+
+func sortedFamilyKeys(m map[string]familyRow) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func scriptBool(b bool) int {
