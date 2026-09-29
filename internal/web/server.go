@@ -54,6 +54,9 @@ type Server struct {
 	// testRoutes lets a test register an extra handler on the live mux that
 	// RunContext serves; nil in production.
 	testRoutes func(*http.ServeMux)
+	// publicOriginHost is dashboard.public_origin's hostname (lowercase), one
+	// of the names open mode answers to (see requireKnownHost).
+	publicOriginHost string
 	// onCampaignEdit wakes the campaign worker after an operator edit; nil
 	// when no worker runs (the edit is still recorded).
 	onCampaignEdit func()
@@ -818,6 +821,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	}
 	server.geo.monitor = firstOpt.Monitor
 	server.originPolicy, server.originError = NewOriginPolicy(firstOpt.PublicOrigin, firstOpt.TrustedProxies)
+	server.publicOriginHost = publicOriginHostname(firstOpt.PublicOrigin)
 	return server
 }
 
@@ -1126,9 +1130,9 @@ func (s *Server) RunContext(ctx context.Context) error {
 	var handlers handlerDrain
 	srv := &http.Server{
 		Addr: s.addr,
-		Handler: handlers.wrap(securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Handler: handlers.wrap(securityHeaders(s.requireKnownHost(s.newServerHostPolicy(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mux.ServeHTTP(w, r.WithContext(observability.WithMonitor(r.Context(), s.monitor)))
-		}))),
+		})))),
 		ReadTimeout: 10 * time.Second,
 		// 60s rather than 20s so /debug/pprof/profile?seconds=30 can
 		// complete. No handler is supposed to take longer than a few

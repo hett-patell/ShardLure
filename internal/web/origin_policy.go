@@ -47,6 +47,10 @@ const crossSiteRefusal = "cross-site request refused"
 // Any other Sec-Fetch-Site value - including "same-site", a sibling host on
 // the same registrable domain, and "none" - is refused, as is a mismatched or
 // "null" Origin.
+//
+// Both labels are relative to the request's own Host, so on their own they
+// cannot tell the dashboard from a DNS-rebinding page that is same-origin with
+// itself; requireKnownHost (host_policy.go) refuses such a Host first.
 func (s *Server) refuseCrossSiteBrowser(w http.ResponseWriter, r *http.Request) bool {
 	site := r.Header.Get("Sec-Fetch-Site")
 	origin := r.Header.Get("Origin")
