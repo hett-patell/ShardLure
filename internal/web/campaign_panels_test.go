@@ -241,9 +241,16 @@ func TestScriptDialogReachesEveryVariant(t *testing.T) {
 	for _, want := range []string{
 		"var vfps = (f.variants || []).map(function (v) { return String(v.fingerprint || ''); });",
 		"action: function () { setActiveView('red'); openScript(fp); closePalette(); }",
+		// Re-review: fingerprints match only a hex query of 8+ characters,
+		// by prefix; plain text searches the display only.
+		"var fpQuery = /^[0-9a-f]{8,64}$/.test(q);",
+		"filter(function (v) { return v.indexOf(q) === 0; })[0];",
 	} {
 		if !strings.Contains(intelHTML, want) {
 			t.Errorf("palette missing %q", want)
 		}
+	}
+	if strings.Contains(intelHTML, "vfps.join(' ')") || strings.Contains(intelHTML, "return v.indexOf(q) >= 0; })[0] || f.family") {
+		t.Error("the palette still substring-matches fingerprints")
 	}
 }

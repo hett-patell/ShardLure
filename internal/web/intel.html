@@ -3347,14 +3347,23 @@ function buildPalette(q) {
       action: function () { setActiveView('red'); openCampaign(c.id); closePalette(); }
     });
   });
+  // Plain text searches a script's display text only. A hex-looking query of
+  // 8+ characters is a fingerprint lookup: it matches the representative or
+  // any variant (a campaign's evidence names a variant, not always the
+  // representative) by PREFIX and opens that fingerprint. Substring matching
+  // over fingerprints made "cd" open whichever variant's hash contained it.
+  var fpQuery = /^[0-9a-f]{8,64}$/.test(q);
   (_lastScripts || []).forEach(function (f) {
-    // Variant fingerprints are searchable too (a campaign's evidence names a
-    // variant, not always the representative); a match opens that variant.
     var vfps = (f.variants || []).map(function (v) { return String(v.fingerprint || ''); });
-    var hay = ((f.family || '') + ' ' + vfps.join(' ') + ' ' + (f.display || '')).toLowerCase();
-    if (hay.indexOf(q) < 0) return;
+    var fp = f.family;
+    if (fpQuery) {
+      fp = [String(f.family || '')].concat(vfps).filter(function (v) { return v.indexOf(q) === 0; })[0];
+      if (!fp && String(f.display || '').toLowerCase().indexOf(q) < 0) return;
+      fp = fp || f.family;
+    } else if (String(f.display || '').toLowerCase().indexOf(q) < 0) {
+      return;
+    }
     if (out.filter(function (r) { return r.group === 'Scripts'; }).length >= 5) return;
-    var fp = vfps.filter(function (v) { return v.indexOf(q) >= 0; })[0] || f.family;
     out.push({
       group: 'Scripts', label: String(f.display || '').split('\n')[0].slice(0, 80) || String(f.family || '').slice(0, 16),
       sub: (f.sessions || 0) + ' sessions' + (fp !== f.family ? ' · variant ' + String(fp).slice(0, 12) : ''),
