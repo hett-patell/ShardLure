@@ -164,24 +164,50 @@ func TestEvidenceFollowsHASSHRekey(t *testing.T) {
 	}
 }
 
-// More than one purge chunk of expired sessions must all be removed.
+// More than one purge chunk of expired sessions must all be removed. 5,100
+// one-line sessions exceed step 1's 5,000-row candidate query, so a second
+// chunk has to delete rows (the old 1,200 fit into one chunk; store-pipeline
+// audit M7). 5,100 old evidence rows do the same for the evidence step's
+// LIMIT 5000.
 func TestRetentionPurgeFinishesPastOneChunk(t *testing.T) {
 	s := newTestStore(t, "retention-chunks.db")
 	ctx := context.Background()
-	old := time.Now().UTC().AddDate(0, 0, -120)
-	for i := 0; i < 1200; i++ {
-		cowrieEvent(t, s, fmt.Sprintf("old%d", i), "cowrie:old", "command", "id", "", "", old)
-	}
-	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+	old := formatFixedUTC(time.Now().UTC().AddDate(0, 0, -120))
+	const n = 5100
+	if err := s.WithTx(func(tx *sql.Tx) error {
+		for i := 0; i < n; i++ {
+			sess := fmt.Sprintf("old%05d", i)
+			if _, err := tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,line_count,bytes,first_seen,last_seen,updated_at) VALUES(?,'cowrie:old',1,2,?,?,?)`, sess, old, old, old); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO session_script_lines(session_id,event_id,line) VALUES(?,?,'id')`, sess, i+1); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO campaign_evidence(kind,value,session_id,first_seen,last_seen) VALUES('ssh_key',?,?,?,?)`, fmt.Sprintf("SHA256:k%05d", i), sess, old, old); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
+	working := map[int]int{}
+	purgeChunkDone = func(step int, deleted int64) {
+		if deleted > 0 {
+			working[step]++
+		}
+	}
+	t.Cleanup(func() { purgeChunkDone = nil })
 	if err := s.purgeCampaignDerived(ctx, time.Now().UTC().AddDate(0, 0, -90)); err != nil {
 		t.Fatal(err)
 	}
 	var left int
-	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)`).Scan(&left)
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)+(SELECT COUNT(*) FROM campaign_evidence)`).Scan(&left)
 	if left != 0 {
 		t.Fatalf("%d rows left after purge", left)
+	}
+	if working[0] < 2 || working[1] < 2 {
+		t.Fatalf("chunks that deleted rows: sessions %d, evidence %d; want at least 2 each", working[0], working[1])
 	}
 }
 
@@ -734,9 +760,13 @@ func TestSettleNeverSeesPartlyPurgedSession(t *testing.T) {
 	s := newTestStore(t, "retention-settle.db")
 	ctx := context.Background()
 	old := formatFixedUTC(time.Now().UTC().AddDate(0, 0, -120))
-	// 17 sessions x 300 lines = 5,100 lines: more than one 5,000-row chunk.
+	// 40 sessions x 300 lines = 12,000 lines. A chunk takes sessions until
+	// their lines reach 5,000 (17 x 300 = 5,100), so this is three deleting
+	// chunks, and the settle below runs between them. The old 17 sessions fit
+	// one chunk and only the empty terminating chunk made chunks >= 2
+	// (store-pipeline audit M7).
 	if err := s.WithTx(func(tx *sql.Tx) error {
-		for i := 0; i < 17; i++ {
+		for i := 0; i < 40; i++ {
 			sess := fmt.Sprintf("p%02d", i)
 			if _, err := tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,line_count,bytes,first_seen,last_seen,updated_at) VALUES(?,?,300,0,?,?,?)`, sess, "cowrie:x", old, old, old); err != nil {
 				return err
@@ -752,7 +782,10 @@ func TestSettleNeverSeesPartlyPurgedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	chunks := 0
-	purgeChunkDone = func() {
+	purgeChunkDone = func(step int, deleted int64) {
+		if step != 0 || deleted == 0 {
+			return
+		}
 		chunks++
 		var partial int
 		s.db.QueryRow(`SELECT COUNT(*) FROM session_scripts ss WHERE line_count <> (SELECT COUNT(*) FROM session_script_lines l WHERE l.session_id=ss.session_id)`).Scan(&partial)
@@ -774,7 +807,7 @@ func TestSettleNeverSeesPartlyPurgedSession(t *testing.T) {
 	}
 	var left int
 	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)`).Scan(&left)
-	if chunks < 2 || left != 0 {
+	if chunks < 3 || left != 0 {
 		t.Fatalf("chunks=%d left=%d", chunks, left)
 	}
 }

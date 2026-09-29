@@ -693,7 +693,7 @@ func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) erro
 			return r.RowsAffected()
 		},
 	}
-	for _, step := range steps {
+	for stepIdx, step := range steps {
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -708,7 +708,7 @@ func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) erro
 				return err
 			}
 			if purgeChunkDone != nil {
-				purgeChunkDone()
+				purgeChunkDone(stepIdx, n)
 			}
 			if n == 0 {
 				break
@@ -719,8 +719,10 @@ func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) erro
 }
 
 // purgeChunkDone, when set (tests only), runs after each committed retention
-// chunk; purgeCampaignDerivedFail, when set, can fail the whole step.
+// chunk with the step (0 sessions, 1 evidence) and how much the chunk deleted,
+// so a test can count the chunks that did work rather than the empty one that
+// ends each step; purgeCampaignDerivedFail, when set, can fail the whole step.
 var (
-	purgeChunkDone           func()
+	purgeChunkDone           func(step int, deleted int64)
 	purgeCampaignDerivedFail func() error
 )
