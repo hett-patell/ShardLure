@@ -180,7 +180,8 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 // hold lives in the database, so it survives a restart.
 //
 // It never ends while the recorder is below the events high-water mark taken
-// at reset (re-measured after a --replace, see scriptHoldRemeasure). Once the
+// at reset (re-measured after a --replace, see scriptHoldRemeasure; lowered
+// to what still exists, see holdRecordTarget). Once the
 // recorder has passed it, the first check stores a deadline of now +
 // scriptHoldDuration (persisted, so a restart keeps it), and the hold ends
 // when no session with a line at or below the mark is unsettled, or at that
@@ -216,7 +217,11 @@ WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSourc
 	if err != nil {
 		return false, err
 	}
-	if cursor < hwm {
+	target, err := holdRecordTarget(ctx, s.db, hwm)
+	if err != nil {
+		return false, err
+	}
+	if cursor < target {
 		return true, nil // not re-recorded yet: no deadline can release this
 	}
 	var deadline int64
@@ -259,6 +264,26 @@ WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSourc
 		_, err := tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path IN (?,?)`, scriptVersionSource, scriptHoldHWMPath, scriptHoldDeadlinePath)
 		return err
 	})
+}
+
+// holdRecordTarget is the id the recorder must reach before the hold can
+// leave its recording phase: the high-water mark taken at reset, lowered to
+// MAX(events.id) when the rows at the top of the id range have since been
+// deleted. The recorder stops at MAX(events.id), so against the raw mark a
+// journal --replace with an empty file, or a purge of old-timestamped events
+// ingested last, left the cursor below it until a new event arrived: seconds
+// under live, forever for a standalone web on a static database, with every
+// regroup suspended meanwhile (store-pipeline audit M2). Nothing above
+// MAX(id) exists to re-record, and ids are AUTOINCREMENT (never reused), so
+// any later event lands above the raw mark too and belongs to the new
+// encoding anyway. The stored mark is not rewritten: the pending check keeps
+// "line at or below hwm", which is the same set of lines.
+func holdRecordTarget(ctx context.Context, q ctxRowQueryer, hwm int64) (int64, error) {
+	var maxID int64
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM events`).Scan(&maxID); err != nil {
+		return 0, err
+	}
+	return min(hwm, maxID), nil
 }
 
 // scriptAssignment is a campaign_ids row of kind 'script', keyed by its
@@ -450,8 +475,12 @@ func (s *Store) ScriptRebuildHoldStatus(ctx context.Context) (ScriptRebuildHoldS
 	if err != nil {
 		return st, err
 	}
-	st.Recorded, st.Target = cursor, hwm
-	if cursor < hwm {
+	target, err := holdRecordTarget(ctx, s.db, hwm)
+	if err != nil {
+		return st, err
+	}
+	st.Recorded, st.Target = cursor, target
+	if cursor < target {
 		st.Phase = "recording"
 		return st, nil
 	}

@@ -58,6 +58,12 @@ func TestScriptRebuildHoldStatusIsReadOnly(t *testing.T) {
 	}
 	check(ScriptRebuildHoldStatus{})
 
+	// Event 400 exists: the recording target is the mark lowered to
+	// MAX(events.id) (holdRecordTarget), so a mark above every event would read
+	// as already recorded.
+	if _, err := s.db.Exec(`INSERT INTO events(id,ts,source,kind) VALUES(400,'2026-09-01T00:00:00Z','cowrie','connect')`); err != nil {
+		t.Fatal(err)
+	}
 	setIngestOffset(t, s, scriptVersionSource, scriptHoldHWMPath, 400)
 	setIngestOffset(t, s, evidenceCursorSource, evidenceCursorPath, 100)
 	check(ScriptRebuildHoldStatus{Held: true, Phase: "recording", Recorded: 100, Target: 400})
@@ -74,6 +80,9 @@ func TestScriptRebuildHoldStatusIsReadOnly(t *testing.T) {
 	// A --replace sentinel: the target is measured, not stored.
 	setIngestOffset(t, s, scriptVersionSource, scriptHoldHWMPath, scriptHoldRemeasure)
 	setIngestOffset(t, s, evidenceCursorSource, evidenceCursorPath, 0)
+	if _, err := s.db.Exec(`DELETE FROM events`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec(`INSERT INTO events(id,ts,source,kind) VALUES(7,'2026-09-01T00:00:00Z','cowrie','connect')`); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +96,12 @@ func TestForceScriptRebuildDeletesOnlyTheVersionRow(t *testing.T) {
 	s := newTestStore(t, "force_rebuild.db")
 	ctx := context.Background()
 	setIngestOffset(t, s, scriptVersionSource, scriptVersionPath, 3)
+	// Event 400 exists: the recording target is the mark lowered to
+	// MAX(events.id) (holdRecordTarget), so a mark above every event would read
+	// as already recorded.
+	if _, err := s.db.Exec(`INSERT INTO events(id,ts,source,kind) VALUES(400,'2026-09-01T00:00:00Z','cowrie','connect')`); err != nil {
+		t.Fatal(err)
+	}
 	setIngestOffset(t, s, scriptVersionSource, scriptHoldHWMPath, 400)
 	setIngestOffset(t, s, evidenceCursorSource, evidenceCursorPath, 100)
 	setIngestOffset(t, s, "cowrie", "/var/log/cowrie.json", 12345)

@@ -300,3 +300,61 @@ func TestReplaceDuringRebuildHoldKeepsCarry(t *testing.T) {
 		t.Fatalf("a replace outside a hold wrote %d hold rows", holds)
 	}
 }
+
+// The hold's recording phase compares the cursor with the high-water mark
+// taken at reset, and the recorder stops at MAX(events.id). If the events at
+// the top of the id range are deleted after the reset (a journal --replace
+// with an empty file, or a purge of old-timestamped rows ingested last), the
+// cursor could never reach the mark until a new event arrived: in live that is
+// seconds, in a standalone `web` on a static database never, and every regroup
+// stayed suspended (store-pipeline audit M2). The mark is now effectively
+// min(hwm, MAX(events.id)): nothing above what exists is left to re-record.
+func TestScriptRebuildHoldEndsWhenTopEventsDeleted(t *testing.T) {
+	s := newTestStore(t, "hold-top.db")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "id", "", "", now.Add(-time.Hour))
+	cowrieEvent(t, s, "s2", "cowrie:b", "command", "uname -a", "", "", now.Add(-time.Hour))
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := s.ResetScriptsForVersion(ctx, 99); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	// The top event disappears after the reset measured hwm=2.
+	if _, err := s.db.Exec(`DELETE FROM events WHERE id=2`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.ScriptRebuildHoldStatus(ctx)
+	if err != nil || status.Phase != "settling" || status.Target != 1 || status.Recorded != 1 {
+		t.Fatalf("status = %+v, %v; want settling at 1/1: nothing above event 1 exists to re-record", status, err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
+		t.Fatalf("s1 unsettled: held=%v err=%v", held, err)
+	}
+	// The deadline clock started, so the hold now ends on its own without any
+	// new ingest, as it must for a standalone web on a static database.
+	if held, err := s.ScriptRebuildHold(ctx, time.Now().Add(scriptHoldDuration+time.Minute)); err != nil || held {
+		t.Fatalf("past the deadline with the top events deleted: held=%v err=%v", held, err)
+	}
+	// And settling alone ends it too, on a fresh reset of the same shape.
+	if _, err := s.ResetScriptsForVersion(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	cowrieEvent(t, s, "s3", "cowrie:c", "command", "w", "", "", now.Add(-time.Hour))
+	if _, err := s.db.Exec(`DELETE FROM events WHERE id=(SELECT MAX(id) FROM events)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Hour), 10); err != nil || n != 1 {
+		t.Fatalf("settle %d %v", n, err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || held {
+		t.Fatalf("all settled, top events gone: held=%v err=%v", held, err)
+	}
+}
