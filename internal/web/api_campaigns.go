@@ -34,16 +34,27 @@ const (
 	maxCampaignNameRunes     = 200
 	maxCampaignNotesRunes    = 4000
 	maxCampaignActorIDLen    = 200
-	maxCampaignEvidenceLen   = 200
 	maxCampaignLookupLen     = 200
 	campaignEditWho          = "dashboard"
 	campaignAmbiguousMessage = "campaign name is ambiguous: several campaigns answer to it; use the campaign ID"
 )
 
 // campaignIgnorableKinds are the evidence kinds that link sessions into a
-// campaign (ssh_key and payload in the worker, plus linking scripts). Ignoring
-// any other kind would be recorded and do nothing, so it is refused.
-var campaignIgnorableKinds = map[string]bool{"ssh_key": true, "payload": true, "script": true}
+// campaign (ssh_key and payload in the worker, plus linking scripts), each
+// with the one value shape that kind's evidence carries. Ignoring any other
+// kind, or a value no evidence of that kind can ever have, would be recorded
+// in the append-only ledger and do nothing forever, so it is refused (fix-D
+// M2; the same reason an unknown remove_actor is refused):
+//   - payload: the lowercase sha256 hex the evidence recorder stores
+//     (store.RecordCampaignEvidence lowercases before storing);
+//   - script: the lowercase 64-hex script fingerprint (script.Fingerprint);
+//   - ssh_key: "SHA256:" + unpadded base64 of 32 bytes, as ssh-keygen -l
+//     prints it and script.ExtractKeys records it.
+var campaignIgnorableKinds = map[string]*regexp.Regexp{
+	"payload": fingerprintRe,
+	"script":  fingerprintRe,
+	"ssh_key": regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`),
+}
 
 func writeCampaignJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -473,8 +484,9 @@ func validateCampaignEdit(id, action, arg string) error {
 		}
 	case "ignore_evidence":
 		kind, value, ok := strings.Cut(arg, ":")
-		if !ok || !campaignIgnorableKinds[kind] || value == "" || len(value) > maxCampaignEvidenceLen || !campaignText(value, maxCampaignEvidenceLen, false) {
-			return errors.New("evidence must be ssh_key:, payload: or script: followed by a value")
+		shape := campaignIgnorableKinds[kind]
+		if !ok || shape == nil || !shape.MatchString(value) {
+			return errors.New("evidence must be payload:<sha256 hex>, script:<64-hex fingerprint> or ssh_key:SHA256:<base64>")
 		}
 	default:
 		return errors.New("unknown action")

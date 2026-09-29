@@ -92,7 +92,18 @@ func TestCampaignEditValidatesAndWakes(t *testing.T) {
 		{"action": {"ignore_evidence"}, "arg": {"hassh:abc"}},
 		{"action": {"ignore_evidence"}, "arg": {"ssh_key:"}},
 		{"action": {"ignore_evidence"}, "arg": {"payload"}},
-		{"id": {"c-ffffffffffff"}, "action": {"ignore_evidence"}, "arg": {"payload:abc"}},
+		{"id": {"c-ffffffffffff"}, "action": {"ignore_evidence"}, "arg": {"payload:" + strings.Repeat("a", 64)}},
+		// fix-D M2: the ledger is append-only, so a value no evidence can ever
+		// carry would be a permanent no-op row. Each kind has one shape.
+		{"action": {"ignore_evidence"}, "arg": {"payload:deadbeef"}},
+		{"action": {"ignore_evidence"}, "arg": {"payload:" + strings.Repeat("A", 64)}}, // evidence stores lowercase
+		{"action": {"ignore_evidence"}, "arg": {"payload:" + strings.Repeat("a", 65)}},
+		{"action": {"ignore_evidence"}, "arg": {"script:" + strings.Repeat("g", 64)}},
+		{"action": {"ignore_evidence"}, "arg": {"script:SHA256:" + strings.Repeat("A", 43)}},
+		{"action": {"ignore_evidence"}, "arg": {"ssh_key:" + strings.Repeat("a", 64)}},
+		{"action": {"ignore_evidence"}, "arg": {"ssh_key:SHA256:" + strings.Repeat("A", 42)}},
+		{"action": {"ignore_evidence"}, "arg": {"ssh_key:SHA256:" + strings.Repeat("A", 43) + "="}},
+		{"action": {"ignore_evidence"}, "arg": {"ssh_key:sha256:" + strings.Repeat("A", 43)}},
 		{"id": {"c-0123456789ab"}, "action": {"merge"}, "arg": {"c-0123456789ab"}},
 		{"id": {"c-0123456789ab"}, "action": {"merge"}, "arg": {"c-ffffffffffff"}}, // unknown target
 		{"id": {"c-0123456789ab"}, "action": {"merge"}, "arg": {""}},
@@ -115,17 +126,18 @@ func TestCampaignEditValidatesAndWakes(t *testing.T) {
 		{"id": {"c-0123456789ab"}, "action": {"notes"}, "arg": {"line one\r\nline two"}},
 		{"id": {"c-0123456789ab"}, "action": {"remove_actor"}, "arg": {"cowrie:a"}},
 		{"action": {"ignore_evidence"}, "arg": {"script:" + strings.Repeat("f", 64)}},
-		{"id": {"c-0123456789ab"}, "action": {"ignore_evidence"}, "arg": {"payload:abc"}},
+		{"id": {"c-0123456789ab"}, "action": {"ignore_evidence"}, "arg": {"payload:" + strings.Repeat("0a", 32)}},
+		{"action": {"ignore_evidence"}, "arg": {"ssh_key:SHA256:MkYY9qiVsFGBC5WkjoClCkwEFW5iSjcGQF7m4n4H7Cw"}},
 	} {
 		if rec := postCampaignEdit(mux, good); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"applying":true`) {
 			t.Errorf("%v = %d %s", good, rec.Code, rec.Body.String())
 		}
 	}
-	if woke != 5 {
-		t.Fatalf("woke = %d, want 5", woke)
+	if woke != 6 {
+		t.Fatalf("woke = %d, want 6", woke)
 	}
 	edits, err := s.st.CampaignEdits(context.Background())
-	if err != nil || len(edits) != 5 || edits[0].Who != "dashboard" || edits[0].Arg != "Outlaw" {
+	if err != nil || len(edits) != 6 || edits[0].Who != "dashboard" || edits[0].Arg != "Outlaw" {
 		t.Fatalf("edits %+v %v", edits, err)
 	}
 }
