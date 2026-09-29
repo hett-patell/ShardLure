@@ -969,16 +969,9 @@ func (s *Server) homeLive() homePoint {
 	return h
 }
 
-// RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
-func (s *Server) RunContext(ctx context.Context) error {
-	defer func() {
-		if s.geo != nil {
-			s.geo.mmdb.close()
-		}
-	}()
-	if s.originError != nil {
-		return s.originError
-	}
+// routes builds the dashboard mux. It is split out of RunContext so tests can
+// drive the real registrations (every guard/guardRead wrapping) end to end.
+func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.guardOperationalRead(s.handleHealth))
 	mux.HandleFunc("/readyz", s.guardOperationalRead(s.handleReady))
@@ -1103,6 +1096,20 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/debug/pprof/symbol", s.guardDebug(pprof.Symbol))
 	mux.HandleFunc("/debug/pprof/trace", s.guardDebug(pprof.Trace))
 	mux.HandleFunc("/debug/runtime", s.guardDebug(s.handleRuntimeStats))
+	return mux
+}
+
+// RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
+func (s *Server) RunContext(ctx context.Context) error {
+	defer func() {
+		if s.geo != nil {
+			s.geo.mmdb.close()
+		}
+	}()
+	if s.originError != nil {
+		return s.originError
+	}
+	mux := s.routes()
 
 	// With SHARDLURE_DASH_TOKEN unset every /api/* endpoint is open —
 	// including the credential/password wordlist export. (/debug/* is the
@@ -1850,6 +1857,13 @@ func (s *Server) registerCampaignRoutes(mux *http.ServeMux) {
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireDashboardAuth(w, r) {
+			return
+		}
+		// Every guard route mutates state or spends a third-party quota; in
+		// open mode nothing else stops a foreign page driving it (see
+		// refuseCrossSiteBrowser). Checked for every method, not just POST:
+		// the VirusTotal lookup spends quota on GET.
+		if s.dashboardToken() == "" && s.refuseCrossSiteBrowser(w, r) {
 			return
 		}
 		if !s.applicationAvailable(w, r) {
