@@ -119,42 +119,59 @@ const (
 	sideSource                     // the config dir or a data/evidence/Cowrie root it names
 )
 
-// side attributes a refused path. A path inside --output/--to or --input is
-// that side's. backup create also opens sources (the config directory, the
-// data, evidence and Cowrie roots it names, each --include-file directory),
-// whose refusals used to be reported as an output problem - the opposite of
-// the fix (audit I1). A refused ancestor shared by several paths goes to the
-// one opened first: create opens the config and --include-file directories
-// before it stages the output.
+// side attributes a refused path. backup create also opens sources (the
+// config directory, the data, evidence and Cowrie roots it names, each
+// --include-file directory), whose refusals used to be reported as an output
+// problem - the opposite of the fix (audit I1).
+//
+// safefile.OpenRoot names the exact directory it was asked to open, so the
+// side is first read from which opened directory the refusal names: the
+// output or --to (or its parent, which create and restore open), the --input
+// bundle, the config directory, an --include-file directory. Only a path that
+// names none of them (a later check on an ancestor) falls back to the real
+// open order in backup.Create: config directory, then the output's parent
+// (create.go OpenRoot(filepath.Dir(output))), then the data roots, then the
+// --include-file directories. An earlier version assumed includes opened
+// before the output, and blamed --include-file for a symlinked ancestor the
+// two shared (re-review of I1).
 func (s refusalSides) side(path string) refusedSide {
 	path = filepath.Clean(path)
 	within := func(p, base string) bool {
 		if base == "" {
 			return false
 		}
-		abs, err := filepath.Abs(base)
-		if err != nil {
-			return false
-		}
+		abs := mustAbs(base)
 		return p == abs || strings.HasPrefix(p, strings.TrimSuffix(abs, string(filepath.Separator))+string(filepath.Separator))
+	}
+	names := func(base string) bool { return base != "" && path == filepath.Dir(mustAbs(base)) }
+	includeDir := func(match func(dir string) bool) bool {
+		for _, inc := range s.includes {
+			if match(filepath.Dir(mustAbs(inc))) {
+				return true
+			}
+		}
+		return false
 	}
 	switch {
 	case within(path, s.output), within(path, s.to):
 		return sideOutput
 	case within(path, s.input):
 		return sideBundle
-	case !s.create:
+	case s.create && names(s.config):
+		// Opened before the output's parent, even when it is the same
+		// directory: had it opened, the output's parent would have too.
+		return sideSource
+	case names(s.output), names(s.to), !s.create:
 		return sideOutput
+	case includeDir(func(dir string) bool { return path == dir }):
+		return sideInclude
+	// No exact match: attribute by open order.
 	case s.config != "" && within(filepath.Dir(mustAbs(s.config)), path):
 		return sideSource
-	}
-	for _, inc := range s.includes {
-		if within(filepath.Dir(mustAbs(inc)), path) {
-			return sideInclude
-		}
-	}
-	if within(s.output, path) {
+	case within(s.output, path):
 		return sideOutput
+	case includeDir(func(dir string) bool { return within(dir, path) }):
+		return sideInclude
 	}
 	return sideSource
 }

@@ -285,3 +285,52 @@ func TestBackupCLIRemedyNamesRefusedSource(t *testing.T) {
 		}
 	}
 }
+
+// When --output and --include-file sit under one symlinked directory, create
+// opens the output's parent first (create.go: output before includes), so the
+// refusal names the output's parent and the remedy must be about the output,
+// not --include-file (re-review of audit I1).
+func TestBackupCLIRemedySharedSymlinkAncestor(t *testing.T) {
+	cfg, _ := cliBackupFixture(t)
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(real, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{filepath.Join(real, "f"), filepath.Join(real, "sub", "f")} {
+		if err := os.WriteFile(f, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, inc := range map[string]string{"same-dir": filepath.Join(link, "f"), "include-below": filepath.Join(link, "sub", "f")} {
+		t.Run(name, func(t *testing.T) {
+			err := runBackup(context.Background(), cfg, []string{"create", "--output", filepath.Join(link, "NEW"), "--include-file", inc}, &bytes.Buffer{})
+			if err == nil {
+				t.Fatal("symlinked output accepted")
+			}
+			msg := err.Error()
+			t.Log(msg)
+			if !strings.Contains(msg, strconv.Quote(link)) || !strings.Contains(msg, "choose an output directory without symlinks") || strings.Contains(msg, "--include-file") {
+				t.Fatalf("remedy does not name the output: %q", msg)
+			}
+		})
+	}
+	// Synthetic: a refusal naming exactly an include's directory, under the
+	// same symlinked ancestor as the output, is the include's.
+	unsafe := &safefile.PathRefusal{Kind: safefile.ErrUnsafePath, Path: "/srv/link/sub", Reason: "path has a symlink or non-directory component"}
+	msg := explainRefusedPath(unsafe, refusalSides{create: true, config: "/etc/shardlure/shardlure.yaml", output: "/srv/link/NEW", includes: []string{"/srv/link/sub/f"}}).Error()
+	if !strings.Contains(msg, "point --include-file") {
+		t.Fatalf("include refusal misattributed: %q", msg)
+	}
+	// The config directory opens before the output's parent: when they are
+	// the same directory, the refusal is the config's.
+	unsafe.Path = "/srv/link"
+	msg = explainRefusedPath(unsafe, refusalSides{create: true, config: "/srv/link/shardlure.yaml", output: "/srv/link/NEW"}).Error()
+	if !strings.Contains(msg, "point the config") {
+		t.Fatalf("config refusal misattributed: %q", msg)
+	}
+}
