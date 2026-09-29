@@ -981,9 +981,11 @@ func TestCampaignWorldSimulation(t *testing.T) {
 	for _, k := range keys {
 		t.Logf("%-26s %4d trials, e.g. %v", k, len(cats[k]), firstMsg[k])
 	}
-	// ambLitOnly counts days where the literal check passed and the intent
-	// check failed, so it is the "failing only intent" figure (and vice versa).
-	t.Logf("ambiguous-edit trials=%d (days failing only literal=%d, only intent=%d, both=%d)", amb, intent, lit, neither)
+	// ambLitOnly counts a trial's days where the literal check passed and the
+	// intent check failed, so it feeds the "failing only intent" figure (and
+	// vice versa). lit, intent and neither count trials with at least one such
+	// day, not days, so the summary says trials.
+	t.Logf("ambiguous-edit trials=%d (trials failing only literal=%d, only intent=%d, both=%d)", amb, intent, lit, neither)
 	t.Logf("organic at-rest compared cycles by variant: %v", orgCycles)
 	t.Logf("organic churn events: %v", orgChurn)
 }
