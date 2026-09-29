@@ -60,6 +60,11 @@ func InLengthBand(a, b int) bool {
 	return a != 0 && b != 0 && float64(min(a, b))/float64(max(a, b)) >= minLengthRatio
 }
 
+// familyDistance is AssignFamily's distance; a test seam, so a test can
+// prove the length band skips the O(n*m) computation rather than only
+// losing on the threshold afterwards.
+var familyDistance = Distance
+
 type Rep struct {
 	Fingerprint string
 	Tokens      []string
@@ -73,7 +78,7 @@ func AssignFamily(tokens []string, reps []Rep) (string, float64, bool) {
 		if !InLengthBand(len(tokens), len(r.Tokens)) {
 			continue
 		}
-		if d := Distance(tokens, r.Tokens); d < bestD {
+		if d := familyDistance(tokens, r.Tokens); d < bestD {
 			best, bestD = r.Fingerprint, d
 		}
 	}
