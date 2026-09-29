@@ -38,11 +38,15 @@ func bridgeChain(m int) Input {
 // outlive the worker lease and the 2-minute cycle budget. The bound here is
 // loose on purpose (CI hosts vary); the audit's figure was 10x above it.
 func TestGroupScalesOnBridgeChain(t *testing.T) {
+	limit := time.Second
+	if raceEnabled {
+		limit *= 8 // the detector's instrumentation, not the algorithm
+	}
 	in := bridgeChain(2000)
 	start := time.Now()
 	out := groupT(in)
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("Group over the m=2000 bridge chain took %v, want well under 1 s", d)
+	if d := time.Since(start); d > limit {
+		t.Fatalf("Group over the m=2000 bridge chain took %v, want well under %v", d, limit)
 	}
 	if len(out.Campaigns) != 1 {
 		t.Fatalf("the chain must form one component, got %d campaigns", len(out.Campaigns))
@@ -50,8 +54,8 @@ func TestGroupScalesOnBridgeChain(t *testing.T) {
 	// The second cycle, fed its own output, is the steady state.
 	start = time.Now()
 	groupT(Input{Occurrences: in.Occurrences, Assignments: out.Assignments, Aliases: out.Aliases})
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("second cycle over the m=2000 bridge chain took %v, want well under 1 s", d)
+	if d := time.Since(start); d > limit {
+		t.Fatalf("second cycle over the m=2000 bridge chain took %v, want well under %v", d, limit)
 	}
 }
 
