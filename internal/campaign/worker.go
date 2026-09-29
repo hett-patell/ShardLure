@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +50,9 @@ var genericFamilies = map[string]bool{"xmrig": true, "coinminer": true}
 // linkingKinds are the evidence kinds that may link sessions. HASSH, client
 // version and download host are context only and never link.
 var linkingKinds = map[string]bool{"ssh_key": true, "payload": true}
+
+// logf is log.Printf; a variable so a test can capture what a tick reports.
+var logf = log.Printf
 
 // beforeSave is a test seam: it runs between reading the edit log and saving
 // the grouping, so a test can append an edit in that window.
@@ -113,11 +117,20 @@ func (w *Worker) Tick(ctx context.Context) error {
 
 func (w *Worker) tick(ctx context.Context) error {
 	start := time.Now()
+	skipped := 0
+	// Reported even when a later window fails: earlier windows' rows are
+	// already behind the cursor and will not be seen again.
+	defer func() {
+		if skipped > 0 {
+			logf("campaigns: skipped %d Cowrie events with an unusable timestamp (no ts_unix_ns and unparseable ts); they are not recorded as evidence", skipped)
+		}
+	}()
 	for i := 0; i < w.maxWindows && ctx.Err() == nil && time.Since(start) < recordBudget; i++ {
 		res, err := w.st.RecordCampaignEvidence(ctx, w.window)
 		if err != nil {
-			return err
+			return err // the window rolled back: its rows were not skipped yet
 		}
+		skipped += res.Skipped
 		if !res.Done {
 			// A backlog (first start, a burst, or the rows a replace-ingest
 			// re-inserted above the parked cursor): scheduled regroups wait

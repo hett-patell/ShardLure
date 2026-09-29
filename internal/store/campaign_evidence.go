@@ -123,7 +123,13 @@ type EvidenceRecordResult struct {
 	// replays the dedup then ignored and lines dropped by the session caps;
 	// it is not a count of new rows.
 	Recorded int
-	Done     bool
+	// Skipped counts rows dropped because neither ts_unix_ns nor ts gave a
+	// usable time. They are never stored (a raw ts would break the
+	// fixed-width min/max ordering), and the cursor still moves past them,
+	// so without this count a corrupt or legacy import would lose evidence
+	// silently. The worker logs it.
+	Skipped int
+	Done    bool
 }
 
 // precomputed is what phase 1 of RecordCampaignEvidence derives from a
@@ -263,12 +269,13 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			// Stored times must be fixed-width UTC text so min()/max()/<
 			// order correctly. Prefer the exact v20 column; legacy rows carry
 			// variable-width RFC3339Nano text. A row with neither usable is
-			// skipped (still counted as scanned), never stored raw.
+			// skipped (counted as scanned and Skipped), never stored raw.
 			if e.tsNS != 0 {
 				e.ts = formatFixedUTC(time.Unix(0, e.tsNS))
 			} else if t, err := time.Parse(time.RFC3339Nano, e.ts); err == nil {
 				e.ts = formatFixedUTC(t)
 			} else {
+				res.Skipped++
 				continue
 			}
 			switch models.EventKind(e.kind) {

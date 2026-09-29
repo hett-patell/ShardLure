@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -412,5 +413,35 @@ func TestPruneRunsOnlyAfterSettleOrRegroup(t *testing.T) {
 	}
 	if _, err := st.GetScript(ctx, fp); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("orphan survived a regroup tick: %v", err)
+	}
+}
+
+// Rows the recorder drops for an unusable timestamp are reported, not lost
+// silently: the tick logs how many it skipped.
+func TestTickLogsSkippedTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "skip.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`UPDATE events SET ts='garbage', ts_unix_ns=NULL WHERE session_id='s1'`); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	old := logf
+	logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() { logf = old })
+	if err := NewWorker(st, 90, t.TempDir()).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "skipped 1 ") {
+		t.Fatalf("logged %q", logged)
 	}
 }

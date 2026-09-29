@@ -373,8 +373,8 @@ func TestEvidenceTimestampsAreFixedWidth(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := s.RecordCampaignEvidence(context.Background(), 1000)
-	if err != nil || res.Scanned != 3 {
-		t.Fatalf("res=%+v err=%v", res, err)
+	if err != nil || res.Scanned != 3 || res.Recorded != 2 || res.Skipped != 1 {
+		t.Fatalf("res=%+v err=%v (want 3 scanned, 2 recorded, 1 skipped)", res, err)
 	}
 	want := formatFixedUTC(at)
 	for _, sess := range []string{"ns", "legacy"} {
