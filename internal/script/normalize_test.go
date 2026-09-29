@@ -690,3 +690,42 @@ func TestQuotedTextNormalisation(t *testing.T) {
 		t.Errorf("Display = %q", got)
 	}
 }
+
+// Each delimiter word and the terminator line bash 5.2 ends it on (checked
+// by running `cat <<WORD >/dev/null; body; TERM; echo A; echo B` in bash,
+// which printed A B for every row). A quote holding a blank or an escaped
+// blank used to split the word, so the body never ended and every later
+// command was hidden (re-review item 2).
+func TestHeredocDelimiterMatchesBash(t *testing.T) {
+	for _, tc := range []struct{ word, term string }{
+		{`E"O F"`, "EO F"},
+		{`E'O F'`, "EO F"},
+		{`E\ OF`, "E OF"},
+		{"E\\\nOF", "EOF"},
+		{`"E\"O F"`, `E"O F`},
+		{`E"\\"F`, `E\F`},
+		{`"E\$F"`, `E$F`},
+		{`"E\xF"`, `E\xF`},
+		{`E\\F`, `E\F`},
+		{`$'EOF'`, "EOF"},
+		{`$"EOF"`, "EOF"},
+		{`$'E\x41'`, "EA"},
+		{`$'E\101é'`, "EAé"},
+		{`$'E\'F'`, "E'F"},
+		{`$EOF`, "$EOF"},
+		{`E$`, "E$"},
+		{`E$'O'F`, "EOF"},
+		{`'E'"O"\F`, "EOF"},
+		{"\"E\\`F\"", "E`F"},
+		{`E'\'`, `E\`},
+	} {
+		in := "cat <<" + tc.word + " >/dev/null\nbody\n" + tc.term + "\necho A; echo B"
+		if got := norm(in); !strings.HasSuffix(got, "> /dev/null ; echo A ; echo B") {
+			t.Errorf("<<%s ending on %q: %q", tc.word, tc.term, got)
+		}
+	}
+	// A quote left open is a bash syntax error: not a heredoc, nothing hidden.
+	if got := norm("cat <<\"EOF\nbody\nEOF\nid"); !strings.HasSuffix(got, "; id") {
+		t.Errorf("unclosed quote in a delimiter hid the tail: %q", got)
+	}
+}

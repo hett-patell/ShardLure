@@ -39,9 +39,10 @@ import (
 // program slot (47ae767), and Display counts its ellipsis inside the cap
 // (25b5d4e); 3 = a leading heredoc or here-string keeps the program slot, a
 // redirection target keeps its $(...) group, and >& / <& tokenise as
-// redirections; 4 = a heredoc delimiter gets bash's quote removal and ends
-// on a whole source line (<<\EOF, <<E"OF" and <<"E O F" no longer hide
-// every later command), a heredoc's body (normalised, at most
+// redirections; 4 = a heredoc delimiter is read from the source as one
+// bash word with bash's quote removal (quotes, escapes, line continuations,
+// $'...' and $"...") and ends on a whole source line (<<\EOF, <<E"OF",
+// <<"E O F" and <<E\ OF no longer hide every later command), a heredoc's body (normalised, at most
 // MaxHeredocBodyBytes) is part of its placeholder token, reserved words and
 // braces are not programs (and keep the program slot open), N<file, <> and
 // >| are redirections, a quoted program name ('id') keeps its name, URLs,
@@ -394,56 +395,183 @@ func isBreak(c byte) bool {
 }
 
 // delimiter consumes the word after a << and returns it after bash's quote
-// removal. The word is every token glued to it in the source (`"EO"F` is
-// one word, EOF), and quotes and backslashes are removed the way bash does
-// (`\EOF`, `E"OF"`, `'EOF'` all end on the line EOF): trimming only the
-// outer quotes left delimiters that never matched, hiding every later
-// command (audit I1). No word (a newline or operator follows) is not a
-// heredoc.
+// removal, reading the source directly rather than tokens: a quote may hold
+// blanks and a backslash may escape one (`<<E"O F"`, `<<E\ OF`), which the
+// bare-word token splits, and trimming only a word's outer quotes left
+// delimiters that never matched, hiding every later command (audit I1).
+// The word runs to the first unquoted, unescaped blank or operator byte (the
+// scanner's isBreak). Quote removal follows bash 5 for a heredoc word, each
+// form checked against bash:
+//   - unquoted: `\` keeps the next byte, `\` + newline is removed (a line
+//     continuation), and `$` before a quote is dropped;
+//   - '...' keeps everything;
+//   - "..." and $"..." : `\` escapes only $, `, " and \, and `\` + newline
+//     is removed;
+//   - $'...' decodes ANSI-C escapes (see ansiEscape).
+//
+// A quote left open is a syntax error in bash (nothing runs), so it is not
+// read as a heredoc: the words after the << are then tokenised as usual
+// and nothing is hidden. No word at all (a newline or operator follows) is
+// not a heredoc either.
 func (sc *scanner) delimiter() (string, bool) {
-	save := *sc
-	sc.next()
-	if !sc.ok() || !sc.word {
-		*sc = save
+	s, i := sc.s, sc.pos
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\f') {
+		i++
+	}
+	if i >= len(s) || isBreak(s[i]) {
 		return "", false
 	}
-	from, to := sc.start, sc.end
-	for {
-		save = *sc
-		sc.next()
-		if !sc.ok() || !sc.word || sc.start != to {
-			*sc = save
-			break
+	var b strings.Builder
+	for i < len(s) && !isBreak(s[i]) {
+		switch c := s[i]; {
+		case c == '\\':
+			switch {
+			case i+1 >= len(s):
+				b.WriteByte(c)
+			case s[i+1] != '\n':
+				b.WriteByte(s[i+1])
+			}
+			i += 2
+		case c == '\'':
+			j := strings.IndexByte(s[i+1:], '\'')
+			if j < 0 {
+				return "", false
+			}
+			b.WriteString(s[i+1 : i+1+j])
+			i += j + 2
+		case c == '"' || c == '$' && i+1 < len(s) && s[i+1] == '"':
+			if c == '$' {
+				i++
+			}
+			end, ok := doubleQuoted(&b, s, i+1)
+			if !ok {
+				return "", false
+			}
+			i = end
+		case c == '$' && i+1 < len(s) && s[i+1] == '\'':
+			end, ok := ansiQuoted(&b, s, i+2)
+			if !ok {
+				return "", false
+			}
+			i = end
+		default:
+			b.WriteByte(c)
+			i++
 		}
-		to = sc.end
 	}
-	return unquote(sc.s[from:to]), true
+	sc.pos = min(i, len(s))
+	return b.String(), true
 }
 
-// unquote applies bash's quote removal to a word: a backslash outside
-// quotes keeps the next byte, single quotes keep everything, and inside
-// double quotes a backslash escapes only $, `, " and \.
-func unquote(w string) string {
-	var b strings.Builder
-	var q byte
-	for i := 0; i < len(w); i++ {
-		c := w[i]
-		switch {
-		case q == 0 && (c == '"' || c == '\''):
-			q = c
-		case q == c:
-			q = 0
-		case c == '\\' && q == 0 && i+1 < len(w):
+// doubleQuoted decodes a "..." body starting at s[i] into b and returns the
+// index after the closing quote.
+func doubleQuoted(b *strings.Builder, s string, i int) (int, bool) {
+	for ; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '"':
+			return i + 1, true
+		case c == '\\' && i+1 < len(s) && s[i+1] == '\n':
 			i++
-			b.WriteByte(w[i])
-		case c == '\\' && q == '"' && i+1 < len(w) && strings.IndexByte("$`\"\\", w[i+1]) >= 0:
+		case c == '\\' && i+1 < len(s) && strings.IndexByte("$`\"\\", s[i+1]) >= 0:
 			i++
-			b.WriteByte(w[i])
+			b.WriteByte(s[i])
 		default:
 			b.WriteByte(c)
 		}
 	}
-	return b.String()
+	return i, false
+}
+
+// ansiQuoted decodes a $'...' body starting at s[i] into b and returns the
+// index after the closing quote. A decoded NUL ends the string's content, as
+// in bash; the rest up to the quote is dropped.
+func ansiQuoted(b *strings.Builder, s string, i int) (int, bool) {
+	nul := false
+	for i < len(s) {
+		c := s[i]
+		if c == '\'' {
+			return i + 1, true
+		}
+		if c != '\\' || i+1 >= len(s) {
+			if !nul {
+				b.WriteByte(c)
+			}
+			i++
+			continue
+		}
+		r, n, raw := ansiEscape(s[i+1:])
+		switch {
+		case nul:
+		case raw:
+			b.WriteByte(byte(r))
+		case r == 0:
+			nul = true
+		default:
+			b.WriteRune(r)
+		}
+		i += 1 + n
+	}
+	return i, false
+}
+
+// ansiEscape decodes the escape after a backslash in $'...': the byte count
+// it spans, and the value, which is a raw byte (octal and \x forms, which
+// bash emits as bytes) or a rune (\u, \U). An unknown escape keeps its
+// backslash, as bash does; it is returned as the backslash alone, spanning
+// nothing, so the next byte is read on its own.
+func ansiEscape(s string) (r rune, n int, raw bool) {
+	c := s[0]
+	if v, ok := ansiSimple[c]; ok {
+		return v, 1, false
+	}
+	digits := func(max int, base int) (int, int) {
+		v, k := 0, 0
+		for k < max && k < len(s)-1 {
+			d := strings.IndexByte("0123456789abcdef"[:base], lower(s[1+k]))
+			if d < 0 {
+				break
+			}
+			v, k = v*base+d, k+1
+		}
+		return v, k
+	}
+	switch c {
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		v, k := 0, 0
+		for k < 3 && k < len(s) && s[k] >= '0' && s[k] <= '7' {
+			v, k = v*8+int(s[k]-'0'), k+1
+		}
+		return rune(v & 0xff), k, v&0xff != 0
+	case 'x':
+		if v, k := digits(2, 16); k > 0 {
+			return rune(v), 1 + k, v != 0
+		}
+	case 'u', 'U':
+		max := 4
+		if c == 'U' {
+			max = 8
+		}
+		if v, k := digits(max, 16); k > 0 {
+			if v > utf8.MaxRune {
+				v = utf8.RuneError
+			}
+			return rune(v), 1 + k, false
+		}
+	case 'c':
+		if len(s) > 1 {
+			return rune(s[1] & 0x1f), 2, true
+		}
+	}
+	return '\\', 0, true
+}
+
+var ansiSimple = map[byte]rune{'a': 7, 'b': 8, 'e': 27, 'E': 27, 'f': 12, 'n': 10, 'r': 13, 't': 9, 'v': 11, '\\': '\\', '\'': '\'', '"': '"', '?': '?'}
+
+func lower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + 'a' - 'A'
+	}
+	return c
 }
 
 // skipBodies cuts the pending heredocs' bodies out of the source, in order,
