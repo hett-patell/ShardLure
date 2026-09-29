@@ -39,16 +39,18 @@ import (
 // program slot (47ae767), and Display counts its ellipsis inside the cap
 // (25b5d4e); 3 = a leading heredoc or here-string keeps the program slot, a
 // redirection target keeps its $(...) group, and >& / <& tokenise as
-// redirections; 4 = a heredoc delimiter is read from the source as one
-// bash word with bash's quote removal (quotes, escapes, line continuations,
-// $'...' and $"...") and ends on a whole source line (<<\EOF, <<E"OF",
-// <<"E O F" and <<E\ OF no longer hide every later command), a heredoc's body (normalised, at most
-// MaxHeredocBodyBytes) is part of its placeholder token, reserved words and
-// braces are not programs (and keep the program slot open), N<file, <>,
-// >| and fd-prefixed heredocs and here-strings (0<<EOF) are redirections, a quoted program name ('id') keeps its name, URLs,
-// IPs and /tmp names stop at a backtick, and quoted text replaces hex runs
-// (>= 16) and numbers (>= 6 digits) and encodes a real line break as
-// <nl>/<cr>.
+// redirections; 4 (unreleased; everything below landed before any build
+// shipped it, so it stays one version) = a heredoc delimiter is read from
+// the source as one bash word with bash's quote removal (quotes, escapes,
+// line continuations, $'...' and $"...") and ends on a whole source line
+// (<<\EOF, <<E"OF", <<"E O F" and <<E\ OF no longer hide later commands);
+// a heredoc's body is part of its placeholder token, bounded to
+// MaxHeredocBodyBytes of encoding; reserved words and braces are not
+// programs (and keep the program slot open); N<file, <>, >| and
+// fd-prefixed heredocs and here-strings (0<<EOF) are redirections; a quoted
+// program name ('id') keeps its name; URLs, IPs and /tmp names stop at a
+// backtick; quoted text replaces hex runs (>= 16) and numbers (>= 6
+// digits) and encodes a real line break as <nl>/<cr>.
 const Version = 4
 
 const (

