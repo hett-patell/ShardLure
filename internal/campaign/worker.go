@@ -70,8 +70,10 @@ var linkingKinds = map[string]bool{"ssh_key": true, "payload": true}
 var logf = log.Printf
 
 // beforeSave is a test seam: it runs between reading the edit log and saving
-// the grouping, so a test can append an edit in that window.
-var beforeSave func()
+// the grouping, so a test can append an edit in that window. beforeGroup runs
+// after the reads and classification, before the lease renewal that
+// precedes Group, so a test can stall that phase past the lease.
+var beforeSave, beforeGroup func()
 
 // Worker drives the campaign pipeline from the live runtime: record evidence
 // in bounded windows, settle scripts, assign families, regroup, prune.
@@ -231,15 +233,18 @@ func (w *Worker) Close() {
 // or a `scripts --rebuild` may have deleted the version row, meanwhile, and
 // a stale holdClear let this process regroup through that hold (audit M-1),
 // while a stale versionChecked missed the rebuild until a restart (cmd audit
-// M2). Only a lease seen lost (leaseUntil zero) reset them before.
-func (w *Worker) holdLease(ctx context.Context, now time.Time) error {
+// M2). Only a lease seen lost (leaseUntil zero) reset them before. The
+// takeover is reported to the caller: at the start of a tick the checks
+// follow and read the reset flags; anywhere later they have already run, so
+// the tick must end instead (see renewLease).
+func (w *Worker) holdLease(ctx context.Context, now time.Time) (takeover bool, err error) {
 	if !w.leaseUntil.IsZero() && now.Before(w.leaseUntil.Add(-w.leaseTTL/2)) {
-		return nil
+		return false, nil
 	}
-	takeover := w.leaseUntil.IsZero() || !now.Before(w.leaseUntil)
+	takeover = w.leaseUntil.IsZero() || !now.Before(w.leaseUntil)
 	held, err := w.st.AcquireCampaignLease(ctx, w.leaseOwner, now, w.leaseTTL)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !held {
 		if !w.leaseLost {
@@ -248,12 +253,9 @@ func (w *Worker) holdLease(ctx context.Context, now time.Time) error {
 			w.leaseLost = true
 		}
 		w.leaseUntil = time.Time{}
-		return ErrLeaseHeldElsewhere
+		return false, ErrLeaseHeldElsewhere
 	}
 	if takeover {
-		// The version check runs at the start of the next tick when the
-		// takeover happens mid-tick; the hold is re-read by this tick's
-		// rebuildHeld either way.
 		w.holdClear, w.versionChecked = false, false
 		if w.leaseLost {
 			logf("campaigns: this process now holds the campaign worker lease")
@@ -261,6 +263,27 @@ func (w *Worker) holdLease(ctx context.Context, now time.Time) error {
 		}
 	}
 	w.leaseUntil = now.Add(w.leaseTTL)
+	return takeover, nil
+}
+
+// renewLease is holdLease for the sites after the tick's version and hold
+// checks (before settle, before regroup, before Group). A takeover there
+// means the lease lapsed on this clock during a phase and another process
+// may have run the pipeline meanwhile: the checks this tick already made
+// (rebuildHeld, the version) answered for a hold and a version that may no
+// longer be the store's, so the tick ends with ErrLeaseLapsed rather than
+// regrouping on them; the takeover has reset both flags, and the next tick
+// starts clean (re-review, New Breakage 1: a process stalled in
+// classification past the TTL regrouped through a rebuild hold another
+// process had set).
+func (w *Worker) renewLease(ctx context.Context) error {
+	takeover, err := w.holdLease(ctx, w.clock())
+	if err != nil {
+		return err
+	}
+	if takeover {
+		return ErrLeaseLapsed
+	}
 	return nil
 }
 
@@ -336,8 +359,9 @@ func (w *Worker) Tick(ctx context.Context) error {
 
 func (w *Worker) tick(ctx context.Context) error {
 	// The lease first: a process that does not hold it runs nothing below,
-	// the version reset included.
-	if err := w.holdLease(ctx, w.clock()); err != nil {
+	// the version reset included. A takeover here is fine: every check that
+	// depends on it comes after.
+	if _, err := w.holdLease(ctx, w.clock()); err != nil {
 		return err
 	}
 	// Once per process, before recording: stored lines are pre-computed
@@ -400,8 +424,9 @@ func (w *Worker) tick(ctx context.Context) error {
 		return err
 	}
 	// Recording can run up to its 5 s budget: renew the lease before the
-	// phases that assume a single caller, and stop here if it was lost.
-	if err := w.holdLease(ctx, w.clock()); err != nil {
+	// phases that assume a single caller, and stop here if it was lost or
+	// had to be retaken (the version check above already ran).
+	if err := w.renewLease(ctx); err != nil {
 		return err
 	}
 	// settle -> assign -> (regroup, rebuild) -> prune, sequentially in this
@@ -438,7 +463,7 @@ func (w *Worker) tick(ctx context.Context) error {
 	}
 	regrouped := false
 	if !held && w.drained && (woken || w.pending || time.Since(w.lastGroup) >= regroupEvery) {
-		if err := w.holdLease(ctx, w.clock()); err != nil {
+		if err := w.renewLease(ctx); err != nil {
 			if woken {
 				w.Wake() // not regrouped: keep the edit's wake for when the lease is back
 			}
@@ -480,7 +505,7 @@ func (w *Worker) tick(ctx context.Context) error {
 func (w *Worker) Regroup(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.holdLease(ctx, w.clock()); err != nil {
+	if _, err := w.holdLease(ctx, w.clock()); err != nil {
 		return err
 	}
 	held, err := w.rebuildHeld(ctx)
@@ -562,10 +587,14 @@ func (w *Worker) regroup(ctx context.Context) error {
 			delete(w.families, sha)
 		}
 	}
+	if beforeGroup != nil {
+		beforeGroup()
+	}
 	// Classifying can open thousands of payload files on the first regroup
 	// of a process (the memo is empty): renew the lease before grouping so
-	// the fence below does not refuse a save for that alone.
-	if err := w.holdLease(ctx, w.clock()); err != nil {
+	// the fence below does not refuse a save for that alone. This tick's
+	// hold check is behind us, so a takeover here ends the tick.
+	if err := w.renewLease(ctx); err != nil {
 		return err
 	}
 	// Group takes the tick context: a regroup that outlives the cycle budget

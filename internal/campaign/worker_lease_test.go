@@ -354,3 +354,64 @@ func TestEditRecordedByAnotherProcessRegroupsOnNextTick(t *testing.T) {
 		t.Fatal("an idle tick regrouped although no edit arrived")
 	}
 }
+
+// Re-review New Breakage 1: a takeover at one of the lease renewals that
+// come after the tick's hold check must end the tick, not regroup on that
+// check's stale answer. A stalls in classification past the TTL, B takes the
+// lapsed lease, starts a script rebuild (store hold on) and releases; A's
+// renewal before Group is then a takeover. Before, A regrouped through B's
+// hold and saved. The next tick starts clean: version re-checked, hold
+// re-read, the owed regroup still pending behind it.
+func TestMidTickTakeoverEndsTheTick(t *testing.T) {
+	st := openStore(t)
+	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
+	ctx := context.Background()
+	now := time.Now()
+	clock := func() time.Time { return now }
+	a := NewWorker(st, 90, t.TempDir())
+	a.clock = clock
+	if err := a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	grouped := a.lastGroup
+	beforeGroup = func() {
+		beforeGroup = nil
+		now = now.Add(campaignLeaseTTL + time.Second) // a is stalled in classification
+		if err := st.ForceScriptRebuild(ctx); err != nil {
+			t.Error(err)
+		}
+		b := NewWorker(st, 90, t.TempDir())
+		b.clock = clock
+		if err := b.Tick(ctx); err != nil { // takes the lapsed lease, resets, hold on
+			t.Error(err)
+		}
+		if held, err := st.ScriptRebuildHold(ctx, now); err != nil || !held {
+			t.Errorf("b's reset must hold regroups: held=%v err=%v", held, err)
+		}
+		b.Close()
+	}
+	t.Cleanup(func() { beforeGroup = nil })
+	a.Wake()
+	if err := a.Tick(ctx); !errors.Is(err, ErrLeaseLapsed) {
+		t.Fatalf("Tick = %v, want ErrLeaseLapsed", err)
+	}
+	if held, err := st.ScriptRebuildHold(ctx, now); err != nil || !held {
+		t.Fatalf("store hold gone: held=%v err=%v", held, err)
+	}
+	if !a.lastGroup.Equal(grouped) || !a.pending || a.holdClear || a.versionChecked {
+		t.Fatalf("mid-tick takeover did not end the tick: regrouped=%v pending=%v holdClear=%v versionChecked=%v",
+			!a.lastGroup.Equal(grouped), a.pending, a.holdClear, a.versionChecked)
+	}
+	now = now.Add(time.Second)
+	a.retryAt = time.Time{}
+	if err := a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != a.leaseOwner {
+		t.Fatalf("a does not hold the lease: %q", owner)
+	}
+	if !a.versionChecked || a.holdClear || !a.lastGroup.Equal(grouped) || !a.pending {
+		t.Fatalf("next tick did not start clean: versionChecked=%v holdClear=%v regrouped=%v pending=%v",
+			a.versionChecked, a.holdClear, !a.lastGroup.Equal(grouped), a.pending)
+	}
+}
