@@ -14,7 +14,7 @@ const (
 	scriptVersionSource    = "script_version"
 	scriptVersionPath      = "normaliser"
 	scriptHoldHWMPath      = "hold_hwm"      // events high-water mark at reset
-	scriptHoldDeadlinePath = "hold_deadline" // unix seconds
+	scriptHoldDeadlinePath = "hold_deadline" // unix seconds; set once the recorder passes hold_hwm
 )
 
 // scriptResetChunk bounds one reset transaction, the MaintenancePurge chunk
@@ -22,10 +22,15 @@ const (
 // one DELETE of them all would hold writeMu for seconds.
 const scriptResetChunk = 5000
 
-// scriptHoldDuration caps how long a rebuild holds regroups. Re-recorded
+// scriptHoldDuration caps how long a rebuild holds regroups once the
+// recorder has re-read every event up to the high-water mark. Re-recorded
 // sessions settle 10 minutes after they were recorded (the ingest-time idle
 // clock restarts), so a hold normally ends in ~10-12 minutes; the deadline
-// only bounds a session that keeps receiving commands.
+// only bounds a session that keeps receiving commands. It is counted from
+// that first observation, not from the reset: counted from the reset, a
+// restart after more than 30 minutes of downtime released the hold before
+// anything was re-recorded, dropping the carry snapshot with nothing
+// settled, which is the bug the hold exists to prevent.
 var scriptHoldDuration = 30 * time.Minute
 
 // ResetScriptsForVersion makes the script-derived rows match normaliser
@@ -42,7 +47,8 @@ var scriptHoldDuration = 30 * time.Minute
 //     guarded UPDATE skips a session whose row is gone);
 //  3. in one final transaction, rewinds the campaign recorder's cursor to 0,
 //     stores version and, when there was anything to rebuild, sets the
-//     regroup hold: the events high-water mark and a deadline.
+//     regroup hold: the events high-water mark (the deadline is set later,
+//     see ScriptRebuildHold).
 //
 // The version is written last, so an interrupted reset simply runs again.
 // It reports whether it reset anything: a database with no script rows and
@@ -138,9 +144,14 @@ SELECT session_id, fingerprint FROM session_scripts WHERE rowid>? AND rowid<=? A
 		if err := upsertIngestOffsetTx(tx, evidenceCursorSource, evidenceCursorPath, 0, stamp); err != nil {
 			return err
 		}
+		// A deadline left by an earlier, unfinished hold must not carry over:
+		// the new hold starts its clock when the recorder catches up again.
+		if _, err := tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath); err != nil {
+			return err
+		}
 		var rows []offsetRow
 		if reset {
-			rows = append(rows, offsetRow{scriptHoldHWMPath, hwm}, offsetRow{scriptHoldDeadlinePath, now.Add(scriptHoldDuration).Unix()})
+			rows = append(rows, offsetRow{scriptHoldHWMPath, hwm})
 		}
 		rows = append(rows, offsetRow{scriptVersionPath, int64(version)})
 		for _, row := range rows {
@@ -163,15 +174,18 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 // (see ResetScriptsForVersion), and releases the hold once it is over. The
 // hold lives in the database, so it survives a restart.
 //
-// It ends when the recorder has passed the events high-water mark taken at
-// reset AND no session with a line from those events is unsettled, or at the
-// deadline, whichever comes first. Release is one transaction: carry the
+// It never ends while the recorder is below the events high-water mark taken
+// at reset. Once the recorder has passed it, the first check stores a
+// deadline of now + scriptHoldDuration (persisted, so a restart keeps it),
+// and the hold ends when no session with a line at or below the mark is
+// unsettled, or at that deadline, whichever comes first. Release is one
+// transaction: carry the
 // script assignments to the new fingerprints, empty script_version_carry,
 // then delete the hold, so the first regroup after the hold sees the carried
 // rows. Sessions a purge removed during the hold simply have nothing to
 // carry.
 func (s *Store) ScriptRebuildHold(ctx context.Context, now time.Time) (bool, error) {
-	var hwm, deadline int64
+	var hwm int64
 	err := s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldHWMPath).Scan(&hwm)
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -179,17 +193,32 @@ func (s *Store) ScriptRebuildHold(ctx context.Context, now time.Time) (bool, err
 	if err != nil {
 		return false, err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath).Scan(&deadline); err != nil && err != sql.ErrNoRows {
+	cursor, err := evidenceCursor(ctx, s.db)
+	if err != nil {
+		return false, err
+	}
+	if cursor < hwm {
+		return true, nil // not re-recorded yet: no deadline can release this
+	}
+	var deadline int64
+	err = s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath).Scan(&deadline)
+	if err == sql.ErrNoRows {
+		// First observation past the mark: start the clock. INSERT OR IGNORE
+		// keeps an existing deadline if one was written meanwhile.
+		deadline = now.Add(scriptHoldDuration).Unix()
+		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'',?)`,
+				scriptVersionSource, scriptHoldDeadlinePath, deadline, formatFixedUTC(now)); err != nil {
+				return err
+			}
+			return tx.QueryRow(`SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath).Scan(&deadline)
+		}); err != nil {
+			return false, err
+		}
+	} else if err != nil {
 		return false, err
 	}
 	if now.Unix() < deadline {
-		cursor, err := evidenceCursor(ctx, s.db)
-		if err != nil {
-			return false, err
-		}
-		if cursor < hwm {
-			return true, nil
-		}
 		// The pending partial index lists unsettled sessions; each is probed
 		// on the line key for a line at or below the high-water mark.
 		var pending bool

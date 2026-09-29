@@ -531,8 +531,11 @@ func TestResetScriptsForVersion(t *testing.T) {
 	if n := count(`SELECT COUNT(*) FROM script_version_carry WHERE session_id='s0' AND fingerprint='fp'`); n != 1 || count(`SELECT COUNT(*) FROM script_version_carry`) != 1 {
 		t.Fatalf("carry map has %d rows for s0", n)
 	}
-	if n := count(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path IN ('hold_hwm','hold_deadline')`); n != 2 {
-		t.Fatalf("hold rows %d", n)
+	// The hold is the high-water mark only: its deadline starts when the
+	// recorder catches up (ScriptRebuildHold), never at the reset.
+	if n := count(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path='hold_hwm'`); n != 1 ||
+		count(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path='hold_deadline'`) != 0 {
+		t.Fatalf("hold rows: hwm %d", n)
 	}
 	if reset, err := s.ResetScriptsForVersion(ctx, 7); err != nil || reset {
 		t.Fatalf("matching version: reset=%v err=%v", reset, err)

@@ -95,3 +95,45 @@ func TestScriptRebuildHoldGates(t *testing.T) {
 		t.Fatalf("all settled: held=%v err=%v", held, err)
 	}
 }
+
+// Downtime after a reset must not release the hold: the deadline counts from
+// the first check that sees the recorder past the high-water mark, and is
+// persisted so a restart keeps it. Before, it counted from the reset, and a
+// restart 2 hours later released at once with nothing re-recorded, deleting
+// the carry snapshot.
+func TestScriptRebuildHoldSurvivesDowntime(t *testing.T) {
+	s := newTestStore(t, "hold-downtime.db")
+	ctx := context.Background()
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "id", "", "", time.Now().UTC().Add(-time.Hour))
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO session_scripts(session_id,actor_id,first_seen,last_seen,updated_at,fingerprint) VALUES('old','cowrie:a','x','x','x','fp')`); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := s.ResetScriptsForVersion(ctx, 99); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	restart := time.Now().Add(2 * time.Hour)
+	if held, err := s.ScriptRebuildHold(ctx, restart); err != nil || !held {
+		t.Fatalf("restart after downtime, recorder behind: held=%v err=%v", held, err)
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, restart); err != nil || !held {
+		t.Fatalf("recorder caught up, session unsettled: held=%v err=%v", held, err)
+	}
+	var carried int
+	s.db.QueryRow(`SELECT COUNT(*) FROM script_version_carry`).Scan(&carried)
+	if carried != 1 {
+		t.Fatalf("carry snapshot lost (%d rows)", carried)
+	}
+	// The clock started at the first observation (restart), not the reset.
+	if held, err := s.ScriptRebuildHold(ctx, restart.Add(scriptHoldDuration-time.Minute)); err != nil || !held {
+		t.Fatalf("inside the deadline: held=%v err=%v", held, err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, restart.Add(scriptHoldDuration+time.Minute)); err != nil || held {
+		t.Fatalf("past the deadline: held=%v err=%v", held, err)
+	}
+}
