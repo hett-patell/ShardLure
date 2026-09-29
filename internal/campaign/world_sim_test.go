@@ -563,8 +563,8 @@ func qRun(seed int64, mode string, verbose bool) *qResult {
 
 		// ---- regroup ----
 		occ := w.window(d)
-		out := Group(qShuffle(r, occ, prev, edits))
-		if again := Group(qShuffle(r, occ, prev, edits)); !reflect.DeepEqual(out, again) {
+		out := groupT(qShuffle(r, occ, prev, edits))
+		if again := groupT(qShuffle(r, occ, prev, edits)); !reflect.DeepEqual(out, again) {
 			fail("shuffle", "day %d: output depends on input order", d)
 		}
 		if qAliasCycle(out.Aliases) {
@@ -572,7 +572,7 @@ func qRun(seed int64, mode string, verbose bool) *qResult {
 			res.log = append(res.log, "stopped at alias cycle")
 			return res
 		}
-		if fp := Group(Input{Occurrences: occ, Assignments: out.Assignments, Aliases: out.Aliases, Edits: edits}); !reflect.DeepEqual(fp, out) {
+		if fp := groupT(Input{Occurrences: occ, Assignments: out.Assignments, Aliases: out.Aliases, Edits: edits}); !reflect.DeepEqual(fp, out) {
 			fail("fixpoint", "day %d: re-running on own output changes it", d)
 			if verbose {
 				logf("FIXPOINT day %d\n out=%s al=%v\n fp =%s al=%v\n outA=%v\n fpA =%v\n edits=%v", d, qShow(out), out.Aliases, qShow(fp), fp.Aliases, out.Assignments, fp.Assignments, edits)

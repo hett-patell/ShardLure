@@ -6,7 +6,7 @@ import "testing"
 // suggested name, and the latest rename still wins, empty or not.
 func TestEmptyRenameClearsName(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", OutlawKey, "s1", "a", 0), o("ssh_key", OutlawKey, "s2", "b", 1)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	id := campOf(first, "a").ID
 	edits := []Edit{{ID: 1, CampaignID: id, Action: "rename", Arg: "Mine"}, {ID: 2, CampaignID: id, Action: "rename", Arg: ""}}
 	c := campOf(feed(first, occ, edits), "a")
@@ -23,11 +23,11 @@ func TestEmptyRenameClearsName(t *testing.T) {
 // name, so it must stop pinning the campaign; notes still pin it.
 func TestClearedNameDoesNotPinMemberlessCampaign(t *testing.T) {
 	const id = "c-000000000001"
-	out := Group(Input{Edits: []Edit{{ID: 1, CampaignID: id, Action: "rename", Arg: "Old op"}, {ID: 2, CampaignID: id, Action: "rename", Arg: ""}}})
+	out := groupT(Input{Edits: []Edit{{ID: 1, CampaignID: id, Action: "rename", Arg: "Old op"}, {ID: 2, CampaignID: id, Action: "rename", Arg: ""}}})
 	if len(out.Campaigns) != 0 {
 		t.Fatalf("cleared name still pins: %+v", out.Campaigns)
 	}
-	out = Group(Input{Edits: []Edit{{ID: 1, CampaignID: id, Action: "rename", Arg: "Old op"}, {ID: 2, CampaignID: id, Action: "notes", Arg: "keep"},
+	out = groupT(Input{Edits: []Edit{{ID: 1, CampaignID: id, Action: "rename", Arg: "Old op"}, {ID: 2, CampaignID: id, Action: "notes", Arg: "keep"},
 		{ID: 3, CampaignID: id, Action: "rename", Arg: ""}}})
 	if len(out.Campaigns) != 1 || out.Campaigns[0].Name != "" || out.Campaigns[0].Notes != "keep" {
 		t.Fatalf("notes no longer pin a cleared campaign: %+v", out.Campaigns)
@@ -41,7 +41,7 @@ func TestClearAcrossMergedLineages(t *testing.T) {
 	k := []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0)}
 	p := []Occurrence{o("payload", "P", "p1", "b1", 1), o("payload", "P", "p2", "b2", 1)}
 	occ := append(append([]Occurrence{}, k...), p...)
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	kid, pid := campOf(first, "a1").ID, campOf(first, "b1").ID
 	edits := []Edit{{ID: 1, CampaignID: pid, Action: "rename", Arg: "P-ops"}, {ID: 2, CampaignID: pid, Action: "merge", Arg: kid},
 		{ID: 3, CampaignID: kid, Action: "rename", Arg: ""}}

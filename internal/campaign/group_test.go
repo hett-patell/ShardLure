@@ -33,7 +33,7 @@ func actorsOf(c Campaign) []string {
 
 // A mixed actor (one HASSH, several tools) must not bridge campaigns.
 func TestSessionsNotActorsAreLinked(t *testing.T) {
-	out := Group(Input{Occurrences: []Occurrence{
+	out := groupT(Input{Occurrences: []Occurrence{
 		o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "m1", "mixed", 1),
 		o("payload", "P", "b1", "b", 2), o("payload", "P", "m2", "mixed", 3),
 	}})
@@ -48,7 +48,7 @@ func TestSessionsNotActorsAreLinked(t *testing.T) {
 }
 
 func TestCoOccurrenceInOneSessionLinks(t *testing.T) {
-	out := Group(Input{Occurrences: []Occurrence{
+	out := groupT(Input{Occurrences: []Occurrence{
 		o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "x1", "x", 1), o("payload", "P", "x1", "x", 1), o("payload", "P", "b1", "b", 2),
 	}})
 	if len(out.Campaigns) != 1 || len(out.Campaigns[0].Members) != 3 {
@@ -57,18 +57,18 @@ func TestCoOccurrenceInOneSessionLinks(t *testing.T) {
 }
 
 func TestSuggestedNamesFromUnforgeableIndicators(t *testing.T) {
-	out := Group(Input{Occurrences: []Occurrence{o("ssh_key", OutlawKey, "a1", "a", 0), o("ssh_key", OutlawKey, "b1", "b", 1)}})
+	out := groupT(Input{Occurrences: []Occurrence{o("ssh_key", OutlawKey, "a1", "a", 0), o("ssh_key", OutlawKey, "b1", "b", 1)}})
 	if out.Campaigns[0].SuggestedName != "Outlaw/Dota" {
 		t.Fatalf("got %q", out.Campaigns[0].SuggestedName)
 	}
 	fake, fake2 := o("ssh_key", "SHA256:other", "c1", "c", 0), o("ssh_key", "SHA256:other", "d1", "d", 0)
 	fake.Label, fake2.Label = "mdrfckr", "mdrfckr"
-	if out := Group(Input{Occurrences: []Occurrence{fake, fake2}}); out.Campaigns[0].SuggestedName != "" {
+	if out := groupT(Input{Occurrences: []Occurrence{fake, fake2}}); out.Campaigns[0].SuggestedName != "" {
 		t.Fatal("a forged comment produced a suggested name")
 	}
 	p1, p2 := o("payload", "R", "e1", "e", 0), o("payload", "R", "f1", "f", 0)
 	p1.Family, p2.Family = "redtail", "redtail"
-	if out := Group(Input{Occurrences: []Occurrence{p1, p2}}); out.Campaigns[0].SuggestedName != "RedTail" {
+	if out := groupT(Input{Occurrences: []Occurrence{p1, p2}}); out.Campaigns[0].SuggestedName != "RedTail" {
 		t.Fatal("classifier family did not suggest RedTail")
 	}
 }
@@ -76,9 +76,9 @@ func TestSuggestedNamesFromUnforgeableIndicators(t *testing.T) {
 // Identity survives a bridge from older evidence: the edited campaign keeps
 // its ID and name.
 func TestIdentitySurvivesBridgeAndKeepsEdits(t *testing.T) {
-	first := Group(Input{Occurrences: []Occurrence{o("ssh_key", "K", "a1", "a", 5), o("ssh_key", "K", "b1", "b", 6)}})
+	first := groupT(Input{Occurrences: []Occurrence{o("ssh_key", "K", "a1", "a", 5), o("ssh_key", "K", "b1", "b", 6)}})
 	named := first.Campaigns[0].ID
-	second := Group(Input{
+	second := groupT(Input{
 		Occurrences: []Occurrence{o("ssh_key", "K", "a1", "a", 5), o("ssh_key", "K", "b1", "b", 6),
 			o("payload", "OLD", "c1", "c", 0), o("payload", "OLD", "b1", "b", 6)},
 		Assignments: first.Assignments, Aliases: first.Aliases,
@@ -94,9 +94,9 @@ func TestIdentitySurvivesBridgeAndKeepsEdits(t *testing.T) {
 // earliest-assigned value, with the notes attached.
 func TestIgnoreKeepsIdentityAndNotes(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 1), o("payload", "P", "c1", "c", 2), o("payload", "P", "d1", "d", 3)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	id := first.Campaigns[0].ID
-	second := Group(Input{Occurrences: occ, Assignments: first.Assignments, Aliases: first.Aliases,
+	second := groupT(Input{Occurrences: occ, Assignments: first.Assignments, Aliases: first.Aliases,
 		Edits: []Edit{{ID: 1, Action: "ignore_evidence", Arg: "ssh_key:K"}, {ID: 2, CampaignID: id, Action: "notes", Arg: "n"}}})
 	if c, ok := byID(second)[id]; !ok || c.Notes != "n" || !reflect.DeepEqual(actorsOf(c), []string{"b", "c", "d"}) {
 		t.Fatalf("got %+v", second.Campaigns)
@@ -107,12 +107,12 @@ func TestIgnoreKeepsIdentityAndNotes(t *testing.T) {
 func TestRemoveActorSplitsAFalseMerge(t *testing.T) {
 	// b1 carries both K and P, so it bridges a and c into one campaign.
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	if len(first.Campaigns) != 1 {
 		t.Fatalf("b1 must bridge K and P: %+v", first.Campaigns)
 	}
 	id := first.Campaigns[0].ID
-	second := Group(Input{Occurrences: occ, Assignments: first.Assignments, Aliases: first.Aliases,
+	second := groupT(Input{Occurrences: occ, Assignments: first.Assignments, Aliases: first.Aliases,
 		Edits: []Edit{{ID: 1, CampaignID: id, Action: "remove_actor", Arg: "b"}}})
 	for _, c := range second.Campaigns {
 		if len(c.Members) > 1 {
@@ -123,7 +123,7 @@ func TestRemoveActorSplitsAFalseMerge(t *testing.T) {
 
 func TestMergeEditResolvesThroughAliases(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0), o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	var k, p string
 	for id, c := range byID(first) {
 		if c.AnchorValue == "K" {
@@ -132,7 +132,7 @@ func TestMergeEditResolvesThroughAliases(t *testing.T) {
 			p = id
 		}
 	}
-	out := Group(Input{Occurrences: occ, Assignments: first.Assignments, Aliases: first.Aliases,
+	out := groupT(Input{Occurrences: occ, Assignments: first.Assignments, Aliases: first.Aliases,
 		Edits: []Edit{{ID: 1, CampaignID: p, Action: "notes", Arg: "from P"}, {ID: 2, CampaignID: p, Action: "merge", Arg: k}}})
 	c, ok := byID(out)[k]
 	if len(out.Campaigns) != 1 || !ok || len(c.Members) != 4 || c.Notes != "from P" || out.Aliases[p] != k {
@@ -141,7 +141,7 @@ func TestMergeEditResolvesThroughAliases(t *testing.T) {
 }
 
 func TestNamedCampaignPersistsWithoutMembers(t *testing.T) {
-	out := Group(Input{Edits: []Edit{{ID: 1, CampaignID: "c-000000000001", Action: "rename", Arg: "Old op"}}})
+	out := groupT(Input{Edits: []Edit{{ID: 1, CampaignID: "c-000000000001", Action: "rename", Arg: "Old op"}}})
 	if len(out.Campaigns) != 1 || out.Campaigns[0].Name != "Old op" || len(out.Campaigns[0].Members) != 0 {
 		t.Fatalf("got %+v", out.Campaigns)
 	}
@@ -150,9 +150,9 @@ func TestNamedCampaignPersistsWithoutMembers(t *testing.T) {
 func TestGroupIsDeterministic(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 3), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 1),
 		o("payload", "P", "c1", "c", 2), o("script", "S", "c1", "c", 2), o("script", "S", "d1", "d", 0)}
-	want := Group(Input{Occurrences: occ})
+	want := groupT(Input{Occurrences: occ})
 	for i := 0; i < 50; i++ {
-		if got := Group(Input{Occurrences: occ}); !reflect.DeepEqual(got, want) {
+		if got := groupT(Input{Occurrences: occ}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("run %d differs", i)
 		}
 	}
@@ -160,13 +160,13 @@ func TestGroupIsDeterministic(t *testing.T) {
 
 // feed runs another regroup cycle with the previous output's identity.
 func feed(prev Output, occ []Occurrence, edits []Edit) Output {
-	return Group(Input{Occurrences: occ, Assignments: prev.Assignments, Aliases: prev.Aliases, Edits: edits})
+	return groupT(Input{Occurrences: occ, Assignments: prev.Assignments, Aliases: prev.Aliases, Edits: edits})
 }
 
 // A merge must survive later regroups (it used to split again next cycle).
 func TestMergePersistsAcrossCycles(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0), o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	var k, p string
 	for id, c := range byID(first) {
 		if c.AnchorValue == "K" {
@@ -191,7 +191,7 @@ func TestNameDoesNotDriftAfterBridgeAndSplit(t *testing.T) {
 	pq := []Occurrence{o("payload", "P", "p1", "p", 5), o("payload", "P", "q1", "q", 5)}
 	k := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1)}
 	// Both campaigns exist first; K's evidence is older, so its seq is lower.
-	first := Group(Input{Occurrences: append(append([]Occurrence{}, k...), pq...)})
+	first := groupT(Input{Occurrences: append(append([]Occurrence{}, k...), pq...)})
 	var named string
 	for id, c := range byID(first) {
 		if c.AnchorValue == "P" {
@@ -240,7 +240,7 @@ func TestNameDoesNotDriftAfterBridgeAndSplit(t *testing.T) {
 // A split piece that mints a new ID keeps it, so an operator can rename it.
 func TestMintedIDIsStableAndRenameable(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 1), o("payload", "P", "c1", "c", 2), o("payload", "P", "d1", "d", 3)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	// Split by dropping the bridging session b1's payload.
 	split := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "c1", "c", 2), o("payload", "P", "d1", "d", 3)}
 	second := feed(first, split, nil)
@@ -269,7 +269,7 @@ func TestMintedIDDoesNotStealAHeldID(t *testing.T) {
 		Assignments: []Assignment{{Kind: "payload", Value: heldValue, CampaignID: held, Seq: 1}},
 		Edits:       []Edit{{ID: 1, CampaignID: held, Action: "rename", Arg: "Q-op"}},
 	}
-	out := Group(in)
+	out := groupT(in)
 	c, ok := byID(out)[held]
 	if !ok || c.Name != "Q-op" || c.Values[0] != heldValue {
 		t.Fatalf("held ID stolen: %+v", out.Campaigns)
@@ -278,7 +278,7 @@ func TestMintedIDDoesNotStealAHeldID(t *testing.T) {
 
 // New sequence numbers follow time, so "earliest assigned" means oldest.
 func TestFreshSequenceFollowsTime(t *testing.T) {
-	out := Group(Input{Occurrences: []Occurrence{o("payload", "Z", "z1", "a", 0), o("payload", "Z", "z2", "b", 0), o("payload", "A", "a1", "c", 9), o("payload", "A", "a2", "d", 9)}})
+	out := groupT(Input{Occurrences: []Occurrence{o("payload", "Z", "z1", "a", 0), o("payload", "Z", "z2", "b", 0), o("payload", "A", "a1", "c", 9), o("payload", "A", "a2", "d", 9)}})
 	seq := map[string]int64{}
 	for _, a := range out.Assignments {
 		seq[a.Value] = a.Seq
@@ -291,12 +291,12 @@ func TestFreshSequenceFollowsTime(t *testing.T) {
 func TestGroupIsDeterministicUnderShuffle(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 3), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 1),
 		o("payload", "P", "c1", "c", 2), o("script", "S", "c1", "c", 2), o("script", "S", "d1", "d", 0), o("payload", "Q", "e1", "e", 4), o("payload", "Q", "f1", "f", 4)}
-	want := Group(Input{Occurrences: occ})
+	want := groupT(Input{Occurrences: occ})
 	r := rand.New(rand.NewSource(1))
 	for i := 0; i < 50; i++ {
 		sh := append([]Occurrence(nil), occ...)
 		r.Shuffle(len(sh), func(a, b int) { sh[a], sh[b] = sh[b], sh[a] })
-		if got := Group(Input{Occurrences: sh}); !reflect.DeepEqual(got, want) {
+		if got := groupT(Input{Occurrences: sh}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("shuffle %d differs", i)
 		}
 	}
@@ -318,7 +318,7 @@ func settle(t *testing.T, prev Output, occ []Occurrence, edits []Edit, cycles in
 		r.Shuffle(len(as), func(a, b int) { as[a], as[b] = as[b], as[a] })
 		ed := append([]Edit(nil), edits...)
 		r.Shuffle(len(ed), func(a, b int) { ed[a], ed[b] = ed[b], ed[a] })
-		if got := Group(Input{Occurrences: sh, Assignments: as, Aliases: in.Aliases, Edits: ed}); !reflect.DeepEqual(got, out) {
+		if got := groupT(Input{Occurrences: sh, Assignments: as, Aliases: in.Aliases, Edits: ed}); !reflect.DeepEqual(got, out) {
 			t.Fatalf("cycle %d: shuffled input differs:\n%+v\n%+v", i, got, out)
 		}
 		inv(i, out)
@@ -359,7 +359,7 @@ func noActor(t *testing.T, actor, x, y string) func(int, Output) {
 // remember the edited campaign or the actor bridges again next cycle.
 func TestRemoveActorPersistsWhenBothPiecesAreSmall(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	edits := []Edit{{ID: 1, CampaignID: first.Campaigns[0].ID, Action: "remove_actor", Arg: "b"}}
 	settle(t, first, occ, edits, 3, noActor(t, "b", "a", "c"))
 }
@@ -370,7 +370,7 @@ func TestRemoveActorPersistsWhenBothPiecesAreSmall(t *testing.T) {
 func TestRemoveActorPersistsWhenBothPiecesSurvive(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "a2", "a2", 0), o("ssh_key", "K", "b1", "b", 1),
 		o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3), o("payload", "P", "d1", "d", 3)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	id := first.Campaigns[0].ID
 	edits := []Edit{{ID: 1, CampaignID: id, Action: "remove_actor", Arg: "b"}}
 	var minted string
@@ -398,7 +398,7 @@ func TestRemoveActorPersistsWhenBothPiecesSurvive(t *testing.T) {
 func TestRemoveActorHoldsAgainstNewEvidence(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "a2", "a2", 0), o("ssh_key", "K", "b1", "b", 1),
 		o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3), o("payload", "P", "d1", "d", 3)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	edits := []Edit{{ID: 1, CampaignID: first.Campaigns[0].ID, Action: "remove_actor", Arg: "b"}}
 	removed := feed(first, occ, edits)
 	later := append(append([]Occurrence{}, occ...),
@@ -423,7 +423,7 @@ func TestMergeTargetSplitsAfterTransientBridge(t *testing.T) {
 	all := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0),
 		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
 		o("script", "W", "e1", "e", 2), o("script", "W", "f1", "f", 2)}
-	first := Group(Input{Occurrences: all})
+	first := groupT(Input{Occurrences: all})
 	ids := map[string]string{}
 	for _, c := range first.Campaigns {
 		ids[c.AnchorValue] = c.ID
@@ -449,7 +449,7 @@ func TestMergeTargetSplitsAfterTransientBridge(t *testing.T) {
 func TestRemoveActorSplitsAMergedCampaign(t *testing.T) {
 	occ := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 1), o("payload", "P", "b1", "b", 2), o("payload", "P", "c1", "c", 3),
 		o("script", "S", "x1", "x", 4), o("script", "S", "y1", "y", 4)}
-	first := Group(Input{Occurrences: occ})
+	first := groupT(Input{Occurrences: occ})
 	var kid, sid string
 	for _, c := range first.Campaigns {
 		if c.AnchorValue == "S" {
@@ -477,9 +477,9 @@ func TestOccurrenceTieBreakIsTotal(t *testing.T) {
 	x1.Family, x2.Family = "", "redtail"
 	x1.IP, x2.IP = "ip-2", "ip-1"
 	y := o("payload", "K", "b1", "b", 0)
-	want := Group(Input{Occurrences: []Occurrence{x1, x2, y}})
+	want := groupT(Input{Occurrences: []Occurrence{x1, x2, y}})
 	for _, in := range [][]Occurrence{{x2, y, x1}, {y, x1, x2}, {x2, x1, y}} {
-		if got := Group(Input{Occurrences: in}); !reflect.DeepEqual(got, want) {
+		if got := groupT(Input{Occurrences: in}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("input order changed the output:\n%+v\n%+v", got, want)
 		}
 	}
@@ -489,7 +489,7 @@ func TestOccurrenceTieBreakIsTotal(t *testing.T) {
 func TestEditsApplyInIDOrder(t *testing.T) {
 	id := CampaignID("payload", "X")
 	edits := []Edit{{ID: 2, CampaignID: id, Action: "rename", Arg: "second"}, {ID: 1, CampaignID: id, Action: "rename", Arg: "first"}}
-	if out := Group(Input{Edits: edits}); len(out.Campaigns) != 1 || out.Campaigns[0].Name != "second" {
+	if out := groupT(Input{Edits: edits}); len(out.Campaigns) != 1 || out.Campaigns[0].Name != "second" {
 		t.Fatalf("got %+v", out.Campaigns)
 	}
 }
@@ -503,7 +503,7 @@ func TestMergeSurvivesTransientBridgeToAnotherCampaign(t *testing.T) {
 	all := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0),
 		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
 		o("script", "D", "e1", "e", 2), o("script", "D", "f1", "f", 2)}
-	first := Group(Input{Occurrences: all})
+	first := groupT(Input{Occurrences: all})
 	ids := map[string]string{}
 	for _, c := range first.Campaigns {
 		ids[c.AnchorValue] = c.ID
@@ -538,7 +538,7 @@ func mergedKPD() ([]Occurrence, map[string]string, []Edit, Output) {
 	all := []Occurrence{o("ssh_key", "K", "a1", "a", 0), o("ssh_key", "K", "b1", "b", 0),
 		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
 		o("script", "D", "e1", "e", 2), o("script", "D", "f1", "f", 2)}
-	first := Group(Input{Occurrences: all})
+	first := groupT(Input{Occurrences: all})
 	ids := map[string]string{}
 	for _, c := range first.Campaigns {
 		ids[c.AnchorValue] = c.ID
@@ -652,7 +652,7 @@ func TestBridgeBetweenMergeTargetsHasNoAliasCycle(t *testing.T) {
 		o("payload", "P", "c1", "c", 1), o("payload", "P", "d1", "d", 1),
 		o("script", "D", "e1", "e", 2), o("script", "D", "f1", "f", 2),
 		o("script", "Q", "g1", "g", 3), o("script", "Q", "h1", "h", 3)}
-	first := Group(Input{Occurrences: all})
+	first := groupT(Input{Occurrences: all})
 	ids := map[string]string{}
 	for _, c := range first.Campaigns {
 		ids[c.AnchorValue] = c.ID
@@ -694,7 +694,7 @@ func TestValueSeenWithOlderCampaignDuringBridgeStaysWithIt(t *testing.T) {
 	all := []Occurrence{o("script", "D", "e1", "e", 0), o("script", "D", "f1", "f", 0),
 		o("ssh_key", "K", "a1", "a", 1), o("ssh_key", "K", "b1", "b", 1),
 		o("payload", "P", "c1", "c", 2), o("payload", "P", "d1", "d", 2)}
-	first := Group(Input{Occurrences: all})
+	first := groupT(Input{Occurrences: all})
 	ids := map[string]string{}
 	for _, c := range first.Campaigns {
 		ids[c.AnchorValue] = c.ID
@@ -770,7 +770,7 @@ func campOf(out Output, actor string) Campaign {
 func TestMergeSurvivesSourceEvidenceTurnover(t *testing.T) {
 	k := []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0)}
 	p := []Occurrence{o("payload", "P", "p1", "b1", 1), o("payload", "P", "p2", "b2", 1)}
-	out := Group(Input{Occurrences: append(append([]Occurrence{}, k...), p...)})
+	out := groupT(Input{Occurrences: append(append([]Occurrence{}, k...), p...)})
 	kid, pid := campOf(out, "a1").ID, campOf(out, "b1").ID
 	edits := []Edit{{ID: 1, CampaignID: pid, Action: "merge", Arg: kid}, {ID: 2, CampaignID: pid, Action: "rename", Arg: "P-ops"}}
 	out = feed(out, append(append([]Occurrence{}, k...), p...), edits)
@@ -792,7 +792,7 @@ func TestMergeSurvivesSourceEvidenceTurnover(t *testing.T) {
 func TestBridgeTurnoverDoesNotSwapIdentities(t *testing.T) {
 	base := []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0),
 		o("payload", "D", "d1", "b1", 1), o("payload", "D", "d2", "b2", 1)}
-	out := Group(Input{Occurrences: base})
+	out := groupT(Input{Occurrences: base})
 	kid, did := campOf(out, "a1").ID, campOf(out, "b1").ID
 	edits := []Edit{{ID: 1, CampaignID: kid, Action: "rename", Arg: "K-ops"}}
 	bridge := []Occurrence{
@@ -830,7 +830,7 @@ func bridgedKD(t *testing.T) (base, bridge []Occurrence, out Output, kid, did, t
 	base = []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0),
 		o("payload", "D", "d1", "b1", 1), o("payload", "D", "d2", "b2", 1),
 		o("script", "T", "t1", "c1", 2), o("script", "T", "t2", "c2", 2)}
-	out = Group(Input{Occurrences: base})
+	out = groupT(Input{Occurrences: base})
 	kid, did, tid = campOf(out, "a1").ID, campOf(out, "b1").ID, campOf(out, "c1").ID
 	bridge = []Occurrence{o("ssh_key", "K", "z1", "z", 3), o("payload", "D", "z1", "z", 3)}
 	out = feed(out, append(append([]Occurrence{}, base...), bridge...), nil)
@@ -866,7 +866,7 @@ func TestMergeNamingBridgedIDDoesNotFuseThirdCampaign(t *testing.T) {
 func TestMergeTargetKeepsIDNameAndRemovalThroughTurnover(t *testing.T) {
 	k := []Occurrence{o("ssh_key", "K", "k1", "a1", 0), o("ssh_key", "K", "k2", "a2", 0), o("ssh_key", "K", "k3", "a3", 0)}
 	p := []Occurrence{o("payload", "P", "p1", "b1", 1), o("payload", "P", "p2", "b2", 1)}
-	out := Group(Input{Occurrences: append(append([]Occurrence{}, k...), p...)})
+	out := groupT(Input{Occurrences: append(append([]Occurrence{}, k...), p...)})
 	kid, pid := campOf(out, "a1").ID, campOf(out, "b1").ID
 	edits := []Edit{{ID: 1, CampaignID: pid, Action: "merge", Arg: kid}, {ID: 2, CampaignID: kid, Action: "rename", Arg: "K-ops"},
 		{ID: 3, CampaignID: kid, Action: "remove_actor", Arg: "a3"}}
@@ -909,7 +909,7 @@ func TestResolveFollowsLongMergeChainToRoot(t *testing.T) {
 		edits = append(edits, Edit{ID: int64(i + 1), CampaignID: id(i), Action: "merge", Arg: id(i + 1)})
 	}
 	edits = append(edits, Edit{ID: 71, CampaignID: id(1), Action: "merge", Arg: id(0)})
-	out := Group(Input{Edits: edits})
+	out := groupT(Input{Edits: edits})
 	for i := 0; i <= 70; i++ {
 		r := Resolve(out.Aliases, id(i))
 		if _, aliased := out.Aliases[r]; aliased || r != id(70) {

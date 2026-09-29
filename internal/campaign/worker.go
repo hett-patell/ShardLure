@@ -479,10 +479,12 @@ func (w *Worker) regroup(ctx context.Context) error {
 			delete(w.families, sha)
 		}
 	}
-	if err := ctx.Err(); err != nil {
+	// Group takes the tick context: a regroup that outlives the cycle budget
+	// or a shutdown stops inside Group and never reaches SaveGrouping.
+	out, err := Group(ctx, in)
+	if err != nil {
 		return err
 	}
-	out := Group(in)
 	rows, assign := groupingRows(out)
 	if beforeSave != nil {
 		beforeSave()

@@ -6,6 +6,7 @@
 package campaign
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -192,7 +193,25 @@ type component struct {
 //     may not belong to.
 //  6. remove_actor holds every cycle on the lineage it names: the actor is
 //     dropped, before union, from every component that owns that lineage.
-func Group(in Input) Output {
+//
+// ctx bounds the work: the worker passes its tick context, so a regroup that
+// outlives the cycle budget or a shutdown stops between phases and rounds
+// and reports ctx.Err() instead of reaching SaveGrouping with a stale result
+// (I-1). A cancelled call returns an empty Output.
+func Group(ctx context.Context, in Input) (Output, error) {
+	return group(ctx, in, attribute)
+}
+
+// attributeFunc is attribute's shape. group takes it as a parameter so the
+// differential test can run the pre-I-1 reference beside the current one on
+// the same input; nothing else passes anything but attribute.
+type attributeFunc func(ctx context.Context, occ []Occurrence, sessOcc map[string][]int, c *component, root string, owner map[string]lineage,
+	lineageOf func(Occurrence) (string, Assignment, bool), rep func(string) string, stable map[string]bool, stamp map[string]string) error
+
+func group(ctx context.Context, in Input, attr attributeFunc) (Output, error) {
+	if err := ctx.Err(); err != nil {
+		return Output{}, err
+	}
 	raw := map[string]Assignment{}
 	var maxSeq int64
 	for _, a := range in.Assignments {
@@ -262,6 +281,9 @@ func Group(in Input) Output {
 		all = append(all, x)
 	}
 	sort.Slice(all, func(i, j int) bool { return occLess(all[i], all[j]) })
+	if err := ctx.Err(); err != nil {
+		return Output{}, err
+	}
 
 	// parents: the session-only components before remove_actor. Two pieces
 	// of one parent that end up apart were severed by a removal, so merge
@@ -281,6 +303,9 @@ func Group(in Input) Output {
 		active[i] = true
 	}
 	for len(removed) > 0 {
+		if err := ctx.Err(); err != nil {
+			return Output{}, err
+		}
 		roots, members := unite(all, active, parentOf, lineageOf, inGroup)
 		// A component reaches a lineage when it owns it (holds its
 		// earliest-assigned value), not merely when it holds some value of it:
@@ -330,6 +355,9 @@ func Group(in Input) Output {
 		} else {
 			dropped = append(dropped, x)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Output{}, err
 	}
 	roots, members := unite(all, active, parentOf, lineageOf, inGroup)
 	comps := map[string]*component{}
@@ -533,7 +561,12 @@ func Group(in Input) Output {
 			}
 			continue
 		}
-		attribute(occ, sessOcc, c, r, owner, lineageOf, rep, stable, stamp)
+		if err := attr(ctx, occ, sessOcc, c, r, owner, lineageOf, rep, stable, stamp); err != nil {
+			return Output{}, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Output{}, err
 	}
 	// Assignments, in occurrence (time) order so fresh sequence numbers mean
 	// "oldest first". A value the removed actor alone carried keeps what it
@@ -571,7 +604,7 @@ func Group(in Input) Output {
 	for _, k := range keys {
 		out.Assignments = append(out.Assignments, newAssign[k])
 	}
-	return out
+	return out, nil
 }
 
 // attribute decides the lineage of every value component c does not own
@@ -605,8 +638,21 @@ func Group(in Input) Output {
 // stamps something, every floating value is read again each round, and
 // stamps within a round apply together, so neither value order nor a
 // conflict released by a later stamp can change the result.
-func attribute(occ []Occurrence, sessOcc map[string][]int, c *component, root string, owner map[string]lineage,
-	lineageOf func(Occurrence) (string, Assignment, bool), rep func(string) string, stable map[string]bool, stamp map[string]string) {
+//
+// Cost is linear in the component per round, not in floating values times
+// the lineages their actors carry (I-1: one actor chaining m two-actor
+// campaigns with sessions {k_i, k_i+1, f_i} cost m^2 map allocations, 18 s
+// at m=4,000 on x86, past the lease and the cycle budget). Pure sessions and
+// continuity are read together and only their count matters: none, one, or
+// several, and several always goes to actorMajority whatever the sessions
+// said, so the read stops at the second distinct lineage, and a bridge actor
+// (two or more lineages) settles it without enumerating them. actorMajority
+// never tallies the heaviest actor of the value, and the tally is memoised
+// per distinct actor set within a round, so values that share their actors
+// (the chain's m new values all belong to the one bridge actor) are decided
+// once. The output is exactly the reference's (TestAttributionMatchesReference).
+func attribute(ctx context.Context, occ []Occurrence, sessOcc map[string][]int, c *component, root string, owner map[string]lineage,
+	lineageOf func(Occurrence) (string, Assignment, bool), rep func(string) string, stable map[string]bool, stamp map[string]string) error {
 	lin, rawLin := map[string]string{}, map[string]string{} // value -> lineage, recorded ID
 	valOcc := map[string][]int{}
 	var floating, sessions []string
@@ -629,21 +675,27 @@ func attribute(occ []Occurrence, sessOcc map[string][]int, c *component, root st
 		valOcc[k] = append(valOcc[k], i)
 	}
 	if len(floating) == 0 {
-		return
+		return nil
 	}
 	if len(c.owned) <= 1 {
 		for _, k := range floating {
 			stamp[k] = c.id
 		}
-		return
+		return nil
 	}
 	// Rounds: every floating value is read again each round against the
 	// stable set as it stands, so a value blocked by a conflict is released
 	// in the same cycle when a later stamp turns one of its sessions mixed.
 	// Anything still floating at the end stays unassigned this cycle.
 	for round := 0; round < 32 && len(floating) > 0; round++ {
-		sessReps, actorReps := map[string]map[string]bool{}, map[string]map[string]bool{}
-		actorRaw := map[string]map[string]bool{} // actor -> recorded IDs of its stable values
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Per round, linear in the component: the lineages of each session's
+		// stable values, and per actor the lineages and recorded IDs of the
+		// stable values across its sessions here.
+		sessReps := map[string]map[string]bool{}
+		actors := map[string]*actorVotes{}
 		for _, s := range sessions {
 			for _, i := range sessOcc[s] {
 				k := vkey(occ[i].Kind, occ[i].Value)
@@ -656,72 +708,88 @@ func attribute(occ []Occurrence, sessOcc map[string][]int, c *component, root st
 				}
 				sessReps[s][l] = true
 				a := occ[i].ActorID
-				if actorReps[a] == nil {
-					actorReps[a], actorRaw[a] = map[string]bool{}, map[string]bool{}
+				av := actors[a]
+				if av == nil {
+					av = &actorVotes{lins: map[string]bool{}, raws: map[string]bool{}}
+					actors[a] = av
 				}
-				actorReps[a][l] = true
-				actorRaw[a][rawLin[k]] = true
+				av.lins[l] = true
+				av.raws[rawLin[k]] = true
 			}
 		}
 		newStamp := map[string]string{}
 		var rest []string
+		majority := map[string]string{} // sorted actor set -> actorMajority, this round
 		for _, k := range floating {
-			pure, cont := map[string]bool{}, map[string]bool{}
-			// votes: lineage -> recorded ID -> non-bridge actors of k's sessions
-			// carrying it, for breaking a tier-1 conflict.
-			votes := map[string]map[string]map[string]bool{}
-			seenActor := map[string]bool{}
-			for _, i := range valOcc[k] {
-				x := occ[i]
-				ar := actorReps[x.ActorID]
-				if len(ar) < 2 {
-					// Only a non-bridge actor's session is pure evidence.
-					for l := range sessReps[x.SessionID] {
-						pure[l] = true
-					}
-				}
-				// Every actor votes with every lineage it carries: a bridge
-				// actor is neutral between its two sides, but still outweighs
-				// a third party against both of them.
-				for l := range ar {
-					cont[l] = true
-				}
-				if seenActor[x.ActorID] {
-					continue
-				}
-				seenActor[x.ActorID] = true
-				for raw := range actorRaw[x.ActorID] {
-					l := rep(raw)
-					if votes[l] == nil {
-						votes[l] = map[string]map[string]bool{}
-					}
-					if votes[l][raw] == nil {
-						votes[l][raw] = map[string]bool{}
-					}
-					votes[l][raw][x.ActorID] = true
-				}
-			}
 			// Pure sessions and actor continuity are read together: one
 			// lineage across both stamps the value; two or more is a conflict,
 			// even when only one pure session exists. A lone pure session is
 			// exactly what an unflagged bridging tool produces on the day it
 			// picks a newborn, and the family's own actors, who carry the
-			// other lineage, are the evidence against it.
-			cands := map[string]bool{}
-			for l := range pure {
-				cands[l] = true
+			// other lineage, are the evidence against it. Only the count up to
+			// two matters, so the read stops there.
+			var one string
+			n := 0
+			add := func(l string) {
+				switch {
+				case n == 0:
+					one, n = l, 1
+				case n == 1 && l != one:
+					n = 2
+				}
 			}
-			for l := range cont {
-				cands[l] = true
+			for _, i := range valOcc[k] {
+				x := occ[i]
+				if av := actors[x.ActorID]; av != nil {
+					// Every actor votes with every lineage it carries: a bridge
+					// actor is neutral between its two sides, but still outweighs
+					// a third party against both of them.
+					if len(av.lins) >= 2 {
+						n = 2
+						break
+					}
+					for l := range av.lins {
+						add(l)
+					}
+				}
+				// Only a non-bridge actor's session is pure evidence.
+				for l := range sessReps[x.SessionID] {
+					add(l)
+					if n >= 2 {
+						break
+					}
+				}
+				if n >= 2 {
+					break
+				}
 			}
 			var pick string
-			switch {
-			case len(cands) == 1:
-				for l := range cands {
-					pick = l
+			switch n {
+			case 1:
+				pick = one
+			case 2:
+				var as []string
+				seenA := map[string]bool{}
+				for _, i := range valOcc[k] {
+					if a := occ[i].ActorID; !seenA[a] {
+						seenA[a] = true
+						as = append(as, a)
+					}
 				}
-			case len(cands) > 1:
-				pick = actorMajority(votes)
+				key := ""
+				if len(as) > 1 {
+					sorted := append([]string(nil), as...)
+					sort.Strings(sorted)
+					key = strings.Join(sorted, "\x00")
+				}
+				if v, ok := majority[key]; ok && key != "" {
+					pick = v
+				} else {
+					pick = actorMajority(as, actors, rep)
+					if key != "" {
+						majority[key] = pick
+					}
+				}
 			}
 			if pick != "" {
 				newStamp[k] = pick
@@ -737,45 +805,103 @@ func attribute(occ []Occurrence, sessOcc map[string][]int, c *component, root st
 			break
 		}
 	}
+	return nil
+}
+
+// actorVotes is what one actor's stable values in a component say: the
+// lineages they belong to and the recorded IDs they carry. The lineage of a
+// recorded ID is rep(id), so lins is exactly the reps of raws.
+type actorVotes struct {
+	lins, raws map[string]bool
 }
 
 // actorMajority breaks a tier-1 conflict by actor continuity: the lineage
-// carried by strictly more of the distinct non-bridge actors that used the
-// value wins, or "" on a tie. Two pure sessions naming different lineages are
-// symmetric as co-occurrence ({v, a-value} and {v, b-value}) but not as
-// actors: a family's actors all carry its lineage, in sessions with the value
-// and in their other sessions, while a third-party tool that bridges two
-// families is one actor, and it is exactly that actor whose sessions look
-// pure while the value it picked from one side is still floating. Without
-// this a family that lives on one stable value at a time is captured by its
-// bridge partner the day that value ages out. Actors are counted per recorded
-// ID and a lineage scores its best ID, not the sum: an explicit merge joins
-// operators the evidence never showed together, and their pooled actor count
-// says nothing about which side a value belongs to.
-func actorMajority(pure map[string]map[string]map[string]bool) string {
-	best, pick, tie := -1, "", false
-	for _, l := range sortedKeys(func() map[string]bool {
-		m := map[string]bool{}
-		for l := range pure {
-			m[l] = true
-		}
-		return m
-	}()) {
-		n := 0
-		for _, actors := range pure[l] {
-			n = max(n, len(actors))
-		}
-		switch {
-		case n > best:
-			best, pick, tie = n, l, false
-		case n == best:
-			tie = true
+// carried by strictly more of the distinct actors that used the value wins,
+// or "" on a tie. Two pure sessions naming different lineages are symmetric
+// as co-occurrence ({v, a-value} and {v, b-value}) but not as actors: a
+// family's actors all carry its lineage, in sessions with the value and in
+// their other sessions, while a third-party tool that bridges two families
+// is one actor, and it is exactly that actor whose sessions look pure while
+// the value it picked from one side is still floating. Without this a family
+// that lives on one stable value at a time is captured by its bridge partner
+// the day that value ages out. Actors are counted per recorded ID and a
+// lineage scores its best ID, not the sum: an explicit merge joins operators
+// the evidence never showed together, and their pooled actor count says
+// nothing about which side a value belongs to.
+//
+// The tally never enumerates the heaviest actor: each of its IDs counts one
+// actor on its own, so only an ID some other actor also carries can score
+// more, and those are the only IDs tallied. With every ID at one actor the
+// winner is the sole lineage carried, if there is one, which the heaviest
+// actor's lineage count answers without a walk. A value whose only actor is
+// a bridge actor is therefore a tie in O(1), whatever that actor carries.
+func actorMajority(as []string, actors map[string]*actorVotes, rep func(string) string) string {
+	h := -1
+	for j, a := range as {
+		if av := actors[a]; av != nil && len(av.raws) > 0 && (h < 0 || len(av.raws) > len(actors[as[h]].raws)) {
+			h = j
 		}
 	}
-	if tie {
+	if h < 0 {
+		return "" // no actor of the value carries a stable value: no votes
+	}
+	heavy := actors[as[h]]
+	cnt := map[string]int{} // recorded ID -> distinct actors carrying it
+	for j, a := range as {
+		if j == h {
+			continue
+		}
+		if av := actors[a]; av != nil {
+			for r := range av.raws {
+				cnt[r]++
+			}
+		}
+	}
+	best := 0
+	for r, n := range cnt {
+		if heavy.raws[r] {
+			n++
+			cnt[r] = n
+		}
+		best = max(best, n)
+	}
+	if best >= 2 {
+		// Only a tallied ID reaches two actors; every other ID of the
+		// heaviest actor has exactly one and cannot win.
+		win, tie := "", false
+		for r, n := range cnt {
+			if n != best {
+				continue
+			}
+			if l := rep(r); win == "" {
+				win = l
+			} else if l != win {
+				tie = true
+				break
+			}
+		}
+		if tie {
+			return ""
+		}
+		return win
+	}
+	// Every ID has one actor: the lineage wins only if it is the sole one
+	// carried, by the heaviest actor and by the rest.
+	if len(heavy.lins) >= 2 {
 		return ""
 	}
-	return pick
+	win := ""
+	for l := range heavy.lins {
+		win = l
+	}
+	for r := range cnt {
+		if l := rep(r); win == "" {
+			win = l
+		} else if l != win {
+			return ""
+		}
+	}
+	return win
 }
 
 // latestEdit returns the value of the most recent edit (by edit ID) recorded
