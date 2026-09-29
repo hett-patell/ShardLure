@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,5 +95,37 @@ func TestBackupCLIMainAvoidsConfigAndStoreInitialization(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("verified")) || bytes.Contains(out, []byte("never-send-fixture-value")) {
 		t.Fatalf("unsafe or missing CLI result: %s", out)
+	}
+}
+
+func TestBackupCLINamesRefusedPathReasonAndRemedy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission refusal test must run as a non-root user")
+	}
+	cfg, bundle := cliBackupFixture(t)
+	shared := t.TempDir()
+	if err := os.Chmod(shared, 0770); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(shared, 0700) })
+	for _, args := range [][]string{
+		{"create", "--output", filepath.Join(shared, "NEW")},
+		{"restore", "--input", bundle, "--to", filepath.Join(shared, "restored")},
+	} {
+		var out bytes.Buffer
+		err := runBackup(context.Background(), cfg, args, &out)
+		if err == nil {
+			t.Fatalf("%v accepted a group-writable ancestor", args)
+		}
+		msg := err.Error()
+		t.Logf("%s: %s", args[0], msg)
+		for _, want := range []string{strconv.Quote(shared), "writable by group or others", "choose an output directory whose ancestors are all owned by root or by the running user"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("%v: error %q lacks %q", args[0], msg, want)
+			}
+		}
+		if strings.Contains(msg, "filesystem or database operation failed") {
+			t.Fatalf("%v: still the generic message: %q", args[0], msg)
+		}
 	}
 }

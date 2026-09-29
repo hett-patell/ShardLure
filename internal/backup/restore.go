@@ -53,7 +53,7 @@ func restoreWithOperations(ctx context.Context, opts RestoreOptions, ops fileOpe
 	defer func() {
 		if result != nil {
 			report = Report{}
-			result = failure(ErrIncomplete, result, stagePath)
+			result = failure(failureKind(ErrIncomplete, result), result, stagePath)
 		}
 	}()
 	if err := ctx.Err(); err != nil {

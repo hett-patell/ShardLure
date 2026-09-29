@@ -57,6 +57,7 @@ func runBackup(ctx context.Context, configPath string, args []string, out io.Wri
 		if errors.As(result, &failure) && failure.Staging != "" {
 			fmt.Fprintf(out, "incomplete recovery material retained at %q\n", failure.Staging)
 		}
+		result = explainRefusedPath(result)
 	}()
 	switch args[0] {
 	case "create":
@@ -96,3 +97,24 @@ func runBackup(ctx context.Context, configPath string, args []string, out io.Wri
 	}
 	return bad
 }
+
+// explainRefusedPath turns a safety refusal into an actionable CLI error: the
+// refused directory, the check it failed and the fix. This is the one place a
+// refused path is printed (explicit operator output, like the staging path);
+// backup.Failure.Error stays path-free for anything that logs it. errors.Is
+// and errors.As still reach the original failure.
+func explainRefusedPath(err error) error {
+	path, reason, ok := backup.RefusedPath(err)
+	if !ok {
+		return err
+	}
+	return &refusedPathError{cause: err, msg: fmt.Sprintf("backup: refused %q: %s; choose an output directory whose ancestors are all owned by root or by the running user and not writable by group or others", path, reason)}
+}
+
+type refusedPathError struct {
+	cause error
+	msg   string
+}
+
+func (e *refusedPathError) Error() string { return e.msg }
+func (e *refusedPathError) Unwrap() error { return e.cause }

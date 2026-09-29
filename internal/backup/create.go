@@ -142,7 +142,7 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 			manifest.Complete = false
 			var f *Failure
 			if !errors.As(result, &f) {
-				result = failure(ErrIO, result, stagePath)
+				result = failure(failureKind(ErrIO, result), result, stagePath)
 			}
 		}
 	}()

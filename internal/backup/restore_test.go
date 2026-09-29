@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,5 +230,28 @@ func TestRestoreLatePublicationFailureStaysIncomplete(t *testing.T) {
 	}
 	if _, err := Verify(context.Background(), bundle); err != nil {
 		t.Fatal("failed restore changed source")
+	}
+}
+
+func TestRestoreNamesRefusedTargetAncestor(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission refusal test must run as a non-root user")
+	}
+	f := newFixture(t)
+	bundle := filepath.Join(t.TempDir(), "backup")
+	if _, err := Create(context.Background(), CreateOptions{ConfigPath: f.Config, Output: bundle}); err != nil {
+		t.Fatal(err)
+	}
+	shared := t.TempDir()
+	if err := os.Chmod(shared, 0770); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(shared, 0700) })
+	_, err := Restore(context.Background(), RestoreOptions{Input: bundle, To: filepath.Join(shared, "new")})
+	if !errors.Is(err, ErrUnsafePath) || !strings.Contains(err.Error(), "writable by group or others") {
+		t.Fatalf("restore refusal hides its reason: %v", err)
+	}
+	if path, _, ok := RefusedPath(err); !ok || path != shared {
+		t.Fatalf("refused path = %q %v, want %q", path, ok, shared)
 	}
 }

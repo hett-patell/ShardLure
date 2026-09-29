@@ -166,3 +166,28 @@ func TestCreateReportsUnsafeDatabaseReason(t *testing.T) {
 		t.Fatalf("error leaks the path: %v", err)
 	}
 }
+
+func TestCreateNamesRefusedOutputAncestor(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission refusal test must run as a non-root user")
+	}
+	fixture := newFixture(t)
+	shared := t.TempDir()
+	if err := os.Chmod(shared, 0770); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(shared, 0700) })
+	_, err := Create(context.Background(), CreateOptions{ConfigPath: fixture.Config, Output: filepath.Join(shared, "backup"), AppVersion: "test", AppCommit: "inert"})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("refused output ancestor reported as %v, want ErrUnsafePath", err)
+	}
+	if !strings.Contains(err.Error(), "writable by group or others") {
+		t.Fatalf("error hides the reason: %v", err)
+	}
+	if path, reason, ok := RefusedPath(err); !ok || path != shared || reason == "" {
+		t.Fatalf("refused path not recoverable: %q %q %v", path, reason, ok)
+	}
+	if _, statErr := os.Stat(filepath.Join(shared, "backup")); !os.IsNotExist(statErr) {
+		t.Fatal("refused create wrote output")
+	}
+}
