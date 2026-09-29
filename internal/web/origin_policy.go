@@ -61,3 +61,28 @@ func (s *Server) refuseCrossSiteBrowser(w http.ResponseWriter, r *http.Request) 
 	http.Error(w, crossSiteRefusal, http.StatusForbidden)
 	return true
 }
+
+// quotaHeader must accompany, in open mode, every GET that spends third-party
+// lookup quota (VirusTotal file lookups, the seven IP-enrichment providers).
+//
+// refuseCrossSiteBrowser cannot see these: browsers send no Sec-Fetch-* headers
+// to a plain-HTTP origin, which is exactly the primary http://<tailnet-ip>
+// deployment, and a GET needs no Origin. So any page the operator visited
+// could spend quota with <img src="http://100.x.y.z:8080/api/intel/payload/vt?sha=...">.
+// A custom request header cannot be sent cross-site without a CORS preflight,
+// and the server answers none, so requiring it closes that. The dashboard's
+// fetch wrapper sets it on every /api/ request; curl users add
+// "-H 'X-ShardLure-Request: 1'". Token mode is unchanged: the bearer header
+// already needs the same preflight.
+const quotaHeader = "X-ShardLure-Request"
+
+func (s *Server) requireQuotaHeader(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.dashboardToken() == "" && r.Header.Get(quotaHeader) != "1" {
+			http.Error(w, "this endpoint spends third-party lookup quota: without a dashboard token, send the header "+
+				quotaHeader+": 1 (the dashboard does; a cross-site page cannot)", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	}
+}

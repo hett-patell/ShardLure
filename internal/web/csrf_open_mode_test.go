@@ -77,8 +77,10 @@ func TestOpenModeRefusesCrossSiteWrites(t *testing.T) {
 	}
 	for _, route := range routes {
 		for _, c := range refused {
-			// GET too: /api/intel/payload/vt spends VirusTotal quota on GET, and
-			// an <img src> needs no CORS at all.
+			// GET too, for a browser that labels it (HTTPS origins). Over plain
+			// HTTP browsers send no Sec-Fetch-* at all, so an <img> GET passes
+			// this gate: the quota-spending GETs are closed separately by
+			// requireQuotaHeader (TestOpenModeQuotaGETsNeedCustomHeader).
 			for _, method := range []string{http.MethodPost, http.MethodGet} {
 				rec := send(method, route, c.h)
 				if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), crossSiteRefusal) {
@@ -97,4 +99,57 @@ func TestOpenModeRefusesCrossSiteWrites(t *testing.T) {
 		}
 	}
 	t.Logf("checked %d mutating routes: %v", len(routes), routes)
+}
+
+// Browsers send no Sec-Fetch-* headers to a plain-HTTP origin - the primary
+// http://<tailnet-ip> deployment - so a cross-site <img src=".../payload/vt?sha=">
+// passes the cross-site gate and spends VirusTotal quota; enrich fans out to
+// seven providers. In open mode those GETs need a custom header, which a
+// foreign page cannot send without a CORS preflight the server never grants.
+func TestOpenModeQuotaGETsNeedCustomHeader(t *testing.T) {
+	t.Setenv(settings.KeyDashToken, "")
+	s := newAuthTestServer(t, "")
+	mux := s.routes()
+	for _, route := range []string{"/api/intel/payload/vt", "/api/intel/enrich"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://example.com"+route, nil))
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), quotaHeader+": 1") {
+			t.Errorf("GET %s without %s = %d %q, want 403 naming the header", route, quotaHeader, rec.Code, rec.Body.String())
+		}
+		r := httptest.NewRequest(http.MethodGet, "http://example.com"+route, nil)
+		r.Header.Set(quotaHeader, "1")
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, r)
+		if rec.Code != http.StatusBadRequest { // reached the handler: missing sha/ip
+			t.Errorf("GET %s with the header = %d %q, want the handler's 400", route, rec.Code, rec.Body.String())
+		}
+	}
+	// Token mode is unchanged: the bearer header already needs a preflight.
+	st := newAuthTestServer(t, "tok")
+	tmux := st.routes()
+	for _, route := range []string{"/api/intel/payload/vt", "/api/intel/enrich"} {
+		r := httptest.NewRequest(http.MethodGet, "http://example.com"+route, nil)
+		r.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		tmux.ServeHTTP(rec, r)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("token mode GET %s = %d %q, want the handler's 400", route, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// The console must send the header in open mode too, so its fetch wrapper is
+// installed unconditionally (it used to return early without a token).
+func TestIntelFetchWrapperSendsQuotaHeader(t *testing.T) {
+	i := strings.Index(intelHTML, "var _fetch = window.fetch.bind(window);")
+	if i < 0 {
+		t.Fatal("fetch wrapper not found")
+	}
+	head := intelHTML[max(0, i-200):i]
+	if strings.Contains(head, "if (!DASH_TOKEN) return;") {
+		t.Error("fetch wrapper still skipped in open mode")
+	}
+	if !strings.Contains(intelHTML[i:i+900], "h.set('X-ShardLure-Request', '1');") {
+		t.Error("fetch wrapper does not set X-ShardLure-Request")
+	}
 }

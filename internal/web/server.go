@@ -958,7 +958,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/intel/mitre", s.guardRead(s.handleIntelMitre))
 	mux.HandleFunc("/api/intel/sessions", s.guardRead(s.handleIntelSessions))
 	mux.HandleFunc("/api/intel/session", s.guardRead(s.handleIntelSession))
-	mux.HandleFunc("/api/intel/enrich", s.guardRead(s.handleIntelEnrich))
+	mux.HandleFunc("/api/intel/enrich", s.guardRead(s.requireQuotaHeader(s.handleIntelEnrich)))
 	mux.HandleFunc("/api/intel/ttp", s.guardRead(s.handleIntelTTP))
 	mux.HandleFunc("/api/intel/payloads", s.guardRead(s.handleIntelPayloads))
 	mux.HandleFunc("/api/intel/payload", s.guardRead(s.handleIntelPayload))
@@ -971,7 +971,7 @@ func (s *Server) routes() *http.ServeMux {
 	// VirusTotal payload-hash lookups. /vt is ON DEMAND (one hash, spends
 	// quota); /vt/cached is a cache-only bulk decorator safe to call from a
 	// list render. See api_vt.go for why the split exists.
-	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.handleIntelPayloadVT))
+	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.requireQuotaHeader(s.handleIntelPayloadVT)))
 	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guardRead(s.handleIntelPayloadsVTCached))
 	mux.HandleFunc("/api/intel/urlhaus", s.guardRead(s.handleIntelURLhaus))
 	mux.HandleFunc("/api/intel/urlhaus/submit", s.guard(s.handleURLhausSubmit))

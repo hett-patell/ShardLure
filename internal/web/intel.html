@@ -2241,20 +2241,21 @@ function withToken(url) {
   if (/[?&]token=/.test(u)) return u + hash;
   return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(currentToken) + hash;
 }
-// Wrap fetch so every same-origin /api/ request sends the Bearer token. Install
-// the wrapper whenever auth was on at load (DASH_TOKEN non-empty); it reads the
-// live currentToken each call so a rotation takes effect immediately.
+// Wrap fetch so every same-origin /api/ request sends X-ShardLure-Request
+// (open mode requires it on the quota-spending lookups, which a cross-site
+// <img> could otherwise trigger) and, when auth is on, the Bearer token. It
+// reads the live currentToken each call so a rotation takes effect immediately.
 (function () {
-  if (!DASH_TOKEN) return;
   var _fetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
     try {
       var url = (typeof input === 'string') ? input : (input && input.url) || '';
       // Same-origin API path: a relative URL beginning with "/api/".
-      if (url.indexOf('/api/') === 0 && currentToken) {
+      if (url.indexOf('/api/') === 0) {
         init = init || {};
         var h = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
-        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + currentToken);
+        h.set('X-ShardLure-Request', '1');
+        if (currentToken && !h.has('Authorization')) h.set('Authorization', 'Bearer ' + currentToken);
         init.headers = h;
       }
     } catch (_) {}
