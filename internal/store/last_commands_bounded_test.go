@@ -108,7 +108,8 @@ func TestLastCommandsForActorsMatchesWholeHistoryRanking(t *testing.T) {
 // through their whole history on every /api/intel poll - 0.87 s of CPU per
 // request on a 640k-event DB. The read now goes through the partial
 // command index, per actor, newest first, and stops at the first native row;
-// the legacy branch stays actor-scoped (never the global legacy index).
+// the legacy branch uses its own legacy-only partial index (no lookups of
+// converted rows), actor-scoped, never the global legacy index.
 func TestLastCommandsForActorsPlanIsBounded(t *testing.T) {
 	s := newTestStore(t, "last_cmd_plan.db")
 	for i, q := range []string{lastCommandNativeQuery, lastCommandLegacyQuery} {
@@ -127,8 +128,9 @@ func TestLastCommandsForActorsPlanIsBounded(t *testing.T) {
 		}
 		rows.Close()
 		joined := strings.Join(plan, "\n")
-		if !strings.Contains(joined, "idx_events_actor_cmd (actor_id=?)") {
-			t.Errorf("query %d does not seek the actor's command rows:\n%s", i, joined)
+		want := []string{"idx_events_actor_cmd (actor_id=?)", "idx_events_actor_cmd_legacy (actor_id=?)"}[i]
+		if !strings.Contains(joined, want) {
+			t.Errorf("query %d does not seek %s:\n%s", i, want, joined)
 		}
 		if strings.Contains(joined, "idx_events_legacy_ts") {
 			t.Errorf("query %d forces the global legacy index on an actor read:\n%s", i, joined)

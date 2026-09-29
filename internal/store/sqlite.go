@@ -770,8 +770,9 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 	// returned: LastCommandsForActors went through every command-less actor's
 	// whole history (idx_events_actor_ts; 0.87 s per request on 640k events)
 	// and RecentCommands through every migrated row (~260 ms).
-	// idx_events_actor_cmd serves the per-actor newest command,
-	// idx_events_cmd_ts the global newest commands. Commands are ~1% of
+	// idx_events_actor_cmd serves the per-actor newest command (with
+	// idx_events_actor_cmd_legacy for its unconverted rows), idx_events_cmd_ts
+	// the global newest commands. Commands are ~1% of
 	// events, so only those inserts pay (compare v9, which dropped a
 	// full-width write-amplifying index). The WHERE clauses must stay
 	// identical to the queries' predicates, or the planner cannot use them.
@@ -781,6 +782,12 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 				return err
 			}
 			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_cmd_ts ON events(ts) WHERE command IS NOT NULL AND command != ''`); err != nil {
+				return err
+			}
+			// The per-actor legacy read's own index: its predicate carries
+			// ts_unix_ns IS NULL so the read never looks up converted rows,
+			// and the backfill empties it (see lastCommandLegacyQuery).
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_cmd_legacy ON events(actor_id, ts) WHERE command IS NOT NULL AND command != '' AND ts_unix_ns IS NULL`); err != nil {
 				return err
 			}
 			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(26,?)`, now)

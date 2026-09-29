@@ -246,19 +246,27 @@ func (s *Store) LastCommandByActor(actorID string) (string, error) {
 }
 
 // lastCommandNativeQuery / lastCommandLegacyQuery read ONE actor's newest
-// command through idx_events_actor_cmd, the partial (actor_id, ts) index over
-// command-bearing rows only (schema v26).
+// command through partial (actor_id, ts) indexes over command-bearing rows
+// only (schema v26).
 //
-// The native branch walks that index newest-first (ts is canonical fixed-width
-// text for migrated rows, and rowid breaks ties in index order) and stops at
-// the first migrated row. The legacy branch visits only the actor's
-// unconverted command rows, ordered by the exact parsed time; it is
-// actor-scoped, never the global legacy index (see eventTimeBranches), and it
-// shrinks to nothing as the backfill converts rows.
+// The native branch walks idx_events_actor_cmd newest-first (ts is canonical
+// fixed-width text for migrated rows, and rowid breaks ties in index order)
+// and stops at the first migrated row.
+//
+// The legacy branch reads idx_events_actor_cmd_legacy, whose predicate also
+// requires ts_unix_ns IS NULL. On idx_events_actor_cmd the legacy filter
+// could only be checked after a table lookup, so every call visited ALL of
+// the actor's command rows, converted or not (~9.5 ms for one actor with 19k
+// command rows under C SQLite, more under modernc on ARM), on every uncached
+// /api/intel poll. On the legacy-only index it visits just the actor's
+// unconverted command rows, ordered by the exact parsed time, and that index
+// really does shrink to nothing: the backfill sets ts_unix_ns, which removes
+// the row from it. Actor-scoped, never the global legacy index (see
+// eventTimeBranches).
 const (
 	lastCommandNativeQuery = `SELECT command, ts, id FROM events INDEXED BY idx_events_actor_cmd
 WHERE actor_id=? AND command IS NOT NULL AND command != '' AND ts_unix_ns IS NOT NULL ORDER BY ts DESC, id DESC LIMIT 1`
-	lastCommandLegacyQuery = `SELECT command, ` + legacyEventTimeSQL + ` AS exact_ts, id FROM events INDEXED BY idx_events_actor_cmd
+	lastCommandLegacyQuery = `SELECT command, ` + legacyEventTimeSQL + ` AS exact_ts, id FROM events INDEXED BY idx_events_actor_cmd_legacy
 WHERE actor_id=? AND command IS NOT NULL AND command != '' AND ts_unix_ns IS NULL ORDER BY exact_ts DESC, id DESC LIMIT 1`
 )
 
