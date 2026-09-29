@@ -267,7 +267,18 @@ func (s *Store) CampaignIdentity(ctx context.Context) ([]CampaignAssignmentRow, 
 // paths resolve IDs through it without loading every campaign_ids row, which
 // grows with every distinct evidence value ever assigned.
 func (s *Store) CampaignAliases(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT old_id, new_id FROM campaign_aliases WHERE old_id<>'' AND new_id<>''`)
+	return campaignAliasesIn(ctx, s.db)
+}
+
+// campaignReader is what the campaign detail reads need: *sql.DB, or the
+// read-only *sql.Tx GetCampaign runs them in.
+type campaignReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func campaignAliasesIn(ctx context.Context, q campaignReader) (map[string]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT old_id, new_id FROM campaign_aliases WHERE old_id<>'' AND new_id<>''`)
 	if err != nil {
 		return nil, err
 	}
@@ -387,13 +398,13 @@ func (s *Store) ResolveCampaignID(ctx context.Context, id string) (string, bool,
 	if err != nil {
 		return "", false, err
 	}
-	return s.resolveCampaignID(ctx, aliases, id)
+	return resolveCampaignIDIn(ctx, s.db, aliases, id)
 }
 
-func (s *Store) resolveCampaignID(ctx context.Context, aliases map[string]string, id string) (string, bool, error) {
+func resolveCampaignIDIn(ctx context.Context, q campaignReader, aliases map[string]string, id string) (string, bool, error) {
 	id = campaignAliasTarget(aliases, id)
 	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM campaigns WHERE id=?`, id).Scan(&n); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM campaigns WHERE id=?`, id).Scan(&n); err != nil {
 		return "", false, err
 	}
 	return id, n == 1, nil
@@ -557,11 +568,28 @@ func (s *Store) GetCampaign(ctx context.Context, idOrName string) (CampaignDetai
 		// A blank name would match every campaign whose name is unset.
 		return d, sql.ErrNoRows
 	}
-	aliases, err := s.CampaignAliases(ctx)
+	// campaignHosts reads artifacts, a lazy table: create it before the read
+	// transaction (ensure* takes writeMu and writes DDL, neither of which
+	// belongs inside a read snapshot).
+	if err := s.ensureArtifactsTable(); err != nil {
+		return d, err
+	}
+	// One read-only transaction is one WAL snapshot. The dozen reads below
+	// used to go to s.db one by one, each on whichever pooled connection was
+	// free, so a SaveGrouping committing between them (it deletes and
+	// re-inserts every campaign) produced a summary from the old grouping
+	// with members and totals from the new one, or none at all if the
+	// campaign was re-keyed (store-reads audit Minor 2).
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return d, err
 	}
-	id, exists, err := s.resolveCampaignID(ctx, aliases, idOrName)
+	defer tx.Rollback()
+	aliases, err := campaignAliasesIn(ctx, tx)
+	if err != nil {
+		return d, err
+	}
+	id, exists, err := resolveCampaignIDIn(ctx, tx, aliases, idOrName)
 	if err != nil {
 		return d, err
 	}
@@ -570,7 +598,7 @@ func (s *Store) GetCampaign(ctx context.Context, idOrName string) (CampaignDetai
 		// matching more than one campaign is ambiguous. Name and suggested
 		// name are pooled on purpose: an operator who renamed one "Outlaw/Dota"
 		// component to "Outlaw/Dota" still has siblings answering to it.
-		ids, err := s.campaignStrings(ctx, idOrName, `SELECT id FROM campaigns
+		ids, err := campaignStringsIn(ctx, tx, idOrName, `SELECT id FROM campaigns
 WHERE lower(name)=lower(?1) OR lower(suggested_name)=lower(?1) ORDER BY id`)
 		if err != nil {
 			return d, err
@@ -584,14 +612,17 @@ WHERE lower(name)=lower(?1) OR lower(suggested_name)=lower(?1) ORDER BY id`)
 			return d, &AmbiguousCampaignError{Name: idOrName, IDs: ids}
 		}
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+campaignSummaryColumns+`, c.notes, c.anchor_kind, c.anchor_value FROM campaigns c
+	row := tx.QueryRowContext(ctx, `SELECT `+campaignSummaryColumns+`, c.notes, c.anchor_kind, c.anchor_value FROM campaigns c
 WHERE c.id=?`, id)
 	summary, err := scanCampaignSummary(row, &d.Notes, &d.AnchorKind, &d.AnchorValue)
 	if err != nil {
 		return d, err // sql.ErrNoRows when absent
 	}
 	d.CampaignSummary = summary
-	mrows, err := s.db.QueryContext(ctx, `SELECT m.actor_id, COALESCE(a.primary_ip,''), COALESCE(a.playbook,''), m.sessions, m.ips, m.reasons
+	if getCampaignAfterSummary != nil {
+		getCampaignAfterSummary()
+	}
+	mrows, err := tx.QueryContext(ctx, `SELECT m.actor_id, COALESCE(a.primary_ip,''), COALESCE(a.playbook,''), m.sessions, m.ips, m.reasons
 FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_id=? ORDER BY m.actor_id LIMIT ?`, d.ID, campaignDetailCap)
 	if err != nil {
 		return d, err
@@ -619,22 +650,27 @@ FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_i
 		{&d.HASSHesTotal, `SELECT COUNT(DISTINCT a.hassh) FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.hassh,'')<>''`},
 		{&d.ClientsTotal, `SELECT COUNT(DISTINCT a.ssh_client) FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.ssh_client,'')<>''`},
 	} {
-		if err := s.db.QueryRowContext(ctx, q.sql, d.ID).Scan(q.dst); err != nil {
+		if err := tx.QueryRowContext(ctx, q.sql, d.ID).Scan(q.dst); err != nil {
 			return d, err
 		}
 	}
-	if d.HASSHes, err = s.campaignStrings(ctx, d.ID, `SELECT DISTINCT a.hassh FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.hassh,'')<>'' ORDER BY 1 LIMIT ?`, campaignDetailCap); err != nil {
+	if d.HASSHes, err = campaignStringsIn(ctx, tx, d.ID, `SELECT DISTINCT a.hassh FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.hassh,'')<>'' ORDER BY 1 LIMIT ?`, campaignDetailCap); err != nil {
 		return d, err
 	}
-	if d.Clients, err = s.campaignStrings(ctx, d.ID, `SELECT DISTINCT a.ssh_client FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.ssh_client,'')<>'' ORDER BY 1 LIMIT ?`, campaignDetailCap); err != nil {
+	if d.Clients, err = campaignStringsIn(ctx, tx, d.ID, `SELECT DISTINCT a.ssh_client FROM actors a JOIN campaign_members m ON m.actor_id=a.id WHERE m.campaign_id=? AND COALESCE(a.ssh_client,'')<>'' ORDER BY 1 LIMIT ?`, campaignDetailCap); err != nil {
 		return d, err
 	}
-	if d.Hosts, d.HostsTotal, err = s.campaignHosts(ctx, d.ID); err != nil {
+	if d.Hosts, d.HostsTotal, err = campaignHostsIn(ctx, tx, d.ID); err != nil {
 		return d, err
 	}
-	d.Edits, err = s.campaignEditsFor(ctx, campaignIDsResolvingTo(aliases, d.ID))
+	d.Edits, err = campaignEditsForIn(ctx, tx, campaignIDsResolvingTo(aliases, d.ID))
 	return d, err
 }
+
+// getCampaignAfterSummary, when set (tests only), runs between GetCampaign's
+// summary read and its member reads, where a concurrent SaveGrouping used to
+// split the detail across two groupings.
+var getCampaignAfterSummary func()
 
 // campaignIDsResolvingTo is the campaign's own ID plus every alias source
 // (including chains) that resolves to it: the small set edits can be filed
@@ -652,7 +688,7 @@ func campaignIDsResolvingTo(aliases map[string]string, id string) []string {
 
 // campaignEditsFor reads only the edits filed under ids, so a detail request
 // never scans the whole campaign_edits history.
-func (s *Store) campaignEditsFor(ctx context.Context, ids []string) ([]CampaignEditRow, error) {
+func campaignEditsForIn(ctx context.Context, tx campaignReader, ids []string) ([]CampaignEditRow, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -662,7 +698,7 @@ func (s *Store) campaignEditsFor(ctx context.Context, ids []string) ([]CampaignE
 	}
 	q := `SELECT id, campaign_id, action, arg, who, created_at FROM campaign_edits WHERE campaign_id IN (?` +
 		strings.Repeat(",?", len(ids)-1) + `) ORDER BY id`
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -691,11 +727,11 @@ func (s *Store) campaignEditsFor(ctx context.Context, ids []string) ([]CampaignE
 // only on demand (a campaign detail request, never a poll or a
 // worker tick), and artifacts holds thousands of rows, so no index is added
 // for it; revisit if the detail view is ever polled.
-func (s *Store) campaignHosts(ctx context.Context, id string) ([]string, int, error) {
-	if err := s.ensureArtifactsTable(); err != nil {
-		return nil, 0, err
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT ar.url FROM artifacts ar JOIN campaign_members m ON m.actor_id=ar.actor_id WHERE m.campaign_id=? AND ar.url LIKE 'http%'`, id)
+//
+// The caller ensures the artifacts table first (GetCampaign does, before its
+// read transaction).
+func campaignHostsIn(ctx context.Context, q campaignReader, id string) ([]string, int, error) {
+	rows, err := q.QueryContext(ctx, `SELECT DISTINCT ar.url FROM artifacts ar JOIN campaign_members m ON m.actor_id=ar.actor_id WHERE m.campaign_id=? AND ar.url LIKE 'http%'`, id)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -721,8 +757,8 @@ func (s *Store) campaignHosts(ctx context.Context, id string) ([]string, int, er
 	return hosts[:min(len(hosts), campaignDetailCap)], len(seen), nil
 }
 
-func (s *Store) campaignStrings(ctx context.Context, id, query string, extra ...any) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, query, append([]any{id}, extra...)...)
+func campaignStringsIn(ctx context.Context, q campaignReader, id, query string, extra ...any) ([]string, error) {
+	rows, err := q.QueryContext(ctx, query, append([]any{id}, extra...)...)
 	if err != nil {
 		return nil, err
 	}

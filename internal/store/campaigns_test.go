@@ -444,3 +444,32 @@ func TestGetCampaignAmbiguousListsEveryID(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// GetCampaign reads one snapshot. A SaveGrouping that commits between its
+// summary and member reads (here it re-keys the campaign away) must not leave
+// a detail with the old summary and the new grouping's empty member list
+// (store-reads audit Minor 2).
+func TestGetCampaignReadsOneSnapshot(t *testing.T) {
+	s := newTestStore(t, "campaigns-snapshot.db")
+	ctx := context.Background()
+	old := CampaignRow{ID: "c-1", Members: []CampaignMemberRow{{ActorID: "cowrie:a", Sessions: 1, IPs: 1, Reasons: "[]"}, {ActorID: "cowrie:b", Sessions: 1, IPs: 1, Reasons: "[]"}}}
+	if err := s.SaveGrouping(ctx, []CampaignRow{old}, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	var saveErr error
+	getCampaignAfterSummary = func() {
+		saveErr = s.SaveGrouping(ctx, []CampaignRow{{ID: "c-2", Members: []CampaignMemberRow{{ActorID: "cowrie:c", Sessions: 1, IPs: 1, Reasons: "[]"}}}}, nil, nil, 0)
+	}
+	t.Cleanup(func() { getCampaignAfterSummary = nil })
+	d, err := s.GetCampaign(ctx, "c-1")
+	if saveErr != nil {
+		t.Fatalf("concurrent save: %v", saveErr)
+	}
+	if err != nil || d.ID != "c-1" || len(d.Members) != 2 || d.MembersTotal != 2 {
+		t.Fatalf("detail = id %q members %d total %d, %v; want c-1 whole from one snapshot", d.ID, len(d.Members), d.MembersTotal, err)
+	}
+	getCampaignAfterSummary = nil
+	if _, err := s.GetCampaign(ctx, "c-1"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("after the save c-1 = %v, want gone", err)
+	}
+}
