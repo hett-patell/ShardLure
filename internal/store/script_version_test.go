@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,8 +20,14 @@ func TestCarryScriptAssignmentsRules(t *testing.T) {
 	}{
 		{name: "unchanged", pairs: [][2]string{{"o", "o"}, {"o", "o"}},
 			assigned: map[string]scriptAssignment{"o": a("c1", 1)}, set: map[string]scriptAssignment{}},
-		{name: "old survives beside a new one", pairs: [][2]string{{"o", "o"}, {"o", "n"}, {"o", "n"}},
+		{name: "a minority survivor does not keep the row", pairs: [][2]string{{"o", "o"}, {"o", "n"}, {"o", "n"}},
+			assigned: map[string]scriptAssignment{"o": a("c1", 1)}, set: map[string]scriptAssignment{"n": a("c1", 1)}, del: []string{"o"}},
+		{name: "old keeps the majority", pairs: [][2]string{{"o", "o"}, {"o", "o"}, {"o", "n"}},
 			assigned: map[string]scriptAssignment{"o": a("c1", 1)}, set: map[string]scriptAssignment{}},
+		{name: "old ties with a larger fingerprint and keeps it", pairs: [][2]string{{"o", "o"}, {"o", "p"}},
+			assigned: map[string]scriptAssignment{"o": a("c1", 1)}, set: map[string]scriptAssignment{}},
+		{name: "old ties with a smaller fingerprint and loses it", pairs: [][2]string{{"o", "o"}, {"o", "n"}},
+			assigned: map[string]scriptAssignment{"o": a("c1", 1)}, set: map[string]scriptAssignment{"n": a("c1", 1)}, del: []string{"o"}},
 		{name: "changed", pairs: [][2]string{{"o", "n"}, {"o", "n"}},
 			assigned: map[string]scriptAssignment{"o": a("c1", 4)}, set: map[string]scriptAssignment{"n": a("c1", 4)}, del: []string{"o"}},
 		{name: "split goes to the majority", pairs: [][2]string{{"o", "n1"}, {"o", "n2"}, {"o", "n2"}},
@@ -135,5 +143,46 @@ func TestScriptRebuildHoldSurvivesDowntime(t *testing.T) {
 	}
 	if held, err := s.ScriptRebuildHold(ctx, restart.Add(scriptHoldDuration+time.Minute)); err != nil || held {
 		t.Fatalf("past the deadline: held=%v err=%v", held, err)
+	}
+}
+
+// The release applies the majority rule through SQL: two of O's three
+// sessions settled to N, one still to O, so O's row moves to N.
+func TestScriptRebuildReleaseMovesRowToMajority(t *testing.T) {
+	s := newTestStore(t, "hold-majority.db")
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO script_version_carry(session_id,fingerprint) VALUES('s1','O'),('s2','O'),('s3','O')`,
+		`INSERT INTO session_scripts(session_id,actor_id,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES
+  ('s1','cowrie:a','x','x','x','x','O'),('s2','cowrie:b','x','x','x','x','N'),('s3','cowrie:c','x','x','x','x','N')`,
+		`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('script','O','c-keep',3),('ssh_key','k','c-other',1)`,
+		`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('script_version','hold_hwm',0,0,'','x')`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || held {
+		t.Fatalf("held=%v err=%v", held, err)
+	}
+	rows, err := s.db.Query(`SELECT kind, value, campaign_id, seq FROM campaign_ids ORDER BY kind, value`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var k, v, id string
+		var seq int
+		if err := rows.Scan(&k, &v, &id, &seq); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%s:%s=%s/%d", k, v, id, seq))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := "script:N=c-keep/3 ssh_key:k=c-other/1"; strings.Join(got, " ") != want {
+		t.Fatalf("campaign_ids %v, want %s", got, want)
 	}
 }

@@ -310,13 +310,16 @@ ON CONFLICT(kind,value) DO UPDATE SET campaign_id=excluded.campaign_id, seq=excl
 // rows. It returns the rows to write and the old fingerprints to delete.
 //
 // Per old fingerprint O that has a row:
-//   - some session still settles to O (unchanged, or O survives beside other
-//     fingerprints): nothing moves, O's row is still valid;
 //   - no session settled again (purged, or no script now): nothing to carry;
 //     Group drops the row as it would any value without occurrences;
-//   - otherwise O's row (campaign ID and seq) moves to the new fingerprint
-//     holding most of O's sessions, ties to the smallest fingerprint (a
-//     split: the other new fingerprints get fresh rows from Group).
+//   - otherwise O's row (campaign ID and seq) belongs to the fingerprint
+//     holding most of O's sessions, ties to the smallest fingerprint. When
+//     that is O itself (unchanged, or O keeps the majority of a split),
+//     nothing moves. Otherwise the row moves there even if a minority of
+//     O's sessions still settles to O: the campaign follows where most of
+//     its sessions went, and the minority (O included) gets fresh rows from
+//     Group. One rule for every split, so a survivor never outvotes the
+//     majority.
 //
 // Several claims on one new fingerprint (a collapse, or a fingerprint that
 // already has a row of its own) keep the lowest seq, then the lowest key:
@@ -337,7 +340,7 @@ func carryScriptAssignments(pairs [][2]string, assigned map[string]scriptAssignm
 	moved := map[string]bool{}
 	for _, old := range sortedAssignmentKeys(assigned) {
 		news := counts[old]
-		if len(news) == 0 || news[old] > 0 {
+		if len(news) == 0 {
 			continue
 		}
 		target, best := "", 0
@@ -345,6 +348,9 @@ func carryScriptAssignments(pairs [][2]string, assigned map[string]scriptAssignm
 			if n > best || (n == best && fp < target) {
 				target, best = fp, n
 			}
+		}
+		if target == old {
+			continue
 		}
 		claims[target] = append(claims[target], claim{old, assigned[old]})
 		moved[old] = true
