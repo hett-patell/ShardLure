@@ -240,6 +240,17 @@ func group(ctx context.Context, in Input, attr attributeFunc) (Output, error) {
 	names, notes := map[string]string{}, map[string]string{}
 	nameID, noteID := map[string]int64{}, map[string]int64{}
 	for _, e := range edits {
+		// A rename, notes, merge or remove_actor with no campaign ID is a
+		// corrupt row (the API refuses one): honouring it emitted a campaign
+		// whose ID is "", SaveGrouping rejected the whole grouping, and
+		// campaigns never updated again (audit M-3). It is dropped here, the
+		// way CampaignIdentity drops an empty-ID assignment; ignore_evidence
+		// names a value, not a campaign, and stands. A merge with no target
+		// is the same class of row (MergeAliases already ignores it) and
+		// must not mark its source as edited either.
+		if e.Action != "ignore_evidence" && e.CampaignID == "" || e.Action == "merge" && e.Arg == "" {
+			continue
+		}
 		id := rep(e.CampaignID)
 		switch e.Action {
 		case "ignore_evidence":
@@ -440,8 +451,10 @@ func group(ctx context.Context, in Input, attr attributeFunc) (Output, error) {
 		reserved[k], reserved[v] = true, true
 	}
 	for _, e := range edits {
-		reserved[e.CampaignID] = true
-		if e.Action == "merge" {
+		if e.CampaignID != "" {
+			reserved[e.CampaignID] = true
+		}
+		if e.Action == "merge" && e.Arg != "" {
 			reserved[e.Arg] = true
 		}
 	}
