@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -146,5 +147,69 @@ func TestValidateListLimit(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "--limit must be 1..1000") {
 			t.Errorf("limit %d: err=%v, want range error", n, err)
 		}
+	}
+}
+
+// scripts --rebuild is an action: it deletes the stored normaliser version,
+// says a restart is needed, and refuses list flags and stray arguments.
+func TestScriptsRebuild(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rebuild.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if _, err := st.ResetScriptsForVersion(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	versionRows := func() int {
+		var n int
+		if err := raw.QueryRow(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path='normaliser'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if versionRows() != 1 {
+		t.Fatal("precondition: a stored normaliser version")
+	}
+	var b bytes.Buffer
+	if err := runScripts(ctx, st, []string{"--rebuild"}, &b); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(b.String()); got != scriptRebuildMessage ||
+		!strings.Contains(got, "restart shardlure-live") || !strings.Contains(got, "campaign names and IDs are kept") {
+		t.Fatalf("output %q", got)
+	}
+	// The version row is gone: the next worker start sees "no version stored".
+	if n := versionRows(); n != 0 {
+		t.Fatalf("version row still stored (%d)", n)
+	}
+	if _, err := st.ResetScriptsForVersion(ctx, 3); err != nil || versionRows() != 1 {
+		t.Fatalf("version not re-stored: %v", err)
+	}
+	for _, args := range [][]string{
+		{"--rebuild", "--limit=5"},
+		{"--limit=50", "--rebuild"},
+		{"--rebuild", "now"},
+		{"extra"},
+		{"--rebuild=maybe"},
+	} {
+		b.Reset()
+		if err := runScripts(ctx, st, args, &b); err == nil {
+			t.Errorf("%v accepted: %q", args, b.String())
+		}
+		if strings.Contains(b.String(), "rebuild requested") {
+			t.Errorf("%v requested a rebuild while refusing", args)
+		}
+	}
+	b.Reset()
+	if err := runScripts(ctx, st, []string{"--limit=5"}, &b); err != nil || !strings.Contains(b.String(), "FAMILY") {
+		t.Fatalf("listing still works: %v %q", err, b.String())
 	}
 }

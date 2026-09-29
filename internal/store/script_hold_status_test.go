@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,4 +78,35 @@ func TestScriptRebuildHoldStatusIsReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(ScriptRebuildHoldStatus{Held: true, Phase: "recording", Recorded: 0, Target: 7})
+}
+
+// ForceScriptRebuild removes exactly the stored normaliser version: the hold,
+// the recorder cursor, other ingest cursors and campaign rows stay for the
+// worker's reset to handle.
+func TestForceScriptRebuildDeletesOnlyTheVersionRow(t *testing.T) {
+	s := newTestStore(t, "force_rebuild.db")
+	ctx := context.Background()
+	setIngestOffset(t, s, scriptVersionSource, scriptVersionPath, 3)
+	setIngestOffset(t, s, scriptVersionSource, scriptHoldHWMPath, 400)
+	setIngestOffset(t, s, evidenceCursorSource, evidenceCursorPath, 100)
+	setIngestOffset(t, s, "cowrie", "/var/log/cowrie.json", 12345)
+	if _, err := s.db.Exec(`INSERT INTO campaign_edits(campaign_id,action,arg,who,created_at) VALUES('c-000000000001','rename','Keep','cli','x')`); err != nil {
+		t.Fatal(err)
+	}
+	before := ingestStateDump(t, s)
+	if err := s.ForceScriptRebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := ingestStateDump(t, s)
+	if want := strings.Replace(before, "script_version/normaliser=3;", "", 1); after != want || want == before {
+		t.Fatalf("ingest_state after:\n %s\nwant\n %s", after, want)
+	}
+	var edits int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM campaign_edits`).Scan(&edits); err != nil || edits != 1 {
+		t.Fatalf("campaign_edits %d %v", edits, err)
+	}
+	// Idempotent: a second request with nothing stored is not an error.
+	if err := s.ForceScriptRebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
 }

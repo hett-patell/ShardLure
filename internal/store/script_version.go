@@ -467,3 +467,22 @@ func (s *Store) ScriptRebuildHoldStatus(ctx context.Context) (ScriptRebuildHoldS
 	}
 	return st, nil
 }
+
+// ForceScriptRebuild deletes the stored normaliser version, so the next
+// campaign worker start sees "no version stored" and ResetScriptsForVersion
+// rebuilds every script-derived row under the regroup hold, exactly as after
+// an upgrade that changed the normaliser.
+//
+// It exists for what the version check cannot see: a downgrade followed by a
+// re-upgrade leaves the current version stored beside lines the older binary
+// encoded. The only way used to be stopping the service and deleting this row
+// by hand. Only that row goes: the hold, the carry snapshot, the recorder
+// cursor and every campaign table are left to the reset, which already
+// handles each of them (and keeps campaign names and IDs). The worker reads
+// the version once per process, so a running daemon acts on it at restart.
+func (s *Store) ForceScriptRebuild(ctx context.Context) error {
+	return s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptVersionPath)
+		return err
+	})
+}

@@ -163,22 +163,57 @@ func orDash(s string) string {
 }
 
 func cmdScripts(st *store.Store, args []string) {
-	fs := flag.NewFlagSet("scripts", flag.ExitOnError)
-	limit := fs.Int("limit", 50, "max script families to list")
-	if err := fs.Parse(args); err != nil {
+	if err := runScripts(context.Background(), st, args, os.Stdout); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		fatal(err)
+	}
+}
+
+// scriptRebuildMessage says plainly what --rebuild did and did not do: the
+// worker reads the stored version once per process, so nothing happens until
+// the daemon restarts.
+const scriptRebuildMessage = "script rebuild requested: restart shardlure-live to rebuild script fingerprints (campaign names and IDs are kept)"
+
+// runScripts lists script families, or with --rebuild forces a script
+// fingerprint rebuild (store.ForceScriptRebuild). --rebuild is an action, not
+// a listing, so it refuses to be combined with any list flag.
+func runScripts(ctx context.Context, st *store.Store, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("scripts", flag.ContinueOnError)
+	limit := fs.Int("limit", 50, "max script families to list")
+	rebuild := fs.Bool("rebuild", false, "force a script fingerprint rebuild on the next shardlure-live start (after a downgrade and re-upgrade)")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
 	if fs.NArg() > 0 {
-		fatal(fmt.Errorf("unexpected argument %q (usage: shardlure scripts [--limit=N])", fs.Arg(0)))
+		return fmt.Errorf("unexpected argument %q (usage: shardlure scripts [--limit=N] | shardlure scripts --rebuild)", fs.Arg(0))
+	}
+	if *rebuild {
+		var others []string
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name != "rebuild" {
+				others = append(others, "--"+f.Name)
+			}
+		})
+		if len(others) > 0 {
+			return fmt.Errorf("--rebuild is an action and takes no list flags (got %s)", strings.Join(others, ", "))
+		}
+		if err := st.ForceScriptRebuild(ctx); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, scriptRebuildMessage)
+		return nil
 	}
 	if err := validateListLimit(*limit); err != nil {
-		fatal(err)
+		return err
 	}
-	fams, err := st.ListScriptFamilies(context.Background(), *limit)
+	fams, err := st.ListScriptFamilies(ctx, *limit)
 	if err != nil {
-		fatal(err)
+		return err
 	}
-	writeScripts(os.Stdout, fams)
+	writeScripts(out, fams)
+	return nil
 }
 
 // shortID keeps the first 12 runes (never bytes, so a multi-byte character

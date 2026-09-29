@@ -711,6 +711,7 @@ Usage:
   shardlure campaigns [--limit=N]
   shardlure campaign show <id|name>
   shardlure scripts [--limit=N]
+  shardlure scripts --rebuild
   shardlure reclassify cowrie [--dry-run]
   shardlure dashboard
   shardlure web [:8080] [--tailscale]

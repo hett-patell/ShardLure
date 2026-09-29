@@ -34,6 +34,7 @@ func TestUsageDocumentsEveryDispatchedCommand(t *testing.T) {
 		"campaigns",
 		"campaign show",
 		"scripts",
+		"scripts --rebuild",
 	} {
 		if !strings.Contains(got, "shardlure "+cmd) {
 			t.Errorf("usage() does not document %q\n---\n%s", cmd, got)
