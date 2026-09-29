@@ -38,7 +38,8 @@ import (
 // delimiter gets bash's quote removal and ends on a whole source line
 // (<<\EOF, <<E"OF" and <<"E O F" no longer hide every later command),
 // and a heredoc's body (normalised, at most MaxHeredocBodyBytes) is part of
-// its placeholder token.
+// its placeholder token; reserved words and braces are not programs (and
+// keep the program slot open), N<file, <> and >| are redirections.
 const Version = 4
 
 const (
@@ -75,7 +76,7 @@ const (
 )
 
 var (
-	redirRe  = regexp.MustCompile(`^(?:<<<|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?)$`)
+	redirRe  = regexp.MustCompile(`^(?:<<<|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?|\d+<|\d*<>|\d*>\|)$`)
 	bareRe   = regexp.MustCompile(`^[a-z_][a-z0-9_.+-]*$`)
 	keyTypes = regexp.MustCompile(`^(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-\S+|sk-\S+@openssh\.com)$`)
 	keyBody  = regexp.MustCompile(`AAAA[0-9A-Za-z+/]{36,}={0,3}`)
@@ -217,7 +218,7 @@ func NormalizeCommand(cmd string) []string {
 		if start && wrappers[t] != nil {
 			wrap = &wrapState{name: t, spec: wrappers[t], operands: wrappers[t].operands}
 		}
-		start = operators[t] || t == "(" || (start && (wrap != nil || isAssignment(t)))
+		start = operators[t] || t == "(" || (start && (wrap != nil || isAssignment(t) || reserved[t]))
 	}
 	return out
 }
@@ -313,6 +314,15 @@ func tokenLen(s string) (int, bool) {
 				r++
 			}
 			return r, false
+		}
+		// \d*>| (clobber) and \d*<> (read-write) are one redirection; so is
+		// \d+< (`0</dev/null id` read the 0 as the program), but not before
+		// a second < (`0<<EOF` stays a word and a heredoc, as before).
+		if d+1 < len(s) && (s[d] == '>' && s[d+1] == '|' || s[d] == '<' && s[d+1] == '>') {
+			return d + 2, false
+		}
+		if d > 0 && s[d] == '<' && (d+1 >= len(s) || s[d+1] != '<') {
+			return d + 1, false
 		}
 		if d > 0 && s[d] == '>' { // \d+>>?
 			if d+1 < len(s) && s[d+1] == '>' {
@@ -788,6 +798,20 @@ func segments(cmds [][]string) [][]string {
 // whole script on one line.
 func CommandCount(cmds [][]string) int { return len(segments(cmds)) }
 
+// Reserved words that are syntax in the program slot, never a program:
+// program() skips them and the word after them is still the program (`if
+// id`, `then wget`, `! grep`, `{ id`), so NormalizeCommand keeps the slot
+// open after them. In a segment led by one of noProgram (`for i in ...`,
+// `case $x in`, `[[ -f x ]]`, `function f`) no word runs as a program.
+// Reading them as programs made recon-only scripts Distinctive (audit M1).
+var (
+	reserved = map[string]bool{
+		"if": true, "then": true, "else": true, "elif": true, "fi": true, "do": true, "done": true,
+		"while": true, "until": true, "esac": true, "{": true, "}": true, "!": true, "]]": true,
+	}
+	noProgram = map[string]bool{"for": true, "case": true, "select": true, "[[": true, "function": true}
+)
+
 var recon = map[string]bool{
 	"uname": true, "whoami": true, "id": true, "hostname": true, "uptime": true, "nproc": true,
 	"free": true, "pwd": true, "ls": true, "w": true, "cat": true, "lscpu": true, "ifconfig": true,
@@ -878,6 +902,12 @@ func program(seg []string) string {
 		if t == "(" || t == ")" || strings.HasPrefix(t, heredocTok) ||
 			(strings.Contains(t, "=") && !strings.HasPrefix(t, "-")) || strings.HasSuffix(t, "$") {
 			continue
+		}
+		if reserved[t] {
+			continue
+		}
+		if noProgram[t] {
+			return ""
 		}
 		if spec := wrappers[t]; spec != nil {
 			wrap = &wrapState{name: t, spec: spec, operands: spec.operands}
