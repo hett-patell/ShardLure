@@ -686,6 +686,7 @@ func versionChangeCase(t *testing.T, changed bool) {
 	if err := old.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	old.Close() // the old binary stops: its worker lease is released
 	fp := one(`SELECT value FROM campaign_ids WHERE kind='script'`)
 	for _, q := range []string{`UPDATE session_script_lines SET line='old-encoding'`} {
 		if _, err := raw.Exec(q); err != nil {
@@ -729,6 +730,7 @@ func versionChangeCase(t *testing.T, changed bool) {
 
 	// A restart mid-hold: the hold is read from the store. Sessions settle,
 	// the hold releases (carrying the assignment) and the owed regroup runs.
+	w.Close() // the stopping process releases the worker lease
 	w = NewWorker(st, 90, t.TempDir())
 	w.idle = -time.Minute
 	if err := w.Tick(ctx); err != nil {
@@ -759,9 +761,11 @@ func TestMatchingVersionResetsNothing(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	ctx := context.Background()
 	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
-	if err := NewWorker(st, 90, t.TempDir()).Tick(ctx); err != nil {
+	first := NewWorker(st, 90, t.TempDir())
+	if err := first.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	first.Close() // a restart: the old process releases the worker lease
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)

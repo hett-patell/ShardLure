@@ -2,8 +2,12 @@ package campaign
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -103,31 +107,75 @@ type Worker struct {
 	// scriptVersion (see the start of tick).
 	versionChecked bool
 	// holdClear is set once the store reports no script-rebuild hold. A hold
-	// is only ever created by the reset at the start of this process, so
-	// after it is clear the per-tick check is skipped. A new process reads
-	// the hold from the store again.
+	// is only ever created by the reset at the start of a lease-holding
+	// process, so after it is clear the per-tick check is skipped. A new
+	// process, or this one after regaining the lease, reads the hold from
+	// the store again.
 	holdClear bool
+	// leaseOwner identifies this process to the cross-process worker lease
+	// (store.AcquireCampaignLease), leaseTTL is the lease's lifetime (a field
+	// so a test can expire it quickly), leaseUntil is when the lease this
+	// process holds runs out (zero while it holds none) and leaseLost
+	// records that another process was seen holding it, so the fact is
+	// logged once, not every tick.
+	leaseOwner string
+	leaseTTL   time.Duration
+	leaseUntil time.Time
+	leaseLost  bool
 }
 
 // ErrRegroupHeld is Regroup's answer while a script rebuild holds regroups
 // (see store.ScriptRebuildHold). Tick keeps the regroup owed instead.
 var ErrRegroupHeld = errors.New("campaign: regroup held until rebuilt scripts settle")
 
+// ErrLeaseHeldElsewhere means another process holds the campaign worker
+// lease, so this one runs no part of the pipeline. Tick swallows it (a skipped
+// tick is not a failure and starts no backoff); Regroup returns it.
+var ErrLeaseHeldElsewhere = errors.New("campaign: another process holds the campaign worker lease")
+
+// campaignLeaseTTL bounds how long a crashed owner blocks the pipeline. The
+// holder renews at half-life (every ~30 s of ticks, one small write) and
+// again before the settle and regroup phases, so a tick can lose the lease
+// only if one phase stalls for over 30 s.
+const campaignLeaseTTL = time.Minute
+
 func NewWorker(st *store.Store, retentionDays int, evidenceRoot string) *Worker {
 	return &Worker{st: st, retentionDays: retentionDays, evidenceRoot: evidenceRoot, families: map[string]string{},
 		window: recordWindow, maxWindows: maxWindowsPerTick, scriptVersion: script.Version, idle: settleIdle,
+		leaseOwner: leaseOwnerID(), leaseTTL: campaignLeaseTTL,
 		classify: func(f *os.File) (string, error) {
 			c, err := bazaar.ClassifyFile(f)
 			return c.Family, err
 		}}
 }
 
-// Close releases the evidence root descriptor familyOf holds. The worker must
-// not tick afterwards. It runs at shutdown, where the caller cannot act on a
-// close error, so a failure is logged here rather than returned (and dropped).
+// leaseOwnerID is "<pid>:<random>": the pid names the process in the log line
+// the other side prints, the random part keeps a recycled pid from renewing
+// a dead process's lease.
+func leaseOwnerID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		binary.LittleEndian.PutUint64(b[:], uint64(time.Now().UnixNano()))
+	}
+	return fmt.Sprintf("%d:%s", os.Getpid(), hex.EncodeToString(b[:]))
+}
+
+// Close releases the campaign worker lease, so a process started next takes
+// over at once instead of waiting out the TTL, and the evidence root
+// descriptor familyOf holds. The worker must not tick afterwards. It runs at
+// shutdown, where the caller cannot act on an error, so failures are logged
+// here rather than returned (and dropped).
 func (w *Worker) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if !w.leaseUntil.IsZero() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := w.st.ReleaseCampaignLease(ctx, w.leaseOwner); err != nil {
+			logf("campaigns: releasing the worker lease: %v", err)
+		}
+		cancel()
+		w.leaseUntil = time.Time{}
+	}
 	if w.root == nil {
 		return
 	}
@@ -135,6 +183,43 @@ func (w *Worker) Close() {
 		logf("campaigns: closing the evidence root: %v", err)
 	}
 	w.root = nil
+}
+
+// holdLease makes sure this process holds the campaign worker lease, taking
+// or renewing it once less than half its TTL is left, and returns
+// ErrLeaseHeldElsewhere when another process has it. Two processes on one
+// database (`shardlure live` beside a separately started `shardlure web`)
+// both start this worker, and AssignScriptFamilies, PruneOrphanScripts, the
+// version reset and the hold release all assume a single sequential caller;
+// the lease gives them one. Regaining the lease re-reads the rebuild hold
+// from the store: the other holder may have run a version reset meanwhile,
+// and a stale holdClear would let this process regroup through its hold.
+func (w *Worker) holdLease(ctx context.Context, now time.Time) error {
+	if !w.leaseUntil.IsZero() && now.Before(w.leaseUntil.Add(-w.leaseTTL/2)) {
+		return nil
+	}
+	held, err := w.st.AcquireCampaignLease(ctx, w.leaseOwner, now, w.leaseTTL)
+	if err != nil {
+		return err
+	}
+	if !held {
+		if !w.leaseLost {
+			owner, _, _ := w.st.CampaignLeaseHolder(ctx)
+			logf("campaigns: another shardlure process (%s) holds the campaign worker lease; this process leaves the campaign pipeline to it until that lease is released or expires", owner)
+			w.leaseLost = true
+		}
+		w.leaseUntil = time.Time{}
+		return ErrLeaseHeldElsewhere
+	}
+	if w.leaseUntil.IsZero() {
+		w.holdClear = false
+		if w.leaseLost {
+			logf("campaigns: this process now holds the campaign worker lease")
+			w.leaseLost = false
+		}
+	}
+	w.leaseUntil = now.Add(w.leaseTTL)
+	return nil
 }
 
 // Wake asks for a regroup on the next tick (an operator edit arrived). It
@@ -160,7 +245,12 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if time.Now().Before(w.retryAt) {
 		return w.lastErr
 	}
-	if err := w.tick(ctx); err != nil {
+	err := w.tick(ctx)
+	if errors.Is(err, ErrLeaseHeldElsewhere) {
+		// Another process runs the pipeline: nothing to do, nothing wrong.
+		return nil
+	}
+	if err != nil {
 		w.failures++
 		w.retryAt = time.Now().Add(min(5*time.Second<<min(w.failures, 7), maxBackoff))
 		w.lastErr = err
@@ -171,6 +261,11 @@ func (w *Worker) Tick(ctx context.Context) error {
 }
 
 func (w *Worker) tick(ctx context.Context) error {
+	// The lease first: a process that does not hold it runs nothing below,
+	// the version reset included.
+	if err := w.holdLease(ctx, time.Now()); err != nil {
+		return err
+	}
 	// Once per process, before recording: stored lines are pre-computed
 	// encodings, so lines from an older normaliser would fingerprint the same
 	// script differently from new sessions. On a version mismatch the store
@@ -223,6 +318,11 @@ func (w *Worker) tick(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Recording can run up to its 5 s budget: renew the lease before the
+	// phases that assume a single caller, and stop here if it was lost.
+	if err := w.holdLease(ctx, time.Now()); err != nil {
+		return err
+	}
 	// settle -> assign -> (regroup, rebuild) -> prune, sequentially in this
 	// goroutine under w.mu: AssignScriptFamilies and PruneOrphanScripts assume
 	// a single sequential caller. Prune runs only on a tick that settled or
@@ -245,6 +345,9 @@ func (w *Worker) tick(ctx context.Context) error {
 	woken := !held && w.wake.Swap(false)
 	regrouped := false
 	if !held && (woken || w.pending || (w.drained && time.Since(w.lastGroup) >= regroupEvery)) {
+		if err := w.holdLease(ctx, time.Now()); err != nil {
+			return err
+		}
 		err := w.regroup(ctx)
 		switch {
 		case errors.Is(err, store.ErrStaleGrouping):
@@ -274,6 +377,9 @@ func (w *Worker) tick(ctx context.Context) error {
 func (w *Worker) Regroup(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.holdLease(ctx, time.Now()); err != nil {
+		return err
+	}
 	held, err := w.rebuildHeld(ctx)
 	if err != nil {
 		return err
