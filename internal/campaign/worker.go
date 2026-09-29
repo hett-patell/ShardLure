@@ -316,8 +316,15 @@ func (w *Worker) tick(ctx context.Context) error {
 	// window that drains inside this tick is ordinary ingest and must not
 	// owe an extra regroup. Only a backlog that outlives the tick (first
 	// start, a burst beyond the tick's budget, or the rows a replace-ingest
-	// re-inserted above the parked cursor) defers scheduled regroups until it
-	// drains, and then one runs. A Wake still regroups at once.
+	// re-inserted above the parked cursor) defers every regroup until it
+	// drains, and then one runs. That includes a Wake and an edit recorded by
+	// another process: a regroup over a partial backlog sees only the
+	// evidence recorded so far, and SaveGrouping replaces campaign_ids with
+	// what it saw, so every campaign whose evidence was still queued lost its
+	// assignment and came back under a fresh ID, its name left on an empty
+	// shell (audit I-2: reached through `ingest cowrie --replace` plus a
+	// restart, or an edit during a first-start backfill). The wake flag is
+	// left set, so the drain's regroup applies the edit.
 	switch {
 	case !done:
 		w.drained = false
@@ -348,12 +355,16 @@ func (w *Worker) tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// While held, nothing regroups, a Wake included: the wake flag and
-	// pending stay set, so the regroup owed runs on the first tick after the
-	// hold ends (the edit itself is already recorded). An edit recorded by
-	// another process (see editsSeen) counts as a wake too.
+	// While held or not drained, nothing regroups, a Wake included: the wake
+	// flag and pending stay set, so the regroup owed runs on the first tick
+	// after the hold ends or the backlog drains (the edit itself is already
+	// recorded). An edit recorded by another process (see editsSeen) counts
+	// as a wake too. editsSeen starts at 0 in every process, so on the first
+	// drained tick after a restart any edit at all reads as new; that tick
+	// owes a regroup anyway (pending), so it costs nothing extra, and it can
+	// only run once the tick has checked the backlog.
 	woken := false
-	if !held {
+	if !held && w.drained {
 		latest, err := w.st.LatestCampaignEditID(ctx)
 		if err != nil {
 			return err
@@ -361,7 +372,7 @@ func (w *Worker) tick(ctx context.Context) error {
 		woken = w.wake.Swap(false) || latest > w.editsSeen
 	}
 	regrouped := false
-	if !held && (woken || w.pending || (w.drained && time.Since(w.lastGroup) >= regroupEvery)) {
+	if !held && w.drained && (woken || w.pending || time.Since(w.lastGroup) >= regroupEvery) {
 		if err := w.holdLease(ctx, w.clock()); err != nil {
 			if woken {
 				w.Wake() // not regrouped: keep the edit's wake for when the lease is back

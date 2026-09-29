@@ -405,8 +405,9 @@ func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
 }
 
 // A backlog reappearing after the first drain (a replace-ingest re-inserts its
-// rows above the parked cursor, or a burst larger than one window) makes scheduled regroups wait
-// for it again; a Wake still regroups at once.
+// rows above the parked cursor, or a burst larger than one window) makes every
+// regroup wait for it again, the scheduled one and a Wake alike (I-2); the
+// drain then runs the one owed.
 func TestBacklogAfterDrainDefersScheduledRegroup(t *testing.T) {
 	st := openStore(t)
 	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
@@ -436,15 +437,15 @@ func TestBacklogAfterDrainDefersScheduledRegroup(t *testing.T) {
 	if err := w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if w.lastGroup.Before(time.Now().Add(-time.Minute)) {
-		t.Fatal("wake did not regroup during a backlog")
+	if w.lastGroup.After(time.Now().Add(-time.Minute)) || !w.wake.Load() {
+		t.Fatalf("wake during a backlog: regrouped=%v consumed=%v, want deferred", w.lastGroup.After(time.Now().Add(-time.Minute)), !w.wake.Load())
 	}
 	w.window, w.maxWindows = recordWindow, maxWindowsPerTick
 	if err := w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !w.drained || w.pending {
-		t.Fatalf("drain did not trigger the owed regroup: drained=%v pending=%v", w.drained, w.pending)
+	if !w.drained || w.pending || w.wake.Load() || w.lastGroup.Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("drain did not trigger the owed regroup: drained=%v pending=%v wake=%v", w.drained, w.pending, w.wake.Load())
 	}
 }
 
