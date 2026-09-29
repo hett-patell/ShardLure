@@ -284,3 +284,26 @@ func TestDisplayCapIncludesEllipsis(t *testing.T) {
 		}
 	}
 }
+
+// A redirection operator consumes its target word: program() used to skip
+// the operator and report the target (`2>/dev/null id` gave "null").
+// fd duplications (2>&1) carry their target inside the token.
+func TestProgramSkipsRedirectionTargets(t *testing.T) {
+	for _, tc := range []struct{ in, prog string }{
+		{`sudo -u root > /tmp/a wget x`, "wget"},
+		{`2>/dev/null id`, "id"},
+		{`> /tmp/a 2>&1 wget x`, "wget"},
+		{`&> /dev/null wget x`, "wget"},
+		{`< /etc/passwd sort`, "sort"},
+		{`>> log nohup wget x`, "wget"},
+		{`sudo > f -u root wget x`, "wget"},
+		{`id > /dev/null`, "id"},
+	} {
+		if p := program(segments([][]string{NormalizeCommand(tc.in)})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+	}
+	if Distinctive([][]string{NormalizeCommand("2>/dev/null id; >/dev/null uname -a; w; uptime; whoami")}) {
+		t.Error("recon behind leading redirections must not be distinctive")
+	}
+}

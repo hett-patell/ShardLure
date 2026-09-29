@@ -472,12 +472,25 @@ var recon = map[string]bool{
 }
 
 // program returns a simple command's program, skipping subshell parens,
-// variable assignments, redirections and wrappers with their own options.
+// variable assignments, redirections with their targets and wrappers with
+// their own options.
 // A wrapper followed by an option it does not know reports the wrapper
 // itself: guessing which later word is the program could name an argument.
 func program(seg []string) string {
 	var wrap *wrapState
+	target := false // the previous word was a redirection awaiting its target
 	for _, t := range seg {
+		if target {
+			target = false
+			continue
+		}
+		// A redirection and its target are neither the program nor a
+		// wrapper's word, wherever they sit: `2>/dev/null id` runs id.
+		// fd duplications (2>&1) hold their target inside the token.
+		if t == ">" || t == ">>" || t == "<" || t == "<<" || redirRe.MatchString(t) {
+			target = !strings.Contains(t, ">&")
+			continue
+		}
 		if wrap != nil {
 			switch wrap.next(t) {
 			case wrapOwn:
@@ -487,7 +500,7 @@ func program(seg []string) string {
 			}
 			wrap = nil
 		}
-		if t == "(" || t == ")" || t == ">" || t == ">>" || t == "<" || t == "<<" || t == "<heredoc>" || redirRe.MatchString(t) ||
+		if t == "(" || t == ")" || t == "<heredoc>" ||
 			(strings.Contains(t, "=") && !strings.HasPrefix(t, "-")) || strings.HasSuffix(t, "$") {
 			continue
 		}
