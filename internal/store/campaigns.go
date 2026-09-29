@@ -95,26 +95,47 @@ var ErrStaleGrouping = errors.New("store: campaign edits changed during grouping
 // operator a different campaign from the one they meant.
 var ErrAmbiguousCampaign = errors.New("store: campaign name is ambiguous")
 
-// ErrInvalidGrouping rejects a grouping carrying an empty identifier. An
-// assignment whose campaign ID is "" is fed back into the next run and makes
-// it emit a campaign whose ID is "", so nothing empty is ever persisted.
-var ErrInvalidGrouping = errors.New("store: campaign grouping has an empty identifier")
+// ErrInvalidGrouping rejects a grouping carrying an empty or duplicate
+// identifier. An assignment whose campaign ID is "" is fed back into the next
+// run and makes it emit a campaign whose ID is "", so nothing empty is ever
+// persisted. Duplicates (a (kind, value) assigned twice, a campaign ID or a
+// member listed twice) are caught here rather than as a primary-key failure
+// halfway through the replace: Group emits each once, so a duplicate is an
+// upstream bug and must read as one, not as an I/O error.
+var ErrInvalidGrouping = errors.New("store: campaign grouping has an empty or duplicate identifier")
 
 func validateGrouping(rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string) error {
+	ids := make(map[string]bool, len(rows))
 	for _, c := range rows {
 		if c.ID == "" {
 			return fmt.Errorf("%w: campaign row", ErrInvalidGrouping)
 		}
+		if ids[c.ID] {
+			return fmt.Errorf("%w: campaign %s listed twice", ErrInvalidGrouping, c.ID)
+		}
+		ids[c.ID] = true
+		members := make(map[string]bool, len(c.Members))
 		for _, m := range c.Members {
 			if m.ActorID == "" {
 				return fmt.Errorf("%w: member of %s", ErrInvalidGrouping, c.ID)
 			}
+			if members[m.ActorID] {
+				return fmt.Errorf("%w: member %s of %s listed twice", ErrInvalidGrouping, m.ActorID, c.ID)
+			}
+			members[m.ActorID] = true
 		}
 	}
+	type key struct{ kind, value string }
+	seen := make(map[key]bool, len(assign))
 	for _, a := range assign {
 		if a.Kind == "" || a.Value == "" || a.CampaignID == "" {
 			return fmt.Errorf("%w: assignment %s", ErrInvalidGrouping, a.Kind)
 		}
+		k := key{a.Kind, a.Value}
+		if seen[k] {
+			return fmt.Errorf("%w: %s value assigned twice", ErrInvalidGrouping, a.Kind)
+		}
+		seen[k] = true
 	}
 	for o, n := range aliases {
 		if o == "" || n == "" {
@@ -328,8 +349,9 @@ func (s *Store) resolveCampaignID(ctx context.Context, aliases map[string]string
 // retention) as stale ownership claims, which fuse campaigns that Group kept
 // apart.
 //
-// A grouping carrying any empty identifier is rejected whole with
-// ErrInvalidGrouping; the previous grouping stays in place.
+// A grouping carrying any empty or duplicate identifier is rejected whole
+// with ErrInvalidGrouping before the transaction; the previous grouping stays
+// in place.
 func (s *Store) SaveGrouping(ctx context.Context, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64) error {
 	if err := validateGrouping(rows, assign, aliases); err != nil {
 		return err

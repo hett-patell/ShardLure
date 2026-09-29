@@ -97,6 +97,36 @@ func TestSaveGroupingRejectsEmptyIDs(t *testing.T) {
 	}
 }
 
+// Duplicate keys are rejected before the transaction with ErrInvalidGrouping,
+// not left to fail as a primary-key constraint error halfway through the
+// replace: Group emits each (kind, value) and campaign ID once, so a duplicate
+// means a bug upstream, and the caller must be able to tell that from an I/O
+// failure.
+func TestSaveGroupingRejectsDuplicates(t *testing.T) {
+	s := newTestStore(t, "campaigns-dup.db")
+	ctx := context.Background()
+	c := CampaignRow{ID: "c-a", Members: []CampaignMemberRow{{ActorID: "cowrie:a", Reasons: "[]"}}}
+	cases := map[string]struct {
+		rows   []CampaignRow
+		assign []CampaignAssignmentRow
+	}{
+		"duplicate assignment": {rows: []CampaignRow{c}, assign: []CampaignAssignmentRow{
+			{Kind: "ssh_key", Value: "k", CampaignID: "c-a", Seq: 1}, {Kind: "ssh_key", Value: "k", CampaignID: "c-b", Seq: 2}}},
+		"duplicate campaign": {rows: []CampaignRow{c, {ID: "c-a"}}},
+		"duplicate member":   {rows: []CampaignRow{{ID: "c-a", Members: []CampaignMemberRow{{ActorID: "cowrie:a"}, {ActorID: "cowrie:a"}}}}},
+	}
+	for name, tc := range cases {
+		if err := s.SaveGrouping(ctx, tc.rows, tc.assign, nil, 0); !errors.Is(err, ErrInvalidGrouping) {
+			t.Fatalf("%s: err = %v, want ErrInvalidGrouping", name, err)
+		}
+	}
+	// Same value under another kind is not a duplicate.
+	ok := []CampaignAssignmentRow{{Kind: "ssh_key", Value: "v", CampaignID: "c-a"}, {Kind: "payload", Value: "v", CampaignID: "c-a"}}
+	if err := s.SaveGrouping(ctx, []CampaignRow{c}, ok, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Rows written by anything other than SaveGrouping (an older build, a manual
 // repair) could still carry an empty target; the reader drops them.
 func TestCampaignIdentitySkipsEmptyIDs(t *testing.T) {

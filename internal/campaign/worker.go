@@ -247,7 +247,7 @@ func (w *Worker) regroup(ctx context.Context) error {
 }
 
 // groupingRows maps Group's output onto the store rows. SaveGrouping rejects
-// a whole grouping on any empty identifier, so nothing here may produce one:
+// a whole grouping on any empty or duplicate identifier, so nothing here may produce one:
 // Reasons is always a JSON array, "[]" at minimum.
 func groupingRows(out Output) ([]store.CampaignRow, []store.CampaignAssignmentRow) {
 	rows := make([]store.CampaignRow, 0, len(out.Campaigns))
