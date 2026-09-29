@@ -765,6 +765,23 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	// v26: a partial (actor_id, ts) index over command-bearing events, for
+	// LastCommandsForActors. idx_events_actor_ts cannot skip rows without a
+	// command, so finding an actor's newest command walked the whole history
+	// of every command-less actor (0.87 s per /api/intel request on 640k
+	// events). Commands are ~1% of events, so only those inserts pay for it
+	// (compare v9, which dropped a full-width write-amplifying index).
+	if current < 26 {
+		if err := s.WithTx(func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_cmd ON events(actor_id, ts) WHERE command IS NOT NULL AND command != ''`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(26,?)`, now)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

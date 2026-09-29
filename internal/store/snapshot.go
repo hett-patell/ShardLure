@@ -65,7 +65,7 @@ var snapshotTables = [...]struct {
 	{"campaign_members", 25}, {"campaign_edits", 25}, {"script_version_carry", 25},
 }
 
-const latestSnapshotSchema = 25
+const latestSnapshotSchema = 26
 
 // LatestSnapshotSchema is the newest schema a snapshot can carry; backup
 // manifest validation uses it as the schema ceiling.

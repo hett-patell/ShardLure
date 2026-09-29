@@ -5,7 +5,7 @@ import "testing"
 func TestSchemaV25(t *testing.T) {
 	s := newTestStore(t, "v25.db")
 	var v int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v != 25 {
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v); err != nil || v < 25 {
 		t.Fatalf("schema %d %v", v, err)
 	}
 	for _, tbl := range []string{"session_script_lines", "session_scripts", "scripts", "script_families", "campaign_evidence",

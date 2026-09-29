@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"github.com/networkshard/shardlure/internal/store"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ func TestCreateVerifyProtectedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !manifest.Complete || manifest.FormatVersion != 1 || manifest.Schema != 25 {
+	if !manifest.Complete || manifest.FormatVersion != 1 || manifest.Schema != store.LatestSnapshotSchema {
 		t.Fatalf("unverified manifest: %+v", manifest)
 	}
 	report, err := Verify(context.Background(), out)

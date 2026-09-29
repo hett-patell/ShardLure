@@ -224,42 +224,81 @@ func (s *Store) LastCommandByActor(actorID string) (string, error) {
 	return cmd, err
 }
 
+// lastCommandNativeQuery / lastCommandLegacyQuery read ONE actor's newest
+// command through idx_events_actor_cmd, the partial (actor_id, ts) index over
+// command-bearing rows only (schema v26).
+//
+// The native branch walks that index newest-first (ts is canonical fixed-width
+// text for migrated rows, and rowid breaks ties in index order) and stops at
+// the first migrated row. The legacy branch visits only the actor's
+// unconverted command rows, ordered by the exact parsed time; it is
+// actor-scoped, never the global legacy index (see eventTimeBranches), and it
+// shrinks to nothing as the backfill converts rows.
+const (
+	lastCommandNativeQuery = `SELECT command, ts, id FROM events INDEXED BY idx_events_actor_cmd
+WHERE actor_id=? AND command IS NOT NULL AND command != '' AND ts_unix_ns IS NOT NULL ORDER BY ts DESC, id DESC LIMIT 1`
+	lastCommandLegacyQuery = `SELECT command, ` + legacyEventTimeSQL + ` AS exact_ts, id FROM events INDEXED BY idx_events_actor_cmd
+WHERE actor_id=? AND command IS NOT NULL AND command != '' AND ts_unix_ns IS NULL ORDER BY exact_ts DESC, id DESC LIMIT 1`
+)
+
 // LastCommandsForActors returns the most recent non-empty command per actor
-// for a batch of actor IDs in ONE query — so the /api/intel actor list can
-// fill its "Last cmd" column without an N+1 (or leaving it permanently blank,
-// which it was: handleIntel never called the per-actor version). Mirrors
-// ActorUsersForActors' window-function approach; actors with no command event
-// are simply absent from the map. Uses idx_events_actor_ts for the ordering.
+// (latest exact event time, ties by event id), so the /api/intel actor list
+// can fill its "Last cmd" column. Actors with no command event are absent.
+//
+// It used to rank every command event of each actor's whole history in one
+// window-function query through idx_events_actor_ts. That index cannot skip
+// the rows without a command, so every command-less actor - most of them:
+// handshake scanners - was walked end to end on every /api/intel poll: 0.87 s
+// of CPU per request on a 640k-event database, 97% of the handler. Two
+// LIMIT 1 reads per actor through the partial command index touch only
+// command rows, and a command-less actor costs one empty index seek.
 func (s *Store) LastCommandsForActors(ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	base, args := eventTimeBranches("id,actor_id,command", nil,
-		"actor_id IN ("+strings.Join(placeholders, ",")+") AND command IS NOT NULL AND command != ''", args)
-	q := "WITH command_events AS (" + base + ") " + `
-SELECT actor_id, command FROM (
-  SELECT actor_id, command,
-         ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY exact_ts DESC,id DESC) AS rn
-  FROM command_events
-) WHERE rn = 1`
-	rows, err := s.db.Query(q, args...)
+	native, err := s.db.Prepare(lastCommandNativeQuery)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, cmd string
-		if err := rows.Scan(&id, &cmd); err != nil {
+	defer native.Close()
+	legacy, err := s.db.Prepare(lastCommandLegacyQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer legacy.Close()
+	type hit struct {
+		command, ts string
+		id          int64
+		ok          bool
+	}
+	read := func(stmt *sql.Stmt, actor string) (hit, error) {
+		var h hit
+		err := stmt.QueryRow(actor).Scan(&h.command, &h.ts, &h.id)
+		if err == sql.ErrNoRows {
+			return h, nil
+		}
+		h.ok = err == nil
+		return h, err
+	}
+	for _, actor := range ids {
+		n, err := read(native, actor)
+		if err != nil {
 			return nil, err
 		}
-		out[id] = cmd
+		l, err := read(legacy, actor)
+		if err != nil {
+			return nil, err
+		}
+		// Both times are the fixed-width UTC form (formatFixedUTC), so they
+		// compare as strings; the id breaks a tie, as the ranking did.
+		best := n
+		if l.ok && (!n.ok || l.ts > n.ts || (l.ts == n.ts && l.id > n.id)) {
+			best = l
+		}
+		if best.ok {
+			out[actor] = best.command
+		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
