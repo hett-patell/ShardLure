@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -302,7 +303,9 @@ func TestReplaceParksCursorBelowReingestedRows(t *testing.T) {
 }
 
 // Stored bytes must equal the length of the joined script, separators
-// included, and never exceed MaxNormalizedBytes.
+// included, and never exceed MaxNormalizedBytes. The one exception is a
+// session a refused line closed: its bytes read exactly the cap, so no later
+// line is admitted (see TestSessionScriptByteCapKeepsThePrefix).
 func TestSessionScriptByteCapCountsSeparators(t *testing.T) {
 	s := newTestStore(t, "evidence-cap.db")
 	cmd := strings.Repeat("x", 218) // 300 lines fit without separators, not with
@@ -334,7 +337,9 @@ func TestSessionScriptByteCapCountsSeparators(t *testing.T) {
 	}
 	rows.Close()
 	joined := len(script.Join(lines))
-	if stored > script.MaxNormalizedBytes || joined > script.MaxNormalizedBytes || stored != joined {
+	// 300 x 218 bytes plus separators overflows on the last line, which
+	// closes the session.
+	if joined > script.MaxNormalizedBytes || stored != script.MaxNormalizedBytes || len(lines) != script.MaxCommands-1 {
 		t.Fatalf("stored=%d joined=%d lines=%d cap=%d", stored, joined, len(lines), script.MaxNormalizedBytes)
 	}
 }
@@ -812,5 +817,117 @@ func TestPurgeJoinsCampaignDerivedAndLaterErrors(t *testing.T) {
 	err := s.MaintenancePurge(90)
 	if !errors.Is(err, boom) || err == nil || !strings.Contains(err.Error(), "last_seen") {
 		t.Fatalf("err = %v, want both the campaign and the sweep error", err)
+	}
+}
+
+// The byte cap must leave the capped prefix. It used to skip only the line
+// that did not fit and admit later, smaller ones, so an attacker could drop
+// one oversized, payload-bearing command (encodings grow up to 4x) from the
+// middle of a script and collide with a session that never ran it (script
+// audit M8). Once a line is refused for bytes the session is closed, in the
+// same window and in every later one.
+func TestSessionScriptByteCapKeepsThePrefix(t *testing.T) {
+	// Ingest keeps at most 64 KiB of command text, so the oversized line is
+	// one whose *encoding* grows past the budget: each quoted `<` encodes as
+	// `<lt>` (120,007 bytes here).
+	big := "echo '" + strings.Repeat("<", 30000) + "'"
+	if n := len(script.EncodeLine(big)); n <= script.MaxNormalizedBytes {
+		t.Fatalf("encoding changed: %d bytes fits the budget", n)
+	}
+	lines := func(t *testing.T, s *Store, session string) []string {
+		t.Helper()
+		rows, err := s.db.Query(`SELECT line FROM session_script_lines WHERE session_id=? ORDER BY event_id`, session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var l string
+			if err := rows.Scan(&l); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, l)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, window := range []int{1000, 1} { // one window, and one window per event
+		t.Run(fmt.Sprintf("window-%d", window), func(t *testing.T) {
+			s := newTestStore(t, "evidence-prefix.db")
+			ctx := context.Background()
+			old := time.Now().UTC().Add(-time.Hour)
+			cowrieEvent(t, s, "mid", "cowrie:a", "command", "echo a", "", "", old)
+			cowrieEvent(t, s, "mid", "cowrie:a", "command", big, "", "", old.Add(time.Second))
+			cowrieEvent(t, s, "mid", "cowrie:a", "command", "echo b", "", "", old.Add(2*time.Second))
+			cowrieEvent(t, s, "first", "cowrie:b", "command", big, "", "", old)
+			cowrieEvent(t, s, "first", "cowrie:b", "command", "echo c", "", "", old.Add(time.Second))
+			for {
+				res, err := s.RecordCampaignEvidence(ctx, window)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if res.Done {
+					break
+				}
+			}
+			if got, want := lines(t, s, "mid"), []string{script.EncodeLine("echo a")}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("mid lines = %q, want the prefix %q", got, want)
+			}
+			if got := lines(t, s, "first"); len(got) != 0 {
+				t.Fatalf("first lines = %d: a refused first line leaves an empty prefix", len(got))
+			}
+			if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Hour), 100); err != nil || n != 1 {
+				t.Fatalf("settled %d, %v; want only the mid session (an empty prefix has no script)", n, err)
+			}
+			var pending int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM session_scripts WHERE settled_at='' OR updated_at>settled_at`).Scan(&pending); err != nil || pending != 0 {
+				t.Fatalf("pending sessions = %d, %v: a closed empty session must never sit in the settle list", pending, err)
+			}
+			var fp string
+			if err := s.db.QueryRow(`SELECT fingerprint FROM session_scripts WHERE session_id='mid'`).Scan(&fp); err != nil || fp != script.Fingerprint(script.Join([]string{script.EncodeLine("echo a")})) {
+				t.Fatalf("mid fingerprint %q, %v", fp, err)
+			}
+		})
+	}
+}
+
+// A settle stamps settled_at = max(now, updated_at). If it ran with the clock
+// ahead, settled_at lies in the future, and a line recorded after the clock is
+// corrected has updated_at < settled_at: the old pending test
+// (updated_at > settled_at) was false and the session kept its prefix
+// fingerprint for good (store-pipeline audit M1). Adding a line now clears
+// settled_at, so the session is pending whatever either clock said.
+func TestLateLineResettlesAfterFutureSettle(t *testing.T) {
+	s := newTestStore(t, "evidence-future-settle.db")
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-time.Hour)
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "echo a", "", "", old)
+	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Minute), 10); err != nil || n != 1 {
+		t.Fatalf("settle %d %v", n, err)
+	}
+	// The settle ran with the clock a day ahead.
+	future := formatFixedUTC(time.Now().Add(24 * time.Hour))
+	if _, err := s.db.Exec(`UPDATE session_scripts SET settled_at=? WHERE session_id='s1'`, future); err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	s.db.QueryRow(`SELECT fingerprint FROM session_scripts WHERE session_id='s1'`).Scan(&before)
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "echo b", "", "", old.Add(time.Second))
+	if _, err := s.RecordCampaignEvidence(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Minute), 10); err != nil || n != 1 {
+		t.Fatalf("late line not re-settled: %d %v", n, err)
+	}
+	var after string
+	s.db.QueryRow(`SELECT fingerprint FROM session_scripts WHERE session_id='s1'`).Scan(&after)
+	if after == before || after != script.Fingerprint(script.Join([]string{script.EncodeLine("echo a"), script.EncodeLine("echo b")})) {
+		t.Fatalf("fingerprint %s -> %s: still the prefix", before, after)
 	}
 }

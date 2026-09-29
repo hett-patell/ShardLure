@@ -458,6 +458,8 @@ func (w *evidenceWriter) flush(ctx context.Context, tx *sql.Tx, cursor, end int6
 		var ins []lineRow
 		deltas := map[string]*sessionDelta{}
 		var order []string
+		closed := map[string]lineRow{} // sessions a refused line closed, with that line
+		var closedOrder []string
 		for _, l := range w.lines {
 			if stored[l.id] {
 				continue // replayed event
@@ -467,7 +469,7 @@ func (w *evidenceWriter) flush(ctx context.Context, tx *sql.Tx, cursor, end int6
 			if c.lines > 0 {
 				add++ // script.Join separator
 			}
-			if c.lines >= script.MaxCommands || c.bytes+add > script.MaxNormalizedBytes {
+			if c.lines >= script.MaxCommands || c.bytes >= script.MaxNormalizedBytes {
 				// Past the cap nothing touches the session row, so its
 				// last_seen (and updated_at) stop at the last stored line
 				// while the session may run on. Harmless for linking: the
@@ -478,6 +480,25 @@ func (w *evidenceWriter) flush(ctx context.Context, tx *sql.Tx, cursor, end int6
 				// effects are that a script occurrence's last_seen can
 				// understate the session's end, and retention may drop the
 				// script row while the session's later events remain.
+				continue
+			}
+			if c.bytes+add > script.MaxNormalizedBytes {
+				// The first line that does not fit closes the session: the
+				// script is the capped *prefix*. Skipping only this line and
+				// admitting later, smaller ones let an attacker drop one
+				// oversized, payload-bearing command (encodings grow up to
+				// 4x, `<` -> `<lt>`) from the middle of a script and collide
+				// with a session that never ran it (script audit M8). The
+				// closure must outlive this window, so it is stored as
+				// bytes = MaxNormalizedBytes (the budget is spent), which
+				// every later window and sessionAtCap read as full. bytes is
+				// therefore len(script.Join(lines)) for an open session and
+				// exactly the cap for a closed one; nothing else reads it.
+				c.bytes = script.MaxNormalizedBytes
+				if _, ok := closed[l.session]; !ok {
+					closed[l.session] = l
+					closedOrder = append(closedOrder, l.session)
+				}
 				continue
 			}
 			c.lines++
@@ -503,9 +524,25 @@ func (w *evidenceWriter) flush(ctx context.Context, tx *sql.Tx, cursor, end int6
 		}
 		if err := execBatched(ctx, tx, `INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at) VALUES`, `(?,?,?,?,?,?,?,?)`,
 			` ON CONFLICT(session_id) DO UPDATE SET actor_id=excluded.actor_id, line_count=line_count+excluded.line_count, bytes=bytes+excluded.bytes,
-  first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen), updated_at=excluded.updated_at`, len(order), func(i int) []any {
+  first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen), updated_at=excluded.updated_at,
+  settled_at=''`, len(order), func(i int) []any {
 				d := deltas[order[i]]
 				return []any{order[i], d.actor, d.ip, d.lines, d.bytes, d.first, d.last, now}
+			}); err != nil {
+			return err
+		}
+		// Closing a session changes no line, so it touches neither its
+		// times nor its settle state: only bytes moves to the cap. A
+		// session whose very first line was refused has an empty prefix
+		// and gets a row too (or a later window would start its script at
+		// a later command), written already settled with no fingerprint:
+		// the pending predicate never lists it, so settle does not revisit
+		// it every pass, and every script read skips fingerprint=''.
+		// Retention takes it by last_seen like any other session row.
+		if err := execBatched(ctx, tx, `INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES`, `(?,?,?,0,?,?,?,?,?,'')`,
+			` ON CONFLICT(session_id) DO UPDATE SET bytes=excluded.bytes`, len(closedOrder), func(i int) []any {
+				l := closed[closedOrder[i]]
+				return []any{l.session, l.actor, l.ip, script.MaxNormalizedBytes, l.ts, l.ts, now, now}
 			}); err != nil {
 			return err
 		}
