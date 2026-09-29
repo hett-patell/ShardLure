@@ -589,3 +589,66 @@ func TestEvidenceSkipsNormalisingCappedSessions(t *testing.T) {
 		t.Fatalf("line_count=%d evidence=%d", count, evidence)
 	}
 }
+
+// The batched phase-2 write spans many multi-row statements (lines, session
+// counters, the IN-list reads) and must keep the per-row semantics: caps
+// applied in event-id order across statement boundaries, the last line's
+// actor, min/max times, the first line's IP, and replays neither re-inserted
+// nor counted.
+func TestEvidenceBatchedWriteKeepsPerRowSemantics(t *testing.T) {
+	s := newTestStore(t, "evidence-batched.db")
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Hour)
+	const sessions = 400
+	if err := s.WithTx(func(tx *sql.Tx) error {
+		for i := 0; i < sessions*3; i++ {
+			sess := fmt.Sprintf("s%03d", i%sessions)
+			if err := insertEvent(tx, &models.Event{TS: base.Add(time.Duration(i) * time.Second), Source: models.SourceCowrie, Kind: models.KindCommand,
+				SrcIP: fmt.Sprintf("198.51.100.%d", i/sessions), SessionID: sess, ActorID: fmt.Sprintf("cowrie:a%d", i/sessions), Command: fmt.Sprintf("echo %d", i)}); err != nil {
+				return err
+			}
+		}
+		// One session crosses MaxCommands inside the same window.
+		for i := 0; i < script.MaxCommands+5; i++ {
+			if err := insertEvent(tx, &models.Event{TS: base.Add(time.Duration(i) * time.Millisecond), Source: models.SourceCowrie, Kind: models.KindCommand,
+				SrcIP: "198.51.100.9", SessionID: "capped", ActorID: "cowrie:c", Command: "id"}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(label string) {
+		t.Helper()
+		var lines, n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM session_script_lines`).Scan(&lines)
+		s.db.QueryRow(`SELECT COUNT(*) FROM session_scripts WHERE line_count=3 AND actor_id='cowrie:a2' AND src_ip='198.51.100.0'`).Scan(&n)
+		if lines != sessions*3+script.MaxCommands || n != sessions {
+			t.Fatalf("%s: lines=%d sessions-ok=%d", label, lines, n)
+		}
+		var first, last string
+		var cnt, bytes int
+		s.db.QueryRow(`SELECT first_seen, last_seen, line_count, bytes FROM session_scripts WHERE session_id='s007'`).Scan(&first, &last, &cnt, &bytes)
+		want := len(script.Join([]string{script.EncodeLine("echo 7"), script.EncodeLine(fmt.Sprintf("echo %d", 7+sessions)), script.EncodeLine(fmt.Sprintf("echo %d", 7+2*sessions))}))
+		if first != formatFixedUTC(base.Add(7*time.Second)) || last != formatFixedUTC(base.Add(time.Duration(7+2*sessions)*time.Second)) || cnt != 3 || bytes != want {
+			t.Fatalf("%s: s007 first=%s last=%s count=%d bytes=%d (want %d)", label, first, last, cnt, bytes, want)
+		}
+		s.db.QueryRow(`SELECT line_count FROM session_scripts WHERE session_id='capped'`).Scan(&cnt)
+		if cnt != script.MaxCommands {
+			t.Fatalf("%s: capped session has %d lines", label, cnt)
+		}
+	}
+	if res, err := s.RecordCampaignEvidence(ctx, 5000); err != nil || !res.Done {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	check("first pass")
+	// Replay the whole window: nothing is inserted or counted twice.
+	if _, err := s.db.Exec(`UPDATE ingest_state SET offset=0 WHERE source='campaign'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	check("replay")
+}

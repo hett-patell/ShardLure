@@ -91,7 +91,7 @@ func scanEvidenceWindow(ctx context.Context, q ctxQueryer, cursor, end int64, vi
 	return rows.Close()
 }
 
-// sessionAtCap is phase 1's read-only look at the caps appendSessionLineTx
+// sessionAtCap is phase 1's read-only look at the caps evidenceWriter.flush
 // enforces, so a session already holding MaxCommands lines or
 // MaxNormalizedBytes does not pay normalisation for commands the transaction
 // would drop anyway. It is an optimisation only and deliberately weaker than
@@ -165,7 +165,7 @@ type precomputed struct {
 //     hold is the SQL alone: at most three statements per command row.
 //
 // The session caps are still enforced inside the transaction
-// (appendSessionLineTx); phase 1 only reads them to avoid normalising commands
+// (evidenceWriter.flush); phase 1 only reads them to avoid normalising commands
 // a capped session would drop.
 //
 // window is clamped to maxEvidenceWindow rowids: 50,000 rowids held writeMu
@@ -254,6 +254,7 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			return err
 		}
 		now := formatFixedUTC(time.Now())
+		var w evidenceWriter
 		for _, e := range live {
 			p, ok := pre[e.id]
 			if !ok || e.session == "" || e.actor == "" {
@@ -272,13 +273,9 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			}
 			switch models.EventKind(e.kind) {
 			case models.KindCommand:
-				if err := appendSessionLineTx(tx, e.id, e.session, e.actor, e.ip, p.line, e.ts, now); err != nil {
-					return err
-				}
+				w.appendLine(e.id, e.session, e.actor, e.ip, p.line, e.ts)
 				for _, k := range p.keys {
-					if err := upsertEvidenceTx(tx, "ssh_key", k.Fingerprint, k.Comment, e.session, e.actor, e.ip, e.ts); err != nil {
-						return err
-					}
+					w.upsertEvidence("ssh_key", k.Fingerprint, k.Comment, e.session, e.actor, e.ip, e.ts)
 				}
 				res.Recorded++
 			case models.KindFileDown, models.KindFileUp:
@@ -286,11 +283,12 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 				if !validCaptureHash(sha) || sha == emptySHA256 {
 					continue
 				}
-				if err := upsertEvidenceTx(tx, "payload", sha, path.Base(e.fn), e.session, e.actor, e.ip, e.ts); err != nil {
-					return err
-				}
+				w.upsertEvidence("payload", sha, path.Base(e.fn), e.session, e.actor, e.ip, e.ts)
 				res.Recorded++
 			}
+		}
+		if err := w.flush(ctx, tx, cursor, end, now); err != nil {
+			return err
 		}
 		_, err = tx.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'',?)
 ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=excluded.updated_at`,
@@ -300,47 +298,207 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 	return res, err
 }
 
-// appendSessionLineTx stores one command line (O(1) per command; the script
-// is assembled once when the session settles). line is the command already
-// encoded by script.EncodeLine outside writeMu ("" stores nothing): nothing
-// attacker-proportional may run here. Caps: MaxCommands lines and
-// MaxNormalizedBytes per session, where bytes is len(script.Join(lines)):
-// every line after the first also costs its one-byte separator.
-func appendSessionLineTx(tx *sql.Tx, eventID int64, session, actor, ip, line, ts, now string) error {
-	if line == "" {
-		return nil
-	}
-	var count, bytes int
-	if err := tx.QueryRow(`SELECT line_count, bytes FROM session_scripts WHERE session_id=?`, session).Scan(&count, &bytes); err != nil && err != sql.ErrNoRows {
-		return err
-	}
-	add := len(line)
-	if count > 0 {
-		add++ // script.Join separator
-	}
-	if count >= script.MaxCommands || bytes+add > script.MaxNormalizedBytes {
-		return nil
-	}
-	r, err := tx.Exec(`INSERT OR IGNORE INTO session_script_lines(session_id,event_id,line) VALUES(?,?,?)`, session, eventID, line)
-	if err != nil {
-		return err
-	}
-	if n, _ := r.RowsAffected(); n == 0 {
-		return nil // replayed event
-	}
-	_, err = tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at) VALUES(?,?,?,1,?,?,?,?)
-ON CONFLICT(session_id) DO UPDATE SET actor_id=excluded.actor_id, line_count=line_count+1, bytes=bytes+excluded.bytes,
-  first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen), updated_at=excluded.updated_at`,
-		session, actor, ip, add, ts, ts, now)
-	return err
+// evidenceWriter buffers phase 2's writes and applies them set-wise: a
+// fixed number of statements per window instead of up to three per command
+// row. A dense window (5,000 short commands across 1,000 sessions) held
+// writeMu 433-571 ms on x86 with per-row tx.Exec. Preparing the statements
+// once (tx.Prepare) only reached ~330-370 ms, because modernc.org/sqlite
+// (v1.34.5) re-runs sqlite3_prepare_v2 on every Stmt.Exec, so a prepared
+// statement saves the Go-side work and not the compile; what costs is the
+// statement count. Batched (see batchParams), the same window holds writeMu
+// 63-78 ms on x86.
+//
+// Semantics match the old per-row path exactly: per session, the counters
+// are loaded once inside this transaction (only this transaction writes
+// session_scripts while it holds writeMu), lines already stored (a replay
+// after a cursor reset) are found up front and neither inserted nor counted,
+// and the caps are applied in event-id order.
+type evidenceWriter struct {
+	lines []lineRow
+	evs   []evidenceRow
 }
 
-func upsertEvidenceTx(tx *sql.Tx, kind, value, label, session, actor, ip, ts string) error {
-	_, err := tx.Exec(`INSERT INTO campaign_evidence(kind,value,label,session_id,actor_id,src_ip,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?)
-ON CONFLICT(kind,value,session_id) DO UPDATE SET actor_id=excluded.actor_id,
-  first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen)`,
-		kind, value, label, session, actor, ip, ts, ts)
-	return err
+type lineRow struct {
+	id                           int64
+	session, actor, ip, line, ts string
+}
+
+type evidenceRow struct{ kind, value, label, session, actor, ip, ts string }
+
+// appendLine queues one encoded command line ("" stores nothing). line was
+// encoded by script.EncodeLine outside writeMu: nothing
+// attacker-proportional runs under the lock.
+func (w *evidenceWriter) appendLine(eventID int64, session, actor, ip, line, ts string) {
+	if line != "" {
+		w.lines = append(w.lines, lineRow{eventID, session, actor, ip, line, ts})
+	}
+}
+
+func (w *evidenceWriter) upsertEvidence(kind, value, label, session, actor, ip, ts string) {
+	w.evs = append(w.evs, evidenceRow{kind, value, label, session, actor, ip, ts})
+}
+
+// batchParams bounds the bound parameters of one multi-row statement.
+// modernc.org/sqlite matches each positional parameter by scanning the
+// argument list, so binding costs O(params^2) per statement: measured on the
+// dense window, 32 params 85-100 ms, 256 params 63-78 ms, 1,024 params
+// 68-88 ms. 256 is the flat middle, and far below SQLite's 32,766 limit.
+const batchParams = 256
+
+// execBatched runs head + n row tuples (each `tuple`, joined by commas) +
+// tail in statements of at most batchRows rows. SQLite applies a multi-row
+// INSERT ... ON CONFLICT row by row, so a later row in the same statement
+// sees an earlier one exactly as consecutive single-row statements would.
+func execBatched(ctx context.Context, tx *sql.Tx, head, tuple, tail string, n int, args func(i int) []any) error {
+	per := max(1, batchParams/max(1, strings.Count(tuple, "?")))
+	for lo := 0; lo < n; lo += per {
+		hi := min(lo+per, n)
+		var q strings.Builder
+		q.WriteString(head)
+		var a []any
+		for i := lo; i < hi; i++ {
+			if i > lo {
+				q.WriteByte(',')
+			}
+			q.WriteString(tuple)
+			a = append(a, args(i)...)
+		}
+		q.WriteString(tail)
+		if _, err := tx.ExecContext(ctx, q.String(), a...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// queryBatched runs head + an IN list of up to batchRows keys + tail, with
+// extra appended after the keys, and hands every row to scan.
+func queryBatched(ctx context.Context, tx *sql.Tx, head, tail string, keys []string, extra []any, scan func(*sql.Rows) error) error {
+	per := max(1, batchParams-len(extra))
+	for lo := 0; lo < len(keys); lo += per {
+		hi := min(lo+per, len(keys))
+		a := make([]any, 0, hi-lo+len(extra))
+		for _, k := range keys[lo:hi] {
+			a = append(a, k)
+		}
+		a = append(a, extra...)
+		rows, err := tx.QueryContext(ctx, head+"(?"+strings.Repeat(",?", hi-lo-1)+")"+tail, a...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			if err := scan(rows); err != nil {
+				rows.Close()
+				return err
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sessionDelta is what one window adds to a session_scripts row.
+type sessionDelta struct {
+	actor, ip, first, last string
+	lines, bytes           int
+}
+
+// flush writes the queued rows. Caps: MaxCommands lines and
+// MaxNormalizedBytes per session, where bytes is len(script.Join(lines)):
+// every line after the first also costs its one-byte separator.
+func (w *evidenceWriter) flush(ctx context.Context, tx *sql.Tx, cursor, end int64, now string) error {
+	if len(w.lines) > 0 {
+		type counts struct{ lines, bytes int }
+		cur := map[string]*counts{}
+		var sessions []string
+		for _, l := range w.lines {
+			if cur[l.session] == nil {
+				cur[l.session] = &counts{}
+				sessions = append(sessions, l.session)
+			}
+		}
+		if err := queryBatched(ctx, tx, `SELECT session_id, line_count, bytes FROM session_scripts WHERE session_id IN `, ``, sessions, nil, func(r *sql.Rows) error {
+			var id string
+			var c counts
+			if err := r.Scan(&id, &c.lines, &c.bytes); err != nil {
+				return err
+			}
+			*cur[id] = c
+			return nil
+		}); err != nil {
+			return err
+		}
+		// Replays: a cursor reset re-reads rows whose lines are stored. Line
+		// event ids lie in this window, so the PK (session_id, event_id)
+		// answers it with one range per session.
+		stored := map[int64]bool{}
+		if err := queryBatched(ctx, tx, `SELECT event_id FROM session_script_lines WHERE session_id IN `, ` AND event_id>? AND event_id<=?`, sessions, []any{cursor, end}, func(r *sql.Rows) error {
+			var id int64
+			if err := r.Scan(&id); err != nil {
+				return err
+			}
+			stored[id] = true
+			return nil
+		}); err != nil {
+			return err
+		}
+		var ins []lineRow
+		deltas := map[string]*sessionDelta{}
+		var order []string
+		for _, l := range w.lines {
+			if stored[l.id] {
+				continue // replayed event
+			}
+			c := cur[l.session]
+			add := len(l.line)
+			if c.lines > 0 {
+				add++ // script.Join separator
+			}
+			if c.lines >= script.MaxCommands || c.bytes+add > script.MaxNormalizedBytes {
+				continue
+			}
+			c.lines++
+			c.bytes += add
+			ins = append(ins, l)
+			d := deltas[l.session]
+			if d == nil {
+				// ip is written only when the row is created: the first
+				// stored line's, as with the per-row upsert.
+				d = &sessionDelta{ip: l.ip, first: l.ts, last: l.ts}
+				deltas[l.session] = d
+				order = append(order, l.session)
+			}
+			d.actor = l.actor // last line wins, as excluded.actor_id did per row
+			d.first, d.last = min(d.first, l.ts), max(d.last, l.ts)
+			d.lines++
+			d.bytes += add
+		}
+		if err := execBatched(ctx, tx, `INSERT OR IGNORE INTO session_script_lines(session_id,event_id,line) VALUES`, `(?,?,?)`, ``, len(ins), func(i int) []any {
+			return []any{ins[i].session, ins[i].id, ins[i].line}
+		}); err != nil {
+			return err
+		}
+		if err := execBatched(ctx, tx, `INSERT INTO session_scripts(session_id,actor_id,src_ip,line_count,bytes,first_seen,last_seen,updated_at) VALUES`, `(?,?,?,?,?,?,?,?)`,
+			` ON CONFLICT(session_id) DO UPDATE SET actor_id=excluded.actor_id, line_count=line_count+excluded.line_count, bytes=bytes+excluded.bytes,
+  first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen), updated_at=excluded.updated_at`, len(order), func(i int) []any {
+				d := deltas[order[i]]
+				return []any{order[i], d.actor, d.ip, d.lines, d.bytes, d.first, d.last, now}
+			}); err != nil {
+			return err
+		}
+	}
+	return execBatched(ctx, tx, `INSERT INTO campaign_evidence(kind,value,label,session_id,actor_id,src_ip,first_seen,last_seen) VALUES`, `(?,?,?,?,?,?,?,?)`,
+		` ON CONFLICT(kind,value,session_id) DO UPDATE SET actor_id=excluded.actor_id,
+  first_seen=min(first_seen, excluded.first_seen), last_seen=max(last_seen, excluded.last_seen)`, len(w.evs), func(i int) []any {
+			e := w.evs[i]
+			return []any{e.kind, e.value, e.label, e.session, e.actor, e.ip, e.ts, e.ts}
+		})
 }
 
 // rekeyCampaignEvidenceTx moves a session's derived rows with its events.

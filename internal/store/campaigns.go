@@ -348,35 +348,51 @@ func (s *Store) SaveGrouping(ctx context.Context, rows []CampaignRow, assign []C
 				return err
 			}
 		}
+		// Multi-row statements (execBatched): the replace rewrites every
+		// campaign, member, assignment and alias under writeMu, and with
+		// modernc.org/sqlite each single-row Exec recompiles its statement.
+		if err := execBatched(ctx, tx, `INSERT INTO campaigns(id,anchor_kind,anchor_value,suggested_name,name,notes,first_seen,last_seen,actors,ips,sessions,kinds,search,updated_at) VALUES`,
+			`(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, ``, len(rows), func(i int) []any {
+				c := rows[i]
+				return []any{c.ID, c.AnchorKind, c.AnchorValue, c.SuggestedName, c.Name, c.Notes,
+					fmtCampaignTime(c.FirstSeen), fmtCampaignTime(c.LastSeen), c.Actors, c.IPs, c.Sessions, c.Kinds, c.Search, now}
+			}); err != nil {
+			return err
+		}
+		type member struct {
+			campaign string
+			m        CampaignMemberRow
+		}
+		var members []member
 		for _, c := range rows {
-			if _, err := tx.Exec(`INSERT INTO campaigns(id,anchor_kind,anchor_value,suggested_name,name,notes,first_seen,last_seen,actors,ips,sessions,kinds,search,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.ID, c.AnchorKind, c.AnchorValue, c.SuggestedName, c.Name, c.Notes,
-				fmtCampaignTime(c.FirstSeen), fmtCampaignTime(c.LastSeen), c.Actors, c.IPs, c.Sessions, c.Kinds, c.Search, now); err != nil {
-				return err
-			}
 			for _, m := range c.Members {
-				if _, err := tx.Exec(`INSERT INTO campaign_members(campaign_id,actor_id,sessions,ips,reasons) VALUES(?,?,?,?,?)`,
-					c.ID, m.ActorID, m.Sessions, m.IPs, m.Reasons); err != nil {
-					return err
-				}
+				members = append(members, member{c.ID, m})
 			}
 		}
-		for _, a := range assign {
-			if _, err := tx.Exec(`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES(?,?,?,?)`,
-				a.Kind, a.Value, a.CampaignID, a.Seq); err != nil {
-				return err
-			}
+		if err := execBatched(ctx, tx, `INSERT INTO campaign_members(campaign_id,actor_id,sessions,ips,reasons) VALUES`, `(?,?,?,?,?)`, ``, len(members), func(i int) []any {
+			m := members[i]
+			return []any{m.campaign, m.m.ActorID, m.m.Sessions, m.m.IPs, m.m.Reasons}
+		}); err != nil {
+			return err
+		}
+		if err := execBatched(ctx, tx, `INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES`, `(?,?,?,?)`, ``, len(assign), func(i int) []any {
+			a := assign[i]
+			return []any{a.Kind, a.Value, a.CampaignID, a.Seq}
+		}); err != nil {
+			return err
 		}
 		// aliases is Group's complete map: a revived ID drops its alias.
 		if _, err := tx.Exec(`DELETE FROM campaign_aliases`); err != nil {
 			return err
 		}
-		for o, n := range aliases {
-			if _, err := tx.Exec(`INSERT INTO campaign_aliases(old_id,new_id,created_at) VALUES(?,?,?)`, o, n, now); err != nil {
-				return err
-			}
+		olds := make([]string, 0, len(aliases))
+		for o := range aliases {
+			olds = append(olds, o)
 		}
-		return nil
+		sort.Strings(olds) // deterministic statements
+		return execBatched(ctx, tx, `INSERT INTO campaign_aliases(old_id,new_id,created_at) VALUES`, `(?,?,?)`, ``, len(olds), func(i int) []any {
+			return []any{olds[i], aliases[olds[i]], now}
+		})
 	})
 }
 
