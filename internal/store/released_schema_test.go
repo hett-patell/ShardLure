@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,27 +69,38 @@ func splitSQLStatements(script string) []string {
 	return out
 }
 
-// schemaObjects lists (type, name) of every application table and index, and
-// the column names of every table, as the current binary sees them.
-func schemaObjects(t *testing.T, db *sql.DB) (map[string]bool, map[string]map[string]bool) {
+// schemaObjects describes every application table, index and trigger as the
+// current binary sees it. Names alone were not enough (store-pipeline audit
+// M4): the rule "never amend a shipped rung's DDL" was enforced only for
+// objects that were *added*, and an edit to an existing partial index's WHERE
+// (idx_session_scripts_pending, which settle and the hold depend on) or to a
+// column default would leave a migrated database on the old definition while
+// the test passed. So an index or trigger is keyed by its whitespace-normalised
+// sqlite_master.sql, and a table by the (type, notnull, default, pk) tuple of
+// every column. A table's own CREATE text is not compared: ALTER TABLE ADD
+// COLUMN rewrites it in a different order and spelling than a fresh CREATE,
+// while its PRAGMA table_info is what the reads actually depend on.
+func schemaObjects(t *testing.T, db *sql.DB) (map[string]string, map[string]map[string]string) {
 	t.Helper()
-	objects := map[string]bool{}
-	columns := map[string]map[string]bool{}
-	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE type IN ('table','index','trigger') AND name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+	objects := map[string]string{}
+	columns := map[string]map[string]string{}
+	rows, err := db.Query(`SELECT type, name, COALESCE(sql,'') FROM sqlite_master WHERE type IN ('table','index','trigger') AND name NOT LIKE 'sqlite_%' ORDER BY type, name`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 	var tables []string
 	for rows.Next() {
-		var typ, name string
-		if err := rows.Scan(&typ, &name); err != nil {
+		var typ, name, ddl string
+		if err := rows.Scan(&typ, &name, &ddl); err != nil {
 			t.Fatal(err)
 		}
-		objects[typ+" "+name] = true
 		if typ == "table" {
+			objects[typ+" "+name] = ""
 			tables = append(tables, name)
+			continue
 		}
+		objects[typ+" "+name] = normaliseDDL(ddl)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
@@ -98,7 +110,7 @@ func schemaObjects(t *testing.T, db *sql.DB) (map[string]bool, map[string]map[st
 		if err != nil {
 			t.Fatal(err)
 		}
-		columns[table] = map[string]bool{}
+		columns[table] = map[string]string{}
 		for cols.Next() {
 			var cid, notnull, pk int
 			var name, ctype string
@@ -107,14 +119,63 @@ func schemaObjects(t *testing.T, db *sql.DB) (map[string]bool, map[string]map[st
 				cols.Close()
 				t.Fatal(err)
 			}
-			columns[table][name] = true
+			columns[table][name] = fmt.Sprintf("type=%s notnull=%d default=%v/%q pk=%d",
+				strings.ToUpper(ctype), notnull, dflt.Valid, dflt.String, pk)
+		}
+		if err := cols.Err(); err != nil {
+			cols.Close()
+			t.Fatal(err)
 		}
 		cols.Close()
 	}
 	return objects, columns
 }
 
-func sortedKeys(m map[string]bool) []string {
+// normaliseDDL collapses whitespace and drops "--" comments, so a dump's
+// reformatting is not a difference but any token change is.
+func normaliseDDL(ddl string) string {
+	var keep []string
+	for _, line := range strings.Split(ddl, "\n") {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
+		}
+		keep = append(keep, line)
+	}
+	return strings.Join(strings.Fields(strings.Join(keep, " ")), " ")
+}
+
+// compareSchema reports every object or column of want that got lacks or
+// defines differently.
+func compareSchema(t *testing.T, label string, wantObjects, gotObjects map[string]string, wantColumns, gotColumns map[string]map[string]string) {
+	t.Helper()
+	for _, obj := range sortedKeys(wantObjects) {
+		got, ok := gotObjects[obj]
+		if !ok {
+			t.Errorf("%s: missing %s", label, obj)
+			continue
+		}
+		if got != wantObjects[obj] {
+			t.Errorf("%s: %s differs from a fresh database\n got: %s\nwant: %s", label, obj, got, wantObjects[obj])
+		}
+	}
+	for _, table := range sortedKeys(wantColumns) {
+		if gotColumns[table] == nil {
+			continue // reported above
+		}
+		for _, col := range sortedKeys(wantColumns[table]) {
+			got, ok := gotColumns[table][col]
+			if !ok {
+				t.Errorf("%s: table %s missing column %s", label, table, col)
+				continue
+			}
+			if got != wantColumns[table][col] {
+				t.Errorf("%s: column %s.%s = %s, fresh = %s", label, table, col, got, wantColumns[table][col])
+			}
+		}
+	}
+}
+
+func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -150,25 +211,65 @@ func TestReleasedSchemasMigrateToLatest(t *testing.T) {
 				t.Fatalf("migrated to schema %d (%v), want %d", got, err, latest)
 			}
 			gotObjects, gotColumns := schemaObjects(t, st.db)
-			for _, obj := range sortedKeys(wantObjects) {
-				if !gotObjects[obj] {
-					t.Errorf("released v%d migrated: missing %s", rel.version, obj)
+			compareSchema(t, fmt.Sprintf("released v%d migrated", rel.version), wantObjects, gotObjects, wantColumns, gotColumns)
+		})
+	}
+}
+
+// TestIntermediateV26DatabaseHeals covers the databases the v26 rung missed
+// (store-reads audit I1). The rung was amended in place after branch builds had
+// already stamped databases 26: 09cf7fd created only idx_events_actor_cmd,
+// 7067d76 added idx_events_cmd_ts, 90140fa idx_events_actor_cmd_legacy and
+// 1c69a01 script_version_carry. A database stamped 26 by an earlier one never
+// re-runs the rung, and the INDEXED BY reads then fail with "no such index" on
+// every request. Each shape is rebuilt from a current database by dropping what
+// that build had not created yet; Open must restore the full schema.
+func TestIntermediateV26DatabaseHeals(t *testing.T) {
+	fresh := newTestStore(t, "fresh.db")
+	wantObjects, wantColumns := schemaObjects(t, fresh.db)
+	shapes := []struct {
+		build string
+		drop  []string
+	}{
+		{"09cf7fd", []string{"DROP INDEX idx_events_cmd_ts", "DROP INDEX idx_events_actor_cmd_legacy", "DROP TABLE script_version_carry"}},
+		{"7067d76", []string{"DROP INDEX idx_events_actor_cmd_legacy", "DROP TABLE script_version_carry"}},
+		{"90140fa", []string{"DROP TABLE script_version_carry"}},
+		{"all-v26-objects-missing", []string{"DROP INDEX idx_events_actor_cmd", "DROP INDEX idx_events_cmd_ts", "DROP INDEX idx_events_actor_cmd_legacy", "DROP TABLE script_version_carry"}},
+	}
+	for _, shape := range shapes {
+		t.Run(shape.build, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "v26.db")
+			st, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range shape.drop {
+				if _, err := st.db.Exec(q); err != nil {
+					t.Fatalf("%s: %v", q, err)
 				}
 			}
-			tables := make([]string, 0, len(wantColumns))
-			for table := range wantColumns {
-				tables = append(tables, table)
+			st.Close()
+
+			st, err = Open(path)
+			if err != nil {
+				t.Fatalf("reopen intermediate v26: %v", err)
 			}
-			sort.Strings(tables)
-			for _, table := range tables {
-				if gotColumns[table] == nil {
-					continue // reported above
-				}
-				for _, col := range sortedKeys(wantColumns[table]) {
-					if !gotColumns[table][col] {
-						t.Errorf("released v%d migrated: table %s missing column %s", rel.version, table, col)
-					}
-				}
+			defer st.Close()
+			var got int
+			if err := st.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&got); err != nil || got != 26 {
+				t.Fatalf("schema = %d, %v; the v26 stamp must stay", got, err)
+			}
+			gotObjects, gotColumns := schemaObjects(t, st.db)
+			compareSchema(t, "intermediate v26 "+shape.build, wantObjects, gotObjects, wantColumns, gotColumns)
+			ctx := context.Background()
+			if _, err := st.RecentCommands(20); err != nil {
+				t.Errorf("RecentCommands: %v", err)
+			}
+			if _, err := st.LastCommandsForActors([]string{"cowrie:h1"}); err != nil {
+				t.Errorf("LastCommandsForActors: %v", err)
+			}
+			if _, err := st.ResetScriptsForVersion(ctx, 3); err != nil {
+				t.Errorf("ResetScriptsForVersion: %v", err)
 			}
 		})
 	}

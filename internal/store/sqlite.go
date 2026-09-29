@@ -782,20 +782,10 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 	// that database (see scriptVersionCarrySchema).
 	if current < 26 {
 		if err := s.WithTx(func(tx *sql.Tx) error {
-			if _, err := tx.Exec(scriptVersionCarrySchema); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_cmd ON events(actor_id, ts) WHERE command IS NOT NULL AND command != ''`); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_cmd_ts ON events(ts) WHERE command IS NOT NULL AND command != ''`); err != nil {
-				return err
-			}
-			// The per-actor legacy read's own index: its predicate carries
-			// ts_unix_ns IS NULL so the read never looks up converted rows,
-			// and the backfill empties it (see lastCommandLegacyQuery).
-			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_cmd_legacy ON events(actor_id, ts) WHERE command IS NOT NULL AND command != '' AND ts_unix_ns IS NULL`); err != nil {
-				return err
+			for _, obj := range v26Objects {
+				if _, err := tx.Exec(obj.ddl); err != nil {
+					return err
+				}
 			}
 			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(26,?)`, now)
 			return err
@@ -803,7 +793,68 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
-	return nil
+	// After the ladder, on every Open: the v26 rung was amended in place
+	// after branch builds had already stamped databases 26 (see v26Objects),
+	// and `current < 26` never lets those databases see the later objects.
+	return s.healV26Objects()
+}
+
+// v26Objects is the v26 rung's DDL, one idempotent statement per object.
+//
+// The rung was amended in place four times: 09cf7fd created only
+// idx_events_actor_cmd, 7067d76 added idx_events_cmd_ts, 90140fa
+// idx_events_actor_cmd_legacy and 1c69a01 script_version_carry. A database
+// stamped 26 by one of the earlier builds (a dev copy, the 1.87M benchmark
+// database, a rehearsal restore) never re-runs a rung guarded by
+// `current < 26`, and because the /api/intel reads name these indexes with
+// INDEXED BY, a missing one is a hard "no such index" on every request, not a
+// slow plan; a missing carry table kills the campaign worker at its first
+// version reset (store-reads audit I1, the fix-all C1 trap one rung later).
+// So these objects are self-healing: healV26Objects re-asserts them on every
+// Open. The stamp stays 26; a v27 rung repeating the DDL would only move the
+// same trap to whichever build shipped it.
+var v26Objects = []struct {
+	typ, name, ddl string
+}{
+	{"table", "script_version_carry", scriptVersionCarrySchema},
+	{"index", "idx_events_actor_cmd", `CREATE INDEX IF NOT EXISTS idx_events_actor_cmd ON events(actor_id, ts) WHERE command IS NOT NULL AND command != ''`},
+	{"index", "idx_events_cmd_ts", `CREATE INDEX IF NOT EXISTS idx_events_cmd_ts ON events(ts) WHERE command IS NOT NULL AND command != ''`},
+	// The per-actor legacy read's own index: its predicate carries
+	// ts_unix_ns IS NULL so the read never looks up converted rows, and the
+	// backfill empties it (see lastCommandLegacyQuery).
+	{"index", "idx_events_actor_cmd_legacy", `CREATE INDEX IF NOT EXISTS idx_events_actor_cmd_legacy ON events(actor_id, ts) WHERE command IS NOT NULL AND command != '' AND ts_unix_ns IS NULL`},
+}
+
+// healV26Objects creates whichever v26 object is missing. It runs only from
+// migrate (Open), never on a request or worker path. It first reads
+// sqlite_master without a lock, so a healthy database (every database but an
+// intermediate v26 one) takes no write lock and no writeMu at all: a `web`
+// opened beside a busy `live` must not queue behind its writer just to learn
+// there is nothing to do. Only a database that lacks an object pays for the
+// index build, once.
+func (s *Store) healV26Objects() error {
+	missing := false
+	for _, obj := range v26Objects {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?`, obj.typ, obj.name).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return nil
+	}
+	return s.WithTx(func(tx *sql.Tx) error {
+		for _, obj := range v26Objects {
+			if _, err := tx.Exec(obj.ddl); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // columnExists reports whether a table has a given column (via PRAGMA
