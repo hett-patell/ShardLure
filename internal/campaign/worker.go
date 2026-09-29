@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/intel/bazaar"
+	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/script"
 	"github.com/networkshard/shardlure/internal/store"
 )
@@ -64,7 +65,9 @@ type Worker struct {
 	st            *store.Store
 	retentionDays int
 	evidenceRoot  string
-	classify      func(path string) (string, error)
+	// classify reads an already-pinned file (see familyOf); a field so a
+	// test can observe which file was handed over.
+	classify func(f *os.File) (string, error)
 	// window and maxWindows are recordWindow and maxWindowsPerTick; fields so
 	// a test can make a small backlog span several windows and ticks.
 	window, maxWindows int
@@ -80,8 +83,14 @@ type Worker struct {
 	// PruneOrphanScripts assume one sequential caller (a concurrent prune can
 	// delete a representative an in-flight assign pass loaded), and it makes
 	// Regroup single-flight. Everything below is guarded by mu.
-	mu        sync.Mutex
-	families  map[string]string // sha256 -> lower-case family; successful reads only
+	mu       sync.Mutex
+	families map[string]string // sha256 -> lower-case family; successful reads only
+	// root is the evidence root, opened once (lazily, by familyOf) as a
+	// pinned descriptor; rootPath is the absolute configured path artifact
+	// paths are made relative to. nil until an open succeeds, so a root that
+	// does not exist yet is retried on a later pass.
+	root      *safefile.Root
+	rootPath  string
 	lastGroup time.Time
 	drained   bool
 	pending   bool // regroup owed: backlog just drained, or the last attempt failed
@@ -104,10 +113,23 @@ var ErrRegroupHeld = errors.New("campaign: regroup held until rebuilt scripts se
 func NewWorker(st *store.Store, retentionDays int, evidenceRoot string) *Worker {
 	return &Worker{st: st, retentionDays: retentionDays, evidenceRoot: evidenceRoot, families: map[string]string{},
 		window: recordWindow, maxWindows: maxWindowsPerTick, scriptVersion: script.Version, idle: settleIdle,
-		classify: func(p string) (string, error) {
-			c, err := bazaar.Classify(p)
+		classify: func(f *os.File) (string, error) {
+			c, err := bazaar.ClassifyFile(f)
 			return c.Family, err
 		}}
+}
+
+// Close releases the evidence root descriptor familyOf holds. The worker must
+// not tick afterwards.
+func (w *Worker) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.root == nil {
+		return nil
+	}
+	err := w.root.Close()
+	w.root = nil
+	return err
 }
 
 // Wake asks for a regroup on the next tick (an operator edit arrived). It
@@ -373,11 +395,18 @@ func reasonsJSON(rs []Reason) string {
 
 // familyOf classifies a payload by its captured file and returns the
 // lower-case family, "" when the classifier names none, or unclassified when
-// the file could not be read. Only regular files inside the configured
-// evidence root are read (after resolving symlinks on both sides), and the
-// content is only classified, never executed. Successful reads are memoised
-// (a file hash is immutable); misses are not, so a later capture is picked
-// up.
+// the file could not be read. The content is only classified, never executed.
+// Successful reads are memoised (a file hash is immutable); misses are not,
+// so a later capture is picked up.
+//
+// The file is opened through a pinned descriptor on the evidence root
+// (safefile.Root.OpenRegular) and the classifier reads that descriptor, not a
+// path. Resolving and checking a path, then re-opening it by name, left a
+// window in which a symlink or another file could be swapped in at the
+// artifact path. OpenRegular refuses a symlink in any component, a hardlinked
+// file (Nlink != 1: a link to a file elsewhere on the filesystem), a FIFO or
+// device (probed with O_PATH, so a FIFO never blocks), a mount crossing, and
+// any path outside the root.
 func (w *Worker) familyOf(ctx context.Context, sha string) string {
 	if f, ok := w.families[sha]; ok {
 		return f
@@ -389,19 +418,20 @@ func (w *Worker) familyOf(ctx context.Context, sha string) string {
 	if err != nil || !ok {
 		return unclassified
 	}
-	root, err := filepath.EvalSymlinks(w.evidenceRoot)
+	root, err := w.evidence()
 	if err != nil {
 		return unclassified
 	}
-	real, err := filepath.EvalSymlinks(p)
-	if err != nil || !within(root, real) {
+	rel, ok := relativeTo(w.rootPath, p)
+	if !ok {
 		return unclassified
 	}
-	// A FIFO or device would block or misread the classifier.
-	if fi, err := os.Lstat(real); err != nil || !fi.Mode().IsRegular() {
+	f, err := root.OpenRegular(rel)
+	if err != nil {
 		return unclassified
 	}
-	fam, err := w.classify(real)
+	defer f.Close()
+	fam, err := w.classify(f)
 	if err != nil {
 		return unclassified
 	}
@@ -410,9 +440,37 @@ func (w *Worker) familyOf(ctx context.Context, sha string) string {
 	return fam
 }
 
-func within(root, p string) bool {
-	rel, err := filepath.Rel(root, p)
-	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+// evidence opens the evidence root once per worker. A failure (the directory
+// does not exist yet, a symlinked or unsupported root) is not remembered, so
+// it is retried on the next lookup; until then payloads fail closed.
+func (w *Worker) evidence() (*safefile.Root, error) {
+	if w.root != nil {
+		return w.root, nil
+	}
+	abs, err := filepath.Abs(w.evidenceRoot)
+	if err != nil {
+		return nil, err
+	}
+	r, err := safefile.OpenRoot(abs)
+	if err != nil {
+		return nil, err
+	}
+	w.root, w.rootPath = r, abs
+	return r, nil
+}
+
+// relativeTo maps an artifact's recorded absolute path onto the root. Only a
+// lexical mapping: nothing is resolved here, OpenRegular refuses symlinks. A
+// path outside the root (or the root itself) is refused.
+func relativeTo(root, p string) (string, bool) {
+	if !filepath.IsAbs(p) {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, filepath.Clean(p))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return rel, true
 }
 
 // linkingOccurrences applies the link rules. Counts are distinct actors per

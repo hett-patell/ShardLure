@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -254,51 +256,131 @@ func TestGroupingRowsNeverCarryEmptyReasons(t *testing.T) {
 	}
 }
 
+// familyOf reads only through a pinned descriptor on the evidence root: a
+// regular single-link file inside the root is classified; a symlink planted
+// at the artifact path (even one pointing inside the root), a hardlink, a
+// FIFO and a file outside the root are refused (fail closed), and the FIFO
+// is refused without blocking.
 func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	outside := t.TempDir()
-	write := func(p string) {
-		if err := os.WriteFile(p, []byte("#!/bin/sh\necho payload\n"), 0o600); err != nil {
+	write := func(p, body string) {
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	inside := filepath.Join(root, "in.bin")
-	write(inside)
+	write(inside, "inside payload")
 	away := filepath.Join(outside, "away.bin")
-	write(away)
-	link := filepath.Join(root, "link.bin")
-	if err := os.Symlink(away, link); err != nil {
+	write(away, "outside payload")
+	escape := filepath.Join(root, "escape.bin")
+	if err := os.Symlink(away, escape); err != nil {
 		t.Fatal(err)
 	}
-	for sha, p := range map[string]string{"aa": inside, "bb": away, "cc": link} {
+	target := filepath.Join(root, "target.bin")
+	write(target, "symlink target payload")
+	planted := filepath.Join(root, "planted.bin")
+	if err := os.Symlink(target, planted); err != nil {
+		t.Fatal(err)
+	}
+	orig := filepath.Join(root, "orig.bin")
+	write(orig, "hardlinked payload")
+	hard := filepath.Join(root, "hard.bin")
+	if err := os.Link(orig, hard); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(root, "pipe.bin")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(sub, "n.bin")
+	write(nested, "nested payload")
+	arts := map[string]string{"aa": inside, "bb": away, "cc": escape, "dd": planted, "ee": hard, "ff": fifo, "gg": nested,
+		"hh": filepath.Join(root, "sub", "..", "..", filepath.Base(outside), "away.bin")}
+	for sha, p := range arts {
 		if err := st.RecordArtifact(store.Artifact{TS: time.Now().UTC(), SHA256: sha, LocalPath: p, SizeBytes: 100, Status: "fetched", Origin: "cowrie_download", URL: "cowrie-download:" + sha}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var read []string
 	w := NewWorker(st, 90, root)
-	w.classify = func(p string) (string, error) { read = append(read, p); return "RedTail", nil }
-	if f := w.familyOf(ctx, "aa"); f != "redtail" {
-		t.Fatalf("inside family %q", f)
+	t.Cleanup(func() { w.Close() })
+	w.classify = func(f *os.File) (string, error) {
+		b, err := io.ReadAll(f)
+		read = append(read, string(b))
+		return "RedTail", err
 	}
-	if f := w.familyOf(ctx, "bb"); f != unclassified {
-		t.Fatalf("outside file classified: %q", f)
+	done := make(chan map[string]string, 1)
+	go func() {
+		got := map[string]string{}
+		for _, sha := range []string{"aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "missing"} {
+			got[sha] = w.familyOf(ctx, sha)
+		}
+		done <- got
+	}()
+	var got map[string]string
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("familyOf blocked (FIFO opened for reading?)")
 	}
-	if f := w.familyOf(ctx, "cc"); f != unclassified {
-		t.Fatalf("symlink escaping the root classified: %q", f)
+	want := map[string]string{"aa": "redtail", "gg": "redtail"}
+	for sha, f := range got {
+		if w, ok := want[sha]; ok != (f != unclassified) || (ok && f != w) {
+			t.Errorf("%s (%s): family %q", sha, arts[sha], f)
+		}
 	}
-	if f := w.familyOf(ctx, "missing"); f != unclassified {
-		t.Fatalf("missing artifact: %q", f)
-	}
-	if len(read) != 1 {
-		t.Fatalf("classifier read %v", read)
+	if strings.Join(read, "|") != "inside payload|nested payload" {
+		t.Fatalf("classifier read %q", read)
 	}
 	noRoot := NewWorker(st, 90, "")
 	noRoot.classify = w.classify
-	if f := noRoot.familyOf(ctx, "aa"); f != unclassified || len(read) != 1 {
+	if f := noRoot.familyOf(ctx, "aa"); f != unclassified || len(read) != 2 {
 		t.Fatalf("no evidence root must not read files: %q %v", f, read)
+	}
+	missingRoot := NewWorker(st, 90, filepath.Join(root, "absent"))
+	missingRoot.classify = w.classify
+	if f := missingRoot.familyOf(ctx, "aa"); f != unclassified || len(read) != 2 {
+		t.Fatalf("missing evidence root must fail closed: %q %v", f, read)
+	}
+}
+
+// The evidence root is opened once, lazily, and a root that is missing at the
+// first lookup is retried (not remembered as a failure) once it appears.
+func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "evidence")
+	w := NewWorker(st, 90, root)
+	t.Cleanup(func() { w.Close() })
+	w.classify = func(*os.File) (string, error) { return "", nil }
+	p := filepath.Join(root, "p.bin")
+	if err := st.RecordArtifact(store.Artifact{TS: time.Now().UTC(), SHA256: "aa", LocalPath: p, SizeBytes: 100, Status: "fetched", Origin: "cowrie_download", URL: "cowrie-download:aa"}); err != nil {
+		t.Fatal(err)
+	}
+	if f := w.familyOf(ctx, "aa"); f != unclassified || w.root != nil {
+		t.Fatalf("missing root: family %q root %v", f, w.root)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if f := w.familyOf(ctx, "aa"); f != "" || w.root == nil {
+		t.Fatalf("root not opened once present: family %q", f)
+	}
+	opened := w.root
+	delete(w.families, "aa")
+	w.familyOf(ctx, "aa")
+	if w.root != opened {
+		t.Fatal("evidence root re-opened per lookup")
 	}
 }
 
@@ -350,7 +432,7 @@ func TestBacklogAfterDrainDefersScheduledRegroup(t *testing.T) {
 func TestFamilyOfFailsClosedOnCancel(t *testing.T) {
 	st := openStore(t)
 	w := NewWorker(st, 90, t.TempDir())
-	w.classify = func(string) (string, error) { t.Fatal("classified after cancel"); return "", nil }
+	w.classify = func(*os.File) (string, error) { t.Fatal("classified after cancel"); return "", nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if f := w.familyOf(ctx, "aa"); f != unclassified {

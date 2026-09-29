@@ -316,6 +316,9 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 		}
 		<-ctx.Done()
 		group.Wait()
+		// Only the campaign goroutine ticks the worker, and it has returned:
+		// release the evidence-root descriptor familyOf pinned.
+		campaigns.Close()
 		return nil
 	}
 	return runLiveLifecycle(ctx, m, liveHooks{Seed: seed, Serve: serve, Workers: workers, Close: st.Close})

@@ -43,16 +43,25 @@ func Classify(path string) (Classification, error) {
 		return Classification{}, err
 	}
 	defer f.Close()
+	return ClassifyFile(f)
+}
 
+// ClassifyFile is Classify over an already-open file, for callers that pin
+// the file themselves (safefile.Root.OpenRegular) so the classified bytes are
+// the checked file's and not whatever a path names by the time it is read.
+// It reads from offset 0 with ReadAt, so the file's own offset does not
+// matter, and it only reads: nothing is ever executed. The caller keeps
+// ownership of f.
+func ClassifyFile(f *os.File) (Classification, error) {
 	buf := make([]byte, classifyScanBytes)
-	n, _ := io.ReadFull(f, buf)
+	n, _ := io.ReadFull(io.NewSectionReader(f, 0, classifyScanBytes), buf)
 	buf = buf[:n]
 
 	c := Classification{}
 
 	switch {
 	case bytes.HasPrefix(buf, []byte{0x7f, 'E', 'L', 'F'}):
-		classifyELF(path, buf, &c)
+		classifyELF(f, buf, &c)
 	case bytes.HasPrefix(buf, []byte("MZ")):
 		c.FileKind = "PE executable"
 		c.Tags = append(c.Tags, "exe")
@@ -101,21 +110,21 @@ func Classify(path string) (Classification, error) {
 // We open with debug/elf rather than parsing by hand because the
 // e_machine field encoding is annoyingly broad (EM_ARM, EM_AARCH64,
 // EM_X86_64, EM_386, EM_MIPS, EM_MIPSEL, EM_PPC, EM_PPC64, ...).
-func classifyELF(path string, buf []byte, c *Classification) {
+func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
 	c.FileKind = "ELF"
 	c.Tags = append(c.Tags, "elf")
 	// Parse the FULL file for structure: debug/elf eagerly reads the section
 	// header table, which e_shoff places at the END of the binary. A truncated
 	// in-memory buffer makes NewFile return EOF for any ELF larger than the
 	// buffer — and statically-linked Mirai/XMRig droppers (exactly the samples
-	// the arch + "static" tags target) are routinely 1-2 MB. So open the file
-	// as a seekable ReaderAt here; the family scan below still uses the cheap
-	// 256 KiB buf since distinctive strings live near the top.
-	ef, err := elf.Open(path)
+	// the arch + "static" tags target) are routinely 1-2 MB. So parse the
+	// open file as a ReaderAt here (never by path: the caller may have pinned
+	// it); the family scan below still uses the cheap 256 KiB buf since
+	// distinctive strings live near the top. elf.NewFile does not own f.
+	ef, err := elf.NewFile(f)
 	if err != nil {
 		return
 	}
-	defer ef.Close()
 	switch ef.Machine {
 	case elf.EM_X86_64:
 		c.Tags = append(c.Tags, "x86-64")
