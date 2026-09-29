@@ -709,11 +709,11 @@ func usageTo(w io.Writer) {
 
 Usage:
   shardlure ingest <journal|cowrie> <file> [--replace]
-  shardlure actors [--limit=25]
-  shardlure actor show <ip>
-  shardlure campaigns [--limit=N]
+  shardlure actors [--limit=25]          (1..1000, 0 = all)
+  shardlure actor show <id|ip>
+  shardlure campaigns [--limit=50]       (1..1000)
   shardlure campaign show <id|name>
-  shardlure scripts [--limit=N]
+  shardlure scripts [--limit=50]         (1..1000)
   shardlure scripts --rebuild
   shardlure reclassify cowrie [--dry-run]
   shardlure dashboard
