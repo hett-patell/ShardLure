@@ -307,3 +307,15 @@ func TestProgramSkipsRedirectionTargets(t *testing.T) {
 		t.Error("recon behind leading redirections must not be distinctive")
 	}
 }
+
+// Probing for tools is recon: `command -v wget` reports the wrapper (-v
+// does not run its operand), and command/type/hash must not make a recon
+// script Distinctive.
+func TestToolProbesAreRecon(t *testing.T) {
+	if Distinctive([][]string{NormalizeCommand("command -v wget; command -V curl; type python3; hash perl; id; uname -a")}) {
+		t.Error("tool probes made a recon script distinctive")
+	}
+	if !Distinctive([][]string{NormalizeCommand("command -v wget; command -p wget x; id; w; uptime")}) {
+		t.Error("a program run through `command -p` must still count")
+	}
+}

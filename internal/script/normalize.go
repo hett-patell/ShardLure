@@ -469,6 +469,9 @@ var recon = map[string]bool{
 	"cd": true, "unset": true, "echo": true, "export": true, "grep": true, "head": true, "tail": true,
 	"wc": true, "awk": true, "sort": true, "uniq": true, "cut": true, "tr": true, "crontab": true,
 	"find": true, "locate": true, "lspci": true, "dmidecode": true,
+	// Tool probes: `command -v wget` reports the wrapper itself (-v does not
+	// run its operand), and type/hash only look programs up.
+	"command": true, "type": true, "hash": true,
 }
 
 // program returns a simple command's program, skipping subshell parens,
