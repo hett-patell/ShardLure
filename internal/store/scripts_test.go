@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -346,5 +347,58 @@ func TestFamilyPassDoesNotChainThroughMembers(t *testing.T) {
 	}
 	if fam[fp(c)] != fp(c) {
 		t.Fatalf("C chained through member B: family %q, want its own %q", fam[fp(c)], fp(c))
+	}
+}
+
+// nearestReps takes the representatives nearest in token count, breaking
+// equal distances by fingerprint, only inside the length band, and returns
+// them in fingerprint order for AssignFamily's tie rule.
+
+// nearestReps takes the representatives nearest in token count, breaking
+// equal distances by fingerprint, only inside the length band, and returns
+// them in fingerprint order for AssignFamily's tie rule.
+func TestNearestRepsIsDeterministic(t *testing.T) {
+	b := map[int][]string{100: {"a", "b"}, 99: {"c"}, 101: {"d"}, 120: {"e"}, 130: {"f"}}
+	for _, tc := range []struct {
+		k    int
+		want string
+	}{{3, "a,b,c"}, {4, "a,b,c,d"}, {10, "a,b,c,d,e"}, {1, "a"}} {
+		if got := strings.Join(nearestReps(b, 100, tc.k), ","); got != tc.want {
+			t.Errorf("k=%d: %s, want %s", tc.k, got, tc.want)
+		}
+	}
+}
+
+// A pending script is compared with at most familyNearestReps
+// representatives however many sit in its length band: the representative
+// set is attacker-driven and each comparison is an O(n*m) distance.
+func TestFamilyPassBoundsRepresentativesPerScript(t *testing.T) {
+	s := newTestStore(t, "families-nearest.db")
+	ts := formatFixedUTC(time.Now())
+	const reps = familyNearestReps + 44
+	if err := s.WithTx(func(tx *sql.Tx) error {
+		for i := 0; i <= reps; i++ {
+			enc := script.Join([]string{script.EncodeLine(fmt.Sprintf("mkdir %s", strings.Repeat("q", i+1)))})
+			fp, fam := script.Fingerprint(enc), ""
+			if i < reps {
+				fam = fp
+			}
+			if _, err := tx.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,token_count,first_seen,last_seen) VALUES(?,?,'',1,1,?,?,?,?)`,
+				fp, enc, fam, len(script.Tokens(enc)), ts, ts); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded := 0
+	familyRepLoaded = func(string) { loaded++ }
+	t.Cleanup(func() { familyRepLoaded = nil })
+	if n, err := s.AssignScriptFamilies(context.Background(), 500); err != nil || n != 1 {
+		t.Fatalf("assign: %d %v", n, err)
+	}
+	if loaded != familyNearestReps {
+		t.Fatalf("loaded %d representatives for one script, want %d", loaded, familyNearestReps)
 	}
 }

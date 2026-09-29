@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sort"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/script"
@@ -154,14 +155,15 @@ type familyRep struct {
 // into the closest representative's family or starts a family. Families are
 // display-only; they never link sessions.
 //
-// Bounded three ways, because the representative set is attacker-driven and
+// Bounded four ways, because the representative set is attacker-driven and
 // unbounded: representatives are listed by (fingerprint, token_count) only;
-// a representative's normalized text is loaded (once per pass, memoised) only
-// when its token count is inside AssignFamily's length-ratio band for some
-// pending script; and the distance work stops after familyPassBudget, leaving
-// the rest for the next pass in the same order, so the outcome is the same
-// as one unbounded pass. At least one script is always processed so a pass
-// makes progress. All of it runs before the write transaction; writeMu is
+// a pending script is compared with at most familyNearestReps of them, the
+// in-band ones nearest in token count (nearestReps: deterministic, ties by
+// fingerprint); a representative's normalized text is loaded (once per pass,
+// memoised) only when it is one of those; and the distance work stops after
+// familyPassBudget, leaving the rest for the next pass in the same order, so
+// the outcome is the same as one unbounded pass. At least one script is
+// always processed so a pass makes progress. All of it runs before the write transaction; writeMu is
 // held only for the UPDATEs.
 //
 // Assumes a single sequential caller (the live ticker): a concurrent
@@ -199,7 +201,11 @@ func (s *Store) AssignScriptFamilies(ctx context.Context, limit int) (int, error
 	if err != nil || len(pending) == 0 {
 		return 0, err
 	}
-	var reps []familyRep // sorted by fingerprint: AssignFamily's tie rule
+	// Representatives bucketed by token count, each bucket sorted by
+	// fingerprint. Token counts are capped at MaxDistanceTokens, so there
+	// are at most a few hundred buckets and nearestReps walks them outward
+	// from a pending script's own count.
+	byTokens := map[int][]string{}
 	err = func() error {
 		rows, err := s.db.QueryContext(ctx, `SELECT fingerprint, token_count FROM scripts WHERE family=fingerprint AND distinctive=1 ORDER BY fingerprint`)
 		if err != nil {
@@ -211,7 +217,7 @@ func (s *Store) AssignScriptFamilies(ctx context.Context, limit int) (int, error
 			if err := rows.Scan(&r.fp, &r.tokens); err != nil {
 				return err
 			}
-			reps = append(reps, r)
+			byTokens[r.tokens] = append(byTokens[r.tokens], r.fp) // ORDER BY fingerprint
 		}
 		return rows.Err()
 	}()
@@ -256,22 +262,21 @@ func (s *Store) AssignScriptFamilies(ctx context.Context, limit int) (int, error
 		if p.distinctive {
 			toks := script.Tokens(p.enc)
 			var cands []script.Rep
-			for _, r := range reps {
-				if !script.InLengthBand(len(toks), r.tokens) {
-					continue // AssignFamily would skip it: never load it
-				}
-				t, ok, err := repTokens(r.fp)
+			// Only in-band representatives are listed (AssignFamily would
+			// skip the rest: never load them), at most familyNearestReps.
+			for _, fp := range nearestReps(byTokens, len(toks), familyNearestReps) {
+				t, ok, err := repTokens(fp)
 				if err != nil {
 					return 0, err
 				}
 				if ok {
-					cands = append(cands, script.Rep{Fingerprint: r.fp, Tokens: t})
+					cands = append(cands, script.Rep{Fingerprint: fp, Tokens: t})
 				}
 			}
 			if f, d, ok := script.AssignFamily(toks, cands); ok {
 				family, dist = f, d
 			} else {
-				reps = insertRep(reps, familyRep{p.fp, len(toks)})
+				byTokens[len(toks)] = insertSorted(byTokens[len(toks)], p.fp)
 				memo[p.fp] = toks
 			}
 		}
@@ -297,17 +302,52 @@ func (s *Store) AssignScriptFamilies(ctx context.Context, limit int) (int, error
 	return assigned, nil
 }
 
-// insertRep keeps reps sorted by fingerprint (AssignFamily's tie rule: the
-// smallest fingerprint wins).
-func insertRep(reps []familyRep, r familyRep) []familyRep {
-	i := 0
-	for i < len(reps) && reps[i].fp < r.fp {
-		i++
+// insertSorted inserts fp into a fingerprint-sorted bucket.
+func insertSorted(bucket []string, fp string) []string {
+	i := sort.SearchStrings(bucket, fp)
+	bucket = append(bucket, "")
+	copy(bucket[i+1:], bucket[i:])
+	bucket[i] = fp
+	return bucket
+}
+
+// familyNearestReps is how many representatives one pending script is
+// compared with. Each comparison is an O(n*m) token distance (up to 300x300),
+// and the representative set is attacker-driven: 3,000 in-band
+// representatives cost 2.7 s of CPU per pending script on x86 (measured),
+// so one pass spent its whole budget on a single script. 256 bounds the cost
+// per script and is far above any real family count in one length band.
+const familyNearestReps = 256
+
+// nearestReps returns at most k representatives inside AssignFamily's length
+// band for a script of n tokens: the ones nearest in token count, ties by
+// fingerprint, returned sorted by fingerprint (AssignFamily's tie rule). The
+// choice depends only on the stored rows, so a pass is deterministic and a
+// budget-split pass resumes to the same result. Variants of one bot differ by
+// a few tokens, so the nearest counts are where a family match lives.
+func nearestReps(byTokens map[int][]string, n, k int) []string {
+	var out []string
+	for d := 0; len(out) < k; d++ {
+		lo, hi := n-d, n+d
+		inLo, inHi := script.InLengthBand(n, lo), script.InLengthBand(n, hi)
+		if !inLo && !inHi {
+			break // the band is contiguous around n: nothing further is in it
+		}
+		var ring []string
+		if inLo {
+			ring = append(ring, byTokens[lo]...)
+		}
+		if inHi && hi != lo {
+			ring = append(ring, byTokens[hi]...)
+		}
+		if len(ring) > k-len(out) {
+			sort.Strings(ring) // equal distance: smallest fingerprints first
+			ring = ring[:k-len(out)]
+		}
+		out = append(out, ring...)
 	}
-	reps = append(reps, familyRep{})
-	copy(reps[i+1:], reps[i:])
-	reps[i] = r
-	return reps
+	sort.Strings(out)
+	return out
 }
 
 type familyVariant struct {
