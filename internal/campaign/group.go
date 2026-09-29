@@ -94,6 +94,27 @@ func Resolve(aliases map[string]string, id string) string {
 	return id
 }
 
+// MergeAliases derives the merge aliases from the edits alone, in edit (ID)
+// order, resolving each side through the merges before it. A stored automatic
+// alias never takes part: "merge T into D" while D is bridged into K merges T
+// with D, not with K (an operator who wanted K would have named K). Group and
+// the edit API's remove_actor membership check share it, so the two cannot
+// disagree on which lineages one merge joined.
+func MergeAliases(edits []Edit) map[string]string {
+	sorted := append([]Edit(nil), edits...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	mergeAlias := map[string]string{}
+	for _, e := range sorted {
+		if e.Action != "merge" || e.CampaignID == "" || e.Arg == "" {
+			continue
+		}
+		if from, to := Resolve(mergeAlias, e.CampaignID), Resolve(mergeAlias, e.Arg); from != to {
+			mergeAlias[from] = to
+		}
+	}
+	return mergeAlias
+}
+
 func vkey(kind, value string) string { return kind + "\x00" + value }
 
 type unionFind map[string]string
@@ -181,19 +202,7 @@ func Group(in Input) Output {
 	edits := append([]Edit(nil), in.Edits...)
 	sort.SliceStable(edits, func(i, j int) bool { return edits[i].ID < edits[j].ID })
 
-	// Merge aliases come from the edits alone, in edit order, resolving each
-	// side through the merges before it. A stored automatic alias never takes
-	// part: "merge T into D" while D is bridged into K merges T with D, not
-	// with K (an operator who wanted K would have named K).
-	mergeAlias := map[string]string{}
-	for _, e := range edits {
-		if e.Action != "merge" || e.CampaignID == "" || e.Arg == "" {
-			continue
-		}
-		if from, to := Resolve(mergeAlias, e.CampaignID), Resolve(mergeAlias, e.Arg); from != to {
-			mergeAlias[from] = to
-		}
-	}
+	mergeAlias := MergeAliases(edits)
 	repCache := map[string]string{}
 	rep := func(id string) string {
 		r, ok := repCache[id]

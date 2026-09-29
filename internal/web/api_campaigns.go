@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/networkshard/shardlure/internal/campaign"
 	"github.com/networkshard/shardlure/internal/store"
 )
 
@@ -310,6 +312,17 @@ func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if action == "remove_actor" {
+		member, err := s.campaignHoldsActor(r.Context(), id, arg)
+		if err != nil {
+			httpError(w, "campaign_edit", err, http.StatusInternalServerError)
+			return
+		}
+		if !member {
+			http.Error(w, "actor "+arg+" is not a member of campaign "+id, http.StatusBadRequest)
+			return
+		}
+	}
 	if err := s.st.AppendCampaignEdit(r.Context(), id, action, arg, campaignEditWho); err != nil {
 		httpError(w, "campaign_edit", err, http.StatusInternalServerError)
 		return
@@ -318,6 +331,39 @@ func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 		s.onCampaignEdit()
 	}
 	writeCampaignJSON(w, map[string]bool{"ok": true, "applying": true})
+}
+
+// campaignHoldsActor decides whether remove_actor names an actor the campaign
+// actually holds. Without it any string was accepted: a typo or an actor from
+// another campaign went into the append-only ledger as a removal that can
+// never mean anything, and one that WOULD bite if that actor later joined.
+//
+// The campaign is the merge group of id - every lineage that merges (edit
+// ledger only, campaign.MergeAliases, exactly as Group reads them) into the
+// same root - so an actor counts when it is a stored member of id, of the
+// campaign id was merged into, or of a campaign merged into id that the
+// worker has not regrouped yet (the dialog says "applying..." for ~5 s after
+// a merge). Each of those IDs is followed through the stored aliases, as the
+// existence check is. The resolution only answers yes/no: the edit is still
+// recorded literally.
+func (s *Server) campaignHoldsActor(ctx context.Context, id, actorID string) (bool, error) {
+	rows, err := s.st.CampaignEdits(ctx)
+	if err != nil {
+		return false, err
+	}
+	edits := make([]campaign.Edit, 0, len(rows))
+	for _, e := range rows {
+		edits = append(edits, campaign.Edit{ID: e.ID, CampaignID: e.CampaignID, Action: e.Action, Arg: e.Arg})
+	}
+	merges := campaign.MergeAliases(edits)
+	root := campaign.Resolve(merges, id)
+	group := []string{id, root}
+	for from := range merges {
+		if campaign.Resolve(merges, from) == root {
+			group = append(group, from)
+		}
+	}
+	return s.st.CampaignHasMember(ctx, group, actorID)
 }
 
 // campaignText accepts valid UTF-8 up to max runes with no control characters
