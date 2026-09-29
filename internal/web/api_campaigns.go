@@ -286,21 +286,27 @@ func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 	// A" while A is bridged into B into a permanent merge into B, and would
 	// refuse "merge A into B" (make the bridge permanent) as a self-merge.
 	// The edit ledger is append-only, so that mistake has no undo.
-	refs := []string{}
+	//
+	// The refusal names the ID and its role: "unknown campaign" is usually a
+	// dialog left open across a regroup, "unknown merge target" a typo, and
+	// the operator cannot tell which from a bare "unknown campaign". Both IDs
+	// already matched campaignIDRe, so echoing them is safe.
+	type ref struct{ role, id string }
+	refs := []ref{}
 	if id != "" {
-		refs = append(refs, id)
+		refs = append(refs, ref{"campaign", id})
 	}
 	if action == "merge" {
-		refs = append(refs, arg)
+		refs = append(refs, ref{"merge target", arg})
 	}
 	for _, ref := range refs {
-		_, ok, err := s.st.ResolveCampaignID(r.Context(), ref)
+		_, ok, err := s.st.ResolveCampaignID(r.Context(), ref.id)
 		if err != nil {
 			httpError(w, "campaign_edit", err, http.StatusInternalServerError)
 			return
 		}
 		if !ok {
-			http.Error(w, "unknown campaign", http.StatusBadRequest)
+			http.Error(w, "unknown "+ref.role+" "+ref.id, http.StatusBadRequest)
 			return
 		}
 	}
