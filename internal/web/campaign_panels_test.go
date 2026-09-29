@@ -39,12 +39,12 @@ func TestCampaignPanelsFollowFrontendContracts(t *testing.T) {
 		t.Fatal("refreshScripts body not found")
 	}
 	body := block[fs : fs+fe]
-	for _, want := range []string{"d.regroup", "regroupText(d.regroup)", "noteRegroup(d.regroup)", "scripts are rebuilding after an upgrade", "no settled scripts yet"} {
+	for _, want := range []string{"d.regroup", "regroupText(d.regroup)", "regroupWhen(d.regroup)", "noteRegroup(d.regroup)", "scripts are being rebuilt", "no settled scripts yet"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refreshScripts does not carry %q", want)
 		}
 	}
-	if strings.Contains(body, "regroupText(d.regroup) + '</td>") || !strings.Contains(body, "esc('scripts are rebuilding") {
+	if strings.Contains(body, "regroupText(d.regroup) + '</td>") || !strings.Contains(body, "esc('scripts are being rebuilt") {
 		t.Error("the rebuild note must go through esc() before innerHTML")
 	}
 }
@@ -142,7 +142,9 @@ func TestCampaignDialogExplainsRegroupHold(t *testing.T) {
 	end := strings.Index(intelHTML, "// ==== end campaigns and scripts")
 	block := intelHTML[start:end]
 	for _, want := range []string{
-		"'campaigns are rebuilding after an upgrade ('",
+		// fix-D M6: the hold follows an upgrade or a manual
+		// `scripts --rebuild`, so the note names neither.
+		"'campaigns are waiting for a script rebuild (' + regroupWhen(g) + ')'",
 		"'recorded — ' + regroupText(g) + '; your edit applies then'",
 		"if (regroup && regroup.held) {",
 		"noteRegroup(d.regroup);",
@@ -154,5 +156,94 @@ func TestCampaignDialogExplainsRegroupHold(t *testing.T) {
 	}
 	if strings.Count(intelHTML, "setInterval(") != 1 {
 		t.Error("the hold re-check must ride the existing list poll, not a new timer")
+	}
+	if strings.Contains(block, "after an upgrade (") || strings.Contains(block, "rebuilding after an upgrade") {
+		t.Error("the rebuild note still blames an upgrade; a manual --rebuild holds too")
+	}
+}
+
+// fix-D M4: Esc closes a native <dialog> without calling closeCampaign, so the
+// cleanup (drop the parked hold reload, cancel the pending reload but still
+// refresh the lists) hangs off the dialog's 'close' event, which every close
+// path fires, and closeCampaign only closes.
+func TestCampaignDialogEscRunsCloseCleanup(t *testing.T) {
+	start := strings.Index(intelHTML, "function campaignDialogClosed(")
+	end := strings.Index(intelHTML, "document.getElementById('cm-close')")
+	if start < 0 || end < start {
+		t.Fatal("campaignDialogClosed not found before the close-button listener")
+	}
+	fn := intelHTML[start:end]
+	for _, want := range []string{
+		"if (document.getElementById('campaign-modal').open) return;",
+		"_cmHeld = null;",
+		"clearTimeout(_cmPending.timer);",
+		"if (m.open) m.close(); // fires 'close' -> campaignDialogClosed",
+		"document.getElementById('campaign-modal').addEventListener('close', campaignDialogClosed);",
+	} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}
+
+// fix-D M5: the clickable Campaigns/Scripts rows were <tr tabindex="0"
+// aria-label>, announced as rows (not controls) with the label hiding the
+// cell text. Each row's first cell is now a real button; the row stays
+// clickable through the one delegated listener, and no keydown shim remains.
+func TestCampaignRowsOpenThroughAButton(t *testing.T) {
+	start := strings.Index(intelHTML, "// ==== Campaigns and scripts")
+	end := strings.Index(intelHTML, "// ==== end campaigns and scripts")
+	block := intelHTML[start:end]
+	if strings.Contains(block, `<tr tabindex="0"`) || strings.Contains(block, `aria-label="open campaign`) || strings.Contains(block, `aria-label="open script `) {
+		t.Error("a clickable row is still a focusable <tr> with an aria-label override")
+	}
+	for _, want := range []string{
+		`'<td><button type="button" class="row-open">' + esc(name) + '</button></td>`,
+		`'<td><button type="button" class="row-open"><code>' + esc(first) + '</code></button></td>`,
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	rs := strings.Index(block, "function rowOpens(")
+	re := strings.Index(block[rs:], "\n}\n")
+	if rs < 0 || re < 0 || strings.Contains(block[rs:rs+re], "keydown") {
+		t.Error("rowOpens must rely on the button's native keyboard activation")
+	}
+	if !strings.Contains(intelHTML, ".row-open {") {
+		t.Error(".row-open style missing")
+	}
+}
+
+// fix-D I1: a Scripts row counts the whole family but its dialog lists one
+// fingerprint's sessions. The dialog says which ("this variant: N of M family
+// sessions"), lists every variant with its session count as an openable
+// button, discloses a capped session list, and the palette finds a script by
+// any variant's fingerprint.
+func TestScriptDialogReachesEveryVariant(t *testing.T) {
+	start := strings.Index(intelHTML, "async function openScript(")
+	end := strings.Index(intelHTML[start:], "\n}\n")
+	if start < 0 || end < 0 {
+		t.Fatal("openScript not found")
+	}
+	fn := intelHTML[start : start+end]
+	for _, want := range []string{
+		"'this variant: ' + fmt(total) + ' of ' + fmt(d.familySessions) + ' family sessions",
+		"actionButton('script', fp.slice(0, 16), { fp: fp }, 'open script variant ' + fp.slice(0, 12))",
+		"variants in this family",
+		"ofTotal(shown, total)",
+		"esc(fmt(v.sessions || 0))",
+	} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("openScript missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"var vfps = (f.variants || []).map(function (v) { return String(v.fingerprint || ''); });",
+		"action: function () { setActiveView('red'); openScript(fp); closePalette(); }",
+	} {
+		if !strings.Contains(intelHTML, want) {
+			t.Errorf("palette missing %q", want)
+		}
 	}
 }
