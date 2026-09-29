@@ -77,24 +77,32 @@ func runPeriodicWorker(ctx context.Context, m *observability.Monitor, id observa
 		}
 		cancel()
 		notify(false, err)
-		timer := time.NewTimer(gap)
-		heartbeat := time.NewTicker(5 * time.Second)
-	wait:
-		for {
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				heartbeat.Stop()
-				return
-			case <-timer.C:
-				break wait
-			case <-heartbeat.C:
-				state := m.Snapshot().Workers[id]
-				state.LastProgress = time.Now().UTC()
-				_ = m.SetWorker(id, state)
-			}
+		if !waitGap(ctx, m, id, gap) {
+			return
 		}
-		heartbeat.Stop()
+	}
+}
+
+// waitGap sleeps gap between cycles, refreshing the worker's LastProgress
+// every 5 s so a long gap never reads as a stalled worker. It reports false
+// when ctx ends first. Shared by runPeriodicWorker and runOptionalWorker so a
+// fix to the wait or heartbeat semantics reaches both (audit M4).
+func waitGap(ctx context.Context, m *observability.Monitor, id observability.Worker, gap time.Duration) bool {
+	timer := time.NewTimer(gap)
+	defer timer.Stop()
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		case <-heartbeat.C:
+			state := m.Snapshot().Workers[id]
+			state.LastProgress = time.Now().UTC()
+			_ = m.SetWorker(id, state)
+		}
 	}
 }
 
@@ -131,24 +139,9 @@ func runOptionalWorker(ctx context.Context, m *observability.Monitor, id observa
 			logged = ""
 			log.Printf("%s worker recovered", id)
 		}
-		timer := time.NewTimer(gap)
-		heartbeat := time.NewTicker(5 * time.Second)
-	wait:
-		for {
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				heartbeat.Stop()
-				return
-			case <-timer.C:
-				break wait
-			case <-heartbeat.C:
-				state := m.Snapshot().Workers[id]
-				state.LastProgress = time.Now().UTC()
-				_ = m.SetWorker(id, state)
-			}
+		if !waitGap(ctx, m, id, gap) {
+			return
 		}
-		heartbeat.Stop()
 	}
 }
 

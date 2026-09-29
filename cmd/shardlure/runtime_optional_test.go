@@ -128,3 +128,21 @@ func (l *lockedBuffer) String() string {
 	defer l.mu.Unlock()
 	return l.b.String()
 }
+
+// waitGap is the one inter-cycle wait both worker loops share: it returns
+// true once the gap elapses and false as soon as the context ends.
+func TestWaitGap(t *testing.T) {
+	m := observability.New(time.Now, 0)
+	if !waitGap(context.Background(), m, observability.Campaigns, 10*time.Millisecond) {
+		t.Fatal("elapsed gap reported as cancelled")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if waitGap(ctx, m, observability.Campaigns, time.Hour) {
+		t.Fatal("cancelled wait reported as elapsed")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("cancelled wait did not return promptly")
+	}
+}
