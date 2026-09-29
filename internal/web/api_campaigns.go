@@ -255,7 +255,13 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 			Actors: f.Actors, IPs: f.IPs, CommandCount: f.CommandCount, Distinctive: f.Distinctive, Links: f.Links, Reason: f.Reason,
 			FirstSeen: campaignJSONTime(f.FirstSeen), LastSeen: campaignJSONTime(f.LastSeen)})
 	}
-	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "families": out})
+	// The same regroup block as the campaigns list: a script rebuild deletes
+	// script_families first and RebuildScriptFamilies fills it only with the
+	// first regroup after the hold, so for the 10-30 minutes in between this
+	// list is legitimately empty and the panel must say why rather than read
+	// as data loss (fix-all review M5).
+	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "families": out,
+		"regroup": s.campaignRegroupStatus(r.Context())})
 }
 
 type scriptSessionJSON struct {

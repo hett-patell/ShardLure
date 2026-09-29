@@ -89,3 +89,56 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset`, source, p, v); e
 		t.Fatalf("edit response %s %v", rec.Body.String(), err)
 	}
 }
+
+// The scripts list carries the same regroup block as the campaigns list:
+// ResetScriptsForVersion empties script_families and the first regroup after
+// the hold refills it, so an empty list during a rebuild needs the reason.
+func TestScriptsResponseCarriesRegroupHold(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hold_scripts.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	keys, err := settings.Load(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, keys, "127.0.0.1:0")
+	mux := http.NewServeMux()
+	s.registerCampaignRoutes(mux)
+	type regroup struct {
+		Held     bool    `json:"held"`
+		Phase    string  `json:"phase"`
+		Progress float64 `json:"progress"`
+	}
+	list := func() (regroup, int) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/intel/scripts", nil))
+		var d struct {
+			Families []json.RawMessage `json:"families"`
+			Regroup  *regroup          `json:"regroup"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil || d.Regroup == nil || d.Families == nil {
+			t.Fatalf("scripts %s %v", rec.Body.String(), err)
+		}
+		return *d.Regroup, len(d.Families)
+	}
+	if g, n := list(); g.Held || n != 0 {
+		t.Fatalf("no hold, got %+v with %d families", g, n)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for _, row := range [][3]any{{"script_version", "hold_hwm", 400}, {"campaign", "evidence-v1", 100}} {
+		if _, err := raw.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'','x')
+ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset`, row[0], row[1], row[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g, n := list(); !g.Held || g.Phase != "recording" || g.Progress != 0.25 || n != 0 {
+		t.Fatalf("recording = %+v with %d families", g, n)
+	}
+}

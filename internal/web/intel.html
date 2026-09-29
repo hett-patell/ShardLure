@@ -2245,6 +2245,15 @@ function withToken(url) {
 // (open mode requires it on the quota-spending lookups, which a cross-site
 // <img> could otherwise trigger) and, when auth is on, the Bearer token. It
 // reads the live currentToken each call so a rotation takes effect immediately.
+//
+// Only a RELATIVE URL beginning with "/api/" gets the headers, and this is
+// deliberate: a relative path can only ever name this origin, so the Bearer
+// token cannot be sent to another host by a mistyped or attacker-influenced
+// absolute URL. The cost is that an absolute same-origin URL
+// ("http://host:8080/api/…"), a Request object built from one, or a URL
+// object would silently go out WITHOUT the headers and get 401/403. Every
+// call site on this page uses a relative "/api/…" string (grep before adding
+// one), and the intel page has no reason to build absolute API URLs.
 (function () {
   var _fetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
@@ -4580,8 +4589,18 @@ async function refreshScripts() {
     const d = await r.json();
     _lastScripts = d.families || [];
     const tb = document.querySelector('#scripts-table tbody');
-    document.getElementById('scripts-meta').textContent = _lastScripts.length + ' script families';
-    if (!_lastScripts.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">no settled scripts yet</td></tr>'; return; }
+    // During a script rebuild (after an upgrade that changed the normaliser)
+    // the families table is emptied first and refilled by the first regroup
+    // after the hold, 10-30 min later: say so instead of showing an empty
+    // table that reads as data loss. Same regroup block as the campaigns list.
+    const held = d.regroup && d.regroup.held;
+    document.getElementById('scripts-meta').textContent = _lastScripts.length + ' script families' +
+      (held ? ' · ' + regroupText(d.regroup) : '');
+    noteRegroup(d.regroup);
+    if (!_lastScripts.length) {
+      tb.innerHTML = '<tr><td colspan="7" class="empty">' + (held ? esc('scripts are rebuilding after an upgrade; families return when the rebuilt scripts settle (' + regroupText(d.regroup) + ')') : 'no settled scripts yet') + '</td></tr>';
+      return;
+    }
     tb.innerHTML = _lastScripts.map(function (f) {
       const first = String(f.display || '').split('\n')[0].slice(0, 120);
       return '<tr tabindex="0" data-script="' + esc(f.family) + '" title="' + esc(f.reason) + '" aria-label="open script ' + esc(String(f.family || '').slice(0, 12)) + '">' +

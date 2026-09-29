@@ -29,6 +29,24 @@ func TestCampaignPanelsFollowFrontendContracts(t *testing.T) {
 			t.Errorf("missing %s", fn)
 		}
 	}
+	// The scripts panel is empty for the 10-30 minutes of a script rebuild
+	// (families are deleted first and rebuilt by the first regroup after the
+	// hold): it must render the server's regroup block as an explanation, in
+	// both the meta line and the empty-table row, not a blank table.
+	fs := strings.Index(block, "function refreshScripts")
+	fe := strings.Index(block[fs:], "\n}\n")
+	if fs < 0 || fe < 0 {
+		t.Fatal("refreshScripts body not found")
+	}
+	body := block[fs : fs+fe]
+	for _, want := range []string{"d.regroup", "regroupText(d.regroup)", "noteRegroup(d.regroup)", "scripts are rebuilding after an upgrade", "no settled scripts yet"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refreshScripts does not carry %q", want)
+		}
+	}
+	if strings.Contains(body, "regroupText(d.regroup) + '</td>") || !strings.Contains(body, "esc('scripts are rebuilding") {
+		t.Error("the rebuild note must go through esc() before innerHTML")
+	}
 }
 
 // TestCampaignReloadKeepsMergeTarget pins two fixes in the post-edit reload
