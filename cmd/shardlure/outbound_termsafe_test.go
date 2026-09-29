@@ -74,19 +74,19 @@ func TestShareAndReportOutputIsTermSafe(t *testing.T) {
 	}
 }
 
-// actors --limit follows the campaign commands: 0 or a negative value used to
-// reach ListActors as "no limit" and dump every actor, and a stray positional
-// argument was ignored.
+// actors --limit: 0 means all actors (the share/report idiom), 1..1000 is
+// bounded like the campaign commands, and a negative value (which used to
+// reach ListActors as "no limit") and a stray argument are refused.
 func TestParseActorsArgs(t *testing.T) {
 	for _, c := range []struct {
 		args []string
 		want int
-	}{{nil, 25}, {[]string{"--limit=1"}, 1}, {[]string{"--limit", "1000"}, 1000}} {
+	}{{nil, 25}, {[]string{"--limit=1"}, 1}, {[]string{"--limit", "1000"}, 1000}, {[]string{"--limit=0"}, 0}} {
 		if n, err := parseActorsArgs(c.args); err != nil || n != c.want {
 			t.Errorf("%v = %d, %v; want %d", c.args, n, err, c.want)
 		}
 	}
-	for _, args := range [][]string{{"--limit=0"}, {"--limit=-5"}, {"--limit=1001"}, {"extra"}, {"--limti=5"}} {
+	for _, args := range [][]string{{"--limit=-1"}, {"--limit=-5"}, {"--limit=1001"}, {"extra"}, {"--limti=5"}} {
 		if _, err := parseActorsArgs(args); err == nil {
 			t.Errorf("%v accepted", args)
 		}

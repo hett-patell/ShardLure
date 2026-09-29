@@ -594,21 +594,25 @@ func planReclassify(st *store.Store, admin *netmatch.Set) (*reclassifyPlan, erro
 	return plan, nil
 }
 
-// parseActorsArgs range-checks --limit like the campaign commands
-// (validateListLimit). ListActors reads a non-positive limit as "no limit",
-// so --limit=0 or a negative typo used to dump every actor instead of being
-// refused; a stray positional argument is refused too.
+// parseActorsArgs checks --limit: 0 lists every actor (the share/report
+// "0 = unbounded" idiom; ListActors reads a non-positive limit as no limit),
+// 1..1000 bounds the list like the campaign commands (validateListLimit), and
+// a negative value - which used to reach ListActors and silently list every
+// actor too - is refused, as is a stray positional argument.
 func parseActorsArgs(args []string) (int, error) {
 	fs := flag.NewFlagSet("actors", flag.ContinueOnError)
-	limit := fs.Int("limit", 25, "max actors to list")
+	limit := fs.Int("limit", 25, "max actors to list, 1..1000 (0 = all)")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
 	}
 	if fs.NArg() > 0 {
 		return 0, fmt.Errorf("unexpected argument %q (usage: shardlure actors [--limit=N])", fs.Arg(0))
 	}
+	if *limit == 0 {
+		return 0, nil
+	}
 	if err := validateListLimit(*limit); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w (or 0 for all actors)", err)
 	}
 	return *limit, nil
 }
