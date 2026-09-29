@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func norm(s string) string { return strings.Join(NormalizeCommand(s), " ") }
@@ -111,7 +112,9 @@ func FuzzNormalizeCommand(f *testing.F) {
 		}
 		_ = Fingerprint(enc)
 		_ = Distinctive(Split(enc))
-		_ = Display(enc, 2048)
+		if d := Display(enc, 64); len(d) > 64 {
+			t.Fatalf("Display exceeded its cap: %d bytes", len(d))
+		}
 		_ = ExtractKeys(s)
 	})
 }
@@ -245,5 +248,38 @@ func TestLiteralPlaceholdersAreEscaped(t *testing.T) {
 	}
 	if got := Display(EncodeLine(`echo "<url>" > f`), 0); got != `echo "\<url\>" > f` {
 		t.Errorf("Display = %q", got)
+	}
+}
+
+// Display's cap is a byte budget for the stored column: the ellipsis counts
+// toward it, no rune is split, and invalid bytes do not drag the cut back.
+func TestDisplayCapIncludesEllipsis(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{strings.Repeat("a", 20), 10, "aaaaaaa…"},
+		{strings.Repeat("a", 10), 10, strings.Repeat("a", 10)},
+		{"aaaaaaa€€", 10, "aaaaaaa…"}, // the cut falls inside €
+		{"aaaaaé€€", 10, "aaaaaé…"},   // é ends exactly at the budget
+		{"a" + strings.Repeat("\x80", 20), 10, "a\x80\x80\x80\x80\x80\x80…"},
+		{strings.Repeat("a", 20), 2, "aa"}, // no room for the ellipsis
+		{"€€", 2, ""},                      // nor for a whole rune
+		{strings.Repeat("a", 20), 3, "…"},
+	} {
+		got := Display(tc.in, tc.max)
+		if got != tc.want || len(got) > tc.max {
+			t.Errorf("Display(%q, %d) = %q (%d bytes), want %q", tc.in, tc.max, got, len(got), tc.want)
+		}
+	}
+	// Every budget: within max, a prefix of the input, cut on a rune start.
+	in := "a€b😀c\xffd" + strings.Repeat("é", 8)
+	for max := 1; max <= len(in); max++ {
+		got := Display(in, max)
+		p := strings.TrimSuffix(got, "…")
+		if len(got) > max || !strings.HasPrefix(in, p) || (len(p) < len(in) && !utf8.RuneStart(in[len(p)])) {
+			t.Errorf("Display(%q, %d) = %q", in, max, got)
+		}
 	}
 }

@@ -395,17 +395,39 @@ func Split(enc string) [][]string {
 // newlines, and escaped literals read shell-style as \< and \>.
 var displayer = strings.NewReplacer(tokSep, " ", lineSep, "\n", litLT, `\<`, litGT, `\>`)
 
-// Display renders an encoded script for people, capped at max bytes.
+const ellipsis = "…"
+
+// Display renders an encoded script for people, capped at max bytes
+// including the ellipsis that marks a cut (a cap too small for the
+// ellipsis gets a bare prefix). The cut never splits a rune.
 func Display(enc string, max int) string {
 	s := displayer.Replace(enc)
-	if max > 0 && len(s) > max {
-		cut := max
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		s = s[:cut] + "…"
+	if max <= 0 || len(s) <= max {
+		return s
 	}
-	return s
+	if max < len(ellipsis) {
+		return s[:runeCut(s, max)]
+	}
+	return s[:runeCut(s, max-len(ellipsis))] + ellipsis
+}
+
+// runeCut returns the largest n' <= n where s[:n'] ends on a rune boundary.
+// Only a valid multi-byte rune straddling n moves the cut back (by at most
+// UTFMax-1 bytes); an invalid byte is its own "rune", so a run of stray
+// continuation bytes cannot drag the cut back to the start.
+func runeCut(s string, n int) int {
+	if n >= len(s) || utf8.RuneStart(s[n]) {
+		return n
+	}
+	for j := n - 1; j >= 0 && j > n-utf8.UTFMax; j-- {
+		if utf8.RuneStart(s[j]) {
+			if r, size := utf8.DecodeRuneInString(s[j:]); !(r == utf8.RuneError && size == 1) && j+size > n {
+				return j
+			}
+			break
+		}
+	}
+	return n
 }
 
 // Fingerprint is the lower-hex SHA-256 of a Join-encoded script.
