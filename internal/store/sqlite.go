@@ -1366,7 +1366,7 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 // mid-purge, skipping the WAL checkpoint in Close. Every committed chunk is
 // complete on its own, so stopping between chunks leaves consistent state and
 // the next run resumes.
-func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) error {
+func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) (retErr error) {
 	if retentionDays <= 0 {
 		return nil
 	}
@@ -1523,6 +1523,13 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 	if campaignErr != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if campaignErr != nil {
+		// Joined into whatever the rest returns, so a later failure cannot
+		// swallow it (and a clean rest still reports it).
+		defer func() {
+			retErr = errors.Join(retErr, fmt.Errorf("campaign-derived retention: %w", campaignErr))
+		}()
+	}
 
 	// Actors are DERIVED from events, so an actor whose every event the sweep
 	// above deleted has no evidence left behind it. Those orphans kept a stale
@@ -1623,9 +1630,6 @@ WHERE COALESCE(campaigns,'')=''
 		_, _ = s.db.Exec(`PRAGMA optimize`)
 	}()
 
-	if campaignErr != nil {
-		return fmt.Errorf("campaign-derived retention: %w", campaignErr)
-	}
 	return nil
 }
 

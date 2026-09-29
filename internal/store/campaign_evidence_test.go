@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -791,5 +792,25 @@ func TestPurgeContinuesPastCampaignDerivedFailure(t *testing.T) {
 	s.db.QueryRow(`SELECT COUNT(*) FROM actors WHERE id='cowrie:gone'`).Scan(&n)
 	if n != 0 {
 		t.Fatal("the orphan sweep was skipped")
+	}
+}
+
+// When a later purge step also fails, both errors are returned: the
+// campaign-derived failure must not be swallowed by the sweep's.
+func TestPurgeJoinsCampaignDerivedAndLaterErrors(t *testing.T) {
+	s := newTestStore(t, "retention-campaign-join.db")
+	old := time.Now().UTC().AddDate(0, 0, -120)
+	if err := upsertActor(s.db, &models.Actor{ID: "cowrie:bad", Source: models.SourceCowrie, FirstSeen: old, LastSeen: old}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE actors SET last_seen='not-a-time' WHERE id='cowrie:bad'`); err != nil {
+		t.Fatal(err)
+	}
+	boom := fmt.Errorf("boom")
+	purgeCampaignDerivedFail = func() error { return boom }
+	t.Cleanup(func() { purgeCampaignDerivedFail = nil })
+	err := s.MaintenancePurge(90)
+	if !errors.Is(err, boom) || err == nil || !strings.Contains(err.Error(), "last_seen") {
+		t.Fatalf("err = %v, want both the campaign and the sweep error", err)
 	}
 }
