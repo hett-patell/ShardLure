@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -27,6 +28,12 @@ import (
 // A failed refresh keeps the last good value and its stamp (so the next read
 // retries), the policy every tier already had. Only a cache that has never
 // succeeded returns an error.
+//
+// compute runs on the drain's context, which bg.stop() cancels: a shutdown
+// interrupts an in-flight scan instead of waiting for it (a lifetime-tier
+// refresh is seconds on ARM), and a refresh cancelled that way is dropped
+// like any failed one, so cancellation can never replace good data with a
+// partial or errored result.
 type swrCache[T any] struct {
 	mu         sync.Mutex
 	val        T
@@ -35,11 +42,12 @@ type swrCache[T any] struct {
 	refreshing bool
 }
 
-func (c *swrCache[T]) get(bg *handlerDrain, ttl time.Duration, compute func() (T, time.Time, error)) (T, error) {
+func (c *swrCache[T]) get(bg *handlerDrain, ttl time.Duration, compute func(context.Context) (T, time.Time, error)) (T, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	ctx := bg.context()
 	if !c.ok {
-		v, at, err := compute()
+		v, at, err := compute(ctx)
 		if err != nil {
 			return c.val, err
 		}
@@ -50,11 +58,11 @@ func (c *swrCache[T]) get(bg *handlerDrain, ttl time.Duration, compute func() (T
 		c.refreshing = true
 		go func() {
 			defer bg.leave()
-			v, at, err := compute()
+			v, at, err := compute(ctx)
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			c.refreshing = false
-			if err == nil {
+			if err == nil && ctx.Err() == nil {
 				c.val, c.at = v, at
 			}
 		}()

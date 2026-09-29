@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -37,12 +38,18 @@ type CommandEvent struct {
 }
 
 func (s *Store) HourlyEventCountsByKind(limitHours int) ([]HourlyKindCell, error) {
+	return s.HourlyEventCountsByKindContext(context.Background(), limitHours)
+}
+
+// HourlyEventCountsByKindContext is HourlyEventCountsByKind under a context
+// (see EventCountContext).
+func (s *Store) HourlyEventCountsByKindContext(ctx context.Context, limitHours int) ([]HourlyKindCell, error) {
 	if limitHours <= 0 {
 		limitHours = 72
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(limitHours) * time.Hour)
 	window, args := eventTimeBranches("kind", &cutoff, "", nil)
-	rows, err := s.db.Query("WITH hourly_events AS ("+window+") "+`
+	rows, err := s.db.QueryContext(ctx, "WITH hourly_events AS ("+window+") "+`
 SELECT substr(exact_ts, 1, 13) AS hour, kind, COUNT(*) AS hits
 FROM hourly_events
 GROUP BY hour, kind
@@ -68,23 +75,39 @@ ORDER BY hour ASC, kind ASC`, args...)
 }
 
 func (s *Store) CountsByKind() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT kind, COUNT(*) AS hits FROM events GROUP BY kind ORDER BY hits DESC`)
+	return s.CountsByKindContext(context.Background())
+}
+
+func (s *Store) CountsByKindContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, `SELECT kind, COUNT(*) AS hits FROM events GROUP BY kind ORDER BY hits DESC`)
 }
 
 func (s *Store) CountsByIntent() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT intent, COUNT(*) AS hits FROM actors WHERE intent != '' GROUP BY intent ORDER BY hits DESC`)
+	return s.CountsByIntentContext(context.Background())
+}
+
+func (s *Store) CountsByIntentContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, `SELECT intent, COUNT(*) AS hits FROM actors WHERE intent != '' GROUP BY intent ORDER BY hits DESC`)
 }
 
 func (s *Store) CountsByPlaybook() ([]LabelCount, error) {
-	return s.labelCounts("SELECT label,COUNT(*) AS hits FROM (SELECT " + actorVisiblePlaybookSQL + " AS label FROM actors) WHERE label<>'' GROUP BY label ORDER BY hits DESC,label")
+	return s.CountsByPlaybookContext(context.Background())
+}
+
+func (s *Store) CountsByPlaybookContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, "SELECT label,COUNT(*) AS hits FROM (SELECT "+actorVisiblePlaybookSQL+" AS label FROM actors) WHERE label<>'' GROUP BY label ORDER BY hits DESC,label")
 }
 
 func (s *Store) CountsBySource() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT source, COUNT(*) AS hits FROM events GROUP BY source ORDER BY hits DESC`)
+	return s.CountsBySourceContext(context.Background())
 }
 
-func (s *Store) labelCounts(query string) ([]LabelCount, error) {
-	rows, err := s.db.Query(query)
+func (s *Store) CountsBySourceContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, `SELECT source, COUNT(*) AS hits FROM events GROUP BY source ORDER BY hits DESC`)
+}
+
+func (s *Store) labelCounts(ctx context.Context, query string) ([]LabelCount, error) {
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}

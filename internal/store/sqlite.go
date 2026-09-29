@@ -898,7 +898,12 @@ func (s *Store) ensureLegacyColumns() error {
 // It is exposed so ingest helpers (e.g. batchDedupJournal) can issue
 // ad-hoc IN-list queries without re-implementing rows.Close handling.
 func (s *Store) QueryRows(query string, args []any, scan func(scan func(...any) error) error) error {
-	rows, err := s.db.Query(query, args...)
+	return s.QueryRowsContext(context.Background(), query, args, scan)
+}
+
+// QueryRowsContext is QueryRows under a context (see EventCountContext).
+func (s *Store) QueryRowsContext(ctx context.Context, query string, args []any, scan func(scan func(...any) error) error) error {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -1360,15 +1365,23 @@ LIMIT 1`, ip)
 	return &a, nil
 }
 
-func (s *Store) EventCount() (int, error) {
+func (s *Store) EventCount() (int, error) { return s.EventCountContext(context.Background()) }
+
+// EventCountContext is EventCount under a context: the dashboard's background
+// cache refreshes run on the server's drain context, so a shutdown interrupts
+// the scan (modernc calls sqlite3_interrupt when ctx is done) instead of
+// waiting for it. The context-free readers stay for callers with no context.
+func (s *Store) EventCountContext(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&n)
 	return n, err
 }
 
-func (s *Store) ActorCount() (int, error) {
+func (s *Store) ActorCount() (int, error) { return s.ActorCountContext(context.Background()) }
+
+func (s *Store) ActorCountContext(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM actors`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM actors`).Scan(&n)
 	return n, err
 }
 

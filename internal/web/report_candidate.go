@@ -80,8 +80,8 @@ type recentCounts struct {
 // A failed refresh serves the previous value rather than an empty one:
 // dropping every rate to zero would silently de-prioritise every suggestion.
 func (s *Server) recentCountsCached() *recentCounts {
-	c, _ := s.ratesCache.get(&s.bg, statsTTL, func() (*recentCounts, time.Time, error) {
-		counts, err := s.st.RecentEventCountsByActor(context.Background(), time.Now().Add(-recentRateWindow))
+	c, _ := s.ratesCache.get(&s.bg, statsTTL, func(ctx context.Context) (*recentCounts, time.Time, error) {
+		counts, err := s.st.RecentEventCountsByActor(ctx, time.Now().Add(-recentRateWindow))
 		if err != nil {
 			return nil, time.Time{}, err
 		}

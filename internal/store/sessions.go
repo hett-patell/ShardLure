@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -84,8 +85,12 @@ func (s *Store) sessionSummariesSince(since time.Time, minCommands, limit int) (
 // grouped rows, before LIMIT). Grouping the window a second time just to count
 // doubled the cost of the slowest intel panel on prod.
 func (s *Store) sessionSummaryPage(since time.Time, minCommands, limit int) ([]ShellSessionSummary, int, error) {
+	return s.sessionSummaryPageContext(context.Background(), since, minCommands, limit)
+}
+
+func (s *Store) sessionSummaryPageContext(ctx context.Context, since time.Time, minCommands, limit int) ([]ShellSessionSummary, int, error) {
 	query, args := sessionSummaryQuery(since, minCommands, limit)
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -196,7 +201,7 @@ func (s *Store) countSessionsSince(since time.Time, minCommands int) (int, error
 
 // stampFirstCommands fills FirstCommand for the (bounded) returned sessions:
 // the earliest in-window kind=command event, ties broken by event id.
-func (s *Store) stampFirstCommands(since time.Time, sums []ShellSessionSummary) error {
+func (s *Store) stampFirstCommands(ctx context.Context, since time.Time, sums []ShellSessionSummary) error {
 	if len(sums) == 0 {
 		return nil
 	}
@@ -211,7 +216,7 @@ func (s *Store) stampFirstCommands(since time.Time, sums []ShellSessionSummary) 
 	// Pinned legacy branch for the same reason as sessionWindow.
 	window, args := globalEventTimeBranches("id,session_id,command", &since,
 		"source='cowrie' AND kind='command' AND COALESCE(command,'')<>'' AND session_id IN ("+strings.Join(placeholders, ",")+")", ids)
-	rows, err := s.db.Query(`WITH w AS (`+window+`)
+	rows, err := s.db.QueryContext(ctx, `WITH w AS (`+window+`)
 SELECT session_id, command FROM (
   SELECT session_id, command, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY exact_ts ASC, id ASC) AS rn FROM w
 ) WHERE rn=1`, args...)
@@ -328,14 +333,20 @@ type ShellSessionSummary struct {
 // and include the earliest command observed (for the dashboard sample
 // column).
 func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionSummary, error) {
+	return s.RecentShellSessionsContext(context.Background(), since, limit)
+}
+
+// RecentShellSessionsContext is RecentShellSessions under a context (see
+// EventCountContext): the landing dashboard's background refresh runs it.
+func (s *Store) RecentShellSessionsContext(ctx context.Context, since time.Time, limit int) ([]ShellSessionSummary, error) {
 	if limit <= 0 {
 		limit = 30
 	}
-	out, err := s.sessionSummariesSince(since, 1, limit)
+	out, _, err := s.sessionSummaryPageContext(ctx, since, 1, limit)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.stampFirstCommands(since, out); err != nil {
+	if err := s.stampFirstCommands(ctx, since, out); err != nil {
 		return nil, err
 	}
 	// Stamp duration/arch from the side-channel. ShellSessionSummary embeds
@@ -346,7 +357,7 @@ func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionS
 			ids = append(ids, out[i].ID)
 		}
 	}
-	meta, err := s.SessionMetaForSessions(ids)
+	meta, err := s.SessionMetaForSessionsContext(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -409,9 +420,12 @@ FROM events WHERE source='cowrie' AND session_id=?`, sessionID)
 // beside all-time events/actors/IPs, and using len(RecentShellSessions) would be
 // worse still: that slice is LIMITed to 30, so the tile would read "30" forever
 // once a honeypot passed 30 sessions.
-func (s *Store) CountSessions() (int, error) {
+func (s *Store) CountSessions() (int, error) { return s.CountSessionsContext(context.Background()) }
+
+// CountSessionsContext is CountSessions under a context (see EventCountContext).
+func (s *Store) CountSessionsContext(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(DISTINCT session_id) FROM events
 WHERE source='cowrie' AND session_id != ''`).Scan(&n)
 	return n, err

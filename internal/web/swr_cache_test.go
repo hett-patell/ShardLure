@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -83,7 +84,7 @@ func TestSWRCacheMechanics(t *testing.T) {
 	var calls atomic.Int32
 	release := make(chan struct{})
 	fail := atomic.Bool{}
-	compute := func() (int, time.Time, error) {
+	compute := func(context.Context) (int, time.Time, error) {
 		n := calls.Add(1)
 		if n > 1 {
 			<-release
@@ -96,7 +97,7 @@ func TestSWRCacheMechanics(t *testing.T) {
 
 	// First ever: synchronous, and an error is returned to the caller.
 	fail.Store(true)
-	if _, err := c.get(&bg, time.Minute, func() (int, time.Time, error) { return 0, time.Time{}, errors.New("cold") }); err == nil {
+	if _, err := c.get(&bg, time.Minute, func(context.Context) (int, time.Time, error) { return 0, time.Time{}, errors.New("cold") }); err == nil {
 		t.Fatal("first computation's error was swallowed")
 	}
 	fail.Store(false)
@@ -147,5 +148,47 @@ func TestSWRCacheMechanics(t *testing.T) {
 	c.get(&bg, time.Minute, compute)
 	if n := calls.Load(); n != 4 {
 		t.Fatalf("refresh started after stop: %d computations", n)
+	}
+}
+
+// A refresh in flight at shutdown is cancelled, not awaited: bg.stop()
+// cancels the context compute runs on, the refresh returns at once, bg.wait()
+// does not block on the scan, and the cancelled result never replaces the
+// last good value (whether compute returned an error or a partial value).
+func TestSWRCacheRefreshIsCancelledByStop(t *testing.T) {
+	for _, returnsValue := range []bool{false, true} {
+		var bg handlerDrain
+		var c swrCache[int]
+		started := make(chan struct{})
+		compute := func(ctx context.Context) (int, time.Time, error) {
+			if ctx.Err() != nil { // only the refresh blocks; the first value is immediate
+				return 0, time.Time{}, ctx.Err()
+			}
+			select {
+			case <-started:
+			default:
+				close(started)
+				return 1, time.Now(), nil
+			}
+			<-ctx.Done() // a long scan, interrupted by shutdown
+			if returnsValue {
+				return 99, time.Now(), nil // a partial result must still be dropped
+			}
+			return 0, time.Time{}, ctx.Err()
+		}
+		if v, err := c.get(&bg, time.Minute, compute); err != nil || v != 1 {
+			t.Fatalf("first get = %d, %v", v, err)
+		}
+		c.expire(time.Hour)
+		if v, _ := c.get(&bg, time.Minute, compute); v != 1 {
+			t.Fatalf("stale get = %d, want last-good 1", v)
+		}
+		returnsWithin(t, time.Second, func() {
+			bg.stop()
+			bg.wait()
+		})
+		if v, ok := c.peek(); !ok || v != 1 {
+			t.Fatalf("returnsValue=%v: cancelled refresh replaced the value: %d %v", returnsValue, v, ok)
+		}
 	}
 }

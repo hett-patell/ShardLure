@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"time"
 )
@@ -62,11 +63,17 @@ func (s *Store) GetEnrichment(ip, source string) (*EnrichmentRecord, bool, error
 // The geo cache holds every IP the dashboard has ever resolved, so distinct
 // non-empty CCs there is a faithful "countries observed" count.
 func (s *Store) DistinctGeoCountryCount() (int, error) {
+	return s.DistinctGeoCountryCountContext(context.Background())
+}
+
+// DistinctGeoCountryCountContext is DistinctGeoCountryCount under a context
+// (see EventCountContext).
+func (s *Store) DistinctGeoCountryCountContext(ctx context.Context) (int, error) {
 	if err := s.EnsureEnrichmentTable(); err != nil {
 		return 0, err
 	}
 	var n int
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(DISTINCT json_extract(payload, '$.cc'))
 FROM ip_enrichment
 WHERE source='geo'

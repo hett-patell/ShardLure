@@ -376,36 +376,37 @@ func (s *Server) liveSummaryStatsCached() (*liveSummaryStats, error) {
 	return s.liveStats.get(&s.bg, statsTTL, s.computeLiveSummaryStats)
 }
 
-func (s *Server) computeLiveSummaryStats() (*liveSummaryStats, time.Time, error) {
-	ec, err := s.st.EventCount()
+// computeLiveSummaryStats and the other tier computes take the cache's
+// context, which is the server drain's (swrCache), never a request's: this
+// populates a shared cache, so binding it to whichever request triggered the
+// refresh would let one client disconnecting abort the refresh for everyone.
+// The drain context is cancelled only at shutdown, when an in-flight scan
+// should stop rather than delay exit.
+func (s *Server) computeLiveSummaryStats(ctx context.Context) (*liveSummaryStats, time.Time, error) {
+	ec, err := s.st.EventCountContext(ctx)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	ac, err := s.st.ActorCount()
+	ac, err := s.st.ActorCountContext(ctx)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	intents, err := s.st.CountsByIntent()
+	intents, err := s.st.CountsByIntentContext(ctx)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	playbooks, err := s.st.CountsByPlaybook()
+	playbooks, err := s.st.CountsByPlaybookContext(ctx)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	hourlyByKind, err := s.st.HourlyEventCountsByKind(72)
+	hourlyByKind, err := s.st.HourlyEventCountsByKindContext(ctx, 72)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 	// Read-only liveness of the sibling honeypot unit. Best-effort: an unknown
 	// value simply hides the readout rather than failing the cache refresh.
-	//
-	// context.Background() is deliberate, NOT an oversight: this populates a
-	// shared 10s cache (usually from a background refresh), so binding it to
-	// whichever request happened to trigger the refresh would let one client
-	// disconnecting abort the refresh for everyone. StartedAt applies its own
-	// 2s timeout, so nothing can hang.
-	cowrieUptime, cowrieUp := hostsvc.Uptime(context.Background(), s.cowrieUnit, time.Now())
+	// StartedAt applies its own 2s timeout, so nothing can hang.
+	cowrieUptime, cowrieUp := hostsvc.Uptime(ctx, s.cowrieUnit, time.Now())
 	return &liveSummaryStats{
 		Events: ec, Actors: ac, IntentCounts: intents, PlaybookCounts: playbooks,
 		HourlyByKind: hourlyByKind, CowrieUptime: cowrieUptime, CowrieUp: cowrieUp,
@@ -413,12 +414,12 @@ func (s *Server) computeLiveSummaryStats() (*liveSummaryStats, time.Time, error)
 }
 
 func (s *Server) distributionSummaryStatsCached() (*distributionSummaryStats, error) {
-	return s.distributionStats.get(&s.bg, distributionStatsTTL, func() (*distributionSummaryStats, time.Time, error) {
-		kinds, err := s.st.CountsByKind()
+	return s.distributionStats.get(&s.bg, distributionStatsTTL, func(ctx context.Context) (*distributionSummaryStats, time.Time, error) {
+		kinds, err := s.st.CountsByKindContext(ctx)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
-		sources, err := s.st.CountsBySource()
+		sources, err := s.st.CountsBySourceContext(ctx)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -430,28 +431,28 @@ func (s *Server) lifetimeSummaryStatsCached() (*lifetimeSummaryStats, error) {
 	return s.lifetimeStats.get(&s.bg, lifetimeStatsTTL, s.computeLifetimeSummaryStats)
 }
 
-func (s *Server) computeLifetimeSummaryStats() (*lifetimeSummaryStats, time.Time, error) {
-	ips, err := s.st.UniqueIPCount()
+func (s *Server) computeLifetimeSummaryStats(ctx context.Context) (*lifetimeSummaryStats, time.Time, error) {
+	ips, err := s.st.UniqueIPCountContext(ctx)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 	// Best-effort; 0 on error keeps the panel alive (and shortens the memo,
 	// see lifetimeStamp).
-	countries, countriesErr := s.st.DistinctGeoCountryCount()
-	topIPs, err := s.st.TopSourceIPs(25)
+	countries, countriesErr := s.st.DistinctGeoCountryCountContext(ctx)
+	topIPs, err := s.st.TopSourceIPsContext(ctx, 25)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	topUsers, err := s.st.TopUsernames(20)
+	topUsers, err := s.st.TopUsernamesContext(ctx, 20)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	topCommands, err := s.st.TopCommands(20)
+	topCommands, err := s.st.TopCommandsContext(ctx, 20)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 	// Best-effort like countries: 0 on error keeps the panel alive.
-	sessionCount, sessionsErr := s.st.CountSessions()
+	sessionCount, sessionsErr := s.st.CountSessionsContext(ctx)
 	geoSettled := countriesErr == nil && (countries > 0 || !s.geo.isEnabled())
 	return &lifetimeSummaryStats{
 		UniqueIPs: ips, Countries: countries, TopIPs: topIPs, TopUsers: topUsers,
@@ -502,12 +503,12 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 // recomputes it (swrCache); a failed refresh keeps the last-good value, and a
 // first computation that fails yields nil, keeping the landing dashboard alive.
 func (s *Server) dashExtraCachedValues() ([]store.HourCount, []store.ShellSessionSummary) {
-	extra, err := s.extraCache.get(&s.bg, statsTTL, func() (*dashExtra, time.Time, error) {
-		hourly, err := s.st.HourlyEventCounts(72)
+	extra, err := s.extraCache.get(&s.bg, statsTTL, func(ctx context.Context) (*dashExtra, time.Time, error) {
+		hourly, err := s.st.HourlyEventCountsContext(ctx, 72)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
-		shell, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
+		shell, err := s.st.RecentShellSessionsContext(ctx, time.Now().UTC().Add(-24*time.Hour), 30)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
