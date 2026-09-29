@@ -181,23 +181,28 @@ func (w *Worker) tick(ctx context.Context) error {
 			logf("campaigns: skipped %d Cowrie events with an unusable timestamp (no ts_unix_ns and unparseable ts); they are not recorded as evidence", skipped)
 		}
 	}()
+	done := false
 	for i := 0; i < w.maxWindows && ctx.Err() == nil && time.Since(start) < recordBudget; i++ {
 		res, err := w.st.RecordCampaignEvidence(ctx, w.window)
 		if err != nil {
 			return err // the window rolled back: its rows were not skipped yet
 		}
 		skipped += res.Skipped
-		if !res.Done {
-			// A backlog (first start, a burst, or the rows a replace-ingest
-			// re-inserted above the parked cursor): scheduled regroups wait
-			// until it drains, then one runs. A Wake still regroups at once.
-			w.drained = false
-			continue
+		if done = res.Done; done {
+			break
 		}
-		if !w.drained {
-			w.drained, w.pending = true, true
-		}
-		break
+	}
+	// Judged on how the tick ENDS, not per window: a burst larger than one
+	// window that drains inside this tick is ordinary ingest and must not
+	// owe an extra regroup. Only a backlog that outlives the tick (first
+	// start, a burst beyond the tick's budget, or the rows a replace-ingest
+	// re-inserted above the parked cursor) defers scheduled regroups until it
+	// drains, and then one runs. A Wake still regroups at once.
+	switch {
+	case !done:
+		w.drained = false
+	case !w.drained:
+		w.drained, w.pending = true, true
 	}
 	if err := ctx.Err(); err != nil {
 		return err

@@ -428,6 +428,39 @@ func TestBacklogAfterDrainDefersScheduledRegroup(t *testing.T) {
 	}
 }
 
+// A burst larger than one window that drains within the same tick is not a
+// backlog that outlived a tick: it must not force an extra regroup. Only a
+// tick that ENDS with the recorder not done defers the schedule and owes a
+// regroup once drained.
+func TestBurstDrainedWithinOneTickDoesNotForceRegroup(t *testing.T) {
+	st := openStore(t)
+	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
+	ctx := context.Background()
+	w := NewWorker(st, 90, t.TempDir())
+	t.Cleanup(func() { w.Close() })
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.drained || w.pending {
+		t.Fatalf("initial backlog: drained=%v pending=%v", w.drained, w.pending)
+	}
+	last := w.lastGroup
+	for i := 0; i < 5; i++ {
+		if err := st.InsertEvent(&models.Event{TS: time.Now().UTC(), Source: models.SourceCowrie, Kind: models.KindCommand,
+			SessionID: fmt.Sprintf("burst%d", i), ActorID: "cowrie:c", SrcIP: "198.51.100.2", Command: "uname -a"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.window, w.maxWindows = 1, 20 // five windows, all inside this tick
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.drained || w.pending || !w.lastGroup.Equal(last) {
+		t.Fatalf("burst drained within one tick forced a regroup: drained=%v pending=%v regrouped=%v",
+			w.drained, w.pending, !w.lastGroup.Equal(last))
+	}
+}
+
 // A cancelled regroup never classifies: familyOf fails closed.
 func TestFamilyOfFailsClosedOnCancel(t *testing.T) {
 	st := openStore(t)
