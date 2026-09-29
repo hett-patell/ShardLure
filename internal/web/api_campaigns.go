@@ -301,8 +301,56 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 	for _, x := range d.Sessions {
 		sessions = append(sessions, scriptSessionJSON{SessionID: x.SessionID, ActorID: x.ActorID, SrcIP: x.SrcIP, FirstSeen: campaignJSONTime(x.FirstSeen)})
 	}
-	writeCampaignJSON(w, map[string]any{"fingerprint": d.Fingerprint, "display": d.Display, "family": d.Family,
-		"sessions": sessions, "actors": nonNilStrings(d.Actors)})
+	out := map[string]any{"fingerprint": d.Fingerprint, "display": d.Display, "family": d.Family,
+		"sessions": sessions, "actors": nonNilStrings(d.Actors), "sessionsTotal": len(sessions)}
+	// The Scripts row counts the whole family, but GetScript lists only this
+	// fingerprint's sessions (capped at 500). Without the family block the
+	// dialog read "4 sessions" under a row claiming 6 and the other variants
+	// could not be opened at all (audit-web I1): carry the family totals and
+	// every variant with its session count, so the dialog says "this variant:
+	// N of M family sessions" and each variant opens through its fingerprint.
+	// A lookup failure only omits the block (the script itself still shows).
+	if fam, ok := s.scriptFamily(r.Context(), d.Family); ok {
+		variants := rawJSONList(fam.Variants)
+		out["variants"] = variants
+		out["familySessions"], out["familyActors"], out["familyIps"] = fam.Sessions, fam.Actors, fam.IPs
+		var vs []struct {
+			Fingerprint string `json:"fingerprint"`
+			Sessions    int    `json:"sessions"`
+		}
+		if json.Unmarshal(variants, &vs) == nil {
+			for _, v := range vs {
+				if v.Fingerprint == d.Fingerprint && v.Sessions > len(sessions) {
+					out["sessionsTotal"] = v.Sessions
+				}
+			}
+		}
+	}
+	writeCampaignJSON(w, out)
+}
+
+// scriptFamilyLookupLimit bounds the family lookup below: ListScriptFamilies
+// orders by sessions, so a family beyond it is one of the smallest, and the
+// dialog then shows the script without the family block.
+const scriptFamilyLookupLimit = 1000
+
+// scriptFamily returns the materialised script_families row for family.
+// There is no single-family store read yet, so it scans the bounded list; it
+// runs only when an analyst opens a script, never on a poll.
+func (s *Server) scriptFamily(ctx context.Context, family string) (store.ScriptFamilyRow, bool) {
+	if family == "" {
+		return store.ScriptFamilyRow{}, false
+	}
+	fams, err := s.st.ListScriptFamilies(ctx, scriptFamilyLookupLimit)
+	if err != nil {
+		return store.ScriptFamilyRow{}, false
+	}
+	for _, f := range fams {
+		if f.Family == family {
+			return f, true
+		}
+	}
+	return store.ScriptFamilyRow{}, false
 }
 
 // handleCampaignEdit validates and records one edit, then wakes the worker.
