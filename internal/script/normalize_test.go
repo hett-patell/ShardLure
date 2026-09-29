@@ -164,3 +164,49 @@ func TestHeredocAndWrappers(t *testing.T) {
 		t.Errorf("heredoc with trailing delimiter CommandCount = %d, want 2", n)
 	}
 }
+
+// Wrapper options and operands are skipped so the wrapped program keeps its
+// literal name: before, the program slot ended at the first option, so the
+// option value or the program itself was normalised (python3 became <tok>)
+// and program() reported the option ("-n") instead of the program.
+func TestWrapperOptionsKeepProgram(t *testing.T) {
+	for _, tc := range []struct{ in, want, prog string }{
+		{`nice -n 5 python3 x`, `nice -n <n> python3 x`, "python3"},
+		{`nice -19 python3 x`, `nice -19 python3 x`, "python3"},
+		{`sudo -u root python3 x`, `sudo -u root python3 x`, "python3"},
+		{`sudo -u abc123def python3 x`, `sudo -u <tok> python3 x`, "python3"},
+		{`sudo -E -- python3 x`, `sudo -E -- python3 x`, "python3"},
+		{`sudo --user=root python3 x`, `sudo --user=root python3 x`, "python3"},
+		{`timeout 30 wget http://x/y`, `timeout <n> wget <url>`, "wget"},
+		{`timeout -s 9 30 python3 x`, `timeout -s <n> <n> python3 x`, "python3"},
+		{`timeout --kill-after=5 30s python3 x`, `timeout --kill-after=5 30s python3 x`, "python3"},
+		{`env A=1 curl x`, `env A=1 curl x`, "curl"},
+		{`env -i python3 x`, `env -i python3 x`, "python3"},
+		{`nohup python3 x`, `nohup python3 x`, "python3"},
+		{`stdbuf -oL python3 x`, `stdbuf -oL python3 x`, "python3"},
+		{`stdbuf -o L python3 x`, `stdbuf -o L python3 x`, "python3"},
+		{`sudo nice -n 5 python3 x`, `sudo nice -n <n> python3 x`, "python3"},
+		{`nice -n 5 id`, `nice -n <n> id`, "id"},
+		// Unknown options stop wrapper parsing: every later word is
+		// normalised as an argument exactly as before, nothing is skipped,
+		// and program() names the wrapper rather than guessing.
+		{`sudo --weird python3 x`, `sudo --weird <tok> x`, "sudo"},
+		{`sudo -Z python3 x`, `sudo -Z <tok> x`, "sudo"},
+		{`nohup -x python3`, `nohup -x <tok>`, "nohup"},
+		{`sudo -u`, `sudo -u`, ""},
+		{`sudo -u; python3 x`, `sudo -u ; python3 x`, ""}, // first segment
+	} {
+		got := NormalizeCommand(tc.in)
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, s, tc.want)
+		}
+		if p := program(segments([][]string{got})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+	}
+	// A wrapped recon command is recon: `nice -n 5 id` used to report "-n"
+	// as its program and made recon-only scripts distinctive.
+	if Distinctive([][]string{NormalizeCommand("nice -n 5 id; timeout 3 uname -a; sudo -u root whoami; w; uptime")}) {
+		t.Error("wrapped recon must not be distinctive")
+	}
+}

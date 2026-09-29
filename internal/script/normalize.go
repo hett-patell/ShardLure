@@ -46,8 +46,32 @@ var (
 
 var (
 	operators = map[string]bool{";": true, "&&": true, "||": true, "|": true, "&": true}
-	// wrappers run the next word as the program (sudo wget, nohup ./x).
-	wrappers     = map[string]bool{"sudo": true, "nohup": true, "env": true, "exec": true, "command": true, "time": true, "nice": true, "busybox": true}
+	// wrappers run a later word as the program (sudo wget, nohup ./x).
+	// Their options are listed conservatively, from the tools' own usage:
+	// an option not listed here stops wrapper parsing, so the words after it
+	// are normalised as plain arguments (the behaviour before options were
+	// understood) rather than one of them being guessed to be the program.
+	// sudo -e/-l/-v and command -v/-V do not run their operand, and env -S
+	// carries the command inside its value, so they are deliberately absent.
+	wrappers = map[string]*wrapSpec{
+		"sudo": {flags: "AbEHiKknPS", valued: "CDgpRrTtUu", long: map[string]bool{
+			"user": true, "group": true, "prompt": true, "chdir": true, "chroot": true, "role": true,
+			"type": true, "command-timeout": true, "other-user": true, "close-from": true,
+			"preserve-env": false, "login": false, "shell": false, "non-interactive": false,
+			"background": false, "askpass": false, "stdin": false, "set-home": false,
+		}},
+		"nice": {valued: "n", long: map[string]bool{"adjustment": true}, numeric: true},
+		"timeout": {flags: "v", valued: "ks", operands: 1, long: map[string]bool{
+			"signal": true, "kill-after": true, "preserve-status": false, "foreground": false, "verbose": false,
+		}},
+		"env":     {flags: "i", valued: "Cu", long: map[string]bool{"ignore-environment": false, "unset": true, "chdir": true}},
+		"stdbuf":  {valued: "eio", long: map[string]bool{"input": true, "output": true, "error": true}},
+		"exec":    {flags: "cl", valued: "a"},
+		"command": {flags: "p"},
+		"time":    {flags: "p"},
+		"nohup":   {},
+		"busybox": {},
+	}
 	keyTypeWords = map[string]bool{"ed25519": true, "nistp256": true, "nistp384": true, "nistp521": true}
 	stripSeps    = strings.NewReplacer(tokSep, " ", lineSep, " ")
 	escapeNL     = strings.NewReplacer("\r", `\r`, "\n", `\n`)
@@ -60,6 +84,7 @@ func NormalizeCommand(cmd string) []string {
 	raw := tokenRe.FindAllString(cmd, -1)
 	out := make([]string, 0, len(raw))
 	start := true
+	var wrap *wrapState // non-nil while a wrapper's own words precede its program
 	heredoc, inBody := "", false
 	for i := 0; i < len(raw); i++ {
 		t := raw[i]
@@ -105,6 +130,21 @@ func NormalizeCommand(cmd string) []string {
 			start = false
 			continue
 		}
+		// A wrapper's options, option values and operands are ordinary
+		// arguments, but they keep the program slot open for the word after
+		// them. The role is decided on the normalised word, the form
+		// program() sees, so both agree on where the program is.
+		if start && wrap != nil && t != "\n" {
+			n := normalizeToken(t)
+			if r := wrap.next(n); r != wrapProgram {
+				out = append(out, n)
+				if r == wrapStop {
+					start, wrap = false, nil
+				}
+				continue
+			}
+		}
+		wrap = nil
 		switch {
 		case t == "\n":
 			t = ";" // a newline separates commands exactly like ";"
@@ -115,9 +155,84 @@ func NormalizeCommand(cmd string) []string {
 			t = normalizeToken(t)
 		}
 		out = append(out, t)
-		start = operators[t] || t == "(" || (start && (wrappers[t] || isAssignment(t)))
+		if start && wrappers[t] != nil {
+			wrap = &wrapState{name: t, spec: wrappers[t], operands: wrappers[t].operands}
+		}
+		start = operators[t] || t == "(" || (start && (wrap != nil || isAssignment(t)))
 	}
 	return out
+}
+
+// wrapSpec describes a wrapper's command line ahead of its program.
+type wrapSpec struct {
+	flags    string          // short options without a value
+	valued   string          // short options taking a value, attached or the next word
+	long     map[string]bool // long options; true = takes a value (next word unless --opt=v)
+	operands int             // words before the program (timeout's DURATION)
+	numeric  bool            // nice's historic -N form
+}
+
+type wrapRole int
+
+const (
+	wrapOwn     wrapRole = iota // the wrapper's own option, value or operand
+	wrapProgram                 // the program the wrapper runs
+	wrapStop                    // an unknown option: stop treating words as the wrapper's
+)
+
+type wrapState struct {
+	name     string
+	spec     *wrapSpec
+	value    bool // the next word is an option's value
+	operands int
+	endOpts  bool // after "--"
+}
+
+// next classifies the next (normalised) word after a wrapper.
+func (w *wrapState) next(n string) wrapRole {
+	switch {
+	case operators[n] || n == "(" || n == ")" || n == "<" || n == ">" || n == ">>" || n == "<<" || n == "<heredoc>" || redirRe.MatchString(n):
+		// Shell syntax is never a wrapper's word: `sudo -u ; id` must not
+		// swallow the ";" as the -u value and run on into the next command.
+		return wrapProgram
+	case w.value:
+		w.value = false
+		return wrapOwn
+	case !w.endOpts && n == "--":
+		w.endOpts = true
+		return wrapOwn
+	case !w.endOpts && len(n) > 1 && n[0] == '-':
+		return w.option(n)
+	case w.operands > 0:
+		w.operands--
+		return wrapOwn
+	}
+	return wrapProgram
+}
+
+func (w *wrapState) option(n string) wrapRole {
+	if long, ok := strings.CutPrefix(n, "--"); ok {
+		name, _, inline := strings.Cut(long, "=")
+		valued, known := w.spec.long[name]
+		if !known {
+			return wrapStop
+		}
+		w.value = valued && !inline
+		return wrapOwn
+	}
+	if w.spec.numeric && numRe.MatchString(n[1:]) {
+		return wrapOwn
+	}
+	for i := 1; i < len(n); i++ {
+		switch c := n[i]; {
+		case strings.IndexByte(w.spec.valued, c) >= 0:
+			w.value = i == len(n)-1 // otherwise the value is attached (-oL)
+			return wrapOwn
+		case strings.IndexByte(w.spec.flags, c) < 0:
+			return wrapStop
+		}
+	}
+	return wrapOwn
 }
 
 func isAssignment(t string) bool {
@@ -286,11 +401,27 @@ var recon = map[string]bool{
 }
 
 // program returns a simple command's program, skipping subshell parens,
-// variable assignments and redirections.
+// variable assignments, redirections and wrappers with their own options.
+// A wrapper followed by an option it does not know reports the wrapper
+// itself: guessing which later word is the program could name an argument.
 func program(seg []string) string {
+	var wrap *wrapState
 	for _, t := range seg {
-		if t == "(" || t == ")" || t == ">" || t == ">>" || t == "<" || t == "<<" || t == "<heredoc>" || wrappers[t] || redirRe.MatchString(t) ||
+		if wrap != nil {
+			switch wrap.next(t) {
+			case wrapOwn:
+				continue
+			case wrapStop:
+				return wrap.name
+			}
+			wrap = nil
+		}
+		if t == "(" || t == ")" || t == ">" || t == ">>" || t == "<" || t == "<<" || t == "<heredoc>" || redirRe.MatchString(t) ||
 			(strings.Contains(t, "=") && !strings.HasPrefix(t, "-")) || strings.HasSuffix(t, "$") {
+			continue
+		}
+		if spec := wrappers[t]; spec != nil {
+			wrap = &wrapState{name: t, spec: spec, operands: spec.operands}
 			continue
 		}
 		return path.Base(strings.Trim(t, `"'`))
