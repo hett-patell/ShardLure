@@ -1511,6 +1511,15 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 		}
 	}
 
+	// Campaign-derived rows follow event retention. This runs before the
+	// orphan-actor sweep so the bulk of an aged DB's lines goes in 5,000-row
+	// chunks here, leaving the sweep's single transaction only an orphan's
+	// sessions still inside retention. It takes writeMu per chunk via
+	// WithTxContext (writeMu is not reentrant), so it runs outside any lock.
+	if err := s.purgeCampaignDerived(ctx, cutoffTime); err != nil {
+		return err
+	}
+
 	// Actors are DERIVED from events, so an actor whose every event the sweep
 	// above deleted has no evidence left behind it. Those orphans kept a stale
 	// event_count, a playbook frozen at whatever the classifier said months
@@ -1574,6 +1583,14 @@ WHERE COALESCE(campaigns,'')=''
 		rows.Close()
 		// The campaign tables only change what is deleted for an actor the
 		// three guards above already selected; they never widen the selection.
+		// Lines go first, through their session rows, so no line is left
+		// without its session_scripts row (purgeCampaignDerived has no
+		// orphan-line step). Retention already ran and removed every session
+		// older than the cutoff in chunks, so this is only an orphan's
+		// sessions still inside retention: a handful of rows.
+		if err := deleteScriptLinesForActors(tx, orphanIDs); err != nil {
+			return err
+		}
 		for _, child := range []string{"actor_ips", "actor_users", "session_scripts", "campaign_evidence", "campaign_members"} {
 			if err := deleteStringRowsByKey(tx, child, "actor_id", orphanIDs); err != nil {
 				return err
@@ -1588,13 +1605,6 @@ WHERE COALESCE(campaigns,'')=''
 	}
 
 	if err := s.purgeCaptureDiagnostics(cutoffTime); err != nil {
-		return err
-	}
-
-	// Runs after the orphan sweep (which may leave script lines without their
-	// session row) and before the checkpoint block: purgeCampaignDerived takes
-	// writeMu per chunk via WithTxContext, and writeMu is not reentrant.
-	if err := s.purgeCampaignDerived(ctx, cutoffTime); err != nil {
 		return err
 	}
 
@@ -1744,6 +1754,25 @@ func deleteRowsByRowID(tx *sql.Tx, table string, ids []int64) error {
 			args = append(args, id)
 		}
 		if _, err := tx.Exec("DELETE FROM "+table+" WHERE rowid IN ("+placeholders+")", args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteScriptLinesForActors deletes the session_script_lines of every
+// session_scripts row owned by actorIDs, in the caller's transaction. It must
+// run before those session_scripts rows are deleted.
+func deleteScriptLinesForActors(tx *sql.Tx, actorIDs []string) error {
+	const chunk = 400
+	for start := 0; start < len(actorIDs); start += chunk {
+		end := min(start+chunk, len(actorIDs))
+		args := make([]any, 0, end-start)
+		for _, id := range actorIDs[start:end] {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec(`DELETE FROM session_script_lines WHERE session_id IN (SELECT session_id FROM session_scripts WHERE actor_id IN (?`+
+			strings.Repeat(",?", end-start-1)+`))`, args...); err != nil {
 			return err
 		}
 	}

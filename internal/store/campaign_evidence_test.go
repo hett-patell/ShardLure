@@ -652,3 +652,63 @@ func TestEvidenceBatchedWriteKeepsPerRowSemantics(t *testing.T) {
 	}
 	check("replay")
 }
+
+// The orphan-actor sweep removes an orphan's session_scripts rows and, in
+// the same transaction, their lines, so a purge never leaves lines without a
+// session row. Here the session's last_seen is inside retention (so the
+// retention steps keep it) while its actor has no events left: only the
+// sweep removes it, and nothing of it may remain.
+func TestOrphanSweepRemovesScriptLines(t *testing.T) {
+	s := newTestStore(t, "retention-orphan-lines.db")
+	old := time.Now().UTC().AddDate(0, 0, -120)
+	if err := upsertActor(s.db, &models.Actor{ID: "cowrie:gone", Source: models.SourceCowrie, FirstSeen: old, LastSeen: old}); err != nil {
+		t.Fatal(err)
+	}
+	recent := formatFixedUTC(time.Now().UTC())
+	for _, q := range []string{
+		`INSERT INTO session_scripts(session_id,actor_id,line_count,bytes,first_seen,last_seen,updated_at) VALUES('sx','cowrie:gone',2,5,'` + recent + `','` + recent + `','` + recent + `')`,
+		`INSERT INTO session_script_lines(session_id,event_id,line) VALUES('sx',1,'id'),('sx',2,'w')`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.MaintenancePurge(90); err != nil {
+		t.Fatal(err)
+	}
+	var actors, left int
+	s.db.QueryRow(`SELECT COUNT(*) FROM actors WHERE id='cowrie:gone'`).Scan(&actors)
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)`).Scan(&left)
+	if actors != 0 || left != 0 {
+		t.Fatalf("actor rows=%d, script rows left=%d", actors, left)
+	}
+}
+
+// Retention step 1 selects old sessions through the last_seen index and
+// their lines through the (session_id, event_id) key: a scan of either table
+// under writeMu is what the chunking exists to avoid.
+func TestPurgeScriptLinesPlan(t *testing.T) {
+	s := newTestStore(t, "retention-plan.db")
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+purgeOldScriptLinesQuery, formatFixedUTC(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var a, b, c int
+		var d string
+		if err := rows.Scan(&a, &b, &c, &d); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, d)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	j := strings.Join(plan, "\n")
+	if !strings.Contains(j, "SEARCH ss USING INDEX idx_session_scripts_last_seen (last_seen<?)") ||
+		!strings.Contains(j, "sqlite_autoindex_session_script_lines_1 (session_id=?)") || strings.Contains(j, "SCAN ") {
+		t.Fatalf("retention step 1 must seek both tables:\n%s", j)
+	}
+}

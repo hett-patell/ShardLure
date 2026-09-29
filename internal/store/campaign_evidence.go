@@ -543,40 +543,37 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 	return err
 }
 
+// purgeOldScriptLinesQuery is retention step 1, selected by line rowid so
+// each chunk is at most 5000 rows under writeMu (a session batch could be 300
+// lines per session). The join is the existence guard: every selected row is
+// deleted, so the next chunk cannot re-select it and the loop ends at zero.
+// TestPurgeScriptLinesPlan pins that it seeks both tables.
+const purgeOldScriptLinesQuery = `DELETE FROM session_script_lines WHERE rowid IN (SELECT l.rowid FROM session_scripts ss
+  JOIN session_script_lines l ON l.session_id=ss.session_id WHERE ss.last_seen < ? LIMIT 5000)`
+
 // purgeCampaignDerived applies event retention to derived rows, in bounded
 // chunks with writeMu released between them (like the events purge).
+//
+// There is no orphan-line step: lines lose their session row only if
+// something deletes session_scripts without its lines, and the one other
+// deleter (the orphan-actor sweep in MaintenancePurgeContext) removes both
+// together. The step it replaces was a LEFT JOIN over every line on every
+// purge.
 func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) error {
 	c := formatFixedUTC(cutoff)
-	steps := []struct {
-		q        string
-		cutoffed bool
-	}{
-		// Selected by line rowid so each chunk is at most 5000 rows under
-		// writeMu (a session batch could be 300 lines per session). The join
-		// is the existence guard: every selected row is deleted, so the next
-		// chunk cannot re-select it and the loop ends at zero.
-		{`DELETE FROM session_script_lines WHERE rowid IN (SELECT l.rowid FROM session_scripts ss
-  JOIN session_script_lines l ON l.session_id=ss.session_id WHERE ss.last_seen < ? LIMIT 5000)`, true},
-		{`DELETE FROM session_scripts WHERE rowid IN (SELECT ss.rowid FROM session_scripts ss WHERE ss.last_seen < ?
-  AND NOT EXISTS (SELECT 1 FROM session_script_lines l WHERE l.session_id=ss.session_id) LIMIT 5000)`, true},
-		{`DELETE FROM session_script_lines WHERE rowid IN (SELECT l.rowid FROM session_script_lines l
-  LEFT JOIN session_scripts ss ON ss.session_id=l.session_id WHERE ss.session_id IS NULL LIMIT 5000)`, false},
-		{`DELETE FROM campaign_evidence WHERE rowid IN (SELECT rowid FROM campaign_evidence WHERE last_seen < ? LIMIT 5000)`, true},
-	}
-	for _, st := range steps {
+	for _, q := range []string{
+		purgeOldScriptLinesQuery,
+		`DELETE FROM session_scripts WHERE rowid IN (SELECT ss.rowid FROM session_scripts ss WHERE ss.last_seen < ?
+  AND NOT EXISTS (SELECT 1 FROM session_script_lines l WHERE l.session_id=ss.session_id) LIMIT 5000)`,
+		`DELETE FROM campaign_evidence WHERE rowid IN (SELECT rowid FROM campaign_evidence WHERE last_seen < ? LIMIT 5000)`,
+	} {
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			var n int64
 			err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
-				var r sql.Result
-				var err error
-				if st.cutoffed {
-					r, err = tx.Exec(st.q, c)
-				} else {
-					r, err = tx.Exec(st.q)
-				}
+				r, err := tx.Exec(q, c)
 				if err != nil {
 					return err
 				}
