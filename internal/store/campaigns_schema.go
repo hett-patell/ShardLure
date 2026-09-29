@@ -114,17 +114,31 @@ CREATE TABLE IF NOT EXISTS campaign_edits (
   who TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
--- A normaliser version change re-encodes every script (ResetScriptsForVersion)
--- and keeps each session's old fingerprint here until the sessions have
--- settled again, so script assignments in campaign_ids can be carried to the
--- new fingerprints (released by ScriptRebuildHold). Empty outside a rebuild.
+-- GetCampaign reads a campaign's edits with campaign_id IN (...); the
+-- history is never purged, so an unindexed filter grows without bound.
+CREATE INDEX IF NOT EXISTS idx_campaign_edits_campaign ON campaign_edits(campaign_id);` + scriptVersionCarrySchema
+
+// scriptVersionCarrySchema is created by the v26 rung, NOT only by v25. It
+// was appended to campaignsSchema after the campaigns rc1 had shipped schema
+// v25 to production, and migrateCampaigns runs only `if current < 25`, so
+// that database was stamped 25 without the table: the first campaign tick's
+// ResetScriptsForVersion failed with "no such table: script_version_carry"
+// and the whole pipeline was dead while /metrics read healthy (fix-all review
+// C1). It stays in campaignsSchema too so a fresh database has it at v25, and
+// the v26 rung repeats it (IF NOT EXISTS) for every database v25 already
+// stamped. Any later addition to a shipped DDL constant needs the same
+// treatment: a new rung, and released_schema_test.go opens the shipped
+// shapes to prove it.
+//
+// A normaliser version change re-encodes every script (ResetScriptsForVersion)
+// and keeps each session's old fingerprint here until the sessions have
+// settled again, so script assignments in campaign_ids can be carried to the
+// new fingerprints (released by ScriptRebuildHold). Empty outside a rebuild.
+const scriptVersionCarrySchema = `
 CREATE TABLE IF NOT EXISTS script_version_carry (
   session_id TEXT PRIMARY KEY,
   fingerprint TEXT NOT NULL
-);
--- GetCampaign reads a campaign's edits with campaign_id IN (...); the
--- history is never purged, so an unindexed filter grows without bound.
-CREATE INDEX IF NOT EXISTS idx_campaign_edits_campaign ON campaign_edits(campaign_id);`
+);`
 
 func (s *Store) migrateCampaigns(now string) error {
 	return s.WithTx(func(tx *sql.Tx) error {

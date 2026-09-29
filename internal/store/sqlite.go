@@ -776,8 +776,15 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 	// events, so only those inserts pay (compare v9, which dropped a
 	// full-width write-amplifying index). The WHERE clauses must stay
 	// identical to the queries' predicates, or the planner cannot use them.
+	//
+	// The rung also creates script_version_carry: it was added to the v25 DDL
+	// after rc1 had stamped production at 25, so only a later rung reaches
+	// that database (see scriptVersionCarrySchema).
 	if current < 26 {
 		if err := s.WithTx(func(tx *sql.Tx) error {
+			if _, err := tx.Exec(scriptVersionCarrySchema); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_cmd ON events(actor_id, ts) WHERE command IS NOT NULL AND command != ''`); err != nil {
 				return err
 			}
