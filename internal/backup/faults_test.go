@@ -178,7 +178,7 @@ func TestInventoryReservesJSONEscapedNames(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("inert"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	root, err := openSource(dir, false, "evidence directory")
+	root, err := openSource(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}

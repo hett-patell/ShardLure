@@ -188,40 +188,7 @@ func TestCreateNamesRefusedOutputAncestor(t *testing.T) {
 	if path, reason, ok := RefusedPath(err); !ok || path != shared || reason == "" {
 		t.Fatalf("refused path not recoverable: %q %q %v", path, reason, ok)
 	}
-	if role, ok := RefusedSource(err); ok {
-		t.Fatalf("a refused output reported as a source (%q)", role)
-	}
 	if _, statErr := os.Stat(filepath.Join(shared, "backup")); !os.IsNotExist(statErr) {
 		t.Fatal("refused create wrote output")
-	}
-}
-
-// A refused source (here the configured evidence directory reached through
-// a symlink) is a safety refusal too, but the remedy is configuration, not
-// another --output: it must say which source it was, so the CLI does not
-// advise choosing an output directory (audit M-4). The category stays
-// ErrUnsafePath, the message stays path-free, and the path is recoverable.
-func TestCreateNamesRefusedSourceDirectory(t *testing.T) {
-	fixture := newFixture(t)
-	real := filepath.Join(t.TempDir(), "evidence-real")
-	if err := os.Rename(fixture.Evidence, real); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(real, fixture.Evidence); err != nil {
-		t.Fatal(err)
-	}
-	_, err := Create(context.Background(), CreateOptions{ConfigPath: fixture.Config, Output: filepath.Join(t.TempDir(), "backup"), AppVersion: "test", AppCommit: "inert"})
-	if !errors.Is(err, ErrUnsafePath) {
-		t.Fatalf("refused source reported as %v, want ErrUnsafePath", err)
-	}
-	role, ok := RefusedSource(err)
-	if !ok || !strings.HasPrefix(role, "evidence directory") {
-		t.Fatalf("refused source not attributed: role %q ok %v (%v)", role, ok, err)
-	}
-	if !strings.Contains(err.Error(), role) || strings.Contains(err.Error(), fixture.Evidence) {
-		t.Fatalf("message must name the role and not the path: %v", err)
-	}
-	if path, _, ok := RefusedPath(err); !ok || path == "" {
-		t.Fatalf("refused path not recoverable: %q %v", path, ok)
 	}
 }

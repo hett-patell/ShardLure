@@ -113,29 +113,18 @@ func (p *inventory) add(source *sourceRoot, name, relative, role string, expecte
 	return nil
 }
 
-// sourceRoles names each configured source for a refusal (SourceRefusal):
-// fixed text the operator can map back to the config key.
-var sourceRoles = map[string]string{
-	"evidence":         "evidence directory (capture.evidence_dir)",
-	"cowrie-logs":      "Cowrie log directory (cowrie.json_log)",
-	"cowrie-downloads": "Cowrie downloads directory (cowrie.home)",
-	"cowrie-tty":       "Cowrie tty directory (cowrie.home)",
-}
-
-// openSource opens a backup source; a safety refusal is tagged with role so
-// it is not mistaken for a refused output (see SourceRefusal).
-func openSource(path string, optional bool, role string) (*sourceRoot, error) {
+func openSource(path string, optional bool) (*sourceRoot, error) {
 	root, err := safefile.OpenRoot(path)
 	if optional && errors.Is(err, safefile.ErrNotExist) {
 		return &sourceRoot{path: path}, nil
 	}
 	if err != nil {
-		return nil, refusedSource(role, err)
+		return nil, err
 	}
 	info, err := root.Info()
 	if err != nil {
 		root.Close()
-		return nil, refusedSource(role, err)
+		return nil, err
 	}
 	return &sourceRoot{path, root, info}, nil
 }
@@ -174,7 +163,7 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 	if err != nil {
 		return manifest, ErrUnsafePath
 	}
-	configRoot, err := openSource(filepath.Dir(configPath), false, "config directory")
+	configRoot, err := openSource(filepath.Dir(configPath), false)
 	if err != nil {
 		return manifest, failure(ErrConfiguration, err, "")
 	}
@@ -318,7 +307,7 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 		}
 	}()
 	for _, role := range []string{"evidence", "cowrie-logs", "cowrie-downloads", "cowrie-tty"} {
-		source, err := openSource(roots[role], true, sourceRoles[role])
+		source, err := openSource(roots[role], true)
 		if err != nil {
 			return manifest, err
 		}
@@ -403,7 +392,7 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 		if err != nil {
 			return manifest, ErrUnsafePath
 		}
-		source, err := openSource(filepath.Dir(absolute), false, "--include file's directory")
+		source, err := openSource(filepath.Dir(absolute), false)
 		if err != nil {
 			return manifest, err
 		}
