@@ -57,16 +57,18 @@ func TestCampaignReloadKeepsMergeTarget(t *testing.T) {
 	}
 }
 
-// The dialog offers "clear name" (an empty rename) and empties the field
-// before sending, so the saved baseline matches and the reload is not held
-// back as unsaved typing. Asserted as text: there is no JS harness.
+// The dialog offers "clear name" (an empty rename) and empties the field only
+// once the clear succeeded, so a refused or timed-out clear leaves the field
+// as it was and a successful one does not block the reload as unsaved typing.
+// Asserted as text: there is no JS harness.
 func TestCampaignDialogClearsName(t *testing.T) {
 	start := strings.Index(intelHTML, "// ==== Campaigns and scripts")
 	end := strings.Index(intelHTML, "// ==== end campaigns and scripts")
 	block := intelHTML[start:end]
 	for _, want := range []string{
 		"actionButton('clear_name', 'clear name', { id: c.id }",
-		"document.getElementById('cm-name').value = '';\n    campaignEdit(b.dataset.id || '', 'rename', '', '');",
+		"if (saved === '' && n && n.value === _cmRendered.name) n.value = '';",
+		"    campaignEdit(b.dataset.id || '', 'rename', '', '');\n    return;",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("missing %q", want)

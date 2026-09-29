@@ -4827,7 +4827,11 @@ async function campaignEdit(id, action, arg, raw) {
     if (!r.ok) {
       const msg = await errorText(r);
       clearTimeout(abortTimer);
-      if (status) status.textContent = 'edit refused: ' + msg;
+      // errorText swallows the abort, so say that the refusal's reason timed
+      // out rather than showing its generic "request failed".
+      if (status) status.textContent = ctl.signal.aborted
+        ? 'edit refused (' + r.status + '); the reason could not be read within ' + (CAMPAIGN_EDIT_TIMEOUT_MS / 1000) + ' s'
+        : 'edit refused: ' + msg;
       failed();
       return;
     }
@@ -4852,7 +4856,14 @@ async function campaignEdit(id, action, arg, raw) {
   }
   if (_cmRendered) {
     const saved = raw == null ? arg : raw;
-    if (action === 'rename') _cmRendered.name = saved;
+    if (action === 'rename') {
+      // A clear empties the field only now that it succeeded (a refused or
+      // timed-out clear leaves the name, and the field, as they were), and
+      // only if the analyst has not typed a new name meanwhile.
+      const n = document.getElementById('cm-name');
+      if (saved === '' && n && n.value === _cmRendered.name) n.value = '';
+      _cmRendered.name = saved;
+    }
     if (action === 'notes') _cmRendered.notes = saved;
     if (action === 'merge') _cmRendered.merge = saved;
   }
@@ -4889,10 +4900,9 @@ document.getElementById('campaign-modal').addEventListener('click', function (e)
   if (a === 'actor') { closeCampaign(); setActiveView('overview'); selectedActor = b.dataset.actor; loadActorDetail(b.dataset.actor); return; }
   if (a === 'script') { openScript(b.dataset.fp); return; }
   if (a === 'clear_name') {
-    // Recorded as a rename with an empty name. Empty the field first so the
-    // saved baseline ('') matches it and the post-edit reload is not held
-    // back as unsaved typing.
-    document.getElementById('cm-name').value = '';
+    // Recorded as a rename with an empty name. campaignEdit empties the field
+    // once the server has accepted it, so the saved baseline ('') matches and
+    // the post-edit reload is not held back as unsaved typing.
     campaignEdit(b.dataset.id || '', 'rename', '', '');
     return;
   }
@@ -4900,7 +4910,11 @@ document.getElementById('campaign-modal').addEventListener('click', function (e)
   if (a === 'rename') {
     raw = document.getElementById('cm-name').value;
     arg = raw.trim();
-    if (!arg) { document.getElementById('cm-status').textContent = 'a name is required (to remove the name, use clear name)'; return; }
+    if (!arg) {
+      document.getElementById('cm-status').textContent = 'a name is required' +
+        (document.querySelector('#cm-body button[data-action="clear_name"]') ? ' (to remove the name, use clear name)' : '');
+      return;
+    }
   }
   if (a === 'notes') arg = raw = document.getElementById('cm-notes').value;
   if (a === 'merge') { raw = document.getElementById('cm-merge').value; arg = raw.trim(); }
