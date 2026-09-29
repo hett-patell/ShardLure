@@ -765,15 +765,22 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
-	// v26: a partial (actor_id, ts) index over command-bearing events, for
-	// LastCommandsForActors. idx_events_actor_ts cannot skip rows without a
-	// command, so finding an actor's newest command walked the whole history
-	// of every command-less actor (0.87 s per /api/intel request on 640k
-	// events). Commands are ~1% of events, so only those inserts pay for it
-	// (compare v9, which dropped a full-width write-amplifying index).
+	// v26: two partial indexes over command-bearing events. No existing index
+	// can skip rows without a command, so /api/intel walked far more than it
+	// returned: LastCommandsForActors went through every command-less actor's
+	// whole history (idx_events_actor_ts; 0.87 s per request on 640k events)
+	// and RecentCommands through every migrated row (~260 ms).
+	// idx_events_actor_cmd serves the per-actor newest command,
+	// idx_events_cmd_ts the global newest commands. Commands are ~1% of
+	// events, so only those inserts pay (compare v9, which dropped a
+	// full-width write-amplifying index). The WHERE clauses must stay
+	// identical to the queries' predicates, or the planner cannot use them.
 	if current < 26 {
 		if err := s.WithTx(func(tx *sql.Tx) error {
 			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_actor_cmd ON events(actor_id, ts) WHERE command IS NOT NULL AND command != ''`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_cmd_ts ON events(ts) WHERE command IS NOT NULL AND command != ''`); err != nil {
 				return err
 			}
 			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(26,?)`, now)

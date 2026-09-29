@@ -100,13 +100,34 @@ func (s *Store) labelCounts(query string) ([]LabelCount, error) {
 	return out, rows.Err()
 }
 
+// RecentCommands returns the newest `limit` command-bearing events (exact
+// time, ties by id), newest first.
+//
+// It used to be orderedGlobalEventQuery over every migrated row: with no index
+// that can skip rows without a command, the native branch visited the whole
+// table to find the ~1% with one, ~260 ms per /api/intel request on a
+// 640k-event database. The native branch now reads idx_events_cmd_ts (v26,
+// partial over command rows) newest-first and stops after `limit` rows; ts is
+// canonical fixed-width text for migrated rows and rowid breaks ties in index
+// order, so its first `limit` rows are exactly its newest. The legacy branch
+// stays on the pinned, shrinking idx_events_legacy_ts, as every global mixed
+// read does, and the merge re-applies the exact-time order and the limit.
 func (s *Store) RecentCommands(limit int) ([]CommandEvent, error) {
+	query, args := recentCommandsQuery(limit)
+	return s.commandEvents(query, args)
+}
+
+func recentCommandsQuery(limit int) (string, []any) {
 	if limit <= 0 {
 		limit = 50
 	}
-	query, args := orderedGlobalEventQuery(commandEventColumns, nil,
-		"command IS NOT NULL AND command != ''", nil, true, limit)
-	return s.commandEvents(query, args)
+	const pred = "command IS NOT NULL AND command != ''"
+	query := `SELECT * FROM (SELECT ` + commandEventColumns + `,ts AS exact_ts FROM events INDEXED BY idx_events_cmd_ts
+WHERE ` + pred + ` AND ts_unix_ns IS NOT NULL ORDER BY ts DESC, id DESC LIMIT ?)
+UNION ALL SELECT ` + commandEventColumns + `,` + legacyEventTimeSQL + ` AS exact_ts FROM events INDEXED BY idx_events_legacy_ts
+WHERE ts_unix_ns IS NULL AND (` + pred + `)
+ORDER BY exact_ts DESC, id DESC LIMIT ?`
+	return query, []any{limit, limit}
 }
 
 func (s *Store) EventsByActor(actorID string, limit int) ([]CommandEvent, error) {
