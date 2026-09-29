@@ -240,3 +240,88 @@ func TestOnlyCancellation(t *testing.T) {
 		}
 	}
 }
+
+// A hook that fails on its own with a cancellation-only error (an internal
+// timeout's DeadlineExceeded) is a real failure even if a SIGTERM arrives
+// while the others drain: the signal did not cause it. Judging "signalled"
+// from parent.Err() after the join forgave it and exited 0.
+func TestOwnFailureThenSignalDuringDrainStillFails(t *testing.T) {
+	parent, signal := context.WithCancel(context.Background())
+	defer signal()
+	draining, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runLiveLifecycle(parent, observability.New(time.Now, 0), liveHooks{
+			Seed: func(context.Context) error { return nil },
+			Serve: func(ctx context.Context) error {
+				<-ctx.Done()
+				close(draining)
+				<-release // still draining when the SIGTERM lands
+				return nil
+			},
+			Workers: func(context.Context) error { return fmt.Errorf("tick budget: %w", context.DeadlineExceeded) },
+			Close:   func() error { return nil },
+		})
+	}()
+	<-draining
+	signal()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("own failure forgiven because a signal arrived during the drain: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not join")
+	}
+}
+
+type cyclicErr struct{ next error }
+
+func (e *cyclicErr) Error() string { return "cyclic" }
+func (e *cyclicErr) Unwrap() error { return e.next }
+
+type cyclicJoin struct{ branches []error }
+
+func (e *cyclicJoin) Error() string   { return "cyclic join" }
+func (e *cyclicJoin) Unwrap() []error { return e.branches }
+
+// A cyclic or exponentially shared error graph must terminate and count as a
+// real error, not overflow the stack or be forgiven.
+func TestOnlyCancellationBoundedWalk(t *testing.T) {
+	self := &cyclicErr{}
+	self.next = self
+	a, b := &cyclicErr{}, &cyclicErr{}
+	a.next, b.next = b, a
+	loop := &cyclicJoin{}
+	loop.branches = []error{context.Canceled, loop}
+	// 40 levels of a two-way join that shares one child: 2^40 paths, depth 40.
+	var dag error = context.Canceled
+	for i := 0; i < 40; i++ {
+		dag = errors.Join(dag, dag)
+	}
+	deep := error(context.Canceled)
+	for i := 0; i < 200; i++ {
+		deep = fmt.Errorf("layer: %w", deep)
+	}
+	for name, err := range map[string]error{"self cycle": self, "two-cycle": a, "join cycle": loop, "shared DAG": dag, "200-deep chain": deep} {
+		done := make(chan bool, 1)
+		go func() { done <- onlyCancellation(err) }()
+		select {
+		case got := <-done:
+			if got {
+				t.Errorf("%s: unbounded chain forgiven as a cancellation", name)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: walk did not terminate", name)
+		}
+	}
+	// Within the bound a wrapped cancellation is still recognised.
+	shallow := error(context.Canceled)
+	for i := 0; i < 32; i++ {
+		shallow = fmt.Errorf("layer: %w", shallow)
+	}
+	if !onlyCancellation(shallow) {
+		t.Error("32-deep wrapped cancellation no longer recognised")
+	}
+}

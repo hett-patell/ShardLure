@@ -27,6 +27,12 @@ import (
 // machine is busy.
 const runtimeJoinBound = 60 * time.Second
 
+// sigtermJoinSlow is the looser, regression-sized budget for the SIGTERM join
+// of an idle runtime: well above what a loaded -race run takes (2-5 s), far
+// below runtimeJoinBound, so a creeping shutdown slowdown fails here long
+// before it would look like a hang.
+const sigtermJoinSlow = 15 * time.Second
+
 func TestRuntimeProductionAdapterServesAndJoins(t *testing.T) {
 	for _, live := range []bool{false, true} {
 		t.Run(map[bool]string{false: "web", true: "live"}[live], func(t *testing.T) {
@@ -74,7 +80,11 @@ func TestRuntimeProductionAdapterServesAndJoins(t *testing.T) {
 				if ready {
 					break
 				}
-				time.Sleep(10 * time.Millisecond)
+				select {
+				case err := <-done: // the runtime exited before readiness: fail now, not at the bound
+					t.Fatalf("runtime exited before readiness: %v", err)
+				case <-time.After(10 * time.Millisecond):
+				}
 			}
 			if !ready {
 				t.Error("production adapter never ready")
@@ -192,10 +202,16 @@ func TestRuntimeMainUsesProductionLifecycle(t *testing.T) {
 	if err := child.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
+	signalledAt := time.Now()
 	select {
 	case err := <-done:
+		joined := time.Since(signalledAt)
+		t.Logf("SIGTERM join took %v", joined)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if joined > sigtermJoinSlow {
+			t.Errorf("SIGTERM join took %v, over the %v regression budget", joined, sigtermJoinSlow)
 		}
 	case <-time.After(runtimeJoinBound):
 		t.Fatal("SIGTERM did not join runtime")
