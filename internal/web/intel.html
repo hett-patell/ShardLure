@@ -830,7 +830,7 @@
     font-family: var(--mono, monospace); font-size: 11px; padding: 1px 6px; margin: 1px 4px 1px 0;
     background: transparent; color: var(--blue-team); max-width: 100%;
     border: 1px solid var(--line-strong); border-radius: 3px; cursor: pointer;
-    overflow-wrap: break-word; text-align: left;
+    overflow-wrap: anywhere; text-align: left;
   }
   .cm-btn:hover { color: var(--accent); border-color: var(--accent); }
   .cm-badges { margin: 8px 0 4px; }
@@ -846,6 +846,15 @@
      the global fixed layout would ellipsise exactly what the analyst needs. */
   .cm-table { table-layout: auto; }
   .cm-table td { white-space: normal; overflow-wrap: break-word; text-overflow: clip; vertical-align: top; }
+  /* Member rows at 760 px: only overflow-wrap:anywhere lowers a cell's
+     min-content width, so the actor-ID and reason cells (39-character
+     cowrie:<hassh> IDs, key comments with no spaces) use it and wrap; with
+     break-word the table outgrew the dialog and pushed "remove" off-screen.
+     Short tokens (IP, playbook) and the action button stay on one line. */
+  .cm-table td.cm-wrap { overflow-wrap: anywhere; }
+  .cm-table td.cm-nw, .cm-table td.cm-act { white-space: nowrap; }
+  .cm-table td.cm-act { width: 1%; }
+  .cm-more { font-size: 11px; color: var(--dim); text-transform: none; letter-spacing: 0; }
 
   /* URLhaus sharing table. Attacker URLs are long and untrusted, so the cell
      truncates with an ellipsis (full value stays in the title attribute)
@@ -4627,6 +4636,13 @@ async function openCampaign(id) {
   } catch (e) { if (view === _cmView) cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
 }
 
+// ofTotal renders " (showing N of M)" when a capped list holds fewer rows
+// than the true total, else nothing.
+function ofTotal(shown, total) {
+  return (typeof total === 'number' && total > shown)
+    ? ' <span class="cm-more">(showing ' + esc(fmt(shown)) + ' of ' + esc(fmt(total)) + ')</span>' : '';
+}
+
 function renderCampaign(c) {
   document.getElementById('cm-title').textContent = c.name || c.suggestedName || c.id;
   document.getElementById('cm-sub').textContent = c.id + ' · ' + fmt(c.actors) + ' actors · ' + fmt(c.ips) + ' IPs · ' + fmt(c.sessions) +
@@ -4635,8 +4651,8 @@ function renderCampaign(c) {
   const members = (c.members || []).map(function (m) {
     (m.reasons || []).forEach(function (r) { values[r.kind + ':' + r.value] = r; });
     const why = (m.reasons || []).map(function (r) { return kindLabel(r.kind) + ' ' + (r.label || String(r.value || '').slice(0, 16)); }).join('; ');
-    return '<tr><td>' + actionButton('actor', m.actorId, { actor: m.actorId }, 'open actor ' + m.actorId) + '</td><td>' + esc(m.primaryIp) + '</td><td>' + esc(m.playbook) +
-      '</td><td class="num">' + fmt(m.sessions) + '</td><td>' + esc(why) + '</td><td>' +
+    return '<tr><td class="cm-wrap">' + actionButton('actor', m.actorId, { actor: m.actorId }, 'open actor ' + m.actorId) + '</td><td class="cm-nw">' + esc(m.primaryIp) + '</td><td class="cm-nw">' + esc(m.playbook) +
+      '</td><td class="num">' + fmt(m.sessions) + '</td><td class="cm-wrap">' + esc(why) + '</td><td class="cm-act">' +
       actionButton('remove_actor', 'remove', { id: c.id, arg: m.actorId }, 'remove actor ' + m.actorId + ' from this campaign') + '</td></tr>';
   }).join('');
   const evidence = Object.keys(values).sort().map(function (k) {
@@ -4644,11 +4660,13 @@ function renderCampaign(c) {
     const val = r.kind === 'script'
       ? actionButton('script', String(r.value || '').slice(0, 16), { fp: r.value }, 'open script ' + String(r.value || '').slice(0, 12))
       : '<code>' + esc(r.value) + '</code>';
-    return '<tr><td>' + esc(kindLabel(r.kind)) + '</td><td>' + val + '</td><td>' + esc(r.label) + '</td><td>' +
+    return '<tr><td>' + esc(kindLabel(r.kind)) + '</td><td>' + val + '</td><td>' + esc(r.label) + '</td><td class="cm-act">' +
       actionButton('ignore_evidence', 'ignore', { id: c.id, arg: k }, 'ignore this ' + kindLabel(r.kind) + ' as linking evidence') + '</td></tr>';
   }).join('');
-  const ctx = [['HASSH', c.hasshes], ['clients', c.clients], ['download hosts', c.hosts]].map(function (p) {
-    return (p[1] && p[1].length) ? '<div><b>' + esc(p[0]) + ':</b> ' + esc(p[1].join(', ')) + '</div>' : '';
+  // The API caps each list (500) and reports the true total beside it; say
+  // "N of M" wherever the cap bit, so a truncated list never reads as whole.
+  const ctx = [['HASSH', c.hasshes, c.hasshesTotal], ['clients', c.clients, c.clientsTotal], ['download hosts', c.hosts, c.hostsTotal]].map(function (p) {
+    return (p[1] && p[1].length) ? '<div><b>' + esc(p[0]) + ':</b> ' + esc(p[1].join(', ')) + ofTotal(p[1].length, p[2]) + '</div>' : '';
   }).join('');
   const edits = (c.edits || []).map(function (e) {
     const arg = (e.action === 'rename' && !e.arg) ? '(name cleared)' : e.arg;
@@ -4664,7 +4682,7 @@ function renderCampaign(c) {
       (c.name ? ' ' + actionButton('clear_name', 'clear name', { id: c.id }, 'clear the name; the suggested name shows again') : '') + '</div>' +
     '<div class="cm-row"><label for="cm-merge">merge into campaign ID</label> <input id="cm-merge" maxlength="14" placeholder="c-…" autocomplete="off"> ' +
       actionButton('merge', 'merge', { id: c.id }) + '</div>' +
-    '<h3 class="cm-h">members</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (members || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
+    '<h3 class="cm-h">members' + ofTotal((c.members || []).length, c.membersTotal) + '</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (members || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
     '<h3 class="cm-h">linking evidence</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (evidence || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
     '<h3 class="cm-h">context (never links)</h3>' + (ctx || '<div class="empty">none</div>') +
     '<h3 class="cm-h">notes</h3><textarea id="cm-notes" class="cm-notes" maxlength="4000" aria-label="Campaign notes">' + esc(c.notes) + '</textarea> ' +

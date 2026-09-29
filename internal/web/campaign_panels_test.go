@@ -93,3 +93,23 @@ func TestCampaignEditFetchTimesOut(t *testing.T) {
 		t.Error("edit timeout constant missing")
 	}
 }
+
+// At 760 px the member table outgrew the dialog (a 39-character actor ID has
+// no break opportunity under overflow-wrap:break-word) and pushed "remove"
+// off-screen. The ID and reason cells now wrap anywhere and the action cell
+// stays whole; checked in a browser, pinned here as text. Capped lists say
+// "showing N of M" from the API's totals.
+func TestCampaignDialogFitsAndDisclosesCaps(t *testing.T) {
+	for _, want := range []string{
+		".cm-table td.cm-wrap { overflow-wrap: anywhere; }",
+		".cm-table td.cm-nw, .cm-table td.cm-act { white-space: nowrap; }",
+		`'<tr><td class="cm-wrap">' + actionButton('actor'`,
+		`'</td><td class="cm-act">' +` + "\n      actionButton('remove_actor'",
+		"ofTotal((c.members || []).length, c.membersTotal)",
+		"['HASSH', c.hasshes, c.hasshesTotal], ['clients', c.clients, c.clientsTotal], ['download hosts', c.hosts, c.hostsTotal]",
+	} {
+		if !strings.Contains(intelHTML, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}
