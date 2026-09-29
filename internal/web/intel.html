@@ -4938,8 +4938,15 @@ async function campaignEdit(id, action, arg, raw) {
 // off its 'close' event rather than off closeCampaign (audit-web M4: Esc left
 // _cmHeld and _cmPending behind). The open check skips a close event that
 // lands after the dialog was already reopened.
+//
+// It also retires the view (_cmView++): an edit POST still in flight when the
+// dialog closed (Esc included) would otherwise land with view === _cmView and
+// park _cmHeld or schedule _cmPending into the closed dialog. Retired, its
+// reply takes the "analyst has moved on" path and only refreshes the lists.
 function campaignDialogClosed() {
   if (document.getElementById('campaign-modal').open) return;
+  _cmView++;
+  _cmRendered = null;
   _cmHeld = null;
   if (_cmPending) {
     // Nothing left to reload into, but the lists still owe the edit's result.
