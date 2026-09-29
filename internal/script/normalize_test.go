@@ -210,3 +210,40 @@ func TestWrapperOptionsKeepProgram(t *testing.T) {
 		t.Error("wrapped recon must not be distinctive")
 	}
 }
+
+// An attacker who types a placeholder literally (`echo "<url>"`) must not
+// produce the normaliser's own placeholder: before, that one echo made a
+// recon-only script Distinctive and collided with a real URL substitution.
+// Literal < and > inside words are encoded as <lt>/<gt>, which no
+// substitution produces, and Display shows them shell-style as \< and \>.
+func TestLiteralPlaceholdersAreEscaped(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`echo "<url>"`, `echo "<lt>url<gt>"`},
+		{`echo '<key>' > x`, `echo '<lt>key<gt>' > x`},
+		{`echo "a<b http://x/y>c"`, `echo "a<lt>b <url><gt>c"`},
+		{`echo "\http://x/y"`, `echo "\<url>"`},
+		{`echo "\<url>"`, `echo "\<lt>url<gt>"`},
+		{`echo "<lt>"`, `echo "<lt>lt<gt>"`},
+		{`echo "x<Abc123xyz789>1.2.3.4"`, `echo "x<lt><tok><gt><ip>"`},
+	} {
+		if got := norm(tc.in); got != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+	}
+	cmds := func(s string) [][]string { return [][]string{NormalizeCommand(s)} }
+	if Distinctive(cmds(`echo "<url>"; echo '<key>'; id; w; uptime`)) {
+		t.Error("literal placeholders typed by the attacker made recon distinctive")
+	}
+	if !Distinctive(cmds(`echo "a<b http://x/y"; id; w; uptime; whoami`)) {
+		t.Error("a real URL beside a literal < must stay distinctive")
+	}
+	if Fingerprint(EncodeLine(`echo "<url>"`)) == Fingerprint(EncodeLine(`echo "http://x/y"`)) {
+		t.Error("a literal <url> collided with a real URL")
+	}
+	if Fingerprint(EncodeLine(`echo "\<url>"`)) == Fingerprint(EncodeLine(`echo "\http://x/y"`)) {
+		t.Error("a backslash before a literal <url> collided with one before a real URL")
+	}
+	if got := Display(EncodeLine(`echo "<url>" > f`), 0); got != `echo "\<url\>" > f` {
+		t.Errorf("Display = %q", got)
+	}
+}

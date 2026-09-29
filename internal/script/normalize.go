@@ -26,6 +26,10 @@ const (
 	// exactly reversible without re-parsing quotes.
 	tokSep  = "\x1f"
 	lineSep = "\x1e"
+
+	// An attacker's literal < and > inside a word (see escapeLiterals).
+	litLT = "<lt>"
+	litGT = "<gt>"
 )
 
 var (
@@ -260,6 +264,47 @@ func normalizeToken(t string) string {
 			return r
 		}
 	}
+	if strings.ContainsAny(inner, "<>") {
+		return quote + escapeLiterals(inner) + quote
+	}
+	return quote + substitute(inner) + quote
+}
+
+// escapeLiterals encodes an attacker's own < and > as <lt> and <gt>, which
+// no substitution produces, so every <...> left in a word is either the
+// normaliser's placeholder or this escape: a typed `"<url>"` can neither
+// count as a URL toward Distinctive nor share a fingerprint with a real one.
+// A backslash escape (\<) would collide with a real placeholder after an
+// attacker's backslash (`"\http://x"` gives \<url>). Only quoted words can
+// hold < or >, the tokenizer splits them out elsewhere.
+//
+// The pieces between the literals are substituted independently, which is
+// exactly equivalent to substituting the whole word: no pattern can match
+// across a < or >, and one reads as a word boundary either way.
+func escapeLiterals(inner string) string {
+	var b strings.Builder
+	b.Grow(len(inner) + len(inner)/4)
+	for {
+		i := strings.IndexAny(inner, "<>")
+		if i < 0 {
+			b.WriteString(substitute(inner))
+			return b.String()
+		}
+		if i > 0 {
+			b.WriteString(substitute(inner[:i]))
+		}
+		if inner[i] == '<' {
+			b.WriteString(litLT)
+		} else {
+			b.WriteString(litGT)
+		}
+		inner = inner[i+1:]
+	}
+}
+
+// substitute replaces the randomised parts inside a word (or a piece of one
+// free of < and >) with placeholders.
+func substitute(inner string) string {
 	inner = keyBody.ReplaceAllStringFunc(inner, func(b string) string {
 		if isKeyBlob(b) {
 			return "<key>"
@@ -270,8 +315,7 @@ func normalizeToken(t string) string {
 	inner = ipRe.ReplaceAllString(inner, "<ip>")
 	inner = tmpRe.ReplaceAllString(inner, "/tmp/<f>")
 	inner = randomInside(inner)
-	inner = escapeNL.Replace(inner) // one command per encoded line
-	return quote + inner + quote
+	return escapeNL.Replace(inner) // one command per encoded line
 }
 
 // isKeyBlob reports whether b decodes to an SSH wire blob (length-prefixed
@@ -347,9 +391,13 @@ func Split(enc string) [][]string {
 	return out
 }
 
+// displayer renders the encoding for people: separators become spaces and
+// newlines, and escaped literals read shell-style as \< and \>.
+var displayer = strings.NewReplacer(tokSep, " ", lineSep, "\n", litLT, `\<`, litGT, `\>`)
+
 // Display renders an encoded script for people, capped at max bytes.
 func Display(enc string, max int) string {
-	s := strings.ReplaceAll(strings.ReplaceAll(enc, tokSep, " "), lineSep, "\n")
+	s := displayer.Replace(enc)
 	if max > 0 && len(s) > max {
 		cut := max
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
