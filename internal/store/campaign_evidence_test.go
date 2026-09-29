@@ -716,6 +716,9 @@ func TestPurgeScriptLinesPlan(t *testing.T) {
 	if j := plan(`DELETE FROM session_script_lines WHERE session_id IN (?,?)`, "a", "b"); !strings.Contains(j, "sqlite_autoindex_session_script_lines_1 (session_id=?)") || strings.Contains(j, "SCAN ") {
 		t.Fatalf("line delete must seek the line key:\n%s", j)
 	}
+	if j := plan(`DELETE FROM session_scripts WHERE session_id IN (?,?)`, "a", "b"); !strings.Contains(j, "sqlite_autoindex_session_scripts_1 (session_id=?)") || strings.Contains(j, "SCAN ") {
+		t.Fatalf("session delete must seek the session key:\n%s", j)
+	}
 }
 
 // Retention deletes a session's lines and its row in one transaction, so a
@@ -767,5 +770,26 @@ func TestSettleNeverSeesPartlyPurgedSession(t *testing.T) {
 	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM session_scripts)+(SELECT COUNT(*) FROM session_script_lines)`).Scan(&left)
 	if chunks < 2 || left != 0 {
 		t.Fatalf("chunks=%d left=%d", chunks, left)
+	}
+}
+
+// A campaign-derived retention failure is reported, but the orphan-actor
+// sweep still runs: derived data must not keep stale actors alive.
+func TestPurgeContinuesPastCampaignDerivedFailure(t *testing.T) {
+	s := newTestStore(t, "retention-campaign-fail.db")
+	old := time.Now().UTC().AddDate(0, 0, -120)
+	if err := upsertActor(s.db, &models.Actor{ID: "cowrie:gone", Source: models.SourceCowrie, FirstSeen: old, LastSeen: old}); err != nil {
+		t.Fatal(err)
+	}
+	purgeCampaignDerivedFail = func() error { return fmt.Errorf("boom") }
+	t.Cleanup(func() { purgeCampaignDerivedFail = nil })
+	err := s.MaintenancePurge(90)
+	if err == nil || !strings.Contains(err.Error(), "campaign-derived retention: boom") {
+		t.Fatalf("err = %v", err)
+	}
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM actors WHERE id='cowrie:gone'`).Scan(&n)
+	if n != 0 {
+		t.Fatal("the orphan sweep was skipped")
 	}
 }

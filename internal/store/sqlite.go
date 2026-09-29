@@ -1516,8 +1516,12 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 	// chunks here, leaving the sweep's single transaction only an orphan's
 	// sessions still inside retention. It takes writeMu per chunk via
 	// WithTxContext (writeMu is not reentrant), so it runs outside any lock.
-	if err := s.purgeCampaignDerived(ctx, cutoffTime); err != nil {
-		return err
+	// A failure here is derived data only: it must not skip the orphan sweep
+	// or the capture diagnostics below, so it is reported after them (a
+	// cancellation still stops the purge at once).
+	campaignErr := s.purgeCampaignDerived(ctx, cutoffTime)
+	if campaignErr != nil && ctx.Err() != nil {
+		return ctx.Err()
 	}
 
 	// Actors are DERIVED from events, so an actor whose every event the sweep
@@ -1619,6 +1623,9 @@ WHERE COALESCE(campaigns,'')=''
 		_, _ = s.db.Exec(`PRAGMA optimize`)
 	}()
 
+	if campaignErr != nil {
+		return fmt.Errorf("campaign-derived retention: %w", campaignErr)
+	}
 	return nil
 }
 

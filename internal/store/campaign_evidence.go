@@ -578,14 +578,19 @@ const purgeLineBudget = 5000
 // instead split a long session across chunks, and a settle running between
 // two chunks fingerprinted the surviving suffix as the session's script
 // (SettleSessionScripts reads outside writeMu; its guard checks updated_at,
-// which a purge does not change). Rows are deleted in the same transaction as
-// their lines, so no line is ever left without its session row.
+// which a purge does not change). Rows and lines are deleted in the same
+// transaction, so a reader sees a session either whole or gone.
 //
 // There is no orphan-line step: the one other deleter of session_scripts
 // (the orphan-actor sweep in MaintenancePurgeContext) removes lines with
 // their rows too. The step it replaces was a LEFT JOIN over every line on
 // every purge.
 func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) error {
+	if purgeCampaignDerivedFail != nil {
+		if err := purgeCampaignDerivedFail(); err != nil {
+			return err
+		}
+	}
 	c := formatFixedUTC(cutoff)
 	steps := []func(tx *sql.Tx) (int64, error){
 		func(tx *sql.Tx) (int64, error) {
@@ -610,7 +615,12 @@ func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) erro
 			if err != nil || len(ids) == 0 {
 				return 0, err
 			}
-			for _, table := range []string{"session_script_lines", "session_scripts"} {
+			// Rows before lines, the order ResetScriptsForVersion uses. In
+			// one transaction the order is invisible to readers (WAL
+			// snapshot); it is kept the same so every deleter follows the
+			// rule that matters across transactions: a session row is never
+			// left with some of its lines gone.
+			for _, table := range []string{"session_scripts", "session_script_lines"} {
 				if err := execBatched(ctx, tx, `DELETE FROM `+table+` WHERE session_id IN (`, `?`, `)`, len(ids), func(i int) []any { return []any{ids[i]} }); err != nil {
 					return 0, err
 				}
@@ -651,5 +661,8 @@ func (s *Store) purgeCampaignDerived(ctx context.Context, cutoff time.Time) erro
 }
 
 // purgeChunkDone, when set (tests only), runs after each committed retention
-// chunk.
-var purgeChunkDone func()
+// chunk; purgeCampaignDerivedFail, when set, can fail the whole step.
+var (
+	purgeChunkDone           func()
+	purgeCampaignDerivedFail func() error
+)

@@ -424,10 +424,6 @@ func TestFamilyPassDoesNotChainThroughMembers(t *testing.T) {
 // nearestReps takes the representatives nearest in token count, breaking
 // equal distances by fingerprint, only inside the length band, and returns
 // them in fingerprint order for AssignFamily's tie rule.
-
-// nearestReps takes the representatives nearest in token count, breaking
-// equal distances by fingerprint, only inside the length band, and returns
-// them in fingerprint order for AssignFamily's tie rule.
 func TestNearestRepsIsDeterministic(t *testing.T) {
 	b := map[int][]string{100: {"a", "b"}, 99: {"c"}, 101: {"d"}, 120: {"e"}, 130: {"f"}}
 	for _, tc := range []struct {

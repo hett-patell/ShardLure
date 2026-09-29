@@ -647,6 +647,12 @@ func (s *Store) campaignEditsFor(ctx context.Context, ids []string) ([]CampaignE
 // URL in Go, so SQL cannot count it: the distinct URLs are streamed and only
 // the host set is held (the old code read the first 500 URLs, which both
 // under-counted and could drop a host that sorted early).
+//
+// Cost: artifacts has no actor_id index, so this scans artifacts once per
+// call (EXPLAIN: SCAN ar, then a campaign_members key probe per row). It runs
+// only on demand (a campaign detail request, never a poll or a
+// worker tick), and artifacts holds thousands of rows, so no index is added
+// for it; revisit if the detail view is ever polled.
 func (s *Store) campaignHosts(ctx context.Context, id string) ([]string, int, error) {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, 0, err
