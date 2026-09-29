@@ -744,6 +744,9 @@ func TestHeredocBodyBoundCountsEncoding(t *testing.T) {
 		"lt":       strings.Repeat("<", 60000),
 		"lt-lines": strings.Repeat("<\n", 30000),
 		"one-line": strings.Repeat("ab ", 20000),
+		// Shorter than the room but escaped past it: the cut used to slice
+		// past the line's end and panic.
+		"short-lt": strings.Repeat("x", 3000) + "\n" + strings.Repeat("<", 900),
 	} {
 		got := NormalizeCommand("cat <<EOF\n" + body + "\nEOF\nid")
 		if len(got) != 5 || got[4] != "id" {

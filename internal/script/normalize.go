@@ -625,9 +625,11 @@ func (sc *scanner) skipBodies(docs []heredoc) []heredoc {
 				continue
 			}
 			if room := budget - len(litNL); room >= 0 {
-				enc = escapeLiterals(line[:runeCut(line, room)])
+				// The line may be shorter than the room (it is its
+				// escapes that do not fit): clamp before cutting.
+				enc = escapeLiterals(line[:runeCut(line, min(room, len(line)))])
 				if len(enc) > room {
-					enc = escapeLiterals(line[:runeCut(line, room/4)])
+					enc = escapeLiterals(line[:runeCut(line, min(room/4, len(line)))])
 				}
 				d.lines = append(d.lines, enc)
 			}
