@@ -84,25 +84,7 @@ func (s *Store) sessionSummariesSince(since time.Time, minCommands, limit int) (
 // grouped rows, before LIMIT). Grouping the window a second time just to count
 // doubled the cost of the slowest intel panel on prod.
 func (s *Store) sessionSummaryPage(since time.Time, minCommands, limit int) ([]ShellSessionSummary, int, error) {
-	window, args := sessionWindow(since)
-	query := `WITH w AS (` + window + `)
-SELECT session_id, MAX(src_ip), COALESCE(MAX(CASE WHEN username<>'' THEN username END),''),
-  COALESCE(MAX(hassh),''), COALESCE(MAX(ssh_client),''), COALESCE(MAX(actor_id),''),
-  MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END),
-  COUNT(*) OVER ()
-FROM w GROUP BY session_id`
-	// HAVING, not WHERE: "has commands" is a property of the whole session.
-	// Filtering rows would drop its login/connect events and corrupt every
-	// other aggregate (event count, start time, username).
-	if minCommands > 0 {
-		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
-		args = append(args, minCommands)
-	}
-	query += ` ORDER BY MAX(exact_ts) DESC, session_id ASC`
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
+	query, args := sessionSummaryQuery(since, minCommands, limit)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, 0, err
@@ -128,6 +110,65 @@ FROM w GROUP BY session_id`
 		out = append(out, ShellSessionSummary{SessionSummary: sum})
 	}
 	return out, total, rows.Err()
+}
+
+// shellCandidates lists the sessions with at least one command-bearing event
+// in the window, from those rows alone. Commands are ~1% of events and ~99.5%
+// of sessions are bare connects, so this is what keeps a "sessions with
+// commands" page from grouping every session of the window (3.5 s of a 60 s
+// ARM profile with the landing dashboard polled every 10 s).
+//
+// The native branch reads the window through the ts index; the unary + keeps
+// source out of index selection, because answering source='cowrie' from
+// idx_events_session walks every Cowrie row ever stored (the planner's choice
+// on an un-ANALYZEd database). The legacy branch stays on the pinned partial
+// index and puts the exact-time check FIRST, so a malformed legacy row in the
+// window still fails the query even when it carries no command, as it did when
+// the whole window was grouped.
+func shellCandidates(since time.Time) (string, []any) {
+	key := formatFixedUTC(since)
+	return `SELECT session_id FROM events WHERE ts_unix_ns IS NOT NULL AND ts>=? AND +source='cowrie' AND session_id<>'' AND COALESCE(command,'')<>''
+UNION SELECT session_id FROM events INDEXED BY idx_events_legacy_ts WHERE ts_unix_ns IS NULL AND ` + legacyEventTimeSQL + `>=? AND source='cowrie' AND session_id<>'' AND COALESCE(command,'')<>''`,
+		[]any{key, key}
+}
+
+func sessionSummaryQuery(since time.Time, minCommands, limit int) (string, []any) {
+	window, args := sessionWindow(since)
+	query := `WITH w AS (` + window + `)
+`
+	if minCommands > 0 {
+		// Only a session with a command in the window can pass the HAVING
+		// below, so aggregate just those sessions - every in-window event of
+		// each, looked up through idx_events_session - instead of the window.
+		// The legacy branch stays pinned (globalEventTimeBranches), as in
+		// sessionWindow: left unpinned it rides idx_events_session too, and
+		// SQLite then ran the Go timestamp function on every candidate row,
+		// native ones included (~7 allocations per event, measured).
+		candidates, candidateArgs := shellCandidates(since)
+		scoped, scopedArgs := globalEventTimeBranches("id,session_id,src_ip,username,hassh,ssh_client,actor_id,command,kind", &since,
+			"source='cowrie' AND session_id IN (SELECT session_id FROM c)", nil)
+		query = `WITH c AS (` + candidates + `), w AS (` + scoped + `)
+`
+		args = append(candidateArgs, scopedArgs...)
+	}
+	query += `SELECT session_id, MAX(src_ip), COALESCE(MAX(CASE WHEN username<>'' THEN username END),''),
+  COALESCE(MAX(hassh),''), COALESCE(MAX(ssh_client),''), COALESCE(MAX(actor_id),''),
+  MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END),
+  COUNT(*) OVER ()
+FROM w GROUP BY session_id`
+	// HAVING, not WHERE: "has commands" is a property of the whole session.
+	// Filtering rows would drop its login/connect events and corrupt every
+	// other aggregate (event count, start time, username).
+	if minCommands > 0 {
+		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
+		args = append(args, minCommands)
+	}
+	query += ` ORDER BY MAX(exact_ts) DESC, session_id ASC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	return query, args
 }
 
 // countSessionsSince counts the same population sessionSummariesSince lists,
