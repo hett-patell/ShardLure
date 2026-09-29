@@ -358,3 +358,80 @@ func TestScriptRebuildHoldEndsWhenTopEventsDeleted(t *testing.T) {
 		t.Fatalf("all settled, top events gone: held=%v err=%v", held, err)
 	}
 }
+
+// An interrupted reset must carry assignments from the fingerprint the
+// session had before the *first* attempt (store-pipeline audit M6). The crash
+// here landed after step 1 (the carry snapshot) and partway through step 2:
+// s1's rows are already deleted, s2's still exist with a fingerprint that is
+// not its pre-reset one (as if a re-settle had raced in), and the version was
+// never written. The rerun must keep both carry rows as they are (INSERT OR
+// IGNORE), and the release must move each campaign ID to the session's new
+// fingerprint.
+func TestInterruptedResetStillCarries(t *testing.T) {
+	s := newTestStore(t, "reset-crash.db")
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-time.Hour)
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", injector, "", "", old)
+	cowrieEvent(t, s, "s2", "cowrie:b", "command", "uname -a; cat /proc/cpuinfo; nproc; free -m; crontab -r", "", "", old)
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Minute), 10); err != nil || n != 2 {
+		t.Fatalf("settle %d %v", n, err)
+	}
+	f0a, f0b := strings.Repeat("1", 64), strings.Repeat("2", 64) // the pre-reset (old encoding) fingerprints
+	for _, q := range []string{
+		`INSERT INTO script_version_carry(session_id,fingerprint) VALUES('s1','` + f0a + `'),('s2','` + f0b + `')`,
+		`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('script','` + f0a + `','c-a',1),('script','` + f0b + `','c-b',2)`,
+		`DELETE FROM session_scripts WHERE session_id='s1'`,
+		`DELETE FROM session_script_lines WHERE session_id='s1'`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatalf("%v\n%s", err, q)
+		}
+	}
+	if reset, err := s.ResetScriptsForVersion(ctx, 99); err != nil || !reset {
+		t.Fatalf("rerun reset=%v err=%v", reset, err)
+	}
+	carry := map[string]string{}
+	rows, err := s.db.Query(`SELECT session_id, fingerprint FROM script_version_carry`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var sid, fp string
+		if err := rows.Scan(&sid, &fp); err != nil {
+			t.Fatal(err)
+		}
+		carry[sid] = fp
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if carry["s1"] != f0a || carry["s2"] != f0b || len(carry) != 2 {
+		t.Fatalf("carry after the rerun = %v; want the first attempt's snapshot kept", carry)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
+		t.Fatalf("rerun did not hold: %v %v", held, err)
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Hour), 10); err != nil || n != 2 {
+		t.Fatalf("re-settle %d %v", n, err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || held {
+		t.Fatalf("release: held=%v err=%v", held, err)
+	}
+	for sid, want := range map[string]string{"s1": "c-a", "s2": "c-b"} {
+		var got string
+		if err := s.db.QueryRow(`SELECT c.campaign_id FROM campaign_ids c JOIN session_scripts ss ON ss.fingerprint=c.value WHERE c.kind='script' AND ss.session_id=?`, sid).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s: campaign %q, %v; want %s carried to its new fingerprint", sid, got, err, want)
+		}
+	}
+	var stale int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM campaign_ids WHERE value IN (?,?)`, f0a, f0b).Scan(&stale); err != nil || stale != 0 {
+		t.Fatalf("old fingerprint rows left: %d, %v", stale, err)
+	}
+}

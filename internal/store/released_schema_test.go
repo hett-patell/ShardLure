@@ -297,6 +297,10 @@ func TestReleasedV25FirstWorkerTick(t *testing.T) {
 VALUES('s1','cowrie:h1','198.51.100.7',1,8,'` + stamp + `','` + stamp + `','` + stamp + `','` + stamp + `','` + strings.Repeat("a", 64) + `')`,
 		`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen) VALUES('` + strings.Repeat("a", 64) + `','uname|-a','uname -a',1,0,'` + stamp + `','` + stamp + `')`,
 		`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('campaign','evidence-v1',0,1,'','` + stamp + `')`,
+		// rc1 had grouped the script into a named campaign: the upgrade exists
+		// to carry that assignment to the script's new fingerprint.
+		`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('script','` + strings.Repeat("a", 64) + `','c-rc1',1)`,
+		`INSERT INTO campaigns(id,name,notes,updated_at) VALUES('c-rc1','Operator name','kept through the upgrade','` + stamp + `')`,
 	}
 	for _, q := range seed {
 		if _, err := raw.Exec(q); err != nil {
@@ -351,5 +355,30 @@ VALUES('s1','cowrie:h1','198.51.100.7',1,8,'` + stamp + `','` + stamp + `','` + 
 	var n int
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM session_scripts WHERE fingerprint<>''`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("re-settled sessions = %d, %v; want 1", n, err)
+	}
+	// The release, the path production takes (store-pipeline audit M5): the
+	// session re-settled under the new encoding, so the worker's hold check
+	// ends the hold and carries c-rc1 from the rc1 fingerprint to the new one.
+	var newFP string
+	if err := st.db.QueryRow(`SELECT fingerprint FROM session_scripts WHERE session_id='s1'`).Scan(&newFP); err != nil || newFP == strings.Repeat("a", 64) {
+		t.Fatalf("new fingerprint %q, %v", newFP, err)
+	}
+	if held, err := st.ScriptRebuildHold(ctx, time.Now()); err != nil || held {
+		t.Fatalf("hold with every session settled = %v, %v; want released", held, err)
+	}
+	var campaignID string
+	var seq int
+	if err := st.db.QueryRow(`SELECT campaign_id, seq FROM campaign_ids WHERE kind='script' AND value=?`, newFP).Scan(&campaignID, &seq); err != nil || campaignID != "c-rc1" || seq != 1 {
+		t.Fatalf("carried row = %q seq %d, %v; want c-rc1 seq 1 on the new fingerprint", campaignID, seq, err)
+	}
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM campaign_ids WHERE kind='script' AND value=?`, strings.Repeat("a", 64)).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("rc1 fingerprint row left behind: %d, %v", n, err)
+	}
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM script_version_carry`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("carry snapshot not emptied on release: %d, %v", n, err)
+	}
+	var name string
+	if err := st.db.QueryRow(`SELECT name FROM campaigns WHERE id='c-rc1'`).Scan(&name); err != nil || name != "Operator name" {
+		t.Fatalf("campaign name %q, %v", name, err)
 	}
 }
