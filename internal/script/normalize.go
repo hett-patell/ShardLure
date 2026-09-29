@@ -399,7 +399,8 @@ const ellipsis = "…"
 
 // Display renders an encoded script for people, capped at max bytes
 // including the ellipsis that marks a cut (a cap too small for the
-// ellipsis gets a bare prefix). The cut never splits a rune.
+// ellipsis gets a bare prefix); max <= 0 means no cap. The cut never
+// splits a rune.
 func Display(enc string, max int) string {
 	s := displayer.Replace(enc)
 	if max <= 0 || len(s) <= max {
