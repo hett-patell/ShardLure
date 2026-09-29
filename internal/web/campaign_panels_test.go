@@ -73,3 +73,23 @@ func TestCampaignDialogClearsName(t *testing.T) {
 		}
 	}
 }
+
+// A hung edit POST kept _cmFlight.n above zero, so every reload for that
+// view deferred forever. The POST now aborts after 15 s and takes the normal
+// failure path, which releases the flight count and reschedules the reload.
+func TestCampaignEditFetchTimesOut(t *testing.T) {
+	start := strings.Index(intelHTML, "async function campaignEdit(")
+	end := strings.Index(intelHTML, "function closeCampaign(")
+	if start < 0 || end < start {
+		t.Fatal("campaignEdit not found")
+	}
+	fn := intelHTML[start:end]
+	for _, want := range []string{"new AbortController()", "ctl.abort()", "signal: ctl.signal", "CAMPAIGN_EDIT_TIMEOUT_MS", "clearTimeout(abortTimer)"} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("campaignEdit missing %q", want)
+		}
+	}
+	if !strings.Contains(intelHTML, "const CAMPAIGN_EDIT_TIMEOUT_MS = 15000;") {
+		t.Error("edit timeout constant missing")
+	}
+}

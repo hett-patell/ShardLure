@@ -4738,6 +4738,12 @@ function scheduleCampaignReload(view, target) {
   _cmPending = entry;
 }
 
+// CAMPAIGN_EDIT_TIMEOUT_MS bounds one edit POST. The server only appends a
+// row and wakes the worker, so a healthy answer is milliseconds; a POST that
+// hangs (a stalled proxy, a wedged connection) used to hold _cmFlight above
+// zero and defer every reload of the dialog forever.
+const CAMPAIGN_EDIT_TIMEOUT_MS = 15000;
+
 // raw is the field's value at click time (arg may be trimmed): it, not the
 // live field, becomes the saved baseline, so keystrokes typed while the POST
 // is in flight stay unsaved and block the reload instead of being wiped.
@@ -4755,20 +4761,29 @@ async function campaignEdit(id, action, arg, raw) {
   };
   const status = document.getElementById('cm-status');
   if (status) status.textContent = 'saving…';
+  // The abort also covers reading a refusal's body, which can hang as well.
+  const ctl = new AbortController();
+  const abortTimer = setTimeout(function () { ctl.abort(); }, CAMPAIGN_EDIT_TIMEOUT_MS);
   let r;
   try {
-    r = await fetch('/api/intel/campaign/edit', { method: 'POST', body: new URLSearchParams({ id: id || '', action: action, arg: arg || '' }) });
+    r = await fetch('/api/intel/campaign/edit', { method: 'POST', signal: ctl.signal, body: new URLSearchParams({ id: id || '', action: action, arg: arg || '' }) });
+    if (!r.ok) {
+      const msg = await errorText(r);
+      clearTimeout(abortTimer);
+      if (status) status.textContent = 'edit refused: ' + msg;
+      failed();
+      return;
+    }
   } catch (e) {
-    if (status) status.textContent = 'edit failed: ' + e.message;
+    clearTimeout(abortTimer);
+    // Timed out: the server may still have recorded it (reopen to check).
+    if (status) status.textContent = e.name === 'AbortError'
+      ? 'edit timed out after ' + (CAMPAIGN_EDIT_TIMEOUT_MS / 1000) + ' s; it may or may not have been saved (reopen to check)'
+      : 'edit failed: ' + e.message;
     failed();
     return;
   }
-  if (!r.ok) {
-    const msg = await errorText(r);
-    if (status) status.textContent = 'edit refused: ' + msg;
-    failed();
-    return;
-  }
+  clearTimeout(abortTimer);
   landed();
   if (status) status.textContent = 'applying…';
   if (view !== _cmView) {
