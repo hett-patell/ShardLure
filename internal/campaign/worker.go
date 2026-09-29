@@ -48,9 +48,19 @@ const (
 	unclassified = "\x00unclassified"
 )
 
-// genericFamilies are public builds that many unrelated operators deploy.
+// genericFamilies are public builds that many unrelated operators deploy
+// byte-identically, so their hash says nothing about who deployed them:
+// XMRig, the c3pool miner ("Coinminer"), and the Traffmonetizer proxyware
+// client (audit M-7: the vendor's public ELF, which the classifier names
+// from its literal brand). Commonness (>25 actors, or >=5 and >2% of the
+// population) catches them at scale; on a small honeypot two unrelated
+// operators are below that floor and would be one campaign. The exclusion
+// is by family label, so a dropper script the classifier names after the
+// same brand is excluded too, exactly as xmrig and c3pool droppers already
+// were: those one-liners are shared publicly as well, and the session
+// still links through the script it typed and any key it injected.
 // Compared lower-case: bazaar.Classify returns "XMRig".
-var genericFamilies = map[string]bool{"xmrig": true, "coinminer": true}
+var genericFamilies = map[string]bool{"xmrig": true, "coinminer": true, "traffmonetizer": true}
 
 // linkingKinds are the evidence kinds that may link sessions. HASSH, client
 // version and download host are context only and never link.
@@ -93,13 +103,16 @@ type Worker struct {
 	// pinned descriptor; rootPath is the absolute configured path artifact
 	// paths are made relative to. nil until an open succeeds, so a root that
 	// does not exist yet is retried on a later pass.
-	root      *safefile.Root
-	rootPath  string
-	lastGroup time.Time
-	drained   bool
-	pending   bool // regroup owed: backlog just drained, or the last attempt failed
-	failures  int
-	retryAt   time.Time
+	root     *safefile.Root
+	rootPath string
+	// rootFailed is set while the evidence root cannot be opened, so the
+	// failure is logged once per streak, and its recovery once.
+	rootFailed bool
+	lastGroup  time.Time
+	drained    bool
+	pending    bool // regroup owed: backlog just drained, or the last attempt failed
+	failures   int
+	retryAt    time.Time
 	// lastErr is the failure that started the current backoff; Tick returns
 	// it on every tick inside the window so the caller keeps reporting it.
 	lastErr error
@@ -674,21 +687,32 @@ func (w *Worker) familyOf(ctx context.Context, sha string) string {
 
 // evidence opens the evidence root once per worker. A failure (the directory
 // does not exist yet, a symlinked or unsupported root) is not remembered, so
-// it is retried on the next lookup; until then payloads fail closed.
+// it is retried on the next lookup; until then payloads fail closed. That
+// state used to be silent: with a symlinked or unsupported root every
+// payload was unclassified and never linked, forever, and the operator saw
+// only that payload links never formed (audit M-5). It is logged once per
+// streak, by safefile category only (no path), and its recovery once.
 func (w *Worker) evidence() (*safefile.Root, error) {
 	if w.root != nil {
 		return w.root, nil
 	}
 	abs, err := filepath.Abs(w.evidenceRoot)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		var r *safefile.Root
+		if r, err = safefile.OpenRoot(abs); err == nil {
+			w.root, w.rootPath = r, abs
+			if w.rootFailed {
+				logf("campaigns: the evidence root opened; payloads are classified again")
+				w.rootFailed = false
+			}
+			return r, nil
+		}
 	}
-	r, err := safefile.OpenRoot(abs)
-	if err != nil {
-		return nil, err
+	if !w.rootFailed {
+		logf("campaigns: the evidence root cannot be opened (%s); payloads stay unclassified and do not link until it can (the configured directory must exist, be a real directory with no symlink on its path, and sit on a supported filesystem)", safefile.Category(err))
+		w.rootFailed = true
 	}
-	w.root, w.rootPath = r, abs
-	return r, nil
+	return nil, err
 }
 
 // relativeTo maps an artifact's recorded absolute path onto the root. Only a

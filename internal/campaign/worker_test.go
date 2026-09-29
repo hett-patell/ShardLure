@@ -71,12 +71,15 @@ func TestPayloadAndCommonFilters(t *testing.T) {
 		row("payload", "unknown", "s1", "a", -1), row("payload", "unknown", "s2", "b", -1), // unknown size: fail closed
 		row("payload", "tiny", "s1", "a", 8), row("payload", "tiny", "s2", "b", 8),
 		row("payload", "miner", "s1", "a", 5000), row("payload", "miner", "s2", "b", 5000),
+		row("payload", "proxyware", "s1", "a", 5000), row("payload", "proxyware", "s2", "b", 5000),
 		row("payload", "good", "s1", "a", 5000), row("payload", "good", "s2", "b", 5000),
 	}
 	for i := 0; i < 30; i++ { // a key used by 30 actors is common
 		ev = append(ev, row("ssh_key", "SHA256:kit", fmt.Sprintf("k%d", i), fmt.Sprintf("actor%d", i), -1))
 	}
-	fam := map[string]string{"miner": "coinminer"}
+	// The vendor's public Traffmonetizer client is byte-identical for every
+	// operator (M-7): generic, like the miners.
+	fam := map[string]string{"miner": "coinminer", "proxyware": "Traffmonetizer"}
 	got := linkingOccurrences(ev, nil, 5000, func(sha string) string { return fam[sha] })
 	for _, o := range got {
 		if o.Value != "good" {
@@ -372,11 +375,14 @@ func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 }
 
 // The evidence root is opened once, lazily, and a root that is missing at the
-// first lookup is retried (not remembered as a failure) once it appears.
+// first lookup is retried (not remembered as a failure) once it appears. The
+// failure is logged once per streak, by category and without the path, and
+// the recovery once (M-5: a root that never opens used to be silent).
 func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "evidence")
+	logs := captureLog(t)
 	w := NewWorker(st, 90, root)
 	t.Cleanup(w.Close)
 	w.classify = func(*os.File) (string, error) { return "", nil }
@@ -384,8 +390,13 @@ func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
 	if err := st.RecordArtifact(store.Artifact{TS: time.Now().UTC(), SHA256: "aa", LocalPath: p, SizeBytes: 100, Status: "fetched", Origin: "cowrie_download", URL: "cowrie-download:aa"}); err != nil {
 		t.Fatal(err)
 	}
-	if f := w.familyOf(ctx, "aa"); f != unclassified || w.root != nil {
-		t.Fatalf("missing root: family %q root %v", f, w.root)
+	for i := 0; i < 3; i++ {
+		if f := w.familyOf(ctx, "aa"); f != unclassified || w.root != nil {
+			t.Fatalf("missing root: family %q root %v", f, w.root)
+		}
+	}
+	if n := strings.Count(logs.String(), "evidence root cannot be opened (ErrNotExist)"); n != 1 || strings.Contains(logs.String(), root) {
+		t.Fatalf("root failure logged %d times over 3 lookups (want once, path-free):\n%s", n, logs.String())
 	}
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -395,6 +406,23 @@ func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
 	}
 	if f := w.familyOf(ctx, "aa"); f != "" || w.root == nil {
 		t.Fatalf("root not opened once present: family %q", f)
+	}
+	if !strings.Contains(logs.String(), "evidence root opened") {
+		t.Fatalf("recovery not logged:\n%s", logs.String())
+	}
+	// A symlinked root is the case that never recovers on its own: its
+	// category must name the check that failed.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	linked := NewWorker(st, 90, link)
+	linked.classify = w.classify
+	if f := linked.familyOf(ctx, "aa"); f != unclassified {
+		t.Fatalf("symlinked root classified: %q", f)
+	}
+	if !strings.Contains(logs.String(), "evidence root cannot be opened (ErrUnsafePath)") {
+		t.Fatalf("symlinked root not logged by category:\n%s", logs.String())
 	}
 	opened := w.root
 	delete(w.families, "aa")
