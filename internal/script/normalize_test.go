@@ -645,3 +645,31 @@ func TestPlaceholdersStopAtBacktick(t *testing.T) {
 		t.Error("the closed and unclosed backtick forms collided")
 	}
 }
+
+// Quoted text normalises per-victim numbers and hex like whole tokens do
+// (spec §1: "in whole tokens and inside quoted strings"), and a real newline
+// inside quotes no longer encodes like a typed \n (audit M4).
+func TestQuotedTextNormalisation(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`echo "root:123456789" | chpasswd`, `echo "root:<n>" | chpasswd`},
+		{`echo "k=deadbeefdeadbeef00 x"`, `echo "k=<hex> x"`},
+		{`echo "port 8080 mode 777"`, `echo "port 8080 mode 777"`}, // short numbers stay
+		{"echo \"a\nb\"", `echo "a<nl>b"`},
+		{"echo \"a\r\nb\"", `echo "a<cr><nl>b"`},
+		{`echo "a\nb"`, `echo "a\nb"`},
+		{`echo "root\n123456789"`, `echo "root\n<n>"`},
+	} {
+		if got := norm(tc.in); got != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+	}
+	if EncodeLine(`echo "root:123456789" | chpasswd`) != EncodeLine(`echo "root:987654321" | chpasswd`) {
+		t.Error("a per-victim password changed the encoding")
+	}
+	if EncodeLine("echo \"a\nb\"") == EncodeLine(`echo "a\nb"`) {
+		t.Error("a real newline and a typed \\n collided")
+	}
+	if got := Display(EncodeLine("echo \"a\nb\""), 0); got != `echo "a\nb"` {
+		t.Errorf("Display = %q", got)
+	}
+}

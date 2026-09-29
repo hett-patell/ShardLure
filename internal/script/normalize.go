@@ -41,7 +41,8 @@ import (
 // its placeholder token; reserved words and braces are not programs (and
 // keep the program slot open), N<file, <> and >| are redirections, a
 // quoted program name ('id') keeps its name, and URLs, IPs and /tmp names
-// stop at a backtick.
+// stop at a backtick, and quoted text replaces hex runs (>= 16) and
+// numbers (>= 6 digits) and encodes a real line break as <nl>/<cr>.
 const Version = 4
 
 const (
@@ -65,6 +66,7 @@ const (
 	// MaxHeredocBodyBytes.
 	heredocTok = "<heredoc>"
 	litNL      = "<nl>"
+	litCR      = "<cr>"
 	litMore    = "<more>"
 
 	// MaxHeredocBodyBytes bounds how much of one heredoc body enters its
@@ -93,6 +95,10 @@ var (
 	randRe   = regexp.MustCompile(`\b(?:[A-Za-z]*\d[A-Za-z0-9]*[A-Za-z]|[A-Za-z]+\d)[A-Za-z0-9]*\b`)
 	tmpRe    = regexp.MustCompile("/tmp/[^\\s/\"'|;&<>()`]+")
 	markerRe = regexp.MustCompile(`^[A-Za-z0-9]{1,4}$`)
+	// Inside quoted text: hex runs and numbers long enough to be per-victim
+	// (the 6-digit floor keeps ports and modes such as 8080 and 777).
+	hexIn = regexp.MustCompile(`\b[0-9a-fA-F]{16,}\b`)
+	numIn = regexp.MustCompile(`\b\d{6,}\b`)
 )
 
 var (
@@ -125,7 +131,9 @@ var (
 	}
 	keyTypeWords = map[string]bool{"ed25519": true, "nistp256": true, "nistp384": true, "nistp521": true}
 	stripSeps    = strings.NewReplacer(tokSep, " ", lineSep, " ")
-	escapeNL     = strings.NewReplacer("\r", `\r`, "\n", `\n`)
+	// A real line break inside a word encodes as a placeholder, not as \n:
+	// a typed backslash-n and a real newline used to encode alike (audit M4).
+	escapeNL = strings.NewReplacer("\r", litCR, "\n", litNL)
 )
 
 // NormalizeCommand splits cmd into shell tokens and replaces the parts bots
@@ -700,11 +708,16 @@ func wholeToken(t string) (string, bool) {
 	return "", false
 }
 
-// randomInside replaces mixed letter+digit words of >= 6 chars (random
-// passwords, file names) inside a larger token, keeping `\n` escapes.
+// randomInside replaces hex runs of >= 16 chars, numbers of >= 6 digits and
+// mixed letter+digit words of >= 6 chars (random passwords, file names)
+// inside a larger token, keeping `\n` escapes: whole tokens get the same
+// treatment in wholeToken, and quoted text used to keep per-victim numbers
+// (`"root:123456789"`, audit M4).
 func randomInside(s string) string {
 	parts := strings.Split(s, `\n`)
 	for i, p := range parts {
+		p = hexIn.ReplaceAllString(p, "<hex>")
+		p = numIn.ReplaceAllString(p, "<n>")
 		parts[i] = randRe.ReplaceAllStringFunc(p, func(w string) string {
 			if len(w) >= 6 && !keyTypeWords[w] {
 				return "<tok>"
@@ -742,7 +755,7 @@ func Split(enc string) [][]string {
 // newlines, and escaped literals read shell-style as \< and \>.
 // A heredoc body's line breaks read as \n, so the body stays inside its
 // command's line: `cat << <heredoc>\nwget <url>\nsh x > /tmp/<f>`.
-var displayer = strings.NewReplacer(tokSep, " ", lineSep, "\n", litLT, `\<`, litGT, `\>`, litNL, `\n`)
+var displayer = strings.NewReplacer(tokSep, " ", lineSep, "\n", litLT, `\<`, litGT, `\>`, litNL, `\n`, litCR, `\r`)
 
 const ellipsis = "…"
 
