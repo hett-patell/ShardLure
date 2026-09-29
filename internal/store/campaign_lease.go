@@ -85,3 +85,48 @@ func (s *Store) CampaignLeaseHolder(ctx context.Context) (string, time.Time, err
 	}
 	return holder.String, time.Unix(0, until), nil
 }
+
+// ErrCampaignLeaseLost means the lease row no longer names the caller as an
+// unexpired holder, so a write that assumes single ownership was refused.
+var ErrCampaignLeaseLost = errors.New("campaign lease: not held by this owner")
+
+// RenewCampaignLease extends owner's lease by ttl from now and reports
+// whether it did. Unlike AcquireCampaignLease it never inserts a missing row
+// and never takes over an expired one: a holder whose lease lapsed during a
+// phase (a stall past the TTL, a wall-clock step) must not get it back here
+// and carry on, because another process may have held it, run the pipeline
+// and released it in between; only the start of a tick takes over.
+func (s *Store) RenewCampaignLease(ctx context.Context, owner string, now time.Time, ttl time.Duration) (bool, error) {
+	if owner == "" || now.IsZero() || ttl <= 0 || ttl > time.Hour {
+		return false, ErrCampaignLeaseInvalid
+	}
+	held := false
+	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		r, err := tx.ExecContext(ctx, `UPDATE ingest_state SET offset=?, updated_at=? WHERE source=? AND path=? AND head_sig=? AND offset>?`,
+			now.Add(ttl).UnixNano(), formatFixedUTC(now), campaignLeaseSource, campaignLeasePath, owner, now.UnixNano())
+		if err != nil {
+			return err
+		}
+		n, err := r.RowsAffected()
+		held = n == 1
+		return err
+	})
+	return held, err
+}
+
+// campaignLeaseHeldTx reports, inside a write transaction, whether owner
+// holds the lease unexpired at now: the predicate SaveGroupingAsLeaseHolder
+// puts in front of its replace, in the same transaction, so no takeover can
+// slip between the check and the write.
+func campaignLeaseHeldTx(tx *sql.Tx, owner string, now time.Time) (bool, error) {
+	var holder sql.NullString
+	var until int64
+	err := tx.QueryRow(`SELECT head_sig, offset FROM ingest_state WHERE source=? AND path=?`, campaignLeaseSource, campaignLeasePath).Scan(&holder, &until)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return holder.Valid && holder.String == owner && until > now.UnixNano(), nil
+}

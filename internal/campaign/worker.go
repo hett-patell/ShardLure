@@ -159,10 +159,11 @@ var ErrLeaseHeldElsewhere = errors.New("campaign: another process holds the camp
 
 // ErrLeaseLapsed means the lease this process held ran out during a phase
 // (recording, settling, classifying or grouping stalled past the TTL, or the
-// store no longer names this process as the holder), so the write the phase
-// led to was refused: another process may have run the pipeline meanwhile.
-// It is a failure (backoff, reported), and the next tick retakes the lease
-// as a takeover, which re-runs the version and hold checks.
+// store no longer names this process as an unexpired holder), so the phase
+// was cut short or the write it led to was refused: another process may
+// have run the pipeline meanwhile. It is a failure (backoff, reported), and
+// the next tick retakes the lease as a takeover, which re-runs the version
+// and hold checks.
 var ErrLeaseLapsed = errors.New("campaign: the worker lease lapsed during a phase; the write was refused")
 
 // campaignLeaseTTL bounds how long a crashed owner blocks the pipeline. The
@@ -266,41 +267,30 @@ func (w *Worker) holdLease(ctx context.Context, now time.Time) (takeover bool, e
 	return takeover, nil
 }
 
-// renewLease is holdLease for the sites after the tick's version and hold
-// checks (before settle, before regroup, before Group). A takeover there
-// means the lease lapsed on this clock during a phase and another process
-// may have run the pipeline meanwhile: the checks this tick already made
-// (rebuildHeld, the version) answered for a hold and a version that may no
-// longer be the store's, so the tick ends with ErrLeaseLapsed rather than
-// regrouping on them; the takeover has reset both flags, and the next tick
-// starts clean (re-review, New Breakage 1: a process stalled in
+// renewLease keeps the lease through the sites after the tick's version and
+// hold checks (before settle, before regroup, before Group). It never takes
+// over: a lease that lapsed on this clock, or that the store no longer
+// renews under this owner (store.RenewCampaignLease updates only an
+// unexpired row naming this owner; it never inserts or re-takes), means
+// another process may have held it, run the pipeline and released it
+// meanwhile, and the checks this tick already made (rebuildHeld, the
+// version) answered for a hold and a version that may no longer be the
+// store's. The tick ends with ErrLeaseLapsed instead of regrouping on them,
+// the owed regroup stays pending, and the next tick's holdLease takes over
+// with both flags reset (re-review, New Breakage 1: a process stalled in
 // classification past the TTL regrouped through a rebuild hold another
-// process had set).
+// process had set; and its M-2 residual: an acquire here re-took a row the
+// other process had released).
 func (w *Worker) renewLease(ctx context.Context) error {
-	takeover, err := w.holdLease(ctx, w.clock())
-	if err != nil {
-		return err
-	}
-	if takeover {
-		return ErrLeaseLapsed
-	}
-	return nil
-}
-
-// fenceLease guards a write that assumes single ownership (SaveGrouping,
-// RebuildScriptFamilies): the lease must still be live on this process's
-// clock and renewable in the store under this owner, else ErrLeaseLapsed.
-// The clock alone is not a fence: holdLease skips the store for up to half
-// the TTL on the process's monotonic clock, while the other process judges
-// expiry on the wall-clock expiry stored in the row, so a wall-clock step
-// forward of more than the half-life lets it take over unseen; the renewal
-// asks the row (audit M-2). One small write per regroup.
-func (w *Worker) fenceLease(ctx context.Context) error {
 	now := w.clock()
 	if !w.leaseLive(now) {
+		w.leaseUntil = time.Time{} // the next acquire is a takeover
 		return ErrLeaseLapsed
 	}
-	held, err := w.st.AcquireCampaignLease(ctx, w.leaseOwner, now, w.leaseTTL)
+	if now.Before(w.leaseUntil.Add(-w.leaseTTL / 2)) {
+		return nil
+	}
+	held, err := w.st.RenewCampaignLease(ctx, w.leaseOwner, now, w.leaseTTL)
 	if err != nil {
 		return err
 	}
@@ -313,8 +303,9 @@ func (w *Worker) fenceLease(ctx context.Context) error {
 }
 
 // leaseLive reports whether the lease this process holds is unexpired on
-// its own clock; the cheap half of the fence, enough before a bounded write
-// that only ever runs right after a phase that renewed against the store.
+// its own clock: the cheap check before prune, a bounded write that only
+// ever runs right after a phase that renewed against the store. The save
+// itself is fenced inside its transaction (store.SaveGroupingAsLeaseHolder).
 func (w *Worker) leaseLive(now time.Time) bool {
 	return !w.leaseUntil.IsZero() && now.Before(w.leaseUntil)
 }
@@ -608,12 +599,16 @@ func (w *Worker) regroup(ctx context.Context) error {
 		beforeSave()
 	}
 	// The save replaces every derived row and assumes no other process is
-	// doing the same: the lease must still be this process's, in the store,
-	// right here (audit M-2).
-	if err := w.fenceLease(ctx); err != nil {
-		return err
-	}
-	if err := w.st.SaveGrouping(ctx, rows, assign, out.Aliases, lastEdit); err != nil {
+	// doing the same: the lease must still be this process's, unexpired on
+	// the wall clock, inside the very transaction that writes (audit M-2 and
+	// its re-review residual). A lost lease is not retaken here; the next
+	// tick's holdLease takes over and the owed regroup runs behind fresh
+	// version and hold checks.
+	if err := w.st.SaveGroupingAsLeaseHolder(ctx, w.leaseOwner, w.clock(), rows, assign, out.Aliases, lastEdit); err != nil {
+		if errors.Is(err, store.ErrCampaignLeaseLost) {
+			w.leaseUntil = time.Time{}
+			return ErrLeaseLapsed
+		}
 		return err
 	}
 	w.editsSeen = lastEdit // the saved grouping includes every edit up to here

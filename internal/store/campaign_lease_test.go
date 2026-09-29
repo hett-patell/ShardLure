@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -83,5 +84,86 @@ func TestCampaignLeaseSurvivesReplace(t *testing.T) {
 	}
 	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != "a" {
 		t.Fatalf("replace evicted the lease holder: %q", owner)
+	}
+}
+
+// RenewCampaignLease extends only an unexpired lease held by the caller: it
+// never inserts a missing row, never renews for another owner and never
+// takes over an expired one (that is AcquireCampaignLease's job, at the
+// start of a tick).
+func TestRenewCampaignLeaseNeverTakesOver(t *testing.T) {
+	st := newTestStore(t, "renew.db")
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	if held, err := st.RenewCampaignLease(ctx, "a", t0, time.Minute); err != nil || held {
+		t.Fatalf("renew with no row = %v, %v; want refused", held, err)
+	}
+	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != "" {
+		t.Fatalf("renew inserted a row for %q", owner)
+	}
+	if held, err := st.AcquireCampaignLease(ctx, "a", t0, time.Minute); err != nil || !held {
+		t.Fatalf("acquire = %v, %v", held, err)
+	}
+	if held, err := st.RenewCampaignLease(ctx, "b", t0.Add(time.Second), time.Minute); err != nil || held {
+		t.Fatalf("renew by another owner = %v, %v; want refused", held, err)
+	}
+	if held, err := st.RenewCampaignLease(ctx, "a", t0.Add(30*time.Second), time.Minute); err != nil || !held {
+		t.Fatalf("renew by the holder = %v, %v", held, err)
+	}
+	if _, until, _ := st.CampaignLeaseHolder(ctx); !until.Equal(t0.Add(90 * time.Second)) {
+		t.Fatalf("renewal did not extend: until %v", until)
+	}
+	// Expired at the caller's clock: not renewed, row untouched.
+	if held, err := st.RenewCampaignLease(ctx, "a", t0.Add(90*time.Second), time.Minute); err != nil || held {
+		t.Fatalf("renew of an expired lease = %v, %v; want refused", held, err)
+	}
+	if owner, until, _ := st.CampaignLeaseHolder(ctx); owner != "a" || !until.Equal(t0.Add(90*time.Second)) {
+		t.Fatalf("refused renewal changed the row: %q until %v", owner, until)
+	}
+	if _, err := st.RenewCampaignLease(ctx, "", t0, time.Minute); err != ErrCampaignLeaseInvalid {
+		t.Fatalf("empty owner = %v, want ErrCampaignLeaseInvalid", err)
+	}
+}
+
+// SaveGroupingAsLeaseHolder writes only while the lease row names the
+// caller as an unexpired holder at the caller's clock; a missing row, another
+// owner's row or an expired own row refuse with ErrCampaignLeaseLost and
+// leave the previous grouping in place. The predicate runs in the save's own
+// transaction.
+func TestSaveGroupingAsLeaseHolderRequiresLiveOwnLease(t *testing.T) {
+	st := newTestStore(t, "fenced.db")
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	row := func(id string) []CampaignRow { return []CampaignRow{{ID: id, AnchorKind: "ssh_key", AnchorValue: "K"}} }
+	count := func() int {
+		list, err := st.ListCampaigns(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(list)
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0, row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
+		t.Fatalf("save with no lease row = %v (campaigns %d), want ErrCampaignLeaseLost and nothing written", err, count())
+	}
+	if held, err := st.AcquireCampaignLease(ctx, "b", t0, time.Minute); err != nil || !held {
+		t.Fatalf("acquire = %v, %v", held, err)
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(time.Second), row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
+		t.Fatalf("save under another owner's lease = %v (campaigns %d), want ErrCampaignLeaseLost", err, count())
+	}
+	if held, err := st.AcquireCampaignLease(ctx, "a", t0.Add(time.Minute), time.Minute); err != nil || !held {
+		t.Fatalf("takeover = %v, %v", held, err)
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(2*time.Minute), row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
+		t.Fatalf("save on an own lease expired at the caller's clock = %v (campaigns %d), want ErrCampaignLeaseLost", err, count())
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(90*time.Second), row("c-1"), nil, nil, 0); err != nil || count() != 1 {
+		t.Fatalf("save under a live own lease = %v (campaigns %d)", err, count())
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "", t0, row("c-2"), nil, nil, 0); err != ErrCampaignLeaseInvalid {
+		t.Fatalf("empty owner = %v, want ErrCampaignLeaseInvalid (never an unfenced save)", err)
+	}
+	if err := st.SaveGrouping(ctx, row("c-3"), nil, nil, 0); err != nil {
+		t.Fatalf("unfenced SaveGrouping (fixtures) = %v", err)
 	}
 }

@@ -429,12 +429,53 @@ func resolveCampaignIDIn(ctx context.Context, q campaignReader, aliases map[stri
 // A grouping carrying any empty or duplicate identifier is rejected whole
 // with ErrInvalidGrouping before the transaction; the previous grouping stays
 // in place.
+//
+// SaveGrouping itself is unfenced: it is for fixtures and one-off tooling
+// that run with no campaign worker. The worker saves through
+// SaveGroupingAsLeaseHolder.
 func (s *Store) SaveGrouping(ctx context.Context, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64) error {
+	return s.saveGrouping(ctx, rows, assign, aliases, lastEditID, nil)
+}
+
+// leaseFence is the campaign worker lease a save must still hold: owner, and
+// the caller's wall clock the row's expiry is judged at.
+type leaseFence struct {
+	owner string
+	now   time.Time
+}
+
+// SaveGroupingAsLeaseHolder is SaveGrouping fenced by the campaign worker
+// lease: inside the transaction that replaces the derived rows, the lease
+// row must still name owner as its holder and be unexpired at now, else
+// ErrCampaignLeaseLost and nothing is written. A renewal before the save was
+// not enough: under a wall-clock step another process could take the lease,
+// run the pipeline and release it inside one Group call, after which the
+// row was free again, the renewal re-took it and the stale grouping
+// overwrote the newer one (re-review, M-2 residual). now must be the wall
+// clock, which is what the other process judged the expiry on; an empty
+// owner or zero now is refused rather than saved unfenced.
+func (s *Store) SaveGroupingAsLeaseHolder(ctx context.Context, owner string, now time.Time, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64) error {
+	if owner == "" || now.IsZero() {
+		return ErrCampaignLeaseInvalid
+	}
+	return s.saveGrouping(ctx, rows, assign, aliases, lastEditID, &leaseFence{owner: owner, now: now})
+}
+
+func (s *Store) saveGrouping(ctx context.Context, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64, fence *leaseFence) error {
 	if err := validateGrouping(rows, assign, aliases); err != nil {
 		return err
 	}
 	now := formatFixedUTC(time.Now())
 	return s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		if fence != nil {
+			held, err := campaignLeaseHeldTx(tx, fence.owner, fence.now)
+			if err != nil {
+				return err
+			}
+			if !held {
+				return ErrCampaignLeaseLost
+			}
+		}
 		var maxEdit int64
 		if err := tx.QueryRow(`SELECT COALESCE(MAX(id),0) FROM campaign_edits`).Scan(&maxEdit); err != nil {
 			return err

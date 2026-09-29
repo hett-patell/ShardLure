@@ -225,12 +225,15 @@ func TestLeaseTakeoverRerunsVersionCheck(t *testing.T) {
 	}
 }
 
-// M-2: the lease is a fence for the save. A regroup whose lease lapsed on
-// the process's own clock, or whose row another process took under a wall
-// clock this process has not seen advance, must not reach SaveGrouping; the
+// M-2: the lease is a fence for the save, inside the save's own transaction.
+// A regroup whose lease lapsed on the process's own clock, whose row another
+// process took under a wall clock this process has not seen advance, or
+// whose row that process took and released again inside this Group call
+// (the re-review's residual: a renewal before the save re-took the freed
+// row and the stale grouping overwrote the newer one) must not save; the
 // next tick retakes the lease and regroups again.
 func TestSaveIsFencedByTheLease(t *testing.T) {
-	for _, mode := range []string{"lapsed clock", "row taken"} {
+	for _, mode := range []string{"lapsed clock", "row taken", "row taken and released"} {
 		t.Run(mode, func(t *testing.T) {
 			st := openStore(t)
 			insertSharedKey(t, st, "cowrie:a", "cowrie:b")
@@ -253,12 +256,17 @@ func TestSaveIsFencedByTheLease(t *testing.T) {
 				switch mode {
 				case "lapsed clock":
 					now = now.Add(campaignLeaseTTL + time.Second)
-				case "row taken":
+				case "row taken", "row taken and released":
 					// Another process, whose wall clock is past this lease's
 					// stored expiry, takes the row; this process's clock has
 					// not moved.
 					if held, err := st.AcquireCampaignLease(ctx, "other", now.Add(campaignLeaseTTL+time.Second), campaignLeaseTTL); err != nil || !held {
 						t.Errorf("other process could not take the expired row: held=%v err=%v", held, err)
+					}
+					if mode == "row taken and released" {
+						if err := st.ReleaseCampaignLease(ctx, "other"); err != nil {
+							t.Error(err)
+						}
 					}
 				}
 			}
@@ -398,9 +406,9 @@ func TestMidTickTakeoverEndsTheTick(t *testing.T) {
 	if held, err := st.ScriptRebuildHold(ctx, now); err != nil || !held {
 		t.Fatalf("store hold gone: held=%v err=%v", held, err)
 	}
-	if !a.lastGroup.Equal(grouped) || !a.pending || a.holdClear || a.versionChecked {
-		t.Fatalf("mid-tick takeover did not end the tick: regrouped=%v pending=%v holdClear=%v versionChecked=%v",
-			!a.lastGroup.Equal(grouped), a.pending, a.holdClear, a.versionChecked)
+	if !a.lastGroup.Equal(grouped) || !a.pending || !a.leaseUntil.IsZero() {
+		t.Fatalf("mid-tick lapse did not end the tick: regrouped=%v pending=%v leaseUntil=%v (want zero: the next acquire is a takeover)",
+			!a.lastGroup.Equal(grouped), a.pending, a.leaseUntil)
 	}
 	now = now.Add(time.Second)
 	a.retryAt = time.Time{}
