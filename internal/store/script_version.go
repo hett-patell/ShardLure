@@ -407,3 +407,63 @@ func sortedAssignmentKeys(m map[string]scriptAssignment) []string {
 	sort.Strings(out)
 	return out
 }
+
+// ScriptRebuildHoldStatus describes a script-rebuild hold for the dashboard.
+// Phase is "recording" while the recorder re-reads events up to Target (the
+// high-water mark; Recorded is the cursor) and "settling" once it has passed
+// it, when the re-recorded sessions wait out their idle time; Until is the
+// deadline once the worker has started that clock (zero before, and in the
+// recording phase, when no deadline can apply).
+type ScriptRebuildHoldStatus struct {
+	Held             bool
+	Phase            string
+	Recorded, Target int64
+	Until            time.Time
+}
+
+// ScriptRebuildHoldStatus reads the hold without acting on it. Request paths
+// call this, never ScriptRebuildHold: that one re-measures the mark, starts
+// the deadline clock and releases the hold, all of which belong to the single
+// worker. This only SELECTs, so a dashboard poll cannot move the hold.
+//
+// Held stays true until the worker's own check releases the hold, even when
+// the release conditions are already met, so the dashboard never claims an
+// edit has applied before it has.
+func (s *Store) ScriptRebuildHoldStatus(ctx context.Context) (ScriptRebuildHoldStatus, error) {
+	var st ScriptRebuildHoldStatus
+	var hwm int64
+	err := s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldHWMPath).Scan(&hwm)
+	if err == sql.ErrNoRows {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	st.Held = true
+	if hwm == scriptHoldRemeasure {
+		// The worker re-measures after a --replace; report the would-be mark.
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM events`).Scan(&hwm); err != nil {
+			return st, err
+		}
+	}
+	cursor, err := evidenceCursor(ctx, s.db)
+	if err != nil {
+		return st, err
+	}
+	st.Recorded, st.Target = cursor, hwm
+	if cursor < hwm {
+		st.Phase = "recording"
+		return st, nil
+	}
+	st.Phase = "settling"
+	var deadline int64
+	err = s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath).Scan(&deadline)
+	switch {
+	case err == sql.ErrNoRows:
+	case err != nil:
+		return st, err
+	default:
+		st.Until = time.Unix(deadline, 0)
+	}
+	return st, nil
+}

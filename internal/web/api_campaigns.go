@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -108,7 +109,47 @@ func (s *Server) handleCampaigns(w http.ResponseWriter, r *http.Request) {
 	for _, c := range list {
 		out = append(out, campaignSummaryToJSON(c))
 	}
-	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "campaigns": out})
+	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "campaigns": out,
+		"regroup": s.campaignRegroupStatus(r.Context())})
+}
+
+// campaignRegroupJSON tells the dashboard why an edit has not applied yet.
+// After an upgrade that changes the script normaliser the worker holds
+// regroups until the re-recorded scripts settle (10-12 min normally, up to
+// the 30 min deadline): edits are recorded but applied only then, and
+// without this the dialog said "applying..." the whole time.
+//
+// Progress is recorded/target (0..1) while recording, 1 while settling.
+// Until is the settling deadline (RFC3339 UTC) once the worker has started
+// that clock.
+type campaignRegroupJSON struct {
+	Held     bool    `json:"held"`
+	Phase    string  `json:"phase,omitempty"`
+	Progress float64 `json:"progress"`
+	Until    string  `json:"until,omitempty"`
+}
+
+// campaignRegroupStatus reads the hold through the read-only
+// store.ScriptRebuildHoldStatus (never ScriptRebuildHold, which acts on the
+// hold and belongs to the worker). nil (JSON null) when it cannot be read:
+// the lists still render.
+func (s *Server) campaignRegroupStatus(ctx context.Context) *campaignRegroupJSON {
+	st, err := s.st.ScriptRebuildHoldStatus(ctx)
+	if err != nil {
+		return nil
+	}
+	out := &campaignRegroupJSON{Held: st.Held, Phase: st.Phase}
+	switch {
+	case !st.Held:
+	case st.Phase == "recording" && st.Target > 0:
+		out.Progress = math.Min(1, float64(st.Recorded)/float64(st.Target))
+	default:
+		out.Progress = 1
+	}
+	if !st.Until.IsZero() {
+		out.Until = campaignJSONTime(st.Until)
+	}
+	return out
 }
 
 type campaignMemberJSON struct {
@@ -330,7 +371,7 @@ func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 	if s.onCampaignEdit != nil {
 		s.onCampaignEdit()
 	}
-	writeCampaignJSON(w, map[string]bool{"ok": true, "applying": true})
+	writeCampaignJSON(w, map[string]any{"ok": true, "applying": true, "regroup": s.campaignRegroupStatus(r.Context())})
 }
 
 // campaignHoldsActor decides whether remove_actor names an actor the campaign

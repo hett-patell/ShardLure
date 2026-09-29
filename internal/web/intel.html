@@ -4559,7 +4559,10 @@ async function refreshCampaigns() {
     const d = await r.json();
     _lastCampaigns = d.campaigns || [];
     const tb = document.querySelector('#campaigns-table tbody');
-    document.getElementById('campaigns-meta').textContent = _lastCampaigns.length + ' campaigns';
+    const held = d.regroup && d.regroup.held;
+    document.getElementById('campaigns-meta').textContent = _lastCampaigns.length + ' campaigns' +
+      (held ? ' · ' + regroupText(d.regroup) : '');
+    noteRegroup(d.regroup);
     if (!_lastCampaigns.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">no linked sessions yet</td></tr>'; return; }
     tb.innerHTML = _lastCampaigns.map(function (c) {
       const name = campaignDisplayName(c);
@@ -4736,6 +4739,41 @@ async function openScript(fp) {
 // response reschedules through the normal path.
 var _cmPending = null, _cmFlight = { view: -1, n: 0 };
 
+// _cmHeld is the reload an edit owes while a script-rebuild hold keeps the
+// worker from regrouping (after an upgrade that changed the script
+// normaliser; 10-30 min). The 6 s reload would only re-render the unchanged
+// campaign and baseline it, so it is parked here instead and released by the
+// Red tab's 30 s list poll (refreshCampaigns -> noteRegroup) once the hold
+// ends.
+var _cmHeld = null;
+
+function regroupText(g) {
+  let when = g.phase === 'recording' ? 'recording ' + Math.floor((g.progress || 0) * 100) + '%' : 'settling';
+  if (g.until) {
+    const t = new Date(g.until);
+    if (!isNaN(t)) when += ', until ~' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+  }
+  return 'campaigns are rebuilding after an upgrade (' + when + ')';
+}
+
+// noteRegroup is fed every regroup block the server sends. While held, a
+// parked reload stays parked and the dialog says why; once released it is
+// scheduled normally (the worker applies the edit within a tick).
+function noteRegroup(g) {
+  if (!_cmHeld) return;
+  const status = document.getElementById('cm-status');
+  if (g && g.held) {
+    if (status && _cmHeld.view === _cmView) status.textContent = 'recorded — ' + regroupText(g) + '; your edit applies then';
+    return;
+  }
+  const h = _cmHeld;
+  _cmHeld = null;
+  if (h.view === _cmView) {
+    if (status) status.textContent = 'applying…';
+    scheduleCampaignReload(h.view, h.target);
+  }
+}
+
 function scheduleCampaignReload(view, target) {
   if (_cmPending && _cmPending.view === view) {
     clearTimeout(_cmPending.timer);
@@ -4802,6 +4840,8 @@ async function campaignEdit(id, action, arg, raw) {
     failed();
     return;
   }
+  let regroup = null;
+  try { regroup = (await r.json()).regroup; } catch (_) {}
   clearTimeout(abortTimer);
   landed();
   if (status) status.textContent = 'applying…';
@@ -4816,12 +4856,20 @@ async function campaignEdit(id, action, arg, raw) {
     if (action === 'notes') _cmRendered.notes = saved;
     if (action === 'merge') _cmRendered.merge = saved;
   }
-  scheduleCampaignReload(view, action === 'merge' ? { id: arg, merged: true } : { id: id });
+  const target = action === 'merge' ? { id: arg, merged: true } : { id: id };
+  if (regroup && regroup.held) {
+    // Park the reload (a merge target wins, as in scheduleCampaignReload).
+    if (!(_cmHeld && _cmHeld.view === view && _cmHeld.target.merged)) _cmHeld = { view: view, target: target };
+    noteRegroup(regroup);
+    return;
+  }
+  scheduleCampaignReload(view, target);
 }
 
 function closeCampaign() {
   const m = document.getElementById('campaign-modal');
   if (m.open) m.close();
+  _cmHeld = null;
   if (_cmPending) {
     // Nothing left to reload into, but the lists still owe the edit's result.
     clearTimeout(_cmPending.timer);

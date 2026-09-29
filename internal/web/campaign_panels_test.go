@@ -113,3 +113,26 @@ func TestCampaignDialogFitsAndDisclosesCaps(t *testing.T) {
 		}
 	}
 }
+
+// During a script-rebuild hold the edit response and the list carry
+// regroup.held; the dialog must say why the edit has not applied, park its
+// 6 s reload, and release it from the list poll once the hold ends.
+func TestCampaignDialogExplainsRegroupHold(t *testing.T) {
+	start := strings.Index(intelHTML, "// ==== Campaigns and scripts")
+	end := strings.Index(intelHTML, "// ==== end campaigns and scripts")
+	block := intelHTML[start:end]
+	for _, want := range []string{
+		"'campaigns are rebuilding after an upgrade ('",
+		"'recorded — ' + regroupText(g) + '; your edit applies then'",
+		"if (regroup && regroup.held) {",
+		"noteRegroup(d.regroup);",
+		"scheduleCampaignReload(h.view, h.target);",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Count(intelHTML, "setInterval(") != 1 {
+		t.Error("the hold re-check must ride the existing list poll, not a new timer")
+	}
+}
