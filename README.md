@@ -350,6 +350,7 @@ sudo ./shardlure run
 | `campaigns [--limit=N]` | List campaigns: sessions linked by a shared SSH key, payload or distinctive script, with actor, IP and session counts |
 | `campaign show <id\|name>` | Show one campaign: members with the evidence behind each link, context (HASSH, clients, payload hosts) and notes. An ambiguous name is an error; use the ID |
 | `scripts [--limit=N]` | List settled bot command-script families with session, actor and IP counts and whether they link sessions |
+| `scripts --rebuild` | Ask for a script-fingerprint rebuild on the next `shardlure-live` restart (after rolling back to an older build and upgrading again). Campaign names and IDs are kept |
 | `dashboard`, `dash`, `tui` | Open the forensic TUI |
 | `web [:8080] [--tailscale]` | Serve the web dashboard |
 | `live [:8080] [--cowrie=PATH] [--interval=5s] [--no-journal] [--tailscale]` | Run live ingest and dashboard |
