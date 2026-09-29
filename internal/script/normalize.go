@@ -58,7 +58,7 @@ var (
 	// sudo -e/-l/-v and command -v/-V do not run their operand, and env -S
 	// carries the command inside its value, so they are deliberately absent.
 	wrappers = map[string]*wrapSpec{
-		"sudo": {flags: "AbEHiKknPS", valued: "CDgpRrTtUu", long: map[string]bool{
+		"sudo": {flags: "AbEHiKknPSs", valued: "CDgpRrTtUu", long: map[string]bool{
 			"user": true, "group": true, "prompt": true, "chdir": true, "chroot": true, "role": true,
 			"type": true, "command-timeout": true, "other-user": true, "close-from": true,
 			"preserve-env": false, "login": false, "shell": false, "non-interactive": false,

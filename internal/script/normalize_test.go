@@ -179,6 +179,7 @@ func TestWrapperOptionsKeepProgram(t *testing.T) {
 		{`sudo -u root python3 x`, `sudo -u root python3 x`, "python3"},
 		{`sudo -u abc123def python3 x`, `sudo -u <tok> python3 x`, "python3"},
 		{`sudo -E -- python3 x`, `sudo -E -- python3 x`, "python3"},
+		{`sudo -s python3 x`, `sudo -s python3 x`, "python3"}, // -s runs the command via the shell
 		{`sudo --user=root python3 x`, `sudo --user=root python3 x`, "python3"},
 		{`timeout 30 wget http://x/y`, `timeout <n> wget <url>`, "wget"},
 		{`timeout -s 9 30 python3 x`, `timeout -s <n> <n> python3 x`, "python3"},
