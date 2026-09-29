@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -137,7 +139,7 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 	submitted, skipped, ferr := urlhaus.Share(ctx, st, cands, opts)
 	fmt.Printf("\nresult: submitted=%d skipped=%d\n", submitted, skipped)
 	if ferr != nil {
-		fatal(ferr)
+		fatalRemote(ferr)
 	}
 }
 
@@ -145,15 +147,22 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 // blocklist dataset is an irreversible action, so the operator should be able
 // to read the output as a contract of what went out and what was held back.
 func printURLhausProgress(c urlhaus.Candidate, submitted bool, reason string) {
+	fprintURLhausProgress(os.Stdout, c, submitted, reason)
+}
+
+func fprintURLhausProgress(w io.Writer, c urlhaus.Candidate, submitted bool, reason string) {
+	// Truncate the raw URL first, then termSafe: a cut through a multi-byte
+	// rune leaves bytes termSafe escapes, never a raw C1 byte.
 	url := c.URL
 	if len(url) > 72 {
 		url = url[:69] + "..."
 	}
+	url, reason = termSafe(url), termSafe(reason)
 	if submitted {
-		fmt.Printf("  SUBMIT  %-72s  %s\n", url, reason)
+		fmt.Fprintf(w, "  SUBMIT  %-72s  %s\n", url, reason)
 		return
 	}
-	fmt.Printf("  skip    %-72s  %s\n", url, reason)
+	fmt.Fprintf(w, "  skip    %-72s  %s\n", url, reason)
 }
 
 func printURLhausStatus(st *store.Store) {
@@ -161,13 +170,17 @@ func printURLhausStatus(st *store.Store) {
 	if err != nil {
 		fatal(err)
 	}
+	fprintURLhausStatus(os.Stdout, rows)
+}
+
+func fprintURLhausStatus(w io.Writer, rows []store.URLhausSubmission) {
 	if len(rows) == 0 {
-		fmt.Println("(no submissions recorded)")
+		fmt.Fprintln(w, "(no submissions recorded)")
 		return
 	}
-	fmt.Printf("%-25s  %-14s  %s\n", "submitted_at (UTC)", "status", "url")
+	fmt.Fprintf(w, "%-25s  %-14s  %s\n", "submitted_at (UTC)", "status", "url")
 	for _, u := range rows {
-		fmt.Printf("%-25s  %-14s  %s\n",
-			u.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), u.Status, u.URL)
+		fmt.Fprintf(w, "%-25s  %-14s  %s\n",
+			u.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), termSafe(u.Status), termSafe(u.URL))
 	}
 }

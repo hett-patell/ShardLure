@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 
 	"flag"
@@ -123,7 +125,7 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 	submitted, skipped, ferr := threatfox.Share(ctx, &threatFoxRecorderAdapter{st: st}, cands, opts)
 	fmt.Printf("\nresult: submitted=%d skipped=%d\n", submitted, skipped)
 	if ferr != nil {
-		fatal(ferr)
+		fatalRemote(ferr)
 	}
 }
 
@@ -142,15 +144,21 @@ func (a *threatFoxRecorderAdapter) RecordThreatFoxSubmission(ioc, iocType, malwa
 // dataset is irreversible, so the operator reads the output as a contract of
 // what went out and what was held back.
 func printThreatFoxProgress(c threatfox.Candidate, submitted bool, iocCount int, reason string) {
+	fprintThreatFoxProgress(os.Stdout, c, submitted, iocCount, reason)
+}
+
+func fprintThreatFoxProgress(w io.Writer, c threatfox.Candidate, submitted bool, iocCount int, reason string) {
+	// Truncate raw, then termSafe (see fprintURLhausProgress).
 	url := c.URL
 	if len(url) > 64 {
 		url = url[:61] + "..."
 	}
+	url, reason = termSafe(url), termSafe(reason)
 	if submitted {
-		fmt.Printf("  SUBMIT  %-64s  %d IOC(s)  %s\n", url, iocCount, reason)
+		fmt.Fprintf(w, "  SUBMIT  %-64s  %d IOC(s)  %s\n", url, iocCount, reason)
 		return
 	}
-	fmt.Printf("  skip    %-64s  %s\n", url, reason)
+	fmt.Fprintf(w, "  skip    %-64s  %s\n", url, reason)
 }
 
 func printThreatFoxStatus(st *store.Store) {
@@ -158,13 +166,17 @@ func printThreatFoxStatus(st *store.Store) {
 	if err != nil {
 		fatal(err)
 	}
+	fprintThreatFoxStatus(os.Stdout, rows)
+}
+
+func fprintThreatFoxStatus(w io.Writer, rows []store.ThreatFoxSubmission) {
 	if len(rows) == 0 {
-		fmt.Println("(no submissions recorded)")
+		fmt.Fprintln(w, "(no submissions recorded)")
 		return
 	}
-	fmt.Printf("%-25s  %-12s  %-14s  %s\n", "submitted_at (UTC)", "type", "malware", "ioc")
+	fmt.Fprintf(w, "%-25s  %-12s  %-14s  %s\n", "submitted_at (UTC)", "type", "malware", "ioc")
 	for _, r := range rows {
-		fmt.Printf("%-25s  %-12s  %-14s  %s\n",
-			r.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), r.IOCType, r.Malware, r.IOC)
+		fmt.Fprintf(w, "%-25s  %-12s  %-14s  %s\n",
+			r.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), termSafe(r.IOCType), termSafe(r.Malware), termSafe(r.IOC))
 	}
 }

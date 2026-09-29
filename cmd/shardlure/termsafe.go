@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"unicode"
 	"unicode/utf16"
@@ -62,4 +63,12 @@ func jsonTermSafe(js string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// fatalRemote is fatal for an error that can carry a remote service's
+// response body or attacker-chosen text (the share/report runs): the message
+// goes through termSafe before it reaches the operator's terminal.
+func fatalRemote(err error) {
+	fmt.Fprintf(os.Stderr, "error: %s\n", termSafe(err.Error()))
+	os.Exit(1)
 }

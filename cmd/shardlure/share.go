@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -158,7 +159,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	uploaded, skipped, ferr := bazaar.Share(ctx, &bazaarRecorderAdapter{st: st}, cands, opts)
 	fmt.Printf("\nresult: uploaded=%d skipped=%d\n", uploaded, skipped)
 	if ferr != nil {
-		fatal(ferr)
+		fatalRemote(ferr)
 	}
 }
 
@@ -246,29 +247,35 @@ func artifactToCandidate(a store.Artifact) bazaar.Candidate {
 // deliberately verbose: this is a destructive, public action and the
 // operator should be able to read the output as a contract.
 func printBazaarProgress(c bazaar.Candidate, cls bazaar.Classification, r *bazaar.Result, err error) {
-	prefix := shaShort(c.SHA256)
-	tags := strings.Join(cls.Tags, ",")
+	fprintBazaarProgress(os.Stdout, c, cls, r, err)
+}
+
+func fprintBazaarProgress(w io.Writer, c bazaar.Candidate, cls bazaar.Classification, r *bazaar.Result, err error) {
+	// Every field below is attacker-derived (classified from their bytes) or
+	// came back from MalwareBazaar, so each goes through termSafe.
+	prefix := termSafe(shaShort(c.SHA256))
+	tags := termSafe(strings.Join(cls.Tags, ","))
 	if tags == "" {
 		tags = "-"
 	}
-	fam := cls.Family
+	fam := termSafe(cls.Family)
 	if fam == "" {
 		fam = "-"
 	}
-	header := fmt.Sprintf("  %s %8d  %-18s %-25s", prefix, c.SizeBytes, cls.FileKind, fam)
+	header := fmt.Sprintf("  %s %8d  %-18s %-25s", prefix, c.SizeBytes, termSafe(cls.FileKind), fam)
 	switch {
 	case err != nil:
-		fmt.Printf("%s tags=%s\n    ERROR: %v\n", header, tags, err)
+		fmt.Fprintf(w, "%s tags=%s\n    ERROR: %s\n", header, tags, termSafe(err.Error()))
 	case r == nil:
-		fmt.Printf("%s tags=%s\n    (no result)\n", header, tags)
+		fmt.Fprintf(w, "%s tags=%s\n    (no result)\n", header, tags)
 	case r.Status == "dry-run":
-		fmt.Printf("%s tags=%s\n", header, tags)
+		fmt.Fprintf(w, "%s tags=%s\n", header, tags)
 	default:
 		extra := ""
 		if r.SampleURL != "" {
 			extra = " " + r.SampleURL
 		}
-		fmt.Printf("%s tags=%s\n    -> %s%s\n", header, tags, r.Status, extra)
+		fmt.Fprintf(w, "%s tags=%s\n    -> %s%s\n", header, tags, termSafe(r.Status), termSafe(extra))
 	}
 }
 
@@ -277,14 +284,18 @@ func printBazaarStatus(st *store.Store) {
 	if err != nil {
 		fatal(err)
 	}
+	fprintBazaarStatus(os.Stdout, rows)
+}
+
+func fprintBazaarStatus(w io.Writer, rows []store.BazaarUpload) {
 	if len(rows) == 0 {
-		fmt.Println("(no uploads recorded)")
+		fmt.Fprintln(w, "(no uploads recorded)")
 		return
 	}
-	fmt.Printf("%-12s  %-25s  %-22s  %s\n", "sha256", "uploaded_at (UTC)", "status", "url")
+	fmt.Fprintf(w, "%-12s  %-25s  %-22s  %s\n", "sha256", "uploaded_at (UTC)", "status", "url")
 	for _, u := range rows {
 		ts := u.UploadedAt.UTC().Format("2006-01-02 15:04:05")
-		fmt.Printf("%-12s  %-25s  %-22s  %s\n", shaShort(u.SHA256), ts, u.ResponseStatus, u.MBURL)
+		fmt.Fprintf(w, "%-12s  %-25s  %-22s  %s\n", termSafe(shaShort(u.SHA256)), ts, termSafe(u.ResponseStatus), termSafe(u.MBURL))
 	}
 }
 

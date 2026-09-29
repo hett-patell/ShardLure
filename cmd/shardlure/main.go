@@ -594,13 +594,34 @@ func planReclassify(st *store.Store, admin *netmatch.Set) (*reclassifyPlan, erro
 	return plan, nil
 }
 
-func cmdActors(st *store.Store, args []string) {
-	fs := flag.NewFlagSet("actors", flag.ExitOnError)
+// parseActorsArgs range-checks --limit like the campaign commands
+// (validateListLimit). ListActors reads a non-positive limit as "no limit",
+// so --limit=0 or a negative typo used to dump every actor instead of being
+// refused; a stray positional argument is refused too.
+func parseActorsArgs(args []string) (int, error) {
+	fs := flag.NewFlagSet("actors", flag.ContinueOnError)
 	limit := fs.Int("limit", 25, "max actors to list")
 	if err := fs.Parse(args); err != nil {
+		return 0, err
+	}
+	if fs.NArg() > 0 {
+		return 0, fmt.Errorf("unexpected argument %q (usage: shardlure actors [--limit=N])", fs.Arg(0))
+	}
+	if err := validateListLimit(*limit); err != nil {
+		return 0, err
+	}
+	return *limit, nil
+}
+
+func cmdActors(st *store.Store, args []string) {
+	limit, err := parseActorsArgs(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		fatal(err)
 	}
-	actors, err := st.ListActors(*limit)
+	actors, err := st.ListActors(limit)
 	if err != nil {
 		fatal(err)
 	}
