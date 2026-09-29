@@ -44,8 +44,8 @@ import (
 // $'...' and $"...") and ends on a whole source line (<<\EOF, <<E"OF",
 // <<"E O F" and <<E\ OF no longer hide every later command), a heredoc's body (normalised, at most
 // MaxHeredocBodyBytes) is part of its placeholder token, reserved words and
-// braces are not programs (and keep the program slot open), N<file, <> and
-// >| are redirections, a quoted program name ('id') keeps its name, URLs,
+// braces are not programs (and keep the program slot open), N<file, <>,
+// >| and fd-prefixed heredocs and here-strings (0<<EOF) are redirections, a quoted program name ('id') keeps its name, URLs,
 // IPs and /tmp names stop at a backtick, and quoted text replaces hex runs
 // (>= 16) and numbers (>= 6 digits) and encodes a real line break as
 // <nl>/<cr>.
@@ -86,7 +86,7 @@ const (
 )
 
 var (
-	redirRe  = regexp.MustCompile(`^(?:<<<|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?|\d+<|\d*<>|\d*>\|)$`)
+	redirRe  = regexp.MustCompile(`^(?:\d*<<<|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?|\d+<|\d*<>|\d*>\|)$`)
 	bareRe   = regexp.MustCompile(`^[a-z_][a-z0-9_.+-]*$`)
 	keyTypes = regexp.MustCompile(`^(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-\S+|sk-\S+@openssh\.com)$`)
 	keyBody  = regexp.MustCompile(`AAAA[0-9A-Za-z+/]{36,}={0,3}`)
@@ -174,15 +174,15 @@ func NormalizeCommand(cmd string) []string {
 		// program() already assumes (`<<EOF python3 x` runs python3). The
 		// here-string's word is the pending target; the heredoc's delimiter
 		// is consumed here and its body starts at the next newline.
-		if t == "<<<" {
+		if hereString(t) {
 			out = append(out, t)
 			target = start
 			continue
 		}
-		if t == "<<" || t == "<<-" {
-			out = append(out, "<<")
+		if isHeredoc(t) {
+			out = append(out, strings.TrimSuffix(t, "-"))
 			if d, ok := sc.delimiter(); ok {
-				pending = append(pending, heredoc{delim: d, tabs: t == "<<-", slot: len(out)})
+				pending = append(pending, heredoc{delim: d, tabs: strings.HasSuffix(t, "-"), slot: len(out)})
 				out = append(out, heredocTok)
 			} else {
 				start = false // no delimiter: a syntax error, not a redirection
@@ -310,15 +310,17 @@ func (sc *scanner) next() {
 // blank) and whether it is a word (quoted or bare) rather than syntax.
 func tokenLen(s string) (int, bool) {
 	has := func(p string) bool { return strings.HasPrefix(s, p) }
-	switch {
-	case has("<<<"), has("<<-"):
-		return 3, false
-	case has("<<"):
-		return 2, false
-	}
 	d := 0
 	for d < len(s) && s[d] >= '0' && s[d] <= '9' {
 		d++
+	}
+	// \d*<<<, \d*<<-?: a here-string or heredoc, with an optional fd
+	// (`0<<EOF` read the 0 as the program; re-review item 3).
+	switch t := s[d:]; {
+	case strings.HasPrefix(t, "<<<"), strings.HasPrefix(t, "<<-"):
+		return d + 3, false
+	case strings.HasPrefix(t, "<<"):
+		return d + 2, false
 	}
 	if d < len(s) && (s[d] == '>' || s[d] == '<') {
 		// \d*(?:>>?|<)&(?:\d+|-)? : an fd duplication or close.
@@ -337,12 +339,11 @@ func tokenLen(s string) (int, bool) {
 			return r, false
 		}
 		// \d*>| (clobber) and \d*<> (read-write) are one redirection; so is
-		// \d+< (`0</dev/null id` read the 0 as the program), but not before
-		// a second < (`0<<EOF` stays a word and a heredoc, as before).
+		// \d+< (`0</dev/null id` read the 0 as the program).
 		if d+1 < len(s) && (s[d] == '>' && s[d+1] == '|' || s[d] == '<' && s[d+1] == '>') {
 			return d + 2, false
 		}
-		if d > 0 && s[d] == '<' && (d+1 >= len(s) || s[d+1] != '<') {
+		if d > 0 && s[d] == '<' {
 			return d + 1, false
 		}
 		if d > 0 && s[d] == '>' { // \d+>>?
@@ -632,7 +633,7 @@ func (sc *scanner) group(out []string) []string {
 	depth := 0
 	for ; sc.ok(); sc.next() {
 		switch t := sc.tok; {
-		case t == "\n" || t == "<<" || t == "<<-" || operators[t]:
+		case t == "\n" || isHeredoc(t) || operators[t]:
 			*sc = save
 			return out
 		case t == "(":
@@ -677,7 +678,7 @@ type wrapState struct {
 // next classifies the next (normalised) word after a wrapper.
 func (w *wrapState) next(n string) wrapRole {
 	switch {
-	case operators[n] || n == "(" || n == ")" || n == "<" || n == ">" || n == ">>" || n == "<<" || strings.HasPrefix(n, heredocTok) || redirRe.MatchString(n):
+	case operators[n] || n == "(" || n == ")" || n == "<" || n == ">" || n == ">>" || isHeredoc(n) || strings.HasPrefix(n, heredocTok) || redirRe.MatchString(n):
 		// Shell syntax is never a wrapper's word: `sudo -u ; id` must not
 		// swallow the ";" as the -u value and run on into the next command.
 		return wrapProgram
@@ -720,6 +721,15 @@ func (w *wrapState) option(n string) wrapRole {
 	}
 	return wrapOwn
 }
+
+// isHeredoc reports whether t is a heredoc operator, <<, <<- or either
+// with an fd (0<<); hereString, whether it is <<< with an optional fd.
+func isHeredoc(t string) bool {
+	op := strings.TrimLeft(t, "0123456789")
+	return op == "<<" || op == "<<-"
+}
+
+func hereString(t string) bool { return strings.TrimLeft(t, "0123456789") == "<<<" }
 
 // quotedBare reports whether t is a quoted word whose text is a bare
 // program name.
@@ -1010,7 +1020,7 @@ func groupEnd(toks []string, i int) int {
 	depth := 0
 	for j := i + 1; j < len(toks); j++ {
 		switch toks[j] {
-		case "\n", "<<", "<<-":
+		case "\n":
 			return j - 1
 		case "(":
 			depth++
@@ -1019,7 +1029,7 @@ func groupEnd(toks []string, i int) int {
 				return j
 			}
 		default:
-			if operators[toks[j]] {
+			if operators[toks[j]] || isHeredoc(toks[j]) {
 				return j - 1
 			}
 		}
@@ -1045,7 +1055,7 @@ func program(seg []string) string {
 		// A redirection and its target are neither the program nor a
 		// wrapper's word, wherever they sit: `2>/dev/null id` runs id.
 		// fd duplications (2>&1) hold their target inside the token.
-		if t == ">" || t == ">>" || t == "<" || t == "<<" || redirRe.MatchString(t) {
+		if t == ">" || t == ">>" || t == "<" || isHeredoc(t) || redirRe.MatchString(t) {
 			target = takesTarget(t)
 			continue
 		}

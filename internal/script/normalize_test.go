@@ -14,11 +14,7 @@ func norm(s string) string { return strings.Join(NormalizeCommand(s), " ") }
 // resumable form of this expression (a heredoc body is cut out by source
 // lines and tokenising resumes after it), and the fuzz target checks that
 // the two agree on every input.
-// It differs in one place a regular expression cannot say: \d+< is not a
-// token before a second < (fdHeredoc), so the comparison skips those.
-var tokenRe = regexp.MustCompile(`<<<|<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d*>\||\d*<>|\d+>>?|\d+<|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
-
-var fdHeredoc = regexp.MustCompile(`\d<<`)
+var tokenRe = regexp.MustCompile(`\d*<<<|\d*<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d*>\||\d*<>|\d+>>?|\d+<|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
 
 func scanAll(s string) []string {
 	var out []string
@@ -143,7 +139,7 @@ func FuzzNormalizeCommand(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !fdHeredoc.MatchString(s) && !reflect.DeepEqual(got, want) {
+		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !reflect.DeepEqual(got, want) {
 			t.Fatalf("scanner disagrees with tokenRe on %q:\n got %q\nwant %q", s, got, want)
 		}
 		line := EncodeLine(s)
@@ -580,6 +576,7 @@ func TestShellSyntaxIsNotAProgram(t *testing.T) {
 		`for i in 1 2 3; do id; done; while w; do uptime; done`,
 		`! id; [[ -f /x ]] && w; case $x in a) id;; esac; uptime`,
 		`id 3<> /tmp/a; w; uptime; whoami; ls`,
+		"0<<EOF id\nx\nEOF\nw; uptime; whoami; uname",
 	} {
 		if Distinctive([][]string{NormalizeCommand(s)}) {
 			t.Errorf("recon-only %q is Distinctive (programs %q)", s, programs(s))
@@ -596,7 +593,12 @@ func TestShellSyntaxIsNotAProgram(t *testing.T) {
 		{`for python3 in a`, `for <tok> in a`, ""},
 		{`[[ -x python3 ]]`, `[[ -x <tok> ]]`, ""},
 		{`}`, `}`, ""},
-		{`0<<EOF`, `<n> << <heredoc>`, "<n>"}, // fd-prefixed heredoc: unchanged
+		// An fd-prefixed heredoc or here-string is a redirection too
+		// (re-review item 3): it never takes the program slot.
+		{`0<<EOF`, `0<< <heredoc>`, ""},
+		{"0<<EOF python3 x\nbody\nEOF", `0<< <heredoc><nl>body python3 x`, "python3"},
+		{"id 0<<-EOF\n\tbody\n\tEOF", `id 0<< <heredoc><nl>body`, "id"},
+		{`2<<<x python3`, `2<<< x python3`, "python3"},
 	} {
 		got := NormalizeCommand(tc.in)
 		if s := strings.Join(got, " "); s != tc.want {
