@@ -71,6 +71,8 @@ type Worker struct {
 	// scriptVersion is script.Version; a field so a test can run a worker
 	// built with another normaliser version.
 	scriptVersion int
+	// idle is settleIdle; a field so a test can settle without waiting.
+	idle time.Duration
 
 	wake atomic.Bool
 
@@ -88,11 +90,20 @@ type Worker struct {
 	// versionChecked is set once the stored script lines are known to match
 	// scriptVersion (see the start of tick).
 	versionChecked bool
+	// holdClear is set once the store reports no script-rebuild hold. A hold
+	// is only ever created by the reset at the start of this process, so
+	// after it is clear the per-tick check is skipped. A new process reads
+	// the hold from the store again.
+	holdClear bool
 }
+
+// ErrRegroupHeld is Regroup's answer while a script rebuild holds regroups
+// (see store.ScriptRebuildHold). Tick keeps the regroup owed instead.
+var ErrRegroupHeld = errors.New("campaign: regroup held until rebuilt scripts settle")
 
 func NewWorker(st *store.Store, retentionDays int, evidenceRoot string) *Worker {
 	return &Worker{st: st, retentionDays: retentionDays, evidenceRoot: evidenceRoot, families: map[string]string{},
-		window: recordWindow, maxWindows: maxWindowsPerTick, scriptVersion: script.Version,
+		window: recordWindow, maxWindows: maxWindowsPerTick, scriptVersion: script.Version, idle: settleIdle,
 		classify: func(p string) (string, error) {
 			c, err := bazaar.Classify(p)
 			return c.Family, err
@@ -174,16 +185,23 @@ func (w *Worker) tick(ctx context.Context) error {
 	// a single sequential caller. Prune runs only on a tick that settled or
 	// regrouped (it takes writeMu, so an idle tick must not pay for it) and
 	// frees representatives one level per such pass.
-	settled, err := w.st.SettleSessionScripts(ctx, time.Now().Add(-settleIdle), settleBatch)
+	settled, err := w.st.SettleSessionScripts(ctx, time.Now().Add(-w.idle), settleBatch)
 	if err != nil {
 		return err
 	}
 	if _, err := w.st.AssignScriptFamilies(ctx, familyBatch); err != nil {
 		return err
 	}
-	woken := w.wake.Swap(false)
+	held, err := w.rebuildHeld(ctx)
+	if err != nil {
+		return err
+	}
+	// While held, nothing regroups, a Wake included: the wake flag and
+	// pending stay set, so the regroup owed runs on the first tick after the
+	// hold ends (the edit itself is already recorded).
+	woken := !held && w.wake.Swap(false)
 	regrouped := false
-	if woken || w.pending || (w.drained && time.Since(w.lastGroup) >= regroupEvery) {
+	if !held && (woken || w.pending || (w.drained && time.Since(w.lastGroup) >= regroupEvery)) {
 		err := w.regroup(ctx)
 		switch {
 		case errors.Is(err, store.ErrStaleGrouping):
@@ -213,7 +231,31 @@ func (w *Worker) tick(ctx context.Context) error {
 func (w *Worker) Regroup(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	held, err := w.rebuildHeld(ctx)
+	if err != nil {
+		return err
+	}
+	if held {
+		return ErrRegroupHeld
+	}
 	return w.regroup(ctx)
+}
+
+// rebuildHeld reports whether a script rebuild still holds regroups. A
+// regroup before the re-recorded sessions settle would drop every script
+// assignment, and the renamed campaign would come back under a new ID; the
+// store releases the hold (carrying assignments to the new fingerprints)
+// once the rebuild has settled. See store.ResetScriptsForVersion.
+func (w *Worker) rebuildHeld(ctx context.Context) (bool, error) {
+	if w.holdClear {
+		return false, nil
+	}
+	held, err := w.st.ScriptRebuildHold(ctx, time.Now())
+	if err != nil {
+		return false, err
+	}
+	w.holdClear = !held
+	return held, nil
 }
 
 func (w *Worker) regroup(ctx context.Context) error {

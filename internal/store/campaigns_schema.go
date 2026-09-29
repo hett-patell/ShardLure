@@ -114,6 +114,14 @@ CREATE TABLE IF NOT EXISTS campaign_edits (
   who TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+-- A normaliser version change re-encodes every script (ResetScriptsForVersion)
+-- and keeps each session's old fingerprint here until the sessions have
+-- settled again, so script assignments in campaign_ids can be carried to the
+-- new fingerprints (ReleaseScriptRebuildHold). Empty outside a rebuild.
+CREATE TABLE IF NOT EXISTS script_version_carry (
+  session_id TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL
+);
 -- GetCampaign reads a campaign's edits with campaign_id IN (...); the
 -- history is never purged, so an unindexed filter grows without bound.
 CREATE INDEX IF NOT EXISTS idx_campaign_edits_campaign ON campaign_edits(campaign_id);`

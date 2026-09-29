@@ -62,7 +62,7 @@ var snapshotTables = [...]struct {
 	{"capture_file_jobs", 24}, {"capture_discovery_errors", 24},
 	{"session_script_lines", 25}, {"session_scripts", 25}, {"scripts", 25}, {"script_families", 25},
 	{"campaign_evidence", 25}, {"campaign_ids", 25}, {"campaign_aliases", 25}, {"campaigns", 25},
-	{"campaign_members", 25}, {"campaign_edits", 25},
+	{"campaign_members", 25}, {"campaign_edits", 25}, {"script_version_carry", 25},
 }
 
 const latestSnapshotSchema = 25

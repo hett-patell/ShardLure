@@ -489,7 +489,8 @@ func TestResetScriptsForVersion(t *testing.T) {
 			}
 		}
 		for _, q := range []string{
-			`INSERT INTO session_scripts(session_id,actor_id,first_seen,last_seen,updated_at) VALUES('s0','cowrie:a','` + ts + `','` + ts + `','` + ts + `')`,
+			`INSERT INTO session_scripts(session_id,actor_id,first_seen,last_seen,updated_at,fingerprint) VALUES('s0','cowrie:a','` + ts + `','` + ts + `','` + ts + `','fp')`,
+			`INSERT INTO session_scripts(session_id,actor_id,first_seen,last_seen,updated_at) VALUES('s1','cowrie:a','` + ts + `','` + ts + `','` + ts + `')`,
 			`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen) VALUES('fp','n','d',1,1,'` + ts + `','` + ts + `')`,
 			`INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen) VALUES('fp','d','[]',1,1,1,1,1,0,'r','` + ts + `','` + ts + `')`,
 			`INSERT INTO campaign_evidence(kind,value,session_id,actor_id,first_seen,last_seen) VALUES('ssh_key','k','s0','cowrie:a','` + ts + `','` + ts + `')`,
@@ -528,6 +529,14 @@ func TestResetScriptsForVersion(t *testing.T) {
 	}
 	if v := count(`SELECT offset FROM ingest_state WHERE source='script_version' AND path='normaliser'`); v != 7 {
 		t.Fatalf("stored version %d", v)
+	}
+	// The settled session's old fingerprint is kept for the carry (the
+	// unsettled one has none), and the regroup hold is set.
+	if n := count(`SELECT COUNT(*) FROM script_version_carry WHERE session_id='s0' AND fingerprint='fp'`); n != 1 || count(`SELECT COUNT(*) FROM script_version_carry`) != 1 {
+		t.Fatalf("carry map has %d rows for s0", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path IN ('hold_hwm','hold_deadline')`); n != 2 {
+		t.Fatalf("hold rows %d", n)
 	}
 	if reset, err := s.ResetScriptsForVersion(ctx, 7); err != nil || reset {
 		t.Fatalf("matching version: reset=%v err=%v", reset, err)
