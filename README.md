@@ -208,6 +208,12 @@ of access logs).
 > dashboard would bind a *public* address — loopback, private, and Tailscale
 > (`100.64.0.0/10`) binds are allowed (with a warning). Either keep it private or
 > set `SHARDLURE_DASH_TOKEN`.
+>
+> Without a token the dashboard also refuses (`421`) any request whose `Host` is
+> not its listen IP, a loopback address, `localhost`, its hostname,
+> `<hostname>.<tailnet>.ts.net` or the `dashboard.public_origin` hostname, which
+> stops DNS-rebinding pages from reading it. Reaching it by another name needs
+> `dashboard.public_origin` or a token.
 
 ### Step 5 (optional) — Enable IP reputation enrichment & MalwareBazaar sharing
 
@@ -274,11 +280,13 @@ sudo systemctl restart shardlure-live
 shardlure version
 ```
 
-- **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues.
+- **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues. When the bot-script normaliser changed (v2.9 is normaliser version 4), the campaigns worker also re-records every script in the background; campaign regrouping waits until the rebuilt scripts settle (at most 30 minutes after it catches up), the dashboard explains the wait, and campaign names and IDs are carried over.
 - **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
 - **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
 - **Rolling back from v2.9 to an older build:** older binaries (v2.8 at schema 24, the v2.9 campaigns rc1 at schema 25) cannot create backups of the v26 database; restore the pre-upgrade bundle instead.
+- **Upgrading again after a rollback:** an older build writes bot-script lines in its own encoding and leaves the stored normaliser version alone, so the next upgrade would keep them and fingerprint the same script two ways. Run `shardlure scripts --rebuild` as the service account, then restart every `shardlure live` and `web` process on that database. Campaign names and IDs are kept.
+- **A token-less dashboard answers only names it knows.** Without `SHARDLURE_DASH_TOKEN`, a request whose `Host` is not the listen IP, a loopback address, `localhost`, the `dashboard.public_origin` hostname, the machine's hostname or `<hostname>.<tailnet>.ts.net` gets `421` (this blocks DNS rebinding). If you reach the dashboard by another name (a node renamed in the Tailscale console, a LAN DNS name), set `dashboard.public_origin` or a token.
 
 ## Local Development
 
@@ -345,12 +353,12 @@ sudo ./shardlure run
 | --- | --- |
 | `ingest journal <file> [--replace]` | Parse journal auth lines and build actors |
 | `ingest cowrie <file> [--replace]` | Parse Cowrie JSON logs and build actors |
-| `actors [--limit=N]` | List actors by last seen. `CONF` is an evidence **tier** (`LOW`/`MEDIUM`/`HIGH`/`CONFIRMED`), not a percentage — it is a coarse label chosen by source and signals, so showing it as `55%` would imply a calibrated probability it does not have. `probe` (0-100) is the computed score. |
+| `actors [--limit=N]` | List actors by last seen (default 25; `1..1000`, or `0` for every actor). `CONF` is an evidence **tier** (`LOW`/`MEDIUM`/`HIGH`/`CONFIRMED`), not a percentage — it is a coarse label chosen by source and signals, so showing it as `55%` would imply a calibrated probability it does not have. `probe` (0-100) is the computed score. |
 | `actor show <id\|ip>` | Show one actor profile |
-| `campaigns [--limit=N]` | List campaigns: sessions linked by a shared SSH key, payload or distinctive script, with actor, IP and session counts |
-| `campaign show <id\|name>` | Show one campaign: members with the evidence behind each link, context (HASSH, clients, payload hosts) and notes. An ambiguous name is an error; use the ID |
-| `scripts [--limit=N]` | List settled bot command-script families with session, actor and IP counts and whether they link sessions |
-| `scripts --rebuild` | Ask for a script-fingerprint rebuild on the next `shardlure-live` restart (after rolling back to an older build and upgrading again). Campaign names and IDs are kept |
+| `campaigns [--limit=N]` | List campaigns: sessions linked by a shared SSH key, payload or distinctive script, with actor, IP and session counts (default 50, `1..1000`) |
+| `campaign show <id\|name>` | Show one campaign: members with the evidence behind each link, context (HASSH, clients, payload hosts), notes and the newest 5 edits. Lists longer than the 500-entry cap say `showing N of M`. An ambiguous name is an error; use the ID |
+| `scripts [--limit=N]` | List settled bot command-script families with session, actor and IP counts and whether they link sessions (default 50, `1..1000`) |
+| `scripts --rebuild` | Ask for a script-fingerprint rebuild (after rolling back to an older build and upgrading again), then restart **every** `shardlure live` and `web` process using the database: whichever holds the campaign worker lease runs the rebuild. Campaign names and IDs are kept |
 | `dashboard`, `dash`, `tui` | Open the forensic TUI |
 | `web [:8080] [--tailscale]` | Serve the web dashboard |
 | `live [:8080] [--cowrie=PATH] [--interval=5s] [--no-journal] [--tailscale]` | Run live ingest and dashboard |
