@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS campaign_edits (
 -- A normaliser version change re-encodes every script (ResetScriptsForVersion)
 -- and keeps each session's old fingerprint here until the sessions have
 -- settled again, so script assignments in campaign_ids can be carried to the
--- new fingerprints (ReleaseScriptRebuildHold). Empty outside a rebuild.
+-- new fingerprints (released by ScriptRebuildHold). Empty outside a rebuild.
 CREATE TABLE IF NOT EXISTS script_version_carry (
   session_id TEXT PRIMARY KEY,
   fingerprint TEXT NOT NULL
