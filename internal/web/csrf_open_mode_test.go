@@ -59,6 +59,12 @@ func TestOpenModeRefusesCrossSiteWrites(t *testing.T) {
 		{"same-origin fetch", hdr{"Sec-Fetch-Site": "same-origin", "Origin": "http://example.com"}},
 		{"own origin only", hdr{"Origin": "http://example.com"}},
 		{"same-origin fetch only", hdr{"Sec-Fetch-Site": "same-origin"}},
+		// Behind a TLS-terminating proxy (tailscale serve, Caddy) with no
+		// public_origin, the browser's Origin is https:// while the server
+		// sees plain HTTP; a Host-rewriting proxy changes the host too. The
+		// browser's own same-origin verdict is authoritative in both.
+		{"https behind proxy", hdr{"Sec-Fetch-Site": "same-origin", "Origin": "https://example.com"}},
+		{"host rewritten by proxy", hdr{"Sec-Fetch-Site": "same-origin", "Origin": "https://dash.tailnet.ts.net"}},
 	}
 	send := func(method, route string, h hdr) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, "http://example.com"+route, nil)

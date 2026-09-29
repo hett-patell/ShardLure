@@ -34,18 +34,26 @@ const crossSiteRefusal = "cross-site request refused"
 // on non-GET requests, Origin. A request carrying neither is not a browser -
 // curl, the CLI, scripts - and cannot be driven by a foreign page, so it stays
 // allowed. A browser request is allowed only when it proves it came from the
-// dashboard itself: Sec-Fetch-Site "same-origin" (the browser's own verdict,
-// which a page cannot set), or, from an engine too old to send it, an Origin
-// equal to the dashboard's origin. Any other Sec-Fetch-Site value - including
-// "same-site", a sibling host on the same registrable domain, and "none" - is
-// refused, as is a mismatched or "null" Origin.
+// dashboard itself:
+//   - Sec-Fetch-Site "same-origin" is the browser's own verdict and a page
+//     cannot set it, so it is accepted on its own. Also matching Origin against
+//     the Host the server sees added nothing and broke every write behind a
+//     TLS-terminating or Host-rewriting proxy (tailscale serve, Caddy) with no
+//     dashboard.public_origin: the browser says https://name, the server sees
+//     http://127.0.0.1:8080.
+//   - With no Sec-Fetch-Site (an engine too old to send it), an Origin equal to
+//     the dashboard's origin.
+//
+// Any other Sec-Fetch-Site value - including "same-site", a sibling host on
+// the same registrable domain, and "none" - is refused, as is a mismatched or
+// "null" Origin.
 func (s *Server) refuseCrossSiteBrowser(w http.ResponseWriter, r *http.Request) bool {
 	site := r.Header.Get("Sec-Fetch-Site")
 	origin := r.Header.Get("Origin")
 	switch {
 	case site == "" && origin == "":
 		return false
-	case site == "same-origin" && (origin == "" || s.sameOriginRequest(r)):
+	case site == "same-origin":
 		return false
 	case site == "" && s.sameOriginRequest(r):
 		return false
