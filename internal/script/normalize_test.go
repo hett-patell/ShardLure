@@ -123,6 +123,13 @@ func TestLinkDecisionAndCommon(t *testing.T) {
 		{true, 26, 100000, false, "common: used by 26 actors"},
 		{true, 5, 100, false, "common: used by 5.0% of actors"},
 		{true, 3, 50, true, "distinctive, used by 3 actors"}, // small honeypot: 6% but < 5 actors
+		// Boundaries: exactly MaxLinkActors is not common, and exactly
+		// MaxLinkPercent (5 of 250 = 2.0%) is not "more than 2%".
+		{true, 25, 100000, true, "distinctive, used by 25 actors"},
+		{true, 5, 250, true, "distinctive, used by 5 actors"},
+		{true, 5, 249, false, "common: used by 2.0% of actors"},
+		{true, 4, 10, true, "distinctive, used by 4 actors"}, // 40% but below MinCommonActors
+		{true, 5, 0, true, "distinctive, used by 5 actors"},  // no population: only the actor cap applies
 	} {
 		links, reason := LinkDecision(tc.distinctive, tc.actors, tc.population)
 		if links != tc.links || reason != tc.reason {
@@ -145,7 +152,17 @@ func FuzzNormalizeCommand(f *testing.F) {
 			t.Fatalf("round trip broke for %q", s)
 		}
 		_ = Fingerprint(enc)
-		_ = Distinctive(Split(enc))
+		// Distinctive and program() agree between the encoding and the
+		// tokens it was made from, and a program never carries a separator.
+		cmds := [][]string{NormalizeCommand(s)}
+		if line != "" && Distinctive(Split(enc)) != Distinctive(cmds) {
+			t.Fatalf("Distinctive differs after the round trip for %q", s)
+		}
+		for _, seg := range segments(cmds) {
+			if p := program(seg); strings.ContainsAny(p, tokSep+lineSep) {
+				t.Fatalf("program %q of %q holds a separator", p, s)
+			}
+		}
 		if d := Display(enc, 64); len(d) > 64 {
 			t.Fatalf("Display exceeded its cap: %d bytes", len(d))
 		}

