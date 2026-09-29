@@ -31,7 +31,8 @@ import (
 // programs keep their name (nice/sudo/timeout/env/nohup/stdbuf), literal
 // < and > in attacker text are escaped, redirection targets are skipped,
 // command/type/hash probes count as recon; 3 = a leading heredoc or
-// here-string keeps the program slot.
+// here-string keeps the program slot, a redirection target keeps its
+// $(...) group.
 const Version = 3
 
 const (
@@ -170,6 +171,11 @@ func NormalizeCommand(cmd string) []string {
 			if target {
 				target = false
 				out = append(out, normalizeToken(t))
+				end := groupEnd(raw, i)
+				for i < end {
+					i++
+					out = append(out, normalizeToken(raw[i]))
+				}
 				continue
 			}
 			if t == ">" || t == ">>" || t == "<" || redirRe.MatchString(t) {
@@ -519,6 +525,40 @@ var recon = map[string]bool{
 	"command": true, "type": true, "hash": true,
 }
 
+// groupEnd returns the index of the last word of a redirection target that
+// starts at toks[i]. The tokenizer splits an unquoted `$(evil)` at "(", so a
+// "(" right after the target opens a group that belongs to it, up to the
+// matching ")": `> $(evil) python3` runs python3, not evil. The group also
+// ends before a newline, an operator or a heredoc, which end the command or
+// need the main loop, so an unterminated group never swallows later
+// commands. Only shell syntax decides it, and parens and those stops are the
+// same before and after normalisation, so NormalizeCommand (raw words) and
+// program() (normalised words) agree. It never drops a word: callers emit
+// or skip every index up to the one returned.
+func groupEnd(toks []string, i int) int {
+	if i+1 >= len(toks) || toks[i+1] != "(" {
+		return i
+	}
+	depth := 0
+	for j := i + 1; j < len(toks); j++ {
+		switch toks[j] {
+		case "\n", "<<", "<<-":
+			return j - 1
+		case "(":
+			depth++
+		case ")":
+			if depth--; depth == 0 {
+				return j
+			}
+		default:
+			if operators[toks[j]] {
+				return j - 1
+			}
+		}
+	}
+	return len(toks) - 1
+}
+
 // program returns a simple command's program, skipping subshell parens,
 // variable assignments, redirections with their targets and wrappers with
 // their own options.
@@ -527,9 +567,11 @@ var recon = map[string]bool{
 func program(seg []string) string {
 	var wrap *wrapState
 	target := false // the previous word was a redirection awaiting its target
-	for _, t := range seg {
+	for i := 0; i < len(seg); i++ {
+		t := seg[i]
 		if target {
 			target = false
+			i = groupEnd(seg, i)
 			continue
 		}
 		// A redirection and its target are neither the program nor a

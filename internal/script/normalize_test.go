@@ -364,3 +364,31 @@ func TestLeadingHeredocKeepsProgram(t *testing.T) {
 		}
 	}
 }
+
+// An unquoted $(...) as a redirection target is part of the target: the
+// tokenizer splits it at "(", and its inner words used to take the program
+// slot (`> $(evil) python3` reported evil). Every word is still emitted.
+func TestRedirectionTargetKeepsSubstitution(t *testing.T) {
+	for _, tc := range []struct{ in, want, prog string }{
+		{`> $(evil) python3 x`, `> $ ( evil ) python3 x`, "python3"},
+		{`> $(a $(b)) python3`, `> $ ( a $ ( b ) ) python3`, "python3"},
+		{`2>/tmp/$(date) wget x`, `2> /tmp/<f> ( date ) wget x`, "wget"},
+		{`sudo -u root > $(evil) python3`, `sudo -u root > $ ( evil ) python3`, "python3"},
+		// Unterminated: the rest of the line stays in the target, nothing is dropped.
+		{`> $(evil python3`, `> $ ( evil <tok>`, ""},
+		// An operator or newline ends the group, as it ends any command.
+		{"> $(a\nwget x", `> $ ( a ; wget x`, ""},
+		{`> $(a; b) python3`, `> $ ( a ; b ) <tok>`, ""},
+		// `> f (id)` is a bash syntax error; it groups the same way, since
+		// program() only sees the normalised target (/tmp/$ is /tmp/<f>).
+		{`> f (id)`, `> f ( id )`, ""},
+	} {
+		got := NormalizeCommand(tc.in)
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, s, tc.want)
+		}
+		if p := program(segments([][]string{got})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+	}
+}
