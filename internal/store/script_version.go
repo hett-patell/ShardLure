@@ -180,11 +180,11 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 // hold lives in the database, so it survives a restart.
 //
 // It never ends while the recorder is below the events high-water mark taken
-// at reset (re-measured after a --replace, see scriptHoldRemeasure). Once the recorder has passed it, the first check stores a
-// deadline of now + scriptHoldDuration (persisted, so a restart keeps it),
-// and the hold ends when no session with a line at or below the mark is
-// unsettled, or at that deadline, whichever comes first. Release is one
-// transaction: carry the
+// at reset (re-measured after a --replace, see scriptHoldRemeasure). Once the
+// recorder has passed it, the first check stores a deadline of now +
+// scriptHoldDuration (persisted, so a restart keeps it), and the hold ends
+// when no session with a line at or below the mark is unsettled, or at that
+// deadline, whichever comes first. Release is one transaction: carry the
 // script assignments to the new fingerprints, empty script_version_carry,
 // then delete the hold, so the first regroup after the hold sees the carried
 // rows. Sessions a purge removed during the hold simply have nothing to
