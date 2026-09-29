@@ -32,6 +32,8 @@ func TestContextReadsHonourCancellation(t *testing.T) {
 		"CountSessions":           func() error { _, err := st.CountSessionsContext(ctx); return err },
 		"RecentShellSessions":     func() error { _, err := st.RecentShellSessionsContext(ctx, since, 30); return err },
 		"SessionMetaForSessions":  func() error { _, err := st.SessionMetaForSessionsContext(ctx, []string{"s1"}); return err },
+		// Runs on the SWR drain context too (recentCountsCached).
+		"RecentEventCountsByActor": func() error { _, err := st.RecentEventCountsByActor(ctx, since); return err },
 	}
 	for name, read := range reads {
 		if err := read(); !errors.Is(err, context.Canceled) {
