@@ -76,3 +76,25 @@ func TestCampaignRemoveActorRequiresMembership(t *testing.T) {
 		t.Fatalf("recorded %s/%s, want the literal %s/cowrie:p1", last.CampaignID, last.Arg, p)
 	}
 }
+
+// Group applies remove_actor to the literal lineage the edit names (through
+// merge aliases only). A stored automatic (bridge) alias must not make an
+// actor count as a member: the removal would be filed on a lineage that does
+// not hold it.
+func TestCampaignRemoveActorIgnoresAutomaticAliases(t *testing.T) {
+	s, st := hasshTestServer(t)
+	mux := http.NewServeMux()
+	s.registerCampaignRoutes(mux)
+	const a, b = "c-00000000000d", "c-00000000000e" // a is bridge-aliased into b, no merge edit
+	rows := []store.CampaignRow{{ID: b, Members: []store.CampaignMemberRow{{ActorID: "cowrie:b1", Reasons: "[]"}}}}
+	if err := st.SaveGrouping(context.Background(), rows, nil, map[string]string{a: b}, 0); err != nil {
+		t.Fatal(err)
+	}
+	rec := postCampaignEdit(mux, url.Values{"id": {a}, "action": {"remove_actor"}, "arg": {"cowrie:b1"}})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "not a member") {
+		t.Fatalf("remove through an automatic alias = %d %q, want 400", rec.Code, rec.Body.String())
+	}
+	if rec := postCampaignEdit(mux, url.Values{"id": {b}, "action": {"remove_actor"}, "arg": {"cowrie:b1"}}); rec.Code != http.StatusOK {
+		t.Fatalf("remove from the live campaign = %d %q", rec.Code, rec.Body.String())
+	}
+}

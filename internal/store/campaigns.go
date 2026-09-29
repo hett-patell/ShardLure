@@ -329,18 +329,16 @@ func (s *Store) AppendCampaignEdit(ctx context.Context, campaignID, action, arg,
 }
 
 // CampaignHasMember reports whether actorID is a stored member of any of ids,
-// each first followed through the stored aliases to the campaign it currently
-// shows as (the same resolution ResolveCampaignID applies for existence). An
-// actor sits in few campaigns, so this reads the actor's memberships through
-// idx_campaign_members_actor and matches them in Go.
+// matched literally. The stored aliases are deliberately NOT followed: they
+// include Group's automatic bridge aliases, while Group applies a removal to
+// the lineage the edit names (through merge aliases only, which the caller
+// has already expanded into ids). An actor sits in few campaigns, so this
+// reads the actor's memberships through idx_campaign_members_actor and
+// matches them in Go.
 func (s *Store) CampaignHasMember(ctx context.Context, ids []string, actorID string) (bool, error) {
-	aliases, err := s.CampaignAliases(ctx)
-	if err != nil {
-		return false, err
-	}
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		want[campaignAliasTarget(aliases, id)] = true
+		want[id] = true
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT campaign_id FROM campaign_members WHERE actor_id=?`, actorID)
 	if err != nil {

@@ -384,9 +384,16 @@ func (s *Server) handleCampaignEdit(w http.ResponseWriter, r *http.Request) {
 // same root - so an actor counts when it is a stored member of id, of the
 // campaign id was merged into, or of a campaign merged into id that the
 // worker has not regrouped yet (the dialog says "applying..." for ~5 s after
-// a merge). Each of those IDs is followed through the stored aliases, as the
-// existence check is. The resolution only answers yes/no: the edit is still
-// recorded literally.
+// a merge). Membership is matched on those IDs literally: the stored aliases
+// also hold Group's automatic bridge aliases, and Group applies a removal to
+// the lineage the edit names through merge aliases only, so following them
+// would accept a removal filed on a lineage that does not hold the actor.
+// The resolution only answers yes/no: the edit is still recorded literally.
+//
+// Stale-dialog edge: if a regroup auto-aliases the dialog's campaign X into Y
+// while it is open, X's members now live under Y and a remove on X is refused
+// as "not a member". That is the safe answer (the removal would not do what
+// the operator saw); reopening the dialog shows Y, where it applies.
 func (s *Server) campaignHoldsActor(ctx context.Context, id, actorID string) (bool, error) {
 	rows, err := s.st.CampaignEdits(ctx)
 	if err != nil {
