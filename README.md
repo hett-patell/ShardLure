@@ -278,7 +278,7 @@ shardlure version
 - **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
 - **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
-- **Rolling back from v2.9 to v2.8:** the v2.8 binary cannot create backups of the v25 database; restore the pre-upgrade bundle instead.
+- **Rolling back from v2.9 to an older build:** older binaries (v2.8 at schema 24, the v2.9 campaigns rc1 at schema 25) cannot create backups of the v26 database; restore the pre-upgrade bundle instead.
 
 ## Local Development
 
