@@ -343,3 +343,24 @@ func TestLeadingRedirectionKeepsProgram(t *testing.T) {
 		}
 	}
 }
+
+// A leading heredoc or here-string is a redirection like any other: it and
+// its word keep the program slot open (the heredoc body still starts at the
+// next newline and is still dropped).
+func TestLeadingHeredocKeepsProgram(t *testing.T) {
+	for _, tc := range []struct{ in, want, prog string }{
+		{"<<EOF python3 x\nid\nEOF\nwget http://x/y", `<< <heredoc> python3 x ; wget <url>`, "python3"},
+		{`<<< x python3 y`, `<<< x python3 y`, "python3"},
+		{`<<< abc123def python3 y`, `<<< <tok> python3 y`, "python3"},
+		{"sudo <<EOF -u root python3\nbody\nEOF", `sudo << <heredoc> -u root python3`, "python3"},
+		{"cat <<EOF python3\nbody\nEOF", `cat << <heredoc> <tok>`, "cat"}, // an argument, not a program
+	} {
+		got := NormalizeCommand(tc.in)
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, s, tc.want)
+		}
+		if p := program(segments([][]string{got})[0]); p != tc.prog {
+			t.Errorf("program(%q) = %q, want %q", tc.in, p, tc.prog)
+		}
+	}
+}

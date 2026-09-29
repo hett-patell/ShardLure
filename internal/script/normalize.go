@@ -30,8 +30,9 @@ import (
 // History: 1 = first release (implicit: no stored version); 2 = wrapped
 // programs keep their name (nice/sudo/timeout/env/nohup/stdbuf), literal
 // < and > in attacker text are escaped, redirection targets are skipped,
-// command/type/hash probes count as recon.
-const Version = 2
+// command/type/hash probes count as recon; 3 = a leading heredoc or
+// here-string keeps the program slot.
+const Version = 3
 
 const (
 	MaxNormalizedBytes = 65536
@@ -138,9 +139,14 @@ func NormalizeCommand(cmd string) []string {
 			}
 			continue
 		}
+		// A heredoc or here-string ahead of the program is a redirection like
+		// the ones below: it and its word keep the program slot open, as
+		// program() already assumes (`<<EOF python3 x` runs python3). The
+		// here-string's word is the pending target; the heredoc's delimiter
+		// is consumed here and its body starts at the next newline.
 		if t == "<<<" {
 			out = append(out, t)
-			start = false
+			target = start
 			continue
 		}
 		if t == "<<" || t == "<<-" {
@@ -149,8 +155,10 @@ func NormalizeCommand(cmd string) []string {
 				i++
 				heredoc = strings.Trim(raw[i], `"'`)
 				out = append(out, "<heredoc>")
+			} else {
+				start = false // no delimiter: a syntax error, not a redirection
 			}
-			start = false
+			target = false
 			continue
 		}
 		// A redirection ahead of the program (`> /tmp/a python3`, `2>/dev/null
