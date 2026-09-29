@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -334,8 +335,13 @@ func TestGetCampaignAmbiguousNameIsReported(t *testing.T) {
 	if err := s.SaveGrouping(ctx, rows, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetCampaign(ctx, "OUTLAW/DOTA"); !errors.Is(err, ErrAmbiguousCampaign) {
+	_, err := s.GetCampaign(ctx, "OUTLAW/DOTA")
+	var amb *AmbiguousCampaignError
+	if !errors.Is(err, ErrAmbiguousCampaign) || !errors.As(err, &amb) {
 		t.Fatalf("ambiguous lookup err = %v", err)
+	}
+	if got := strings.Join(amb.IDs, ","); got != "c-aaaaaaaaaaa1,c-aaaaaaaaaaa2,c-aaaaaaaaaaa3" {
+		t.Fatalf("ambiguous IDs = %s", got)
 	}
 	if d, err := s.GetCampaign(ctx, "solo"); err != nil || d.ID != "c-aaaaaaaaaaa4" {
 		t.Fatalf("unique name %+v %v", d.ID, err)
@@ -417,5 +423,24 @@ func TestGetCampaignBoundsListsAndReportsTotals(t *testing.T) {
 	}
 	if d.Hosts[0] != "a.example" || d.Hosts[1] != "b.example" {
 		t.Fatalf("hosts must be the first in sort order: %v", d.Hosts)
+	}
+}
+
+// Every matching ID is reported, with no list cap: the operator needs the
+// complete set to pick from.
+func TestGetCampaignAmbiguousListsEveryID(t *testing.T) {
+	s := newTestStore(t, "campaigns-ambiguous-many.db")
+	ctx := context.Background()
+	var rows []CampaignRow
+	for i := 0; i < 1001; i++ {
+		rows = append(rows, CampaignRow{ID: fmt.Sprintf("c-%012d", i), SuggestedName: "Outlaw/Dota"})
+	}
+	if err := s.SaveGrouping(ctx, rows, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.GetCampaign(ctx, "outlaw/dota")
+	var amb *AmbiguousCampaignError
+	if !errors.As(err, &amb) || len(amb.IDs) != 1001 || amb.IDs[0] != "c-000000000000" {
+		t.Fatalf("err = %v", err)
 	}
 }

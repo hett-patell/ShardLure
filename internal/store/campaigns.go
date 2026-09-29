@@ -99,11 +99,29 @@ type ScriptDetail struct {
 
 var ErrStaleGrouping = errors.New("store: campaign edits changed during grouping")
 
-// ErrAmbiguousCampaign is returned by GetCampaign when a name or suggested
-// name matches more than one campaign (several "Outlaw/Dota" components are
-// normal). Callers must ask for the ID; picking one would silently show the
-// operator a different campaign from the one they meant.
+// ErrAmbiguousCampaign matches (errors.Is) the *AmbiguousCampaignError
+// GetCampaign returns when a name or suggested name matches more than one
+// campaign (several "Outlaw/Dota" components are normal). Callers must ask
+// for the ID; picking one would silently show the operator a different
+// campaign from the one they meant.
 var ErrAmbiguousCampaign = errors.New("store: campaign name is ambiguous")
+
+// AmbiguousCampaignError carries every matching campaign ID, sorted, so the
+// caller can offer them instead of only refusing. The IDs come from the same
+// query that detected the ambiguity (SQLite's ASCII lower() on name and
+// suggested name), uncapped: a truncated list would hide the one the
+// operator wants.
+type AmbiguousCampaignError struct {
+	Name string
+	IDs  []string
+}
+
+func (e *AmbiguousCampaignError) Error() string {
+	return fmt.Sprintf("%v: %q matches %d campaigns (%s)", ErrAmbiguousCampaign, e.Name, len(e.IDs), strings.Join(e.IDs, ", "))
+}
+
+// Is makes errors.Is(err, ErrAmbiguousCampaign) hold.
+func (e *AmbiguousCampaignError) Is(target error) bool { return target == ErrAmbiguousCampaign }
 
 // ErrInvalidGrouping rejects a grouping carrying an empty or duplicate
 // identifier. An assignment whose campaign ID is "" is fed back into the next
@@ -492,8 +510,8 @@ func (s *Store) CampaignsForActor(ctx context.Context, actorID string) ([]Campai
 }
 
 // GetCampaign resolves aliases, then a case-insensitive name or suggested
-// name. sql.ErrNoRows when nothing matches; ErrAmbiguousCampaign when a name
-// matches more than one campaign.
+// name. sql.ErrNoRows when nothing matches; an *AmbiguousCampaignError
+// (errors.Is ErrAmbiguousCampaign) when a name matches more than one campaign.
 func (s *Store) GetCampaign(ctx context.Context, idOrName string) (CampaignDetail, error) {
 	var d CampaignDetail
 	idOrName = strings.TrimSpace(idOrName)
@@ -515,7 +533,7 @@ func (s *Store) GetCampaign(ctx context.Context, idOrName string) (CampaignDetai
 		// name are pooled on purpose: an operator who renamed one "Outlaw/Dota"
 		// component to "Outlaw/Dota" still has siblings answering to it.
 		ids, err := s.campaignStrings(ctx, idOrName, `SELECT id FROM campaigns
-WHERE lower(name)=lower(?1) OR lower(suggested_name)=lower(?1) ORDER BY id LIMIT 2`)
+WHERE lower(name)=lower(?1) OR lower(suggested_name)=lower(?1) ORDER BY id`)
 		if err != nil {
 			return d, err
 		}
@@ -525,7 +543,7 @@ WHERE lower(name)=lower(?1) OR lower(suggested_name)=lower(?1) ORDER BY id LIMIT
 		case 1:
 			id = ids[0]
 		default:
-			return d, ErrAmbiguousCampaign
+			return d, &AmbiguousCampaignError{Name: idOrName, IDs: ids}
 		}
 	}
 	row := s.db.QueryRowContext(ctx, `SELECT `+campaignSummaryColumns+`, c.notes, c.anchor_kind, c.anchor_value FROM campaigns c

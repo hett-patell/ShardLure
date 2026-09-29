@@ -183,7 +183,9 @@ func TestCampaignDetailContractAndAmbiguity(t *testing.T) {
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
 		return rec
 	}
-	if rec := get("/api/intel/campaign?id=outlaw%2Fdota"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "ambiguous") {
+	// The refusal names every matching ID so the operator can pick one.
+	if rec := get("/api/intel/campaign?id=outlaw%2Fdota"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "ambiguous") ||
+		!strings.Contains(rec.Body.String(), "c-aaaaaaaaaaaa, c-bbbbbbbbbbbb") {
 		t.Fatalf("ambiguous name = %d %q", rec.Code, rec.Body.String())
 	}
 	if rec := get("/api/intel/campaign?id=nobody"); rec.Code != http.StatusNotFound {

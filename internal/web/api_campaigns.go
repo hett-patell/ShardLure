@@ -158,7 +158,14 @@ func (s *Server) handleCampaign(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	case errors.Is(err, store.ErrAmbiguousCampaign):
-		http.Error(w, campaignAmbiguousMessage, http.StatusBadRequest)
+		// The IDs are ours (c-<hex>), never attacker text, so they can be
+		// echoed; listing them lets the operator pick instead of guessing.
+		msg := campaignAmbiguousMessage
+		var amb *store.AmbiguousCampaignError
+		if errors.As(err, &amb) && len(amb.IDs) > 0 {
+			msg += ": " + strings.Join(amb.IDs, ", ")
+		}
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	case err != nil:
 		httpError(w, "campaign", err, http.StatusInternalServerError)
