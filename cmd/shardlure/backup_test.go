@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/networkshard/shardlure/internal/backup"
 	"github.com/networkshard/shardlure/internal/config"
+	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 	"gopkg.in/yaml.v3"
@@ -127,5 +129,68 @@ func TestBackupCLINamesRefusedPathReasonAndRemedy(t *testing.T) {
 		if strings.Contains(msg, "filesystem or database operation failed") {
 			t.Fatalf("%v: still the generic message: %q", args[0], msg)
 		}
+	}
+}
+
+// The remedy must match the check that failed and the side refused: ancestor
+// ownership advice is wrong for a symlink, an unsupported filesystem or the
+// --input bundle (review follow-up to 850e210).
+func TestBackupCLIRemedyMatchesRefusal(t *testing.T) {
+	cfg, bundle := cliBackupFixture(t)
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "real"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(filepath.Join(base, "real"), link); err != nil {
+		t.Fatal(err)
+	}
+	linkedBundle := filepath.Join(base, "real", "bundle")
+	if err := os.Rename(bundle, linkedBundle); err != nil {
+		t.Fatal(err)
+	}
+	viaLink := filepath.Join(link, "bundle")
+	const ownership = "whose ancestors are all owned by root"
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		want, deny []string
+	}{
+		{"verify-symlink-input", []string{"verify", "--input", viaLink}, []string{"symlink", "choose a bundle path without symlinks"}, []string{ownership, "output directory"}},
+		{"restore-symlink-input", []string{"restore", "--input", viaLink, "--to", filepath.Join(t.TempDir(), "r")}, []string{"choose a bundle path without symlinks"}, []string{ownership, "output directory"}},
+		{"create-symlink-output", []string{"create", "--output", filepath.Join(link, "NEW")}, []string{"choose an output directory without symlinks"}, []string{ownership, "bundle path"}},
+		{"restore-symlink-to", []string{"restore", "--input", linkedBundle, "--to", filepath.Join(link, "NEW")}, []string{strconv.Quote(link), "choose an output directory without symlinks"}, []string{ownership, "bundle path"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runBackup(context.Background(), cfg, tc.args, &bytes.Buffer{})
+			if err == nil {
+				t.Fatal("symlinked path accepted")
+			}
+			msg := err.Error()
+			t.Log(msg)
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Fatalf("%q lacks %q", msg, w)
+				}
+			}
+			for _, d := range tc.deny {
+				if strings.Contains(msg, d) {
+					t.Fatalf("%q wrongly contains %q", msg, d)
+				}
+			}
+		})
+	}
+	// An unsupported filesystem cannot be staged portably in a test, so the
+	// mapping is checked on a synthetic refusal of each side.
+	unsupported := &safefile.PathRefusal{Kind: safefile.ErrUnsupported, Path: "/mnt/nfs/b", Reason: "filesystem is not ext4, xfs, btrfs, tmpfs or overlayfs"}
+	for input, want := range map[string]string{"": "choose an output directory on a supported filesystem", "/mnt/nfs/b": "choose a bundle path on a supported filesystem"} {
+		msg := explainRefusedPath(fmt.Errorf("wrapped: %w", unsupported), input).Error()
+		if !strings.Contains(msg, want) || !strings.Contains(msg, unsupported.Reason) || strings.Contains(msg, ownership) {
+			t.Fatalf("input=%q: %q", input, msg)
+		}
+	}
+	perm := &safefile.PathRefusal{Kind: safefile.ErrPermission, Path: "/srv", Reason: "directory owned by uid 1000, not root or the running user (uid 0)"}
+	if msg := explainRefusedPath(perm, "/var/backups/b").Error(); !strings.Contains(msg, "choose an output directory "+ownership) {
+		t.Fatalf("ownership refusal lost its advice: %q", msg)
 	}
 }

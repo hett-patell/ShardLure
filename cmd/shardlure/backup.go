@@ -6,10 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/backup"
 	"github.com/networkshard/shardlure/internal/config"
+	"github.com/networkshard/shardlure/internal/safefile"
 )
 
 type backupIncludes []string
@@ -57,7 +60,7 @@ func runBackup(ctx context.Context, configPath string, args []string, out io.Wri
 		if errors.As(result, &failure) && failure.Staging != "" {
 			fmt.Fprintf(out, "incomplete recovery material retained at %q\n", failure.Staging)
 		}
-		result = explainRefusedPath(result)
+		result = explainRefusedPath(result, input)
 	}()
 	switch args[0] {
 	case "create":
@@ -103,12 +106,35 @@ func runBackup(ctx context.Context, configPath string, args []string, out io.Wri
 // refused path is printed (explicit operator output, like the staging path);
 // backup.Failure.Error stays path-free for anything that logs it. errors.Is
 // and errors.As still reach the original failure.
-func explainRefusedPath(err error) error {
-	path, reason, ok := backup.RefusedPath(err)
-	if !ok {
+//
+// The remedy follows the failed check and the side that was refused: advice
+// about ancestor ownership is wrong for a symlink, an unsupported filesystem
+// or the --input bundle, which never gets output-ownership checks.
+func explainRefusedPath(err error, input string) error {
+	var refusal *safefile.PathRefusal
+	if !errors.As(err, &refusal) {
 		return err
 	}
-	return &refusedPathError{cause: err, msg: fmt.Sprintf("backup: refused %q: %s; choose an output directory whose ancestors are all owned by root or by the running user and not writable by group or others", path, reason)}
+	subject := "an output directory"
+	if input != "" {
+		if abs, absErr := filepath.Abs(input); absErr == nil && (refusal.Path == abs || strings.HasPrefix(refusal.Path, abs+string(filepath.Separator))) {
+			subject = "a bundle path"
+		}
+	}
+	var remedy string
+	switch {
+	case errors.Is(refusal.Kind, safefile.ErrUnsupported):
+		remedy = "choose " + subject + " on a supported filesystem (ext4, xfs, btrfs, tmpfs or overlayfs)"
+	case errors.Is(refusal.Kind, safefile.ErrUnsafePath):
+		remedy = "choose " + subject + " without symlinks (pass the real directory, e.g. from realpath)"
+	case errors.Is(refusal.Kind, safefile.ErrChanged):
+		remedy = "choose " + subject + " that is a real directory (no symlinks) and is not renamed or replaced during the operation"
+	case subject == "a bundle path":
+		remedy = "choose a bundle path the running user can read without symlinks"
+	default:
+		remedy = "choose " + subject + " whose ancestors are all owned by root or by the running user and not writable by group or others"
+	}
+	return &refusedPathError{cause: err, msg: fmt.Sprintf("backup: refused %q: %s; %s", refusal.Path, refusal.Reason, remedy)}
 }
 
 type refusedPathError struct {
