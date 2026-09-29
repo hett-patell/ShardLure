@@ -32,8 +32,12 @@ import (
 // < and > in attacker text are escaped, redirection targets are skipped,
 // command/type/hash probes count as recon; 3 = a leading heredoc or
 // here-string keeps the program slot, a redirection target keeps its
-// $(...) group, and >& / <& tokenise as redirections.
-const Version = 3
+// $(...) group, and >& / <& tokenise as redirections (this range also
+// shipped 47ae767, a leading redirection keeps the program slot, and
+// 25b5d4e, Display counts its ellipsis inside the cap); 4 = a heredoc
+// delimiter gets bash's quote removal and ends on a whole source line
+// (<<\EOF, <<E"OF" and <<"E O F" no longer hide every later command).
+const Version = 4
 
 const (
 	MaxNormalizedBytes = 65536
@@ -53,7 +57,6 @@ const (
 )
 
 var (
-	tokenRe  = regexp.MustCompile(`<<<|<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
 	redirRe  = regexp.MustCompile(`^(?:<<<|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d+>>?)$`)
 	bareRe   = regexp.MustCompile(`^[a-z_][a-z0-9_.+-]*$`)
 	keyTypes = regexp.MustCompile(`^(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-\S+|sk-\S+@openssh\.com)$`)
@@ -105,39 +108,25 @@ var (
 // randomise with placeholders, including inside quoted strings.
 func NormalizeCommand(cmd string) []string {
 	cmd = stripSeps.Replace(cmd)
-	raw := tokenRe.FindAllString(cmd, -1)
-	out := make([]string, 0, len(raw))
+	out := make([]string, 0, 16)
 	start := true
 	var wrap *wrapState // non-nil while a wrapper's own words precede its program
 	target := false     // the previous word was a leading redirection awaiting its target
-	heredoc, inBody := "", false
-	for i := 0; i < len(raw); i++ {
-		t := raw[i]
-		// A heredoc body is data, not commands: drop it up to the delimiter
-		// line, so `cat <<EOF\nid\nw\nEOF` stays one command. The newline that
-		// opens the body is also the first possible terminator line, so it
-		// falls through to the check below instead of being consumed:
-		// consuming it made `cat <<EOF\nEOF\nid` swallow every later command,
-		// and any dropper prefixed with an empty heredoc collapsed to one
-		// non-distinctive command with a shared fingerprint (review I1).
-		if heredoc != "" && t == "\n" {
-			inBody = true
-		}
-		if inBody {
-			// The terminator is the delimiter word exactly, alone on its line
-			// (followed by a newline or the end). Quotes are not trimmed: bash
-			// compares the raw line, so a quoted `"EOF"` line does not end the
-			// body. Known limitation: the tokenizer discards whitespace, so an
-			// indented `  EOF` line terminates here where bash would not
-			// (except `<<-` with tabs). That is unreachable at the token level
-			// and fails safe: it can only surface commands, never hide them,
-			// and the fingerprint stays deterministic per script.
-			if t == "\n" && i+1 < len(raw) && raw[i+1] == heredoc {
-				if i+2 >= len(raw) || raw[i+2] == "\n" {
-					i++
-					heredoc, inBody = "", false
-				}
-			}
+	var pending []heredoc
+	sc := scanner{s: cmd}
+	sc.next()
+	for ; sc.ok(); sc.next() {
+		t := sc.tok
+		// A heredoc body is data, not commands: it starts after the newline
+		// that ends the line holding the << and runs to the delimiter line,
+		// so `cat <<EOF\nid\nw\nEOF` stays one command. The body is cut out
+		// of the source by lines, never by tokens (a quote inside it must not
+		// pair with one after it), and the tokenizer resumes at the newline
+		// ending the terminator line, which separates the next command. An
+		// unterminated body runs to the end of the event, as in bash.
+		if t == "\n" && len(pending) > 0 {
+			sc.skipBodies(pending)
+			pending = pending[:0]
 			continue
 		}
 		// A heredoc or here-string ahead of the program is a redirection like
@@ -152,9 +141,8 @@ func NormalizeCommand(cmd string) []string {
 		}
 		if t == "<<" || t == "<<-" {
 			out = append(out, "<<")
-			if i+1 < len(raw) && raw[i+1] != "\n" {
-				i++
-				heredoc = strings.Trim(raw[i], `"'`)
+			if d, ok := sc.delimiter(); ok {
+				pending = append(pending, heredoc{delim: d, tabs: t == "<<-"})
 				out = append(out, "<heredoc>")
 			} else {
 				start = false // no delimiter: a syntax error, not a redirection
@@ -171,11 +159,7 @@ func NormalizeCommand(cmd string) []string {
 			if target {
 				target = false
 				out = append(out, normalizeToken(t))
-				end := groupEnd(raw, i)
-				for i < end {
-					i++
-					out = append(out, normalizeToken(raw[i]))
-				}
+				out = sc.group(out)
 				continue
 			}
 			if t == ">" || t == ">>" || t == "<" || redirRe.MatchString(t) {
@@ -214,6 +198,236 @@ func NormalizeCommand(cmd string) []string {
 			wrap = &wrapState{name: t, spec: wrappers[t], operands: wrappers[t].operands}
 		}
 		start = operators[t] || t == "(" || (start && (wrap != nil || isAssignment(t)))
+	}
+	return out
+}
+
+// heredoc is a << awaiting its body: the delimiter after quote removal and
+// whether <<- strips leading tabs.
+type heredoc struct {
+	delim string
+	tabs  bool
+}
+
+// scanner yields shell tokens one at a time, so a heredoc body can be cut
+// out of the source by lines and tokenising resumes after it. Tokens are
+// what tokenRe (normalize_test.go) specifies: operators and redirections,
+// a newline, a quoted string, or a run of other non-space bytes. Every
+// step only moves forward, and the one search that can fail (a quote with
+// no partner) fails at most once per quote character, so a pass is linear.
+type scanner struct {
+	s          string
+	pos        int
+	tok        string
+	start, end int // tok's source span
+	word       bool
+}
+
+func (sc *scanner) ok() bool { return sc.start >= 0 }
+
+// next advances to the next token; ok() is false at the end.
+func (sc *scanner) next() {
+	s, p := sc.s, sc.pos
+	for p < len(s) && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\f') {
+		p++
+	}
+	if p >= len(s) {
+		sc.start, sc.end, sc.tok, sc.word, sc.pos = -1, len(s), "", false, len(s)
+		return
+	}
+	n, word := tokenLen(s[p:])
+	sc.start, sc.end, sc.word, sc.pos = p, p+n, word, p+n
+	sc.tok = s[p : p+n]
+}
+
+// tokenLen returns the length of the token at the start of s (s[0] is not
+// blank) and whether it is a word (quoted or bare) rather than syntax.
+func tokenLen(s string) (int, bool) {
+	has := func(p string) bool { return strings.HasPrefix(s, p) }
+	switch {
+	case has("<<<"), has("<<-"):
+		return 3, false
+	case has("<<"):
+		return 2, false
+	}
+	d := 0
+	for d < len(s) && s[d] >= '0' && s[d] <= '9' {
+		d++
+	}
+	if d < len(s) && (s[d] == '>' || s[d] == '<') {
+		// \d*(?:>>?|<)&(?:\d+|-)? : an fd duplication or close.
+		r := d + 1
+		if s[d] == '>' && r < len(s) && s[r] == '>' && r+1 < len(s) && s[r+1] == '&' {
+			r++
+		}
+		if r < len(s) && s[r] == '&' {
+			r++
+			if r < len(s) && s[r] == '-' {
+				return r + 1, false
+			}
+			for r < len(s) && s[r] >= '0' && s[r] <= '9' {
+				r++
+			}
+			return r, false
+		}
+		if d > 0 && s[d] == '>' { // \d+>>?
+			if d+1 < len(s) && s[d+1] == '>' {
+				return d + 2, false
+			}
+			return d + 1, false
+		}
+	}
+	switch c := s[0]; c {
+	case '&':
+		if has("&>>") {
+			return 3, false
+		}
+		if has("&>") || has("&&") {
+			return 2, false
+		}
+		return 1, false
+	case '\n', ';', '(', ')', '<':
+		return 1, false
+	case '|':
+		if has("||") {
+			return 2, false
+		}
+		return 1, false
+	case '>':
+		if has(">>") {
+			return 2, false
+		}
+		return 1, false
+	case '"', '\'':
+		if i := strings.IndexByte(s[1:], c); i >= 0 {
+			return i + 2, true
+		}
+	}
+	n := 0
+	for n < len(s) && !isBreak(s[n]) {
+		n++
+	}
+	return n, true
+}
+
+// isBreak reports whether c ends a bare word: [\s;|&<>()].
+func isBreak(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '\f', ';', '|', '&', '<', '>', '(', ')':
+		return true
+	}
+	return false
+}
+
+// delimiter consumes the word after a << and returns it after bash's quote
+// removal. The word is every token glued to it in the source (`"EO"F` is
+// one word, EOF), and quotes and backslashes are removed the way bash does
+// (`\EOF`, `E"OF"`, `'EOF'` all end on the line EOF): trimming only the
+// outer quotes left delimiters that never matched, hiding every later
+// command (audit I1). No word (a newline or operator follows) is not a
+// heredoc.
+func (sc *scanner) delimiter() (string, bool) {
+	save := *sc
+	sc.next()
+	if !sc.ok() || !sc.word {
+		*sc = save
+		return "", false
+	}
+	from, to := sc.start, sc.end
+	for {
+		save = *sc
+		sc.next()
+		if !sc.ok() || !sc.word || sc.start != to {
+			*sc = save
+			break
+		}
+		to = sc.end
+	}
+	return unquote(sc.s[from:to]), true
+}
+
+// unquote applies bash's quote removal to a word: a backslash outside
+// quotes keeps the next byte, single quotes keep everything, and inside
+// double quotes a backslash escapes only $, `, " and \.
+func unquote(w string) string {
+	var b strings.Builder
+	var q byte
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		switch {
+		case q == 0 && (c == '"' || c == '\''):
+			q = c
+		case q == c:
+			q = 0
+		case c == '\\' && q == 0 && i+1 < len(w):
+			i++
+			b.WriteByte(w[i])
+		case c == '\\' && q == '"' && i+1 < len(w) && strings.IndexByte("$`\"\\", w[i+1]) >= 0:
+			i++
+			b.WriteByte(w[i])
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// skipBodies cuts the pending heredocs' bodies out of the source, in order,
+// starting after the current newline. Each ends on the first line equal to
+// its delimiter, compared as a whole line (so an indented `  EOF` does not
+// end it, as in bash), with a trailing \r dropped and, for <<-, leading tabs
+// stripped. The scanner resumes at the newline after the last terminator.
+func (sc *scanner) skipBodies(docs []heredoc) {
+	s, p := sc.s, sc.end
+	resume := len(s) // an unterminated body runs to the end
+	for _, d := range docs {
+		resume = len(s)
+		for p < len(s) {
+			e := strings.IndexByte(s[p:], '\n')
+			if e < 0 {
+				e = len(s)
+			} else {
+				e += p
+			}
+			line := strings.TrimSuffix(s[p:e], "\r")
+			if d.tabs {
+				line = strings.TrimLeft(line, "\t")
+			}
+			p = e + 1
+			if line == d.delim {
+				resume = e
+				break
+			}
+		}
+	}
+	sc.pos = resume // the newline ending the last terminator, or the end
+}
+
+// group appends the rest of a redirection target's $(...) group (see
+// groupEnd) after the target word just emitted, normalising each word.
+func (sc *scanner) group(out []string) []string {
+	save := *sc
+	sc.next()
+	if !sc.ok() || sc.tok != "(" {
+		*sc = save
+		return out
+	}
+	depth := 0
+	for ; sc.ok(); sc.next() {
+		switch t := sc.tok; {
+		case t == "\n" || t == "<<" || t == "<<-" || operators[t]:
+			*sc = save
+			return out
+		case t == "(":
+			depth++
+		case t == ")":
+			depth--
+		}
+		out = append(out, normalizeToken(sc.tok))
+		save = *sc
+		if depth == 0 {
+			return out
+		}
 	}
 	return out
 }
@@ -541,8 +755,9 @@ func takesTarget(t string) bool {
 // ends before a newline, an operator or a heredoc, which end the command or
 // need the main loop, so an unterminated group never swallows later
 // commands. Only shell syntax decides it, and parens and those stops are the
-// same before and after normalisation, so NormalizeCommand (raw words) and
-// program() (normalised words) agree. It never drops a word: callers emit
+// same before and after normalisation, so NormalizeCommand (raw words, in
+// scanner.group, which applies these rules) and program() (normalised
+// words) agree. It never drops a word: callers emit
 // or skip every index up to the one returned.
 func groupEnd(toks []string, i int) int {
 	if i+1 >= len(toks) || toks[i+1] != "(" {
