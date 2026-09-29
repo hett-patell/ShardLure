@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 	"strings"
@@ -234,9 +235,35 @@ func TestReplaceDuringRebuildHoldKeepsCarry(t *testing.T) {
 	if reset, err := s.ResetScriptsForVersion(ctx, 99); err != nil || !reset {
 		t.Fatalf("reset=%v err=%v", reset, err)
 	}
+	// Catch the recorder up so the hold anchors its deadline before the
+	// replace: the replace must then drop that anchor.
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
+		t.Fatalf("caught up, unsettled: held=%v err=%v", held, err)
+	}
+	holdRow := func(path string) (int64, bool) {
+		t.Helper()
+		var v int64
+		err := s.db.QueryRow(`SELECT offset FROM ingest_state WHERE source='script_version' AND path=?`, path).Scan(&v)
+		if err != nil && err != sql.ErrNoRows {
+			t.Fatal(err)
+		}
+		return v, err == nil
+	}
+	if _, ok := holdRow("hold_deadline"); !ok {
+		t.Fatal("precondition: no deadline anchor before the replace")
+	}
 	// --replace with the same sessions while the hold is active.
 	if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, events(), nil); err != nil {
 		t.Fatal(err)
+	}
+	if _, ok := holdRow("hold_deadline"); ok {
+		t.Fatal("the replace kept the deadline anchor")
+	}
+	if hwm, ok := holdRow("hold_hwm"); !ok || hwm != scriptHoldRemeasure {
+		t.Fatalf("hold_hwm = %d (present %v), want the re-measure sentinel %d", hwm, ok, scriptHoldRemeasure)
 	}
 	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
 		t.Fatalf("after --replace, nothing re-recorded: held=%v err=%v", held, err)
