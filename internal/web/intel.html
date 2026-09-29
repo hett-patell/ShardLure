@@ -4651,13 +4651,17 @@ function renderCampaign(c) {
     return (p[1] && p[1].length) ? '<div><b>' + esc(p[0]) + ':</b> ' + esc(p[1].join(', ')) + '</div>' : '';
   }).join('');
   const edits = (c.edits || []).map(function (e) {
-    return '<tr><td class="range">' + esc(shortTime(e.createdAt)) + '</td><td>' + esc(e.action) + '</td><td>' + esc(e.arg) + '</td><td>' + esc(e.who) + '</td></tr>';
+    const arg = (e.action === 'rename' && !e.arg) ? '(name cleared)' : e.arg;
+    return '<tr><td class="range">' + esc(shortTime(e.createdAt)) + '</td><td>' + esc(e.action) + '</td><td>' + esc(arg) + '</td><td>' + esc(e.who) + '</td></tr>';
   }).join('');
   cmBody(
     '<div id="cm-status" class="cm-status" role="status"></div>' +
     '<div class="cm-row"><label for="cm-name">name</label> <input id="cm-name" maxlength="200" value="' + esc(c.name || '') + '"' +
       (c.suggestedName ? ' placeholder="' + esc(c.suggestedName) + '"' : '') + '> ' +
-      actionButton('rename', 'save name', { id: c.id }) + '</div>' +
+      actionButton('rename', 'save name', { id: c.id }) +
+      // An empty rename clears the operator's name (the suggested name shows
+      // again); only offered while there is a name to clear.
+      (c.name ? ' ' + actionButton('clear_name', 'clear name', { id: c.id }, 'clear the name; the suggested name shows again') : '') + '</div>' +
     '<div class="cm-row"><label for="cm-merge">merge into campaign ID</label> <input id="cm-merge" maxlength="14" placeholder="c-…" autocomplete="off"> ' +
       actionButton('merge', 'merge', { id: c.id }) + '</div>' +
     '<h3 class="cm-h">members</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (members || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
@@ -4802,11 +4806,19 @@ document.getElementById('campaign-modal').addEventListener('click', function (e)
   if (a === 'session') { closeCampaign(); openSession(b.dataset.session); return; }
   if (a === 'actor') { closeCampaign(); setActiveView('overview'); selectedActor = b.dataset.actor; loadActorDetail(b.dataset.actor); return; }
   if (a === 'script') { openScript(b.dataset.fp); return; }
+  if (a === 'clear_name') {
+    // Recorded as a rename with an empty name. Empty the field first so the
+    // saved baseline ('') matches it and the post-edit reload is not held
+    // back as unsaved typing.
+    document.getElementById('cm-name').value = '';
+    campaignEdit(b.dataset.id || '', 'rename', '', '');
+    return;
+  }
   let arg = b.dataset.arg || '', raw;
   if (a === 'rename') {
     raw = document.getElementById('cm-name').value;
     arg = raw.trim();
-    if (!arg) { document.getElementById('cm-status').textContent = 'a name is required'; return; }
+    if (!arg) { document.getElementById('cm-status').textContent = 'a name is required (to remove the name, use clear name)'; return; }
   }
   if (a === 'notes') arg = raw = document.getElementById('cm-notes').value;
   if (a === 'merge') { raw = document.getElementById('cm-merge').value; arg = raw.trim(); }

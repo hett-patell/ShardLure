@@ -85,7 +85,6 @@ func TestCampaignEditValidatesAndWakes(t *testing.T) {
 	for _, bad := range []url.Values{
 		{"id": {"c-0123456789ab"}, "action": {"drop_table"}},
 		{"id": {"c-0123456789ab"}, "action": {"rename"}, "arg": {strings.Repeat("x", 201)}},
-		{"id": {"c-0123456789ab"}, "action": {"rename"}, "arg": {""}},
 		{"id": {"c-0123456789ab"}, "action": {"rename"}, "arg": {"a\nb"}},
 		{"id": {"c-0123456789ab"}, "action": {"notes"}, "arg": {strings.Repeat("n", 4001)}},
 		{"id": {"c-ffffffffffff"}, "action": {"rename"}, "arg": {"x"}}, // unknown campaign

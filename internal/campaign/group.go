@@ -234,6 +234,11 @@ func Group(in Input) Output {
 			removed[id][e.Arg] = true
 			edited[id] = true
 		case "rename":
+			// An empty Arg is a clear, not a special case: it is still the
+			// latest rename, so latestEdit returns "" (the suggested name
+			// shows) and an unowned lineage it names is no longer pinned by
+			// the "name or notes" rule below. It still counts as edited, so
+			// clearing a name never changes which lineage owns the ID.
 			names[id], nameID[id], edited[id] = e.Arg, e.ID, true
 		case "notes":
 			notes[id], noteID[id], edited[id] = e.Arg, e.ID, true

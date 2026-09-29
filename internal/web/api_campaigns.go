@@ -395,8 +395,12 @@ func validateCampaignEdit(id, action, arg string) error {
 	}
 	switch action {
 	case "rename":
-		if arg == "" || !campaignText(arg, maxCampaignNameRunes, false) {
-			return errors.New("name must be 1-200 characters on one line")
+		// An empty name (arg is already trimmed) clears the operator's name:
+		// Group reads the latest rename as the name, so a later empty one
+		// shows the suggested name again and no longer pins a memberless
+		// campaign.
+		if !campaignText(arg, maxCampaignNameRunes, false) {
+			return errors.New("name must be at most 200 characters on one line")
 		}
 	case "notes":
 		if !campaignText(arg, maxCampaignNotesRunes, true) {
