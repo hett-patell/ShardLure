@@ -36,7 +36,9 @@ import (
 // shipped 47ae767, a leading redirection keeps the program slot, and
 // 25b5d4e, Display counts its ellipsis inside the cap); 4 = a heredoc
 // delimiter gets bash's quote removal and ends on a whole source line
-// (<<\EOF, <<E"OF" and <<"E O F" no longer hide every later command).
+// (<<\EOF, <<E"OF" and <<"E O F" no longer hide every later command),
+// and a heredoc's body (normalised, at most MaxHeredocBodyBytes) is part of
+// its placeholder token.
 const Version = 4
 
 const (
@@ -54,6 +56,22 @@ const (
 	// An attacker's literal < and > inside a word (see escapeLiterals).
 	litLT = "<lt>"
 	litGT = "<gt>"
+
+	// A heredoc's placeholder; its body follows inside the same token, one
+	// litNL per body line, and litMore marks a body cut at
+	// MaxHeredocBodyBytes.
+	heredocTok = "<heredoc>"
+	litNL      = "<nl>"
+	litMore    = "<more>"
+
+	// MaxHeredocBodyBytes bounds how much of one heredoc body enters its
+	// token (raw bytes, counted before normalising). Bodies are part of the
+	// fingerprint, but a dropper carrying a large payload in a heredoc must
+	// not push its whole line past the per-session byte cap: the recorder
+	// refuses a line that does not fit, and the script's later commands
+	// with it. 4 KiB keeps any script a bot writes this way (the loader
+	// commands) while a base64 blob is cut.
+	MaxHeredocBodyBytes = 4096
 )
 
 var (
@@ -125,7 +143,9 @@ func NormalizeCommand(cmd string) []string {
 		// ending the terminator line, which separates the next command. An
 		// unterminated body runs to the end of the event, as in bash.
 		if t == "\n" && len(pending) > 0 {
-			sc.skipBodies(pending)
+			for _, b := range sc.skipBodies(pending) {
+				out[b.slot] = b.token()
+			}
 			pending = pending[:0]
 			continue
 		}
@@ -142,8 +162,8 @@ func NormalizeCommand(cmd string) []string {
 		if t == "<<" || t == "<<-" {
 			out = append(out, "<<")
 			if d, ok := sc.delimiter(); ok {
-				pending = append(pending, heredoc{delim: d, tabs: t == "<<-"})
-				out = append(out, "<heredoc>")
+				pending = append(pending, heredoc{delim: d, tabs: t == "<<-", slot: len(out)})
+				out = append(out, heredocTok)
 			} else {
 				start = false // no delimiter: a syntax error, not a redirection
 			}
@@ -202,11 +222,35 @@ func NormalizeCommand(cmd string) []string {
 	return out
 }
 
-// heredoc is a << awaiting its body: the delimiter after quote removal and
-// whether <<- strips leading tabs.
+// heredoc is a << awaiting its body: the delimiter after quote removal,
+// whether <<- strips leading tabs, and the index of its placeholder token.
+// skipBodies fills in the body's lines.
 type heredoc struct {
 	delim string
 	tabs  bool
+	slot  int
+	lines []string // raw, at most MaxHeredocBodyBytes in total
+	cut   bool     // the body had more than that
+}
+
+// token is the heredoc's placeholder followed by its body, each line
+// normalised like a quoted word's text and introduced by litNL, so the body
+// is data inside one token: it never adds commands or a program (the
+// program slot sees the placeholder prefix), but two droppers that write
+// different scripts through the same wrapper no longer share a fingerprint
+// (audit I2; the echo "..." > f form always kept its content). An empty
+// body leaves the bare placeholder.
+func (h heredoc) token() string {
+	var b strings.Builder
+	b.WriteString(heredocTok)
+	for _, l := range h.lines {
+		b.WriteString(litNL)
+		b.WriteString(escapeLiterals(l))
+	}
+	if h.cut {
+		b.WriteString(litNL + litMore)
+	}
+	return b.String()
 }
 
 // scanner yields shell tokens one at a time, so a heredoc body can be cut
@@ -373,14 +417,19 @@ func unquote(w string) string {
 }
 
 // skipBodies cuts the pending heredocs' bodies out of the source, in order,
-// starting after the current newline. Each ends on the first line equal to
-// its delimiter, compared as a whole line (so an indented `  EOF` does not
-// end it, as in bash), with a trailing \r dropped and, for <<-, leading tabs
-// stripped. The scanner resumes at the newline after the last terminator.
-func (sc *scanner) skipBodies(docs []heredoc) {
+// starting after the current newline, and returns them with their lines.
+// Each ends on the first line equal to its delimiter, compared as a whole
+// line (so an indented `  EOF` does not end it, as in bash), with a trailing
+// \r dropped and, for <<-, leading tabs stripped (from body lines too). The
+// scanner resumes at the newline after the last terminator. Every line is
+// looked at once and at most MaxHeredocBodyBytes of each body is kept, so
+// the pass stays linear.
+func (sc *scanner) skipBodies(docs []heredoc) []heredoc {
 	s, p := sc.s, sc.end
 	resume := len(s) // an unterminated body runs to the end
-	for _, d := range docs {
+	for i := range docs {
+		d := &docs[i]
+		budget := MaxHeredocBodyBytes
 		resume = len(s)
 		for p < len(s) {
 			e := strings.IndexByte(s[p:], '\n')
@@ -398,9 +447,19 @@ func (sc *scanner) skipBodies(docs []heredoc) {
 				resume = e
 				break
 			}
+			switch {
+			case d.cut:
+			case len(line) > budget:
+				d.lines = append(d.lines, line[:runeCut(line, budget)])
+				d.cut, budget = true, 0
+			default:
+				d.lines = append(d.lines, line)
+				budget -= len(line)
+			}
 		}
 	}
 	sc.pos = resume // the newline ending the last terminator, or the end
+	return docs
 }
 
 // group appends the rest of a redirection target's $(...) group (see
@@ -460,7 +519,7 @@ type wrapState struct {
 // next classifies the next (normalised) word after a wrapper.
 func (w *wrapState) next(n string) wrapRole {
 	switch {
-	case operators[n] || n == "(" || n == ")" || n == "<" || n == ">" || n == ">>" || n == "<<" || n == "<heredoc>" || redirRe.MatchString(n):
+	case operators[n] || n == "(" || n == ")" || n == "<" || n == ">" || n == ">>" || n == "<<" || strings.HasPrefix(n, heredocTok) || redirRe.MatchString(n):
 		// Shell syntax is never a wrapper's word: `sudo -u ; id` must not
 		// swallow the ";" as the -u value and run on into the next command.
 		return wrapProgram
@@ -658,7 +717,9 @@ func Split(enc string) [][]string {
 
 // displayer renders the encoding for people: separators become spaces and
 // newlines, and escaped literals read shell-style as \< and \>.
-var displayer = strings.NewReplacer(tokSep, " ", lineSep, "\n", litLT, `\<`, litGT, `\>`)
+// A heredoc body's line breaks read as \n, so the body stays inside its
+// command's line: `cat << <heredoc>\nwget <url>\nsh x > /tmp/<f>`.
+var displayer = strings.NewReplacer(tokSep, " ", lineSep, "\n", litLT, `\<`, litGT, `\>`, litNL, `\n`)
 
 const ellipsis = "…"
 
@@ -814,7 +875,7 @@ func program(seg []string) string {
 			}
 			wrap = nil
 		}
-		if t == "(" || t == ")" || t == "<heredoc>" ||
+		if t == "(" || t == ")" || strings.HasPrefix(t, heredocTok) ||
 			(strings.Contains(t, "=") && !strings.HasPrefix(t, "-")) || strings.HasSuffix(t, "$") {
 			continue
 		}
