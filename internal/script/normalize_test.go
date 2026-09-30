@@ -224,7 +224,7 @@ func FuzzNormalizeCommand(f *testing.F) {
 func TestHeredocAndWrappers(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"cat <<EOF\nid\nw\nuptime\nEOF", `cat << <heredoc><nl>id<nl>w<nl>uptime`},
-		{"cat <<'X' > /tmp/a\nfoo\nX\nwhoami", `cat << <heredoc><nl>foo > /tmp/<f> ; whoami`},
+		{"cat <<'X' > /tmp/a\nfoo\nX\nwhoami", `cat << <heredoc-q><nl>foo > /tmp/<f> ; whoami`},
 		{`nohup python3 x`, `nohup python3 x`},
 		{`sudo base64 -d f`, `sudo base64 -d f`},
 		{`x=1 md5sum f`, `x=1 md5sum f`},
@@ -920,6 +920,15 @@ func TestHeredocDelimiterSubstitutions(t *testing.T) {
 			t.Errorf("<<%s ending on %q: programs %q (%q)", tc.word, tc.term, got, norm(in))
 		}
 	}
+	// A substitution does not quote the delimiter; a quote does.
+	for in, q := range map[string]bool{
+		"cat <<$(x)\n$y\n$(x)": false, "cat <<E${x}OF\n$y\nE${x}OF": false, "cat <<E\\\nOF\n$y\nEOF": false,
+		"cat <<\"$(x)\"\n$y\n$(x)": true, "cat <<$'EOF'\n$y\nEOF": true, "cat <<$\"EOF\"\n$y\nEOF": true,
+	} {
+		if got := NormalizeCommand(in); len(got) != 3 || strings.HasPrefix(got[2], heredocQTok) != q {
+			t.Errorf("%q: quoted=%v, tokens %q", in, q, got)
+		}
+	}
 	// An unclosed substitution is a syntax error, not a heredoc.
 	if got := programs("cat <<$(x\nid"); len(got) != 2 || got[1] != "id" {
 		t.Errorf("unclosed $( delimiter: %q", got)
@@ -1009,5 +1018,24 @@ func TestNoOpsAreRecon(t *testing.T) {
 	}
 	if !Distinctive([][]string{NormalizeCommand("sleep 1; id; w; uptime; python3 x")}) {
 		t.Error("a real program beside the no-ops must still count")
+	}
+}
+
+// bash expands $(...) in an unquoted heredoc body and not in a quoted one,
+// so the two encode differently (final audit M5); neither adds a program.
+func TestQuotedHeredocDiffers(t *testing.T) {
+	const tail = "\nEOF\nid; w; uptime; whoami"
+	u := NormalizeCommand("cat <<EOF >/dev/null\n$(python3 -c x)" + tail)
+	q := NormalizeCommand("cat <<'EOF' >/dev/null\n$(python3 -c x)" + tail)
+	if reflect.DeepEqual(u, q) {
+		t.Fatalf("quoted and unquoted heredocs encode alike: %q", u)
+	}
+	if !strings.HasPrefix(u[2], heredocTok+litNL) || !strings.HasPrefix(q[2], heredocQTok+litNL) {
+		t.Errorf("placeholders: %q %q", u[2], q[2])
+	}
+	for _, c := range [][]string{u, q} {
+		if Distinctive([][]string{c}) {
+			t.Errorf("%q is Distinctive", c)
+		}
 	}
 }

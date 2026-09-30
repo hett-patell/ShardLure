@@ -26,7 +26,7 @@ import (
 var versionPin = struct {
 	version int
 	digest  string
-}{5, "2897394ecf3b922562a155bd336be2b1186decc5cdd090596b0d653f6d2a1406"}
+}{5, "ed12cc8fc33ffa8fa904239e618bc1142ac97045ead323cbe69cb81a18fb0886"}
 
 // versionCorpus has, for every normalisation rule, at least one input
 // whose encoding, Display, CommandCount, Distinctive or per-segment

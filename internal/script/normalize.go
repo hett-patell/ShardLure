@@ -63,7 +63,7 @@ import (
 // \f and the separator bytes are word bytes (these two encode as <us> and
 // <rs>) and only an all-CRLF event has its line endings read as LF (M7); an
 // arithmetic (( )) runs no program and [, test, :, true, false and sleep are
-// recon (M4).
+// recon (M4); a quoted delimiter's placeholder is <heredoc-q> (M5).
 const Version = 5
 
 const (
@@ -307,10 +307,16 @@ type heredoc struct {
 // program slot sees the placeholder prefix), but two droppers that write
 // different scripts through the same wrapper no longer share a fingerprint
 // (audit I2; the echo "..." > f form always kept its content). An empty
-// body leaves the bare placeholder.
+// body leaves the bare placeholder. A quoted delimiter gives heredocQTok:
+// bash runs the $(...) in an unquoted body and not in a quoted one, so the
+// two must not share an encoding (final audit M5).
 func (h heredoc) token() string {
 	var b strings.Builder
-	b.WriteString(heredocTok)
+	if h.quoted {
+		b.WriteString(heredocQTok)
+	} else {
+		b.WriteString(heredocTok)
+	}
 	for _, l := range h.lines {
 		b.WriteString(litNL)
 		b.WriteString(l)
