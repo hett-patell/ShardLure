@@ -77,3 +77,53 @@ VALUES(?,?,?,3,1,?,0.1,3,?,?)`, smallest, "n", "cd /tmp", family, ts, ts); err !
 		t.Fatalf("bad variants JSON: %+v", last)
 	}
 }
+
+// Final re-review, web item 3: capVariants parses every stored variant to
+// rank them, so each 30 s poll cost CPU proportional to the stored arrays
+// although the response was capped. The list memoises the capped result per
+// family and parses again only when the stored array changed; the "N of M"
+// totals stay those of the current array.
+func TestScriptListParsesVariantsOnlyWhenChanged(t *testing.T) {
+	s, mux, _, raw := listTotalsServer(t)
+	fp := func(i int) string { return fmt.Sprintf("%064x", i+1) }
+	variants := func(n int) string {
+		var vs []map[string]any
+		for i := 0; i < n; i++ {
+			vs = append(vs, map[string]any{"fingerprint": fp(i), "distance": 0.1, "sessions": i + 1, "links": false, "reason": "r"})
+		}
+		b, _ := json.Marshal(vs)
+		return string(b)
+	}
+	seedScriptFamily(t, raw, fp(1000), 10, variants(300))
+	seedScriptFamily(t, raw, fp(1001), 5, variants(3))
+	var l struct {
+		Families []struct {
+			Family        string            `json:"family"`
+			Variants      []json.RawMessage `json:"variants"`
+			VariantsTotal int               `json:"variantsTotal"`
+		} `json:"families"`
+	}
+	check := func(wantParses int, wantTotals map[string]int) {
+		t.Helper()
+		getJSON(t, mux, "/api/intel/scripts", &l)
+		s.listVariants.mu.Lock()
+		parses := s.listVariants.parses
+		s.listVariants.mu.Unlock()
+		if parses != wantParses {
+			t.Fatalf("capVariants ran %d times, want %d", parses, wantParses)
+		}
+		for _, f := range l.Families {
+			if want := wantTotals[f.Family]; f.VariantsTotal != want || len(f.Variants) != min(want, listVariantCap) {
+				t.Fatalf("family %s: %d variants of %d, want %d of %d", f.Family[:8], len(f.Variants), f.VariantsTotal, min(want, listVariantCap), want)
+			}
+		}
+	}
+	check(2, map[string]int{fp(1000): 300, fp(1001): 3})
+	check(2, map[string]int{fp(1000): 300, fp(1001): 3}) // unchanged: no parse
+	check(2, map[string]int{fp(1000): 300, fp(1001): 3})
+	// A regroup rewrites one family's variants: only that one is parsed.
+	if _, err := raw.Exec(`UPDATE script_families SET variants=? WHERE family=?`, variants(420), fp(1000)); err != nil {
+		t.Fatal(err)
+	}
+	check(3, map[string]int{fp(1000): 420, fp(1001): 3})
+}

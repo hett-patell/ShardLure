@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -317,6 +318,53 @@ func capVariants(stored string, limit int, keep ...string) (json.RawMessage, int
 	return b, len(all)
 }
 
+// listVariantMemo remembers, per family, the stored variants array the last
+// Scripts poll capped and what capVariants made of it. capVariants parses
+// every stored element (twice) to rank them, and a family stores one
+// variant per member fingerprint with no bound, so the 30 s poll's CPU grew
+// with the stored arrays although the response was capped (final re-review,
+// web item 3). The arrays change only when a regroup rebuilds families
+// (every 10 min at most), so almost every poll now costs one string
+// comparison per family (the store read already pays for those bytes); only
+// a family whose array changed is parsed again. The map is rebuilt from each
+// poll's families, so it holds at most one list page (≤ 1000 families) and
+// drops families that left the list.
+type listVariantMemo struct {
+	mu      sync.Mutex
+	entries map[string]listVariantEntry
+	parses  int // capVariants calls on a miss; read by tests
+}
+
+type listVariantEntry struct {
+	stored string
+	out    json.RawMessage
+	total  int
+}
+
+// cappedListVariants returns capVariants(f.Variants, listVariantCap) for
+// each family, in order, reusing a memoised result whose stored array is
+// unchanged. The totals are those of the stored array, as capVariants
+// computes them.
+func (s *Server) cappedListVariants(fams []store.ScriptFamilyRow) ([]json.RawMessage, []int) {
+	m := &s.listVariants
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next := make(map[string]listVariantEntry, len(fams))
+	outs, totals := make([]json.RawMessage, len(fams)), make([]int, len(fams))
+	for i, f := range fams {
+		e, ok := m.entries[f.Family]
+		if !ok || e.stored != f.Variants {
+			e.stored = f.Variants
+			e.out, e.total = capVariants(f.Variants, listVariantCap)
+			m.parses++
+		}
+		next[f.Family] = e
+		outs[i], totals[i] = e.out, e.total
+	}
+	m.entries = next
+	return outs, totals
+}
+
 type scriptFamilyJSON struct {
 	Family        string          `json:"family"`
 	Display       string          `json:"display"`
@@ -340,9 +388,9 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]scriptFamilyJSON, 0, len(fams))
-	for _, f := range fams {
-		variants, variantsTotal := capVariants(f.Variants, listVariantCap)
-		out = append(out, scriptFamilyJSON{Family: f.Family, Display: f.Display, Variants: variants, VariantsTotal: variantsTotal, Sessions: f.Sessions,
+	capped, totals := s.cappedListVariants(fams)
+	for i, f := range fams {
+		out = append(out, scriptFamilyJSON{Family: f.Family, Display: f.Display, Variants: capped[i], VariantsTotal: totals[i], Sessions: f.Sessions,
 			Actors: f.Actors, IPs: f.IPs, CommandCount: f.CommandCount, Distinctive: f.Distinctive, Links: f.Links, Reason: f.Reason,
 			FirstSeen: campaignJSONTime(f.FirstSeen), LastSeen: campaignJSONTime(f.LastSeen)})
 	}

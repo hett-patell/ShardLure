@@ -190,6 +190,9 @@ type Server struct {
 	lastCmdErrLog opLogLimiter
 	// listTotalErrLog does the same for the Campaigns/Scripts list totals.
 	listTotalErrLog opLogLimiter
+	// listVariants memoises the Scripts list's capped variants per family
+	// (see cappedListVariants).
+	listVariants listVariantMemo
 	// bg tracks background cache refreshes; RunContext joins it before
 	// returning so none of them outlives the store.
 	bg handlerDrain
