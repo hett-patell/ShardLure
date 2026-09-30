@@ -4520,7 +4520,10 @@ onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); refreshC
 pollEvery(30000, function() {
   if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); }
 });
-if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); }
+// Campaigns and scripts are not refreshed here: their block ends with an
+// unconditional first load (the palette searches them on every tab), so a
+// red-tab deep link fetched both lists twice.
+if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); }
 
 // ==== Proxy targets (direct-tcpip pivots) =========================
 function renderTunnels(data) {
