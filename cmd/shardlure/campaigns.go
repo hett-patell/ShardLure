@@ -270,7 +270,7 @@ const scriptRebuildMessage = "script rebuild requested: restart every shardlure 
 // a listing, so it refuses to be combined with any list flag.
 func runScripts(ctx context.Context, st *store.Store, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("scripts", flag.ContinueOnError)
-	limit := fs.Int("limit", 50, "max script families to list")
+	limit := fs.Int("limit", 50, "max script families to list, 1..1000")
 	rebuild := fs.Bool("rebuild", false, "force a script fingerprint rebuild when every shardlure live/web process on this database next starts (after a downgrade and re-upgrade)")
 	if err := parseCmdFlags(fs, args); err != nil {
 		return err

@@ -186,6 +186,8 @@ type Server struct {
 	topActorRates func(map[string]int, float64, int) ([]store.ActorRate, error)
 	// radarErrLog rate-limits the Brute-Force Radar's store-error log line.
 	radarErrLog opLogLimiter
+	// lastCmdErrLog does the same for the actor table's "Last cmd" read.
+	lastCmdErrLog opLogLimiter
 	// bg tracks background cache refreshes; RunContext joins it before
 	// returning so none of them outlives the store.
 	bg handlerDrain

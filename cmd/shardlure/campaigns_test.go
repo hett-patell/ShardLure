@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -328,4 +330,49 @@ func TestListCommandsReportFlagErrorsOnce(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Every list command's --limit help states its accepted range, as the
+// CLAUDE.md --limit convention requires: scripts -h used to say only "max
+// script families to list" while refusing 0 (final audit M2).
+func TestListCommandsHelpStatesLimitRange(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "h.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	run := map[string]func([]string) error{
+		"campaigns": func(a []string) error { return runCampaigns(ctx, st, a, &bytes.Buffer{}) },
+		"scripts":   func(a []string) error { return runScripts(ctx, st, a, &bytes.Buffer{}) },
+		"actors":    func(a []string) error { _, err := parseActorsArgs(a); return err },
+	}
+	for name, fn := range run {
+		help := captureStderr(t, func() { _ = fn([]string{"-h"}) })
+		if !strings.Contains(help, "1..1000") {
+			t.Errorf("%s -h does not state the --limit range:\n%s", name, help)
+		}
+	}
+}
+
+// captureStderr returns what fn wrote to os.Stderr, where the flag package
+// prints usage. Tests in this package do not run in parallel.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	done := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	defer func() { os.Stderr = saved }()
+	fn()
+	os.Stderr = saved
+	w.Close()
+	return <-done
 }

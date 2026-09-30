@@ -245,8 +245,15 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// Last command per actor in one batched query so the actor table's
 	// "Last cmd" column is populated (it was permanently blank — handleIntel
 	// never set LastCommand, only the detail endpoint did). Best-effort: on
-	// error just leave the column empty rather than failing the whole panel.
-	lastCmdByActor, _ := s.st.LastCommandsForActors(actorIDs)
+	// error leave the column empty rather than failing the whole panel, but
+	// log it (rate-limited like the radar). Since v26 the read names its
+	// indexes via INDEXED BY, so a dropped index fails it on every poll until
+	// the next Open heals it; a silent blank column hid that.
+	lastCmdByActor, err := s.st.LastCommandsForActors(actorIDs)
+	if err != nil {
+		s.lastCmdErrLog.log("intel_last_command", err)
+		lastCmdByActor = nil
+	}
 
 	for _, a := range actors {
 		row := intelActorRow{
