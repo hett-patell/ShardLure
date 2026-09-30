@@ -142,33 +142,42 @@ func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
 	// open file as a ReaderAt here (never by path: the caller may have pinned
 	// it); the family scan below still uses the cheap 256 KiB buf since
 	// distinctive strings live near the top. elf.NewFile does not own f.
+	//
+	// A header that does not parse (a download cut short, a mangled section
+	// table) only loses the structural tags below: the family scan runs on
+	// the head regardless. It used to return here, so a truncated copy of a
+	// generic build (XMRig) carried no family, and the campaign worker's
+	// generic-build exclusion, which keys on that family, let the payload
+	// link (campaign final audit M-1). Cowrie does capture partial downloads.
 	ef, err := elf.NewFile(f)
 	if err != nil {
-		return
-	}
-	switch ef.Machine {
-	case elf.EM_X86_64:
-		c.Tags = append(c.Tags, "x86-64")
-	case elf.EM_386:
-		c.Tags = append(c.Tags, "i386")
-	case elf.EM_AARCH64:
-		c.Tags = append(c.Tags, "aarch64")
-	case elf.EM_ARM:
-		c.Tags = append(c.Tags, "arm")
-	case elf.EM_MIPS:
-		c.Tags = append(c.Tags, "mips")
-	case elf.EM_PPC:
-		c.Tags = append(c.Tags, "ppc")
-	case elf.EM_PPC64:
-		c.Tags = append(c.Tags, "ppc64")
-	}
-	// Statically linked ELFs are the Mirai-family fingerprint —
-	// they bundle libc to avoid the target's missing dynamic loader.
-	if isStaticELF(ef) {
-		c.Tags = append(c.Tags, "static")
+		ef = nil // isPackedELF and the checks below take nil as "no structure"
+	} else {
+		switch ef.Machine {
+		case elf.EM_X86_64:
+			c.Tags = append(c.Tags, "x86-64")
+		case elf.EM_386:
+			c.Tags = append(c.Tags, "i386")
+		case elf.EM_AARCH64:
+			c.Tags = append(c.Tags, "aarch64")
+		case elf.EM_ARM:
+			c.Tags = append(c.Tags, "arm")
+		case elf.EM_MIPS:
+			c.Tags = append(c.Tags, "mips")
+		case elf.EM_PPC:
+			c.Tags = append(c.Tags, "ppc")
+		case elf.EM_PPC64:
+			c.Tags = append(c.Tags, "ppc64")
+		}
+		// Statically linked ELFs are the Mirai-family fingerprint —
+		// they bundle libc to avoid the target's missing dynamic loader.
+		if isStaticELF(ef) {
+			c.Tags = append(c.Tags, "static")
+		}
 	}
 	// Packing detection (verdict signal + reason to withhold a family guess).
 	// Tagged even when a family still matched, so the upload carries "packed".
+	// The byte checks run on any head; the structural ones need ef.
 	packed, packedTags := isPackedELF(buf, ef)
 	if packed {
 		c.Tags = append(c.Tags, packedTags...)
