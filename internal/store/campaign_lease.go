@@ -34,9 +34,26 @@ var ErrCampaignLeaseInvalid = errors.New("campaign lease: invalid owner, time or
 // and the read-back run in one write transaction, so two processes racing
 // for an expired lease see one winner. A held lease is not an error: the
 // caller skips its work quietly.
+//
+// The row is read on a plain connection first, and the write runs only when
+// that read says the lease is absent, owner's or expired. The conditional
+// upsert alone answered "held elsewhere" with a WHERE that was false, but
+// the statement still took SQLite's write lock to find that out: behind a
+// long writer in the other process (a CLI --replace is one multi-minute
+// transaction on prod) a non-holder's every tick waited busy_timeout and
+// failed with SQLITE_BUSY, which the worker counted as a failure (backoff,
+// worker_error=1, a logged error) on a process that had nothing to do
+// (pipeline audit M2). The read is only an admission check, never the
+// decision: a stale read that admits a contender still meets the conditional
+// write, so two takers of an expired lease still see one winner.
 func (s *Store) AcquireCampaignLease(ctx context.Context, owner string, now time.Time, ttl time.Duration) (bool, error) {
 	if owner == "" || now.IsZero() || ttl <= 0 || ttl > time.Hour {
 		return false, ErrCampaignLeaseInvalid
+	}
+	if holder, until, err := s.CampaignLeaseHolder(ctx); err != nil {
+		return false, err
+	} else if holder != "" && holder != owner && until.After(now) {
+		return false, nil
 	}
 	held := false
 	err := s.WithTxContext(ctx, func(tx *sql.Tx) error {

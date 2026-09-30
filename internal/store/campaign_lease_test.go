@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -165,5 +166,67 @@ func TestSaveGroupingAsLeaseHolderRequiresLiveOwnLease(t *testing.T) {
 	}
 	if err := st.SaveGrouping(ctx, row("c-3"), nil, nil, 0); err != nil {
 		t.Fatalf("unfenced SaveGrouping (fixtures) = %v", err)
+	}
+}
+
+// A process that does not hold the lease must not take SQLite's write lock
+// to find that out (pipeline audit M2). The conditional upsert's WHERE was
+// false for it, but the statement still waited for the lock: behind a long
+// writer in the holder's process (a CLI --replace is one multi-minute
+// transaction on prod) it waited busy_timeout and failed with SQLITE_BUSY,
+// which Tick counted as a failure (backoff, worker_error=1, a logged error)
+// on a process that had nothing to do. The acquire now reads the row first
+// and writes only when the lease is absent, its own or expired.
+func TestNonHolderAcquireDoesNotWaitForTheWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "busy.db")
+	holder, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	other, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	ctx := context.Background()
+	now := time.Now()
+	if held, err := holder.AcquireCampaignLease(ctx, "holder", now, time.Minute); err != nil || !held {
+		t.Fatalf("holder acquire %v %v", held, err)
+	}
+	// The holder's process keeps a write transaction open, with the SQLite
+	// write lock taken, until the other process's acquire has returned.
+	locked, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- holder.WithTx(func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`INSERT INTO app_settings(key,value,updated_at) VALUES('probe','x','x')`); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	start := time.Now()
+	held, err := other.AcquireCampaignLease(ctx, "other", now.Add(time.Second), time.Minute)
+	waited := time.Since(start)
+	close(release)
+	if e := <-done; e != nil {
+		t.Fatal(e)
+	}
+	if err != nil || held {
+		t.Fatalf("non-holder acquire behind a live lease and a long writer: held=%v err=%v after %v; want quietly refused", held, err, waited.Round(time.Millisecond))
+	}
+	if waited > time.Second {
+		t.Fatalf("non-holder acquire waited %v on the write lock", waited.Round(time.Millisecond))
+	}
+	// The write path still decides the contested cases: the lease has expired,
+	// so the other process takes it over (and the old owner is then refused).
+	if held, err := other.AcquireCampaignLease(ctx, "other", now.Add(2*time.Minute), time.Minute); err != nil || !held {
+		t.Fatalf("takeover of an expired lease = %v, %v", held, err)
+	}
+	if held, err := holder.AcquireCampaignLease(ctx, "holder", now.Add(2*time.Minute), time.Minute); err != nil || held {
+		t.Fatalf("evicted owner re-acquired: %v, %v", held, err)
 	}
 }
