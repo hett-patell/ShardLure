@@ -210,9 +210,13 @@ of access logs).
 > set `SHARDLURE_DASH_TOKEN`.
 >
 > Without a token the dashboard also refuses (`421`) any request whose `Host` is
-> not its listen IP, a loopback address, `localhost`, its hostname,
-> `<hostname>.<tailnet>.ts.net` or the `dashboard.public_origin` hostname, which
-> stops DNS-rebinding pages from reading it. Reaching it by another name needs
+> not its listen IP, a loopback address, `localhost`, the `dashboard.public_origin`
+> hostname, or one of this machine's Tailscale names, which stops DNS-rebinding
+> pages from reading it. The Tailscale names are the MagicDNS name that
+> `tailscale status --json` reports at startup (and its short form), plus names
+> derived from the hostname the way Tailscale derives them (`my_box` becomes
+> `my-box`, a duplicate `arm` becomes `arm-1`), alone or as
+> `<name>.<tailnet>.ts.net`. Reaching it by another name needs
 > `dashboard.public_origin` or a token.
 
 ### Step 5 (optional) — Enable IP reputation enrichment & MalwareBazaar sharing
@@ -280,13 +284,13 @@ sudo systemctl restart shardlure-live
 shardlure version
 ```
 
-- **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues. When the bot-script normaliser changed (v2.9 is normaliser version 4), the campaigns worker also re-records every script in the background; campaign regrouping waits until the rebuilt scripts settle (at most 30 minutes after it catches up), the dashboard explains the wait, and campaign names and IDs are carried over.
+- **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues. When the bot-script normaliser changed (v2.9 is normaliser version 5; the second release candidate was 4, so upgrading from it rebuilds once more), the campaigns worker also re-records every script in the background; campaign regrouping waits until the rebuilt scripts settle (at most 30 minutes after it catches up), the dashboard explains the wait, and campaign names and IDs are carried over. `ingest cowrie --replace` starts the same wait, so a replaced log keeps its campaign names and IDs too.
 - **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
 - **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
 - **Rolling back from v2.9 to an older build:** older binaries (v2.8 at schema 24, the v2.9 campaigns rc1 at schema 25) cannot create backups of the v26 database; restore the pre-upgrade bundle instead.
 - **Upgrading again after a rollback:** an older build writes bot-script lines in its own encoding and leaves the stored normaliser version alone, so the next upgrade would keep them and fingerprint the same script two ways. Run `shardlure scripts --rebuild` as the service account, then restart every `shardlure live` and `web` process on that database. Campaign names and IDs are kept.
-- **A token-less dashboard answers only names it knows.** Without `SHARDLURE_DASH_TOKEN`, a request whose `Host` is not the listen IP, a loopback address, `localhost`, the `dashboard.public_origin` hostname, the machine's hostname or `<hostname>.<tailnet>.ts.net` gets `421` (this blocks DNS rebinding). If you reach the dashboard by another name (a node renamed in the Tailscale console, a LAN DNS name), set `dashboard.public_origin` or a token.
+- **A token-less dashboard answers only names it knows.** Without `SHARDLURE_DASH_TOKEN`, a request whose `Host` is not the listen IP, a loopback address, `localhost`, the `dashboard.public_origin` hostname or one of the machine's Tailscale names gets `421` (this blocks DNS rebinding). The Tailscale names are the MagicDNS name `tailscale status --json` reports at startup and its short form, plus the hostname sanitised and de-duplicated as Tailscale does it (`my_box` → `my-box`, `arm` → `arm-1`), alone or as `<name>.<tailnet>.ts.net`. If you reach the dashboard by another name (a LAN DNS name, or a node renamed in the Tailscale console on a machine without a working `tailscale` CLI), set `dashboard.public_origin` or a token.
 
 ## Local Development
 
@@ -604,7 +608,7 @@ You can also share payloads from the web dashboard: open the payload inspector m
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--dry-run` | false | print classification + destination without POSTing |
-| `--limit N` | 10 | cap per-run uploads (0 = unbounded) |
+| `--limit N` | 10 | cap per-run uploads (0 = unbounded; a negative value is refused) |
 | `--sha SHA` | – | select only this sample; dedup and `Vet` still apply |
 | `--since DUR` | `freshness_days` (10d by default) | local candidate-selection window only |
 | `--anonymous` | false | submit without attribution to your account |
@@ -712,7 +716,7 @@ The same gate runs for both the CLI and the dashboard's "Report All" button. The
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--dry-run` | false | print what would be reported without contacting AbuseIPDB |
-| `--limit N` | 25 | cap per-run reports (0 = unbounded) |
+| `--limit N` | 25 | cap per-run reports (0 = unbounded; a negative value is refused) |
 | `--min-probe N` | 60 | minimum actor ProbeScore to report (0-100) |
 | `--rewindow N` | 24 | hours before a reported IP may be reported again |
 | `--status` | – | list past reports from `abuseipdb_reports` instead of reporting |
@@ -743,10 +747,10 @@ The destination's parent directories must be owned by root or the service accoun
 
 - **What a bundle holds.** A SQLite snapshot taken through the database's own backup API (safe on a live WAL database), the configuration exactly as the service parsed it, referenced evidence files, Cowrie downloads and TTY logs, and a `manifest.json` with every file's hash and size. `--include-file` adds extra administrative files.
 - **Ownership and limits.** Bundle directories are `0700` and files `0600`. The manifest is format v1, capped at 64 MiB and 1,000,000 entries. Every operation times out after 30 minutes unless `--timeout` says otherwise.
-- **Failure is visible.** A bundle is staged under a private `.incomplete` name and only published once every write and `fsync` succeeded. If publication fails late, the output keeps its incomplete marker and the command does not report success.
+- **Failure is visible.** A bundle is staged under a private `.incomplete` name and only published once every write and `fsync` succeeded. If `backup create` fails before publishing, it removes its own staging directory on Linux, and nothing else. If that cleanup fails, or on other platforms, the staging directory is kept and the command prints its path. If publication fails late, the output keeps its incomplete marker and the command does not report success. A refused source file, such as a symlinked config or `--include-file`, is named in the error with the reason.
 - **Restore never overwrites.** The destination must not exist. Restore re-checks every hash, remaps stored evidence paths into the new directory, resets Cowrie file cursors so a later replay deduplicates instead of duplicating history, and writes `shardlure.recovery.yaml` (capture and retention disabled) plus `recovery-report.json` describing every transformation. Your original config, settings, annotations and submission ledgers are preserved unchanged.
 - **Activation is manual.** Restore does not start, stop or reconfigure any service. Review the report, point a service at the recovered config, and enable capture and retention yourself when you are satisfied.
-- **Nothing is deleted.** No backup command removes old bundles, source evidence or incomplete output.
+- **Nothing is deleted.** No backup command removes old bundles, source evidence or published incomplete output. The only thing removed is a failed run's own unpublished staging directory.
 
 ## Health And Metrics
 
