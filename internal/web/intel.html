@@ -3352,12 +3352,21 @@ function buildPalette(q) {
   // any variant (a campaign's evidence names a variant, not always the
   // representative) by PREFIX and opens that fingerprint. Substring matching
   // over fingerprints made "cd" open whichever variant's hash contained it.
+  //
+  // The list carries only each family's 50 largest variants (listVariantCap:
+  // the 30 s poll must stay bounded), so a prefix cannot reach a variant
+  // ranked below that. A FULL 64-hex fingerprint needs no list: the script
+  // dialog resolves any fingerprint server-side, so it always opens (campaign
+  // evidence and the CLI print full fingerprints). A shorter prefix with no
+  // listed match says so instead of reading as "no such script".
   var fpQuery = /^[0-9a-f]{8,64}$/.test(q);
+  var fpFull = /^[0-9a-f]{64}$/.test(q), fpListed = false;
   (_lastScripts || []).forEach(function (f) {
     var vfps = (f.variants || []).map(function (v) { return String(v.fingerprint || ''); });
     var fp = f.family;
     if (fpQuery) {
       fp = [String(f.family || '')].concat(vfps).filter(function (v) { return v.indexOf(q) === 0; })[0];
+      if (fp) fpListed = true;
       if (!fp && String(f.display || '').toLowerCase().indexOf(q) < 0) return;
       fp = fp || f.family;
     } else if (String(f.display || '').toLowerCase().indexOf(q) < 0) {
@@ -3370,6 +3379,18 @@ function buildPalette(q) {
       action: function () { setActiveView('red'); openScript(fp); closePalette(); }
     });
   });
+  if (fpFull && !fpListed) {
+    out.push({
+      group: 'Scripts', label: 'open script ' + q.slice(0, 16) + '…', sub: 'full fingerprint · not among the listed variants',
+      action: function () { setActiveView('red'); openScript(q); closePalette(); }
+    });
+  } else if (fpQuery && !fpListed) {
+    out.push({
+      group: 'Scripts', label: 'no listed variant starts with ' + q.slice(0, 16),
+      sub: 'prefix search covers each family\'s 50 largest variants; paste the full 64-hex fingerprint to open any script',
+      action: function () { closePalette(); }
+    });
+  }
   return out;
 }
 
