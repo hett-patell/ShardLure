@@ -77,16 +77,12 @@ func requireNode(t *testing.T) string {
 func runCampaignJS(t *testing.T, scenario string) string {
 	t.Helper()
 	node := requireNode(t)
-	start := strings.Index(intelHTML, "// ==== Campaigns and scripts")
-	end := strings.Index(intelHTML, "// ==== end campaigns and scripts")
-	if start < 0 || end < start {
-		t.Fatal("campaign JS block markers missing")
-	}
+	block := campaignJSBlock(t)
 	helpers := pageHelperRe.FindAllString(intelHTML, -1)
 	if len(helpers) != 3 {
 		t.Fatalf("page esc/fmt definitions: found %d of 3", len(helpers))
 	}
-	script := campaignJSHarness + strings.Join(helpers, "\n") + "\n" + intelHTML[start:end] +
+	script := campaignJSHarness + strings.Join(helpers, "\n") + "\n" + block +
 		"\n(async () => {\n" + scenario + "\n})().catch(e => { console.error(e); process.exit(1); });\n"
 	path := filepath.Join(t.TempDir(), "harness.js")
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
