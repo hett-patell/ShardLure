@@ -55,7 +55,9 @@ func twoKeyCampaigns(t *testing.T, st *store.Store) []*models.Event {
 // restart: editsSeen starts at 0, so the first tick saw "a new edit" and
 // regrouped at once. The same happens in one process when the operator
 // edits during a backfill (Wake). Neither may regroup until the tick ends
-// drained; the drain already owes a regroup.
+// drained; the drain already owes a regroup. The replace also arms the
+// script rebuild hold (store pipeline audit I1), so that owed regroup waits
+// further until the re-recorded sessions settle.
 func TestRestartDuringBacklogKeepsRenamedCampaign(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
@@ -97,6 +99,12 @@ func TestRestartDuringBacklogKeepsRenamedCampaign(t *testing.T) {
 	}
 	if !w2.drained {
 		t.Fatal("backlog never drained")
+	}
+	// Settle the re-recorded sessions so the hold the replace armed
+	// releases and the drain's owed regroup runs.
+	w2.idle = -time.Minute
+	if err := w2.Tick(ctx); err != nil {
+		t.Fatal(err)
 	}
 	list, err = st.ListCampaigns(ctx, 10)
 	if err != nil {

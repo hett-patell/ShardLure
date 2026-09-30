@@ -110,23 +110,21 @@ type Worker struct {
 	// rootFailed is set while the evidence root cannot be opened, so the
 	// failure is logged once per streak, and its recovery once.
 	rootFailed bool
-	lastGroup  time.Time
-	drained    bool
-	pending    bool // regroup owed: backlog just drained, or the last attempt failed
-	failures   int
-	retryAt    time.Time
+	// unreadableLogged is set while the last regroup had payloads it could
+	// not read (their assignments are carried), so that state is logged once
+	// per streak, and its recovery once.
+	unreadableLogged bool
+	lastGroup        time.Time
+	drained          bool
+	pending          bool // regroup owed: backlog just drained, or the last attempt failed
+	failures         int
+	retryAt          time.Time
 	// lastErr is the failure that started the current backoff; Tick returns
 	// it on every tick inside the window so the caller keeps reporting it.
 	lastErr error
 	// versionChecked is set once the stored script lines are known to match
 	// scriptVersion (see the start of tick).
 	versionChecked bool
-	// holdClear is set once the store reports no script-rebuild hold. A hold
-	// is only ever created by the reset at the start of a lease-holding
-	// process, so after it is clear the per-tick check is skipped. A new
-	// process, or this one after regaining the lease, reads the hold from
-	// the store again.
-	holdClear bool
 	// leaseOwner identifies this process to the cross-process worker lease
 	// (store.AcquireCampaignLease), leaseTTL is the lease's lifetime (a field
 	// so a test can expire it quickly), leaseUntil is when the lease this
@@ -229,15 +227,17 @@ func (w *Worker) Close() {
 // An acquire is a takeover, not a renewal, when this process holds no lease
 // or the one it held has lapsed on its own clock (a phase stalled past the
 // TTL: another process may have held and released it in between, unseen).
-// A takeover re-reads the rebuild hold from the store and re-runs the
-// normaliser version check: the other holder may have run a version reset,
-// or a `scripts --rebuild` may have deleted the version row, meanwhile, and
-// a stale holdClear let this process regroup through that hold (audit M-1),
-// while a stale versionChecked missed the rebuild until a restart (cmd audit
-// M2). Only a lease seen lost (leaseUntil zero) reset them before. The
-// takeover is reported to the caller: at the start of a tick the checks
-// follow and read the reset flags; anywhere later they have already run, so
-// the tick must end instead (see renewLease).
+// A takeover re-runs the normaliser version check: a `scripts --rebuild`
+// may have deleted the version row while another process held the lease,
+// and a stale versionChecked missed the rebuild until a restart (cmd audit
+// M2). Only a lease seen lost (leaseUntil zero) reset it before. The rebuild
+// hold needs no reset here: it is read from the store on every tick (see
+// rebuildHeld; a cached "clear" once let a lapsed holder regroup through
+// another process's hold, audit M-1, and a running worker through the hold
+// a CLI `--replace` armed, store pipeline audit I1). The takeover is
+// reported to the caller: at the start of a tick the version check follows
+// and reads the reset flag; anywhere later it has already run, so the tick
+// must end instead (see renewLease).
 func (w *Worker) holdLease(ctx context.Context, now time.Time) (takeover bool, err error) {
 	if !w.leaseUntil.IsZero() && now.Before(w.leaseUntil.Add(-w.leaseTTL/2)) {
 		return false, nil
@@ -257,7 +257,7 @@ func (w *Worker) holdLease(ctx context.Context, now time.Time) (takeover bool, e
 		return false, ErrLeaseHeldElsewhere
 	}
 	if takeover {
-		w.holdClear, w.versionChecked = false, false
+		w.versionChecked = false
 		if w.leaseLost {
 			logf("campaigns: this process now holds the campaign worker lease")
 			w.leaseLost = false
@@ -514,16 +514,17 @@ func (w *Worker) Regroup(ctx context.Context) error {
 // assignment, and the renamed campaign would come back under a new ID; the
 // store releases the hold (carrying assignments to the new fingerprints)
 // once the rebuild has settled. See store.ResetScriptsForVersion.
+//
+// The store is asked on every tick: one primary-key read while no hold
+// exists. The answer used to be cached once it read clear (holdClear), on
+// the theory that only this process's own version reset could arm a hold,
+// and re-read only after a restart or a lease takeover. But a Cowrie
+// `--replace` arms one too (store pipeline audit I1: the drain's regroup
+// otherwise ran before any re-recorded script had settled and orphaned
+// every script-linked campaign), and it runs from the CLI, in another
+// process, at any time. A cached "clear" regrouped straight through it.
 func (w *Worker) rebuildHeld(ctx context.Context) (bool, error) {
-	if w.holdClear {
-		return false, nil
-	}
-	held, err := w.st.ScriptRebuildHold(ctx, time.Now())
-	if err != nil {
-		return false, err
-	}
-	w.holdClear = !held
-	return held, nil
+	return w.st.ScriptRebuildHold(ctx, time.Now())
 }
 
 func (w *Worker) regroup(ctx context.Context) error {

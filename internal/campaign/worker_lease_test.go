@@ -106,9 +106,9 @@ func TestLeaseExpiryHandsThePipelineOver(t *testing.T) {
 	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != w2.leaseOwner || !w1.leaseUntil.IsZero() {
 		t.Fatalf("evicted owner kept running: holder %q, w1 until %v", owner, w1.leaseUntil)
 	}
-	// Regaining the lease re-reads the hold from the store: a script rebuild
+	// The hold is read from the store on every tick: a script rebuild
 	// started meanwhile (here forced directly on the store) holds regroups,
-	// and w1, which believed the hold clear, must not regroup through it.
+	// and w1, whose last read said clear, must not regroup through it.
 	w2.Close()
 	if err := st.ForceScriptRebuild(ctx); err != nil {
 		t.Fatal(err)
@@ -116,7 +116,6 @@ func TestLeaseExpiryHandsThePipelineOver(t *testing.T) {
 	if reset, err := st.ResetScriptsForVersion(ctx, script.Version); err != nil || !reset {
 		t.Fatalf("reset=%v err=%v, want a reset that sets the hold", reset, err)
 	}
-	w1.holdClear = true
 	w1.Wake()
 	grouped := w1.lastGroup
 	now = now.Add(time.Second)
@@ -126,16 +125,17 @@ func TestLeaseExpiryHandsThePipelineOver(t *testing.T) {
 	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != w1.leaseOwner {
 		t.Fatalf("w1 did not reacquire after w2's release: holder %q", owner)
 	}
-	if w1.holdClear || !w1.lastGroup.Equal(grouped) || !w1.wake.Load() {
-		t.Fatalf("regained lease did not re-read the hold: holdClear=%v regrouped=%v wake=%v", w1.holdClear, !w1.lastGroup.Equal(grouped), w1.wake.Load())
+	if !w1.lastGroup.Equal(grouped) || !w1.wake.Load() {
+		t.Fatalf("regained lease regrouped through the store hold: regrouped=%v wake=%v", !w1.lastGroup.Equal(grouped), w1.wake.Load())
 	}
 }
 
 // M-1: a holder whose lease lapsed on its own clock (a phase stalled past
 // the TTL) never saw another holder, so leaseUntil stays non-zero. Another
 // process takes the lapsed lease, starts a script rebuild (store hold) and
-// releases; the first process's next acquire must count as regaining, or its
-// stale holdClear lets it regroup through the hold.
+// releases; the first process's next acquire must count as regaining (it
+// re-runs the version check), and the hold, read from the store every tick,
+// must stop its regroup.
 func TestLapsedHolderRereadsHoldOnReacquire(t *testing.T) {
 	st := openStore(t)
 	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
@@ -147,8 +147,8 @@ func TestLapsedHolderRereadsHoldOnReacquire(t *testing.T) {
 	if err := a.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !a.holdClear || a.leaseUntil.IsZero() {
-		t.Fatalf("precondition: a holds with the hold clear: holdClear=%v until=%v", a.holdClear, a.leaseUntil)
+	if a.leaseUntil.IsZero() {
+		t.Fatal("precondition: a holds the lease")
 	}
 	grouped := a.lastGroup
 	now = now.Add(campaignLeaseTTL + time.Second) // a stalled; its lease lapsed unseen
@@ -175,8 +175,8 @@ func TestLapsedHolderRereadsHoldOnReacquire(t *testing.T) {
 	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != a.leaseOwner {
 		t.Fatalf("a did not reacquire: holder %q", owner)
 	}
-	if a.holdClear || !a.lastGroup.Equal(grouped) {
-		t.Fatalf("a regrouped through the store hold after its lease lapsed: holdClear=%v regrouped=%v", a.holdClear, !a.lastGroup.Equal(grouped))
+	if !a.lastGroup.Equal(grouped) {
+		t.Fatal("a regrouped through the store hold after its lease lapsed")
 	}
 }
 
@@ -418,8 +418,8 @@ func TestMidTickTakeoverEndsTheTick(t *testing.T) {
 	if owner, _, _ := st.CampaignLeaseHolder(ctx); owner != a.leaseOwner {
 		t.Fatalf("a does not hold the lease: %q", owner)
 	}
-	if !a.versionChecked || a.holdClear || !a.lastGroup.Equal(grouped) || !a.pending {
-		t.Fatalf("next tick did not start clean: versionChecked=%v holdClear=%v regrouped=%v pending=%v",
-			a.versionChecked, a.holdClear, !a.lastGroup.Equal(grouped), a.pending)
+	if !a.versionChecked || !a.lastGroup.Equal(grouped) || !a.pending {
+		t.Fatalf("next tick did not start clean: versionChecked=%v regrouped=%v pending=%v",
+			a.versionChecked, !a.lastGroup.Equal(grouped), a.pending)
 	}
 }
