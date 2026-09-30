@@ -61,7 +61,9 @@ import (
 // delimiter keeps $(...), `...` and ${...} literally (M1) and decodes $'...'
 // as bash 5.2 does (\c?, \c\\, a NUL, bash's UTF-8 for \u and \U; M2); \r,
 // \f and the separator bytes are word bytes (these two encode as <us> and
-// <rs>) and only an all-CRLF event has its line endings read as LF (M7).
+// <rs>) and only an all-CRLF event has its line endings read as LF (M7); an
+// arithmetic (( )) runs no program and [, test, :, true, false and sleep are
+// recon (M4).
 const Version = 5
 
 const (
@@ -499,6 +501,18 @@ func (sc *scanner) operator(p int) (string, int) {
 		}
 		return ">", n
 	case '(':
+		// (( opens an arithmetic command only if its inner ( closes on a )
+		// that another ) follows, as bash decides it: `((i++))` runs no
+		// program, `((id); w)` is two subshells running id and w.
+		if c2 == '(' {
+			e := sc.span(kParen, n2)
+			if e >= 0 {
+				if c3, _ := at(e); c3 == ')' {
+					return "((", n2
+				}
+			}
+			sc.failed = sc.failed || sc.strict && e < 0
+		}
 		return "(", n
 	case '\n', ';', ')', '<':
 		return string(c), n
@@ -1476,7 +1490,7 @@ var (
 		"if": true, "then": true, "else": true, "elif": true, "fi": true, "do": true, "done": true,
 		"while": true, "until": true, "esac": true, "{": true, "}": true, "!": true, "]]": true,
 	}
-	noProgram = map[string]bool{"for": true, "case": true, "select": true, "[[": true, "function": true}
+	noProgram = map[string]bool{"for": true, "case": true, "select": true, "[[": true, "((": true, "function": true}
 )
 
 var recon = map[string]bool{
@@ -1489,6 +1503,9 @@ var recon = map[string]bool{
 	// Tool probes: `command -v wget` reports the wrapper itself (-v does not
 	// run its operand), and type/hash only look programs up.
 	"command": true, "type": true, "hash": true,
+	// Tests and no-ops: `[ -d /tmp ] && cd /tmp`, `:`, `sleep 1` (final
+	// audit M4).
+	"[": true, "test": true, ":": true, "true": true, "false": true, "sleep": true,
 }
 
 // takesTarget reports whether redirection t is followed by a target word.

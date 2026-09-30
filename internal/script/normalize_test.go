@@ -861,8 +861,9 @@ func TestBashWordSyntax(t *testing.T) {
 		// Continuations inside operators: >\<nl>> is >>, <\<nl><EOF a heredoc.
 		{"cat <\\\n<EOF\nP1\nEOF\nP2", []string{"cat", "P2"}},
 		{"echo b >\\\n> f; P1", []string{"echo", "P1"}},
-		// (( ... ) is two subshells.
+		// (( is arithmetic only when its )) follows; otherwise subshells.
 		{"((P1 x); P2)", []string{"P1", "P2"}},
+		{"echo $((1+2)) ; ((i++)) ; P1", []string{"echo", "", "P1"}},
 	} {
 		got := programs(tc.in)
 		if !reflect.DeepEqual(got, tc.progs) {
@@ -985,5 +986,28 @@ func TestControlBytesAreWordBytes(t *testing.T) {
 	}
 	if EncodeLine("id\r") != EncodeLine("id") {
 		t.Error("a CR-terminated single line differs from its LF form")
+	}
+}
+
+// Arithmetic, tests and no-ops are not programs a recon script can be told
+// apart by (final audit M4): (( )) runs no program, and [, test, :, true,
+// false and sleep are recon.
+func TestNoOpsAreRecon(t *testing.T) {
+	for _, s := range []string{
+		"(( i++ )); id; w; uptime; whoami",
+		"[ -d /tmp ] && cd /tmp; id; w; uptime; whoami",
+		": ; true; false; test -f x; sleep 1; id",
+	} {
+		if Distinctive([][]string{NormalizeCommand(s)}) {
+			t.Errorf("%q is Distinctive (programs %q)", s, programs(s))
+		}
+	}
+	for in, want := range map[string]string{"((i++))": "", "(( i = 1 + 2 ))": "", "[ -f x ]": "[", "((id); w)": "id"} {
+		if got := programs(in)[0]; got != want {
+			t.Errorf("program(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if !Distinctive([][]string{NormalizeCommand("sleep 1; id; w; uptime; python3 x")}) {
+		t.Error("a real program beside the no-ops must still count")
 	}
 }
