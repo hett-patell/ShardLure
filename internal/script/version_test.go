@@ -2,6 +2,8 @@ package script
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"maps"
@@ -23,10 +25,21 @@ import (
 //
 // Never update only the digest: without a bump, stored sessions and new
 // sessions of one script fingerprint differently forever.
+//
+// keys pins ExtractKeys the same way over versionKeyCorpus: which blobs it
+// accepts, their type, comment and fingerprint. ResetScriptsForVersion
+// deletes and re-records ssh_key evidence only on a Version change, so a
+// stricter or looser key rule shipped without a bump leaves stored values
+// the extractor no longer produces (or misses new ones) forever. It is a
+// separate digest so extending the key corpus never disturbs the encoding
+// pin: a changed digest here with an unchanged corpus needs a bump too.
+// (It was added with Version 5 unchanged; the final re-review showed an RSA
+// minimum of 512 instead of 1024 passing the encoding pin.)
 var versionPin = struct {
 	version int
 	digest  string
-}{5, "877371860a62f9e30cee83c76de10781c1bf73b604c84e176727ef2dc162faae"}
+	keys    string
+}{5, "877371860a62f9e30cee83c76de10781c1bf73b604c84e176727ef2dc162faae", "88f0ddfeb4219393f16dc4ccdc8ee21b577ee8fe7bb950ef5ab1d91843147a8a"}
 
 // versionCorpus has, for every normalisation rule, at least one input
 // whose encoding, Display, CommandCount, Distinctive or per-segment
@@ -163,10 +176,86 @@ func TestVersionPinsEncoding(t *testing.T) {
 	all := Join(lines)
 	fmt.Fprintf(h, "script %s %d\n", Fingerprint(all), len(Tokens(all)))
 	got := hex.EncodeToString(h.Sum(nil))
+	kh := sha256.New()
+	for _, line := range versionKeyCorpus(t) {
+		fmt.Fprintf(kh, "%q %+v\n", line, ExtractKeys(line))
+	}
+	gotKeys := hex.EncodeToString(kh.Sum(nil))
 	switch {
 	case Version != versionPin.version:
-		t.Fatalf("script.Version is %d but versionPin says %d: set versionPin to {%d, %q}", Version, versionPin.version, Version, got)
+		t.Fatalf("script.Version is %d but versionPin says %d: set versionPin to {%d, %q, %q}", Version, versionPin.version, Version, got, gotKeys)
 	case got != versionPin.digest:
-		t.Fatalf("the normaliser's output changed without a script.Version bump: bump script.Version, extend its history, and set versionPin to {Version, %q}", got)
+		t.Fatalf("the normaliser's output changed without a script.Version bump: bump script.Version, extend its history, and set versionPin to {Version, %q, %q}", got, gotKeys)
+	case gotKeys != versionPin.keys:
+		t.Fatalf("ExtractKeys' output changed without a script.Version bump (ssh_key evidence is rebuilt only on a bump): bump script.Version, extend its history, and set versionPin to {Version, %q, %q}", got, gotKeys)
 	}
+}
+
+// versionKeyCorpus holds, for every ExtractKeys rule, a line on each side of
+// it: every key type, the comment forms, mismatched and malformed blobs, and
+// the RSA/DSA mpint, modulus-size and canonical re-encoding boundaries
+// (built from the ssh-keygen-checked vectors in sshkey_test.go).
+func versionKeyCorpus(t *testing.T) []string {
+	fields := func(line string) [][]byte {
+		b, err := base64.StdEncoding.DecodeString(strings.Fields(line)[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out [][]byte
+		for len(b) >= 4 {
+			n := binary.BigEndian.Uint32(b)
+			out, b = append(out, b[4:4+n]), b[4+n:]
+		}
+		return out
+	}
+	line := func(fs ...[]byte) string {
+		var b []byte
+		for _, f := range fs {
+			b = appendField(b, f)
+		}
+		return string(fs[0]) + " " + base64.StdEncoding.EncodeToString(b) + " x"
+	}
+	pow := func(bits int) []byte { // 2^(bits-1)+1 as an mpint
+		b := make([]byte, (bits+7)/8)
+		b[0], b[len(b)-1] = 1<<((bits-1)%8), 1
+		if b[0]&0x80 != 0 {
+			b = append([]byte{0}, b...)
+		}
+		return b
+	}
+	r := fields(testRSA)
+	typ, e, n := r[0], r[1], r[2]
+	d := fields(testDSS)
+	ed := fields(testED25519)
+	out := []string{
+		`echo "` + testED25519 + `" >> .ssh/authorized_keys && echo '` + testRSA + `'>>.ssh/authorized_keys`,
+		testECDSA384, testDSS, testSKEd, testSKEc,
+		`echo ` + testED25519[:len(testED25519)-8] + `>>f`,
+		`echo "` + testED25519 + `">>f; echo ` + testED25519 + `|x;y&z`,
+		"ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIKBT1fubDzcjP8Ntf33MZwaTgCpwTQRaj7IrSvXO0lBU x",
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5Z2FyYmFnZS1ieXRlcy1oZXJl bad",
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKBT1fubDzcjP8Ntf33MZwaTgCpwTQRaj7IrSvXO0lBUAAAA x",
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKBT1fubDzcjP8Ntf33MZwaTgCpwTQRaj7IrSvXO0l x",
+		"sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20AAAAIbmlzdHAyNTYAAAABBAAAAARzc2g6 x",
+		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAACH8BAgMEBQYH x",
+		line(ed[0], append(ed[1], 0)),
+		line(ed[0], ed[1][:31]),
+	}
+	for _, bits := range []int{511, 512, 513, 767, 768, 1023, 1024, 1025, 2048, 4096, 16383, 16384, 16385} {
+		out = append(out, line(typ, e, pow(bits)))
+	}
+	for _, v := range [][2][]byte{
+		{append([]byte{0}, e...), n}, {e, append([]byte{0, 0}, n...)}, {e, append(make([]byte, 5), n...)},
+		{nil, n}, {e, n[1:]}, {e, nil},
+		{append([]byte{0, 1}, make([]byte, 2047)...), n}, {append([]byte{1}, make([]byte, 2048)...), n},
+		{append([]byte{0, 0, 1}, make([]byte, 2047)...), n},
+	} {
+		out = append(out, line(typ, v[0], v[1]))
+	}
+	return append(out,
+		line(d[0], d[1], append([]byte{0}, d[2]...), d[3], d[4]),
+		line(d[0], d[1], d[2], d[3], nil),
+		line(d[0], d[1][1:], d[2], d[3], d[4]),
+		line(d[0], d[1], d[2], d[3]),
+	)
 }
