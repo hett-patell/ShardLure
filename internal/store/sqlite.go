@@ -62,6 +62,15 @@ type Store struct {
 	errThreatFox    error
 	errPayloadIntel error
 	errFileCapture  error
+
+	// getCampaignAfterSummary, when set (tests only, on the test's own
+	// Store), runs between GetCampaign's summary read and its member reads,
+	// where a concurrent SaveGrouping used to split the detail across two
+	// groupings. A field rather than a package variable: a package-level hook
+	// is read on every GetCampaign and shared by every parallel test in the
+	// process, so one test setting it while another's GetCampaign ran was a
+	// data race (reads audit M3). Production never sets it.
+	getCampaignAfterSummary func()
 }
 
 type sqlExecer interface {

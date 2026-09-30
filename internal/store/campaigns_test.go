@@ -457,10 +457,9 @@ func TestGetCampaignReadsOneSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	var saveErr error
-	getCampaignAfterSummary = func() {
+	s.getCampaignAfterSummary = func() {
 		saveErr = s.SaveGrouping(ctx, []CampaignRow{{ID: "c-2", Members: []CampaignMemberRow{{ActorID: "cowrie:c", Sessions: 1, IPs: 1, Reasons: "[]"}}}}, nil, nil, 0)
 	}
-	t.Cleanup(func() { getCampaignAfterSummary = nil })
 	d, err := s.GetCampaign(ctx, "c-1")
 	if saveErr != nil {
 		t.Fatalf("concurrent save: %v", saveErr)
@@ -468,7 +467,7 @@ func TestGetCampaignReadsOneSnapshot(t *testing.T) {
 	if err != nil || d.ID != "c-1" || len(d.Members) != 2 || d.MembersTotal != 2 {
 		t.Fatalf("detail = id %q members %d total %d, %v; want c-1 whole from one snapshot", d.ID, len(d.Members), d.MembersTotal, err)
 	}
-	getCampaignAfterSummary = nil
+	s.getCampaignAfterSummary = nil
 	if _, err := s.GetCampaign(ctx, "c-1"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("after the save c-1 = %v, want gone", err)
 	}

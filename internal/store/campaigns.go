@@ -666,8 +666,8 @@ WHERE c.id=?`, id)
 		return d, err // sql.ErrNoRows when absent
 	}
 	d.CampaignSummary = summary
-	if getCampaignAfterSummary != nil {
-		getCampaignAfterSummary()
+	if s.getCampaignAfterSummary != nil {
+		s.getCampaignAfterSummary()
 	}
 	mrows, err := tx.QueryContext(ctx, `SELECT m.actor_id, COALESCE(a.primary_ip,''), COALESCE(a.playbook,''), m.sessions, m.ips, m.reasons
 FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_id=? ORDER BY m.actor_id LIMIT ?`, d.ID, campaignDetailCap)
@@ -713,11 +713,6 @@ FROM campaign_members m LEFT JOIN actors a ON a.id=m.actor_id WHERE m.campaign_i
 	d.Edits, err = campaignEditsForIn(ctx, tx, campaignIDsResolvingTo(aliases, d.ID))
 	return d, err
 }
-
-// getCampaignAfterSummary, when set (tests only), runs between GetCampaign's
-// summary read and its member reads, where a concurrent SaveGrouping used to
-// split the detail across two groupings.
-var getCampaignAfterSummary func()
 
 // campaignIDsResolvingTo is the campaign's own ID plus every alias source
 // (including chains) that resolves to it: the small set edits can be filed
