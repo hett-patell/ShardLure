@@ -80,7 +80,10 @@ func TestPayloadAndCommonFilters(t *testing.T) {
 	// The vendor's public Traffmonetizer client is byte-identical for every
 	// operator (M-7): generic, like the miners.
 	fam := map[string]string{"miner": "coinminer", "proxyware": "Traffmonetizer"}
-	got := linkingOccurrences(ev, nil, 5000, func(sha string) string { return fam[sha] })
+	got, unread := linkingOccurrences(ev, nil, 5000, func(sha string) string { return fam[sha] })
+	if len(unread) != 0 {
+		t.Fatalf("nothing here is unreadable: %v", unread)
+	}
 	for _, o := range got {
 		if o.Value != "good" {
 			t.Fatalf("value %q must not link", o.Value)
@@ -92,8 +95,9 @@ func TestPayloadAndCommonFilters(t *testing.T) {
 }
 
 // The payload rule and the never-link kinds, beyond the brief's fixture: the
-// empty-file hash, the classifier's mixed-case "XMRig", a payload that could
-// not be classified at all, and context-only kinds.
+// empty-file hash, the classifier's mixed-case "XMRig", a payload policy
+// refused, one that could not be read (listed for the assignment carry, and
+// once per distinct value), and context-only kinds.
 func TestLinkingRulesRejectContextAndUnclassified(t *testing.T) {
 	now := time.Now().UTC()
 	pair := func(kind, value string, size int64) []store.EvidenceRow {
@@ -105,15 +109,19 @@ func TestLinkingRulesRejectContextAndUnclassified(t *testing.T) {
 	var ev []store.EvidenceRow
 	ev = append(ev, pair("payload", emptyFileSHA256, 5000)...)
 	ev = append(ev, pair("payload", "xmrig", 5000)...)
+	ev = append(ev, pair("payload", "refused", 5000)...)
 	ev = append(ev, pair("payload", "unreadable", 5000)...)
 	ev = append(ev, pair("payload", "redtail", 5000)...)
 	ev = append(ev, pair("hassh", "h1", -1)...)
 	ev = append(ev, pair("client", "SSH-2.0-Go", -1)...)
 	ev = append(ev, pair("host", "203.0.113.9", -1)...)
-	fam := map[string]string{"xmrig": "XMRig", "unreadable": unclassified, "redtail": "redtail"}
-	got := linkingOccurrences(ev, nil, 5000, func(sha string) string { return fam[sha] })
+	fam := map[string]string{"xmrig": "XMRig", "refused": unclassified, "unreadable": unreadable, "redtail": "redtail"}
+	got, unread := linkingOccurrences(ev, nil, 5000, func(sha string) string { return fam[sha] })
 	if len(got) != 2 || got[0].Value != "redtail" || got[0].Family != "redtail" {
 		t.Fatalf("got %+v", got)
+	}
+	if len(unread) != 1 || unread[0] != (ValueRef{Kind: "payload", Value: "unreadable"}) {
+		t.Fatalf("unreadable values %v, want exactly payload/unreadable once", unread)
 	}
 }
 
@@ -129,7 +137,7 @@ func TestScriptsLinkOnlyThroughLinkDecision(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		scripts = append(scripts, occ("everyone", fmt.Sprintf("e%d", i), fmt.Sprintf("actor%d", i), true))
 	}
-	got := linkingOccurrences(nil, scripts, 5000, func(string) string { return "" })
+	got, _ := linkingOccurrences(nil, scripts, 5000, func(string) string { return "" })
 	if len(got) != 2 || got[0].Value != "tool" || got[0].Kind != "script" {
 		t.Fatalf("got %+v", got)
 	}
@@ -282,8 +290,11 @@ func TestGroupingRowsNeverCarryEmptyReasons(t *testing.T) {
 // familyOf reads only through a pinned descriptor on the evidence root: a
 // regular single-link file inside the root is classified; a symlink planted
 // at the artifact path (even one pointing inside the root), a hardlink, a
-// FIFO and a file outside the root are refused (fail closed), and the FIFO
-// is refused without blocking.
+// FIFO and a file outside the root are refused by policy (unclassified: no
+// link, no carried assignment), and the FIFO is refused without blocking.
+// A file that cannot be read (EACCES), a payload with no fetched artifact,
+// no evidence root and a missing root are read failures (unreadable: no
+// link, assignment carried), final audit I-1.
 func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
@@ -326,6 +337,16 @@ func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 	write(nested, "nested payload")
 	arts := map[string]string{"aa": inside, "bb": away, "cc": escape, "dd": planted, "ee": hard, "ff": fifo, "gg": nested,
 		"hh": filepath.Join(root, "sub", "..", "..", filepath.Base(outside), "away.bin")}
+	want := map[string]string{"aa": "redtail", "gg": "redtail", "bb": unclassified, "cc": unclassified, "dd": unclassified,
+		"ee": unclassified, "ff": unclassified, "hh": unclassified, "missing": unreadable}
+	if os.Geteuid() != 0 { // root reads a mode-000 file
+		denied := filepath.Join(root, "denied.bin")
+		write(denied, "denied payload")
+		if err := os.Chmod(denied, 0); err != nil {
+			t.Fatal(err)
+		}
+		arts["ii"], want["ii"] = denied, unreadable
+	}
 	for sha, p := range arts {
 		if err := st.RecordArtifact(store.Artifact{TS: time.Now().UTC(), SHA256: sha, LocalPath: p, SizeBytes: 100, Status: "fetched", Origin: "cowrie_download", URL: "cowrie-download:" + sha}); err != nil {
 			t.Fatal(err)
@@ -342,7 +363,7 @@ func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 	done := make(chan map[string]string, 1)
 	go func() {
 		got := map[string]string{}
-		for _, sha := range []string{"aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "missing"} {
+		for sha := range want {
 			got[sha] = w.familyOf(ctx, sha)
 		}
 		done <- got
@@ -353,24 +374,23 @@ func TestFamilyOfOnlyReadsInsideEvidenceRoot(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("familyOf blocked (FIFO opened for reading?)")
 	}
-	want := map[string]string{"aa": "redtail", "gg": "redtail"}
 	for sha, f := range got {
-		if w, ok := want[sha]; ok != (f != unclassified) || (ok && f != w) {
-			t.Errorf("%s (%s): family %q", sha, arts[sha], f)
+		if f != want[sha] {
+			t.Errorf("%s (%s): family %q, want %q", sha, arts[sha], f, want[sha])
 		}
 	}
-	if strings.Join(read, "|") != "inside payload|nested payload" {
+	if len(read) != 2 || strings.Join(read, "|") != "inside payload|nested payload" && strings.Join(read, "|") != "nested payload|inside payload" {
 		t.Fatalf("classifier read %q", read)
 	}
 	noRoot := NewWorker(st, 90, "")
 	noRoot.classify = w.classify
-	if f := noRoot.familyOf(ctx, "aa"); f != unclassified || len(read) != 2 {
+	if f := noRoot.familyOf(ctx, "aa"); f != unreadable || len(read) != 2 {
 		t.Fatalf("no evidence root must not read files: %q %v", f, read)
 	}
 	missingRoot := NewWorker(st, 90, filepath.Join(root, "absent"))
 	missingRoot.classify = w.classify
-	if f := missingRoot.familyOf(ctx, "aa"); f != unclassified || len(read) != 2 {
-		t.Fatalf("missing evidence root must fail closed: %q %v", f, read)
+	if f := missingRoot.familyOf(ctx, "aa"); f != unreadable || len(read) != 2 {
+		t.Fatalf("missing evidence root is a read failure, not policy: %q %v", f, read)
 	}
 }
 
@@ -391,7 +411,7 @@ func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if f := w.familyOf(ctx, "aa"); f != unclassified || w.root != nil {
+		if f := w.familyOf(ctx, "aa"); f != unreadable || w.root != nil {
 			t.Fatalf("missing root: family %q root %v", f, w.root)
 		}
 	}
@@ -416,10 +436,12 @@ func TestFamilyOfOpensRootOnceAndRetriesMissingRoot(t *testing.T) {
 	if err := os.Symlink(root, link); err != nil {
 		t.Fatal(err)
 	}
+	// A symlinked root is a deployment error, not the file's: a read
+	// failure (the assignment is carried until the operator fixes it).
 	linked := NewWorker(st, 90, link)
 	linked.classify = w.classify
-	if f := linked.familyOf(ctx, "aa"); f != unclassified {
-		t.Fatalf("symlinked root classified: %q", f)
+	if f := linked.familyOf(ctx, "aa"); f != unreadable {
+		t.Fatalf("symlinked root: %q, want unreadable", f)
 	}
 	if !strings.Contains(logs.String(), "evidence root cannot be opened (ErrUnsafePath)") {
 		t.Fatalf("symlinked root not logged by category:\n%s", logs.String())
@@ -510,8 +532,8 @@ func TestBurstDrainedWithinOneTickDoesNotForceRegroup(t *testing.T) {
 	}
 }
 
-// A classifier read error means unclassified and is not memoised: the next
-// lookup reads the file again and a success is remembered.
+// A classifier read error means unreadable (not policy) and is not memoised:
+// the next lookup reads the file again and a success is remembered.
 func TestFamilyOfDoesNotMemoiseReadErrors(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()
@@ -533,8 +555,8 @@ func TestFamilyOfDoesNotMemoiseReadErrors(t *testing.T) {
 		}
 		return "RedTail", nil
 	}
-	if f := w.familyOf(ctx, "aa"); f != unclassified {
-		t.Fatalf("read error: family %q", f)
+	if f := w.familyOf(ctx, "aa"); f != unreadable {
+		t.Fatalf("read error: family %q, want unreadable", f)
 	}
 	if _, ok := w.families["aa"]; ok {
 		t.Fatal("read error memoised")
@@ -547,14 +569,15 @@ func TestFamilyOfDoesNotMemoiseReadErrors(t *testing.T) {
 	}
 }
 
-// A cancelled regroup never classifies: familyOf fails closed.
+// A cancelled regroup never classifies: familyOf answers unreadable (nothing
+// was read; Group returns ctx.Err() before any save either way).
 func TestFamilyOfFailsClosedOnCancel(t *testing.T) {
 	st := openStore(t)
 	w := NewWorker(st, 90, t.TempDir())
 	w.classify = func(*os.File) (string, error) { t.Fatal("classified after cancel"); return "", nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if f := w.familyOf(ctx, "aa"); f != unclassified {
+	if f := w.familyOf(ctx, "aa"); f != unreadable {
 		t.Fatalf("family %q", f)
 	}
 }

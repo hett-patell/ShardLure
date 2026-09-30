@@ -41,11 +41,20 @@ const (
 	maxBackoff   = 10 * time.Minute
 
 	emptyFileSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	// unclassified is familyOf's answer when the payload's file could not be
-	// read (no evidence root, no fetched artifact, outside the root, not a
-	// regular file, read error). Such a payload does not link: the generic-
-	// build exclusion could not run, so it fails closed.
+	// unclassified is familyOf's answer when policy refuses the payload's
+	// file: a symlink or hardlink, a non-regular file, a path outside the
+	// root. Such a payload does not link (the generic-build exclusion could
+	// not run, so it fails closed) and its stored assignment is not carried.
 	unclassified = "\x00unclassified"
+	// unreadable is familyOf's answer when the file could not be read for a
+	// reason that is not policy: a permission or I/O error, an evidence root
+	// that does not open (not mounted yet), a failed artifact lookup, no
+	// fetched artifact, a cancelled context. The payload does not link
+	// either, but its assignment is carried forward (Input.Unreadable) so
+	// the campaign keeps its ID and name until the file reads again (final
+	// audit I-1: one failed read on the first regroup after a restart
+	// re-keyed a renamed campaign for good).
+	unreadable = "\x00unreadable"
 )
 
 // genericFamilies are public builds that many unrelated operators deploy
@@ -567,10 +576,10 @@ func (w *Worker) regroup(ctx context.Context) error {
 	}
 	in.Aliases = aliases
 	seen := map[string]bool{}
-	in.Occurrences = linkingOccurrences(ev, scripts, population, func(sha string) string {
+	in.Occurrences, in.Unreadable = linkingOccurrences(ev, scripts, population, func(sha string) string {
 		seen[sha] = true
-		if ctx.Err() != nil { // cancelled: stop reading files, fail closed
-			return unclassified
+		if ctx.Err() != nil { // cancelled: stop reading files (Group returns ctx.Err() before any save)
+			return unreadable
 		}
 		return w.familyOf(ctx, sha)
 	})
@@ -579,6 +588,7 @@ func (w *Worker) regroup(ctx context.Context) error {
 			delete(w.families, sha)
 		}
 	}
+	w.reportUnreadable(len(in.Unreadable))
 	if beforeGroup != nil {
 		beforeGroup()
 	}
@@ -664,10 +674,27 @@ func reasonsJSON(rs []Reason) string {
 }
 
 // familyOf classifies a payload by its captured file and returns the
-// lower-case family, "" when the classifier names none, or unclassified when
-// the file could not be read. The content is only classified, never executed.
-// Successful reads are memoised (a file hash is immutable); misses are not,
-// so a later capture is picked up.
+// lower-case family, "" when the classifier names none, unclassified when
+// policy refuses the file, or unreadable when it could not be read. The
+// content is only classified, never executed. Successful reads are memoised
+// (a file hash is immutable); neither refusal is, so a later capture, or a
+// file that reads again, is picked up.
+//
+// The two refusals differ only in what the regroup does with the payload's
+// stored assignment (final audit I-1). A policy refusal (a symlink on the
+// path, a hardlink, a FIFO or device, a path outside the root) is a property
+// of the file: it fails closed all the way, so the payload neither links nor
+// keeps its assignment. A read failure (EACCES or EIO, an evidence root that
+// does not open yet, a DB error on the artifact lookup or no fetched
+// artifact, a cancelled context, a classifier read error) is the state of
+// the deployment, not of the file: the payload does not link this cycle,
+// but the worker lists it in Input.Unreadable so its assignment is carried
+// unchanged. Before, every failure dropped the assignment, and one failed
+// read on the first regroup of a restarted process (the memo is per
+// process) minted a fresh ID for a renamed campaign once the file read
+// again, its name stranded on an empty shell. The root's own failure is
+// also a read failure: a symlinked or unsupported root is a deployment
+// error the operator fixes, and the IDs must survive the fix.
 //
 // The file is opened through a pinned descriptor on the evidence root
 // (safefile.Root.OpenRegular) and the classifier reads that descriptor, not a
@@ -682,15 +709,15 @@ func (w *Worker) familyOf(ctx context.Context, sha string) string {
 		return f
 	}
 	if w.evidenceRoot == "" || ctx.Err() != nil {
-		return unclassified
+		return unreadable
 	}
 	p, ok, err := w.st.ArtifactPathForSHA256(ctx, sha)
 	if err != nil || !ok {
-		return unclassified
+		return unreadable
 	}
 	root, err := w.evidence()
 	if err != nil {
-		return unclassified
+		return unreadable
 	}
 	rel, ok := relativeTo(w.rootPath, p)
 	if !ok {
@@ -698,16 +725,39 @@ func (w *Worker) familyOf(ctx context.Context, sha string) string {
 	}
 	f, err := root.OpenRegular(rel)
 	if err != nil {
-		return unclassified
+		// ErrUnsafePath: a symlink or non-directory component (ELOOP/ENOTDIR
+		// under RESOLVE_NO_SYMLINKS) or a malformed relative path;
+		// ErrNotRegular: a hardlink, FIFO, device or directory. Everything
+		// else (ErrNotExist, ErrPermission, ErrIO, ErrChanged, ErrUnsupported,
+		// ErrClosed) is the deployment's state and is retried next regroup.
+		if errors.Is(err, safefile.ErrUnsafePath) || errors.Is(err, safefile.ErrNotRegular) {
+			return unclassified
+		}
+		return unreadable
 	}
 	defer f.Close()
 	fam, err := w.classify(f)
 	if err != nil {
-		return unclassified
+		return unreadable
 	}
 	fam = strings.ToLower(fam)
 	w.families[sha] = fam
 	return fam
+}
+
+// reportUnreadable logs once per streak that a regroup had payloads it could
+// not read (their assignments are carried, see familyOf), and once when they
+// all read again. evidence() reports the root's own failure the same way;
+// per-file failures were silent before.
+func (w *Worker) reportUnreadable(n int) {
+	switch {
+	case n > 0 && !w.unreadableLogged:
+		logf("campaigns: %d payload(s) could not be read for classification (a permission or I/O error, an evidence root or artifact not available); they do not link and their campaign assignments are carried unchanged until they read again", n)
+		w.unreadableLogged = true
+	case n == 0 && w.unreadableLogged:
+		logf("campaigns: every payload reads again; payload classification resumed")
+		w.unreadableLogged = false
+	}
 }
 
 // evidence opens the evidence root once per worker. A failure (the directory
@@ -764,7 +814,14 @@ func relativeTo(root, p string) (string, bool) {
 // excludes only known generic builds, and the classifier is precision-first,
 // so most real droppers (packed or Go-built ELFs) carry no family. Requiring a
 // name would stop payloads linking at all.
-func linkingOccurrences(ev []store.EvidenceRow, scripts []store.ScriptOccRow, population int, familyOf func(string) string) []Occurrence {
+//
+// The second result lists the payload values familyOf could not read (see
+// unreadable): they are left out of the occurrences like a refused one, and
+// the caller hands them to Group as Input.Unreadable so their assignments
+// are carried rather than dropped. Values the size, empty-hash or commonness
+// rules exclude are never read and never listed: they could not link either
+// way.
+func linkingOccurrences(ev []store.EvidenceRow, scripts []store.ScriptOccRow, population int, familyOf func(string) string) ([]Occurrence, []ValueRef) {
 	actors := map[string]map[string]bool{}
 	count := func(k, actor string) {
 		if actors[k] == nil {
@@ -785,6 +842,7 @@ func linkingOccurrences(ev []store.EvidenceRow, scripts []store.ScriptOccRow, po
 	}
 	families := map[string]string{} // one lookup per distinct payload per pass
 	var out []Occurrence
+	var unread []ValueRef
 	for _, e := range ev {
 		if !linkingKinds[e.Kind] || !usable(e.Value, e.SessionID, e.ActorID) {
 			continue
@@ -801,8 +859,11 @@ func linkingOccurrences(ev []store.EvidenceRow, scripts []store.ScriptOccRow, po
 			if !ok {
 				f = familyOf(e.Value)
 				families[e.Value] = f
+				if f == unreadable {
+					unread = append(unread, ValueRef{Kind: e.Kind, Value: e.Value})
+				}
 			}
-			if f == unclassified || genericFamilies[strings.ToLower(f)] {
+			if f == unclassified || f == unreadable || genericFamilies[strings.ToLower(f)] {
 				continue
 			}
 			family = strings.ToLower(f)
@@ -820,5 +881,5 @@ func linkingOccurrences(ev []store.EvidenceRow, scripts []store.ScriptOccRow, po
 		out = append(out, Occurrence{Kind: "script", Value: s.Fingerprint, SessionID: s.SessionID, ActorID: s.ActorID,
 			IP: s.IP, FirstSeen: s.FirstSeen, LastSeen: s.LastSeen})
 	}
-	return out
+	return out, unread
 }

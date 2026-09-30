@@ -36,6 +36,24 @@ type Input struct {
 	Assignments []Assignment
 	Aliases     map[string]string
 	Edits       []Edit
+	// Unreadable names linking values whose evidence could not be read this
+	// cycle (a payload file behind a permission or I/O error, an evidence
+	// root not mounted yet, a failed artifact lookup). They carry no
+	// occurrence, so they link nothing, but each keeps the assignment it
+	// had, the rule already applied to a value only a removed actor carried.
+	// With the assignment dropped instead, the first readable regroup minted
+	// a fresh ID for the component (the edit reserves the old one) and a
+	// renamed campaign was left on an empty shell (final audit I-1). A value
+	// that also has an occurrence, has no assignment, or is ignored by an
+	// edit is unaffected. Policy refusals (a symlink, hardlink or non-regular
+	// file, a path outside the root, a generic family) are never listed
+	// here: they fail closed all the way, as before.
+	Unreadable []ValueRef
+}
+
+// ValueRef names one linking value by kind and value.
+type ValueRef struct {
+	Kind, Value string
 }
 
 type Reason struct {
@@ -606,6 +624,15 @@ func group(ctx context.Context, in Input, attr attributeFunc) (Output, error) {
 	for _, x := range dropped {
 		k := vkey(x.Kind, x.Value)
 		if prev, had := raw[k]; had && !present[k] {
+			newAssign[k] = prev
+		}
+	}
+	// A value that could not be read this cycle keeps what it had, by the
+	// same rule: it has no occurrence, so nothing above wrote it. An ignored
+	// value is left out, exactly as its (readable) occurrence would be.
+	for _, v := range in.Unreadable {
+		k := vkey(v.Kind, v.Value)
+		if prev, had := raw[k]; had && !present[k] && !ignored[k] {
 			newAssign[k] = prev
 		}
 	}
