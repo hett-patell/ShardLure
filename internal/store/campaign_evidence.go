@@ -569,8 +569,13 @@ func rekeyCampaignEvidenceTx(tx *sql.Tx, sessionID, newActorID string) error {
 }
 
 // clearCampaignDerivedTx empties derived tables and parks the recorder when
-// the Cowrie source is replaced. Operator edits and campaign identity are
-// kept, so re-ingested evidence maps back to the same campaign IDs.
+// the Cowrie source is replaced. Operator edits and campaign identity
+// (campaign_ids, aliases, named campaigns) are kept. ssh_key and payload
+// evidence re-record to the same values in the first windows after the
+// replace, so their assignments apply again unaided; a script assignment
+// survives only through the rebuild hold armed below, because its value is a
+// settled fingerprint and nothing is settled for the ten minutes after the
+// re-recording.
 //
 // The cursor is set to the largest event id ever issued rather than deleted.
 // events.id is AUTOINCREMENT and sqlite_sequence is never reset, so every
@@ -582,17 +587,37 @@ func rekeyCampaignEvidenceTx(tx *sql.Tx, sessionID, newActorID string) error {
 // top rows were deleted earlier; max() of the two never sits above the next
 // id to be issued, so no re-ingested row is skipped.
 //
-// During a script rebuild hold (ResetScriptsForVersion) the parked cursor is
-// at or past the hold's high-water mark, so the next check would find nothing
-// pending, release, and drop script_version_carry before any re-ingested
-// session settled: every script row in campaign_ids orphaned. The re-ingested
-// events keep their session IDs, so the carry still applies once they are
-// re-recorded. The hold is therefore kept: script_version_carry stays, the
-// deadline anchor is dropped, and the high-water mark is set to
-// scriptHoldRemeasure so the next ScriptRebuildHold re-reads MAX(events.id).
-// clearSourceTx runs this before the replace re-inserts the events in the
-// same transaction, so any check sees the re-inserted rows in that maximum.
+// Every replace arms the script rebuild hold (ResetScriptsForVersion
+// explains the hold), whether or not one is active: it snapshots each
+// settled session's fingerprint into script_version_carry (INSERT OR IGNORE,
+// so a hold already in progress keeps its older snapshot), drops the deadline
+// anchor and sets the high-water mark to scriptHoldRemeasure, which the next
+// ScriptRebuildHold replaces with MAX(events.id). clearSourceTx runs this
+// before the replace re-inserts the events in the same transaction, so that
+// re-measure sees the re-inserted rows. Two failures made this unconditional:
+//
+//   - With a hold active, the parked cursor sits at or past the mark, so the
+//     next check found nothing pending, released and dropped the carry before
+//     any re-ingested session had settled.
+//   - Without one, nothing suppressed regroups at all. The re-recorded
+//     sessions settle only after settleIdle of ingest-time idleness, the
+//     worker regroups as soon as the backlog drains, and Group keeps an
+//     assignment only for a value with an occurrence: the regroup replaced
+//     campaign_ids without the script rows, and when the sessions settled
+//     Group minted a fresh ID, leaving the renamed campaign a named, empty
+//     shell (pipeline audit I1; prod carries such a campaign).
+//
+// The re-ingested events keep their session IDs, so once they are re-recorded
+// and settled the release carries each row to whatever fingerprint its
+// sessions now have, unchanged or not. On a database with no settled scripts
+// the carry stays empty and the release simply waits for the re-recorded
+// sessions to settle (or the deadline), then carries nothing.
 func clearCampaignDerivedTx(tx *sql.Tx) error {
+	// The snapshot first: it reads the rows the DELETE below removes.
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO script_version_carry(session_id, fingerprint)
+SELECT session_id, fingerprint FROM session_scripts WHERE fingerprint<>''`); err != nil {
+		return err
+	}
 	for _, q := range []string{
 		`DELETE FROM session_script_lines`, `DELETE FROM session_scripts`, `DELETE FROM scripts`, `DELETE FROM script_families`,
 		`DELETE FROM campaign_evidence`, `DELETE FROM campaign_members`, `DELETE FROM campaigns WHERE name='' AND notes=''`,
@@ -609,15 +634,10 @@ func clearCampaignDerivedTx(tx *sql.Tx) error {
 	if err := upsertIngestOffsetTx(tx, evidenceCursorSource, evidenceCursorPath, floor, stamp); err != nil {
 		return err
 	}
-	// Only an active hold is touched; without one this is a no-op.
-	r, err := tx.Exec(`UPDATE ingest_state SET offset=?, updated_at=? WHERE source=? AND path=?`,
-		scriptHoldRemeasure, stamp, scriptVersionSource, scriptHoldHWMPath)
-	if err != nil {
+	if err := upsertIngestOffsetTx(tx, scriptVersionSource, scriptHoldHWMPath, scriptHoldRemeasure, stamp); err != nil {
 		return err
 	}
-	if n, _ := r.RowsAffected(); n > 0 {
-		_, err = tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath)
-	}
+	_, err := tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath)
 	return err
 }
 
