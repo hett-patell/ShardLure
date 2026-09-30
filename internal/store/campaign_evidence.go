@@ -695,6 +695,15 @@ const purgeLineBudget = 5000
 // which a purge does not change). Rows and lines are deleted in the same
 // transaction, so a reader sees a session either whole or gone.
 //
+// Sessions and events age out on different keys: the events purge deletes by
+// event time, this step by the session's last_seen. A session straddling the
+// cutoff instant therefore keeps its lines for the events already purged
+// until a later purge's cutoff passes its last_seen (the next one, for any
+// session shorter than the purge interval), and a reset or replay in that
+// window re-records only its surviving suffix. Bounded by one session's
+// duration at the cutoff, and the price of the whole-sessions rule above;
+// accepted as is (pipeline audit M4).
+//
 // There is no orphan-line step: the one other deleter of session_scripts
 // (the orphan-actor sweep in MaintenancePurgeContext) removes lines with
 // their rows too. The step it replaces was a LEFT JOIN over every line on
