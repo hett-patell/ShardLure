@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/store"
 	"os"
 	"path/filepath"
@@ -190,5 +191,79 @@ func TestCreateNamesRefusedOutputAncestor(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(shared, "backup")); !os.IsNotExist(statErr) {
 		t.Fatal("refused create wrote output")
+	}
+}
+
+// A symlinked --include-file or config file used to fail with the generic
+// "filesystem or database operation failed" / "invalid or missing
+// configuration" and no path, and the include case left this run's
+// .incomplete staging directory behind (final audit M3). The refusal must name
+// the file, and a failed create must remove only its own staging directory.
+func TestCreateNamesRefusedSourceFileAndRemovesOwnStaging(t *testing.T) {
+	f := newFixture(t)
+	base := t.TempDir()
+	real := filepath.Join(base, "real-key")
+	if err := os.WriteFile(real, []byte("inert include\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "key-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	cfgLink := filepath.Join(filepath.Dir(f.Config), "config-link.yaml")
+	if err := os.Symlink(f.Config, cfgLink); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		opts    func(out string) CreateOptions
+		refused string
+	}{
+		"include-file": {func(out string) CreateOptions {
+			return CreateOptions{ConfigPath: f.Config, Output: out, IncludeFiles: []string{link}}
+		}, link},
+		"config-file": {func(out string) CreateOptions { return CreateOptions{ConfigPath: cfgLink, Output: out} }, cfgLink},
+	} {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			// Another run's staging directory and an unrelated entry must survive.
+			other := filepath.Join(parent, ".shardlure-backup-0123456789abcdef0123456789abcdef.incomplete")
+			if err := os.Mkdir(other, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(other, incompleteName), []byte("incomplete\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(parent, "keep"), []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Create(context.Background(), tc.opts(filepath.Join(parent, "backup")))
+			if !errors.Is(err, ErrUnsafePath) || !errors.Is(err, safefile.ErrUnsafePath) {
+				t.Fatalf("symlinked %s: %v", name, err)
+			}
+			if path, reason, ok := RefusedPath(err); !ok || path != tc.refused || !strings.Contains(reason, "symbolic link") {
+				t.Fatalf("refused = %q %q %v, want %q", path, reason, ok, tc.refused)
+			}
+			if strings.Contains(err.Error(), base) || strings.Contains(err.Error(), f.Root) {
+				t.Fatalf("path leaked into Error(): %v", err)
+			}
+			var failure *Failure
+			if errors.As(err, &failure) && failure.Staging != "" {
+				t.Fatalf("staging reported retained: %q", failure.Staging)
+			}
+			entries, err := os.ReadDir(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if len(names) != 2 || names[0] != filepath.Base(other) || names[1] != "keep" {
+				t.Fatalf("output parent after failure = %v, want only the pre-existing entries", names)
+			}
+			if _, err := os.Stat(filepath.Join(other, incompleteName)); err != nil {
+				t.Fatalf("another run's staging was touched: %v", err)
+			}
+		})
 	}
 }

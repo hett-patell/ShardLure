@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -157,6 +158,13 @@ func (s refusalSides) side(path string) refusedSide {
 		return sideOutput
 	case within(path, s.input):
 		return sideBundle
+	// backup.Create names the file itself when a no-follow open of the config
+	// file or an --include-file refuses it (a symlinked file used to get a
+	// generic error and no path; final audit M3).
+	case s.create && s.config != "" && path == mustAbs(s.config):
+		return sideSource
+	case s.create && slices.ContainsFunc(s.includes, func(inc string) bool { return path == mustAbs(inc) }):
+		return sideInclude
 	case s.create && names(s.config):
 		// Opened before the output's parent, even when it is the same
 		// directory: had it opened, the output's parent would have too.

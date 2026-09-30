@@ -334,3 +334,60 @@ func TestBackupCLIRemedySharedSymlinkAncestor(t *testing.T) {
 		t.Fatalf("config refusal misattributed: %q", msg)
 	}
 }
+
+// A symlinked --include-file or config *file* (not directory) used to print
+// only "filesystem or database operation failed" / "invalid or missing
+// configuration", and the include case left a .incomplete staging directory
+// beside the output (final audit M3). The refusal must name the file with its
+// own side's remedy, and nothing may be left in the output's parent.
+func TestBackupCLIRemedyNamesRefusedSourceFile(t *testing.T) {
+	cfg, _ := cliBackupFixture(t)
+	base := t.TempDir()
+	real := filepath.Join(base, "real-key")
+	if err := os.WriteFile(real, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	incLink := filepath.Join(base, "key-link")
+	if err := os.Symlink(real, incLink); err != nil {
+		t.Fatal(err)
+	}
+	cfgLink := filepath.Join(filepath.Dir(cfg), "link.yaml")
+	if err := os.Symlink(cfg, cfgLink); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, config string
+		extra        []string
+		want         []string
+	}{
+		{"include-file", cfg, []string{"--include-file", incLink}, []string{strconv.Quote(incLink), "symbolic link", "point --include-file", "real directory"}},
+		{"config-file", cfgLink, nil, []string{strconv.Quote(cfgLink), "symbolic link", "point the config", "real directory"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			var out bytes.Buffer
+			err := runBackup(context.Background(), tc.config, append([]string{"create", "--output", filepath.Join(parent, "NEW")}, tc.extra...), &out)
+			if err == nil {
+				t.Fatal("symlinked source file accepted")
+			}
+			msg := err.Error()
+			t.Log(msg)
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Fatalf("%q lacks %q", msg, w)
+				}
+			}
+			for _, d := range []string{"output directory", "bundle path", "filesystem or database operation failed"} {
+				if strings.Contains(msg, d) {
+					t.Fatalf("%q wrongly contains %q", msg, d)
+				}
+			}
+			if strings.Contains(out.String(), "retained") {
+				t.Fatalf("staging reported retained: %q", out.String())
+			}
+			if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
+				t.Fatalf("output parent not empty after refusal: %v %v", entries, err)
+			}
+		})
+	}
+}
