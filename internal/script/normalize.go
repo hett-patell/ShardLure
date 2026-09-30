@@ -25,8 +25,9 @@ import (
 // the length band). Bump Version with every change that can alter an
 // encoding or one of those values (tokenising, placeholders, program
 // detection, escaping, separators, the recon list, the heredoc body bound,
-// Tokens and its cap, the family constants; not a pure refactor or a
-// comment): the campaign worker compares it with the version stored in the
+// Tokens and its cap, the family constants, and MaxCommands and
+// MaxNormalizedBytes, with which the store cuts a session's true capped
+// prefix; not a pure refactor or a comment): the campaign worker compares it with the version stored in the
 // database and, on a mismatch, deletes the script-derived rows and rewinds
 // the recorder so every line is re-encoded (store.ResetScriptsForVersion).
 // TestVersionPinsEncoding fails when any of these values changes while
@@ -66,7 +67,7 @@ import (
 // recon (M4); a quoted delimiter's placeholder is <heredoc-q> (M5);
 // ExtractKeys follows OpenSSH's mpint and RSA modulus rules and hashes the
 // key as ssh-keygen re-encodes it (M6: its ssh_key evidence is rebuilt by
-// the same reset).
+// the same reset); the pin covers MaxCommands and MaxNormalizedBytes (M3).
 const Version = 5
 
 const (

@@ -26,7 +26,7 @@ import (
 var versionPin = struct {
 	version int
 	digest  string
-}{5, "ed12cc8fc33ffa8fa904239e618bc1142ac97045ead323cbe69cb81a18fb0886"}
+}{5, "877371860a62f9e30cee83c76de10781c1bf73b604c84e176727ef2dc162faae"}
 
 // versionCorpus has, for every normalisation rule, at least one input
 // whose encoding, Display, CommandCount, Distinctive or per-segment
@@ -142,7 +142,7 @@ var versionCorpus = []string{
 
 func TestVersionPinsEncoding(t *testing.T) {
 	h := sha256.New()
-	fmt.Fprintf(h, "consts %v %v %v %v\n", FamilyThreshold, MaxDistanceTokens, minLengthRatio, MaxHeredocBodyBytes)
+	fmt.Fprintf(h, "consts %v %v %v %v %v %v\n", FamilyThreshold, MaxDistanceTokens, minLengthRatio, MaxHeredocBodyBytes, MaxCommands, MaxNormalizedBytes)
 	for _, m := range []map[string]bool{recon, reserved, noProgram} {
 		fmt.Fprintf(h, "words %q\n", slices.Sorted(maps.Keys(m)))
 	}
