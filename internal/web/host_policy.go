@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/netmatch"
@@ -21,23 +22,56 @@ var machineHostname = os.Hostname
 
 // tailscaleSelfDNSName is this node's MagicDNS name as the local tailscale
 // CLI reports it (`tailscale status --json`, Self.DNSName), or "" when the
-// CLI is absent, the daemon is down or the call exceeds its budget. It runs
-// once per process (the host policy is built at startup); tests substitute
-// it.
-var tailscaleSelfDNSName = sync.OnceValue(readTailscaleSelfDNSName)
+// CLI is absent, the daemon is down, the call exceeds its budget or ctx ends
+// first. A completed answer is memoised for the process (the host policy is
+// built once per RunContext); a lookup cut short by ctx is not, so a later
+// server in the same process asks again. Tests substitute it.
+var tailscaleSelfDNSName = memoTailscaleSelfDNSName
 
-// tailscaleStatusTimeout bounds the startup call: the dashboard must never
-// wait on a wedged tailscaled. On timeout the hostname rules still apply.
-const tailscaleStatusTimeout = 2 * time.Second
+var tailscaleMemo struct {
+	sync.Mutex
+	done bool
+	name string
+}
 
-func readTailscaleSelfDNSName() string {
+func memoTailscaleSelfDNSName(ctx context.Context) string {
+	tailscaleMemo.Lock()
+	defer tailscaleMemo.Unlock()
+	if tailscaleMemo.done {
+		return tailscaleMemo.name
+	}
+	name := readTailscaleSelfDNSName(ctx)
+	if ctx.Err() == nil {
+		tailscaleMemo.done, tailscaleMemo.name = true, name
+	}
+	return name
+}
+
+// tailscaleStatusTimeout bounds the call: the dashboard must never wait on a
+// wedged tailscaled. On timeout the hostname rules still apply. A variable so
+// a test can shorten it.
+var tailscaleStatusTimeout = 2 * time.Second
+
+// tailscaleWaitDelay bounds how long Output waits for the CLI's stdout to
+// close once the CLI has exited or been killed. Without it, a descendant that
+// inherited stdout (a wrapper script that backgrounds something, a CLI that
+// forks) kept the pipe open and Output waited for that descendant, not the
+// 2 s budget: startup was measured listening after 30 s (final re-review,
+// web item 1). The context kills only the direct child.
+const tailscaleWaitDelay = 500 * time.Millisecond
+
+// readTailscaleSelfDNSName runs the CLI under ctx (the server's run context,
+// so a SIGTERM during startup ends it) with the budget above.
+func readTailscaleSelfDNSName(ctx context.Context) string {
 	path, err := exec.LookPath("tailscale")
 	if err != nil {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), tailscaleStatusTimeout)
+	ctx, cancel := context.WithTimeout(ctx, tailscaleStatusTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "status", "--json").Output()
+	cmd := exec.CommandContext(ctx, path, "status", "--json")
+	cmd.WaitDelay = tailscaleWaitDelay
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -262,11 +296,18 @@ func publicOriginHostname(origin string) string {
 const misdirectedHost = "unrecognised Host for a dashboard without a token: reach it by its listen address, " +
 	"localhost, its Tailscale name or dashboard.public_origin (or set SHARDLURE_DASH_TOKEN)"
 
+// liveHostPolicy is the policy requireKnownHost reads per request. It is
+// swapped once, when a background MagicDNS lookup completes (see
+// startHostPolicy).
+type liveHostPolicy struct{ p atomic.Pointer[hostPolicy] }
+
+func (l *liveHostPolicy) load() hostPolicy { return *l.p.Load() }
+
 // requireKnownHost wraps the live handler (RunContext). The token is read per
 // request, so setting one in the Settings panel lifts the check at once.
-func (s *Server) requireKnownHost(p hostPolicy, next http.Handler) http.Handler {
+func (s *Server) requireKnownHost(l *liveHostPolicy, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.dashboardToken() == "" && !p.allows(r.Host) {
+		if s.dashboardToken() == "" && !l.load().allows(r.Host) {
 			http.Error(w, misdirectedHost, http.StatusMisdirectedRequest)
 			return
 		}
@@ -275,11 +316,51 @@ func (s *Server) requireKnownHost(p hostPolicy, next http.Handler) http.Handler 
 }
 
 // newServerHostPolicy builds the policy for s from its listen address, the
-// configured public origin and the machine's hostname.
+// configured public origin and the machine's hostname, without the MagicDNS
+// name.
 func (s *Server) newServerHostPolicy() hostPolicy {
 	name, err := machineHostname()
 	if err != nil {
 		name = ""
 	}
-	return newHostPolicy(s.addr, s.publicOriginHost, name).withMagicDNS(tailscaleSelfDNSName())
+	return newHostPolicy(s.addr, s.publicOriginHost, name)
+}
+
+// startHostPolicy builds the live policy and returns a stop function that
+// cancels the MagicDNS lookup, if one is still running, and joins it (so a
+// RunContext that fails to listen does not wait out the lookup's budget).
+//
+// Whether the lookup blocks startup follows what the Host check does, which
+// is decided per request on the live token (requireKnownHost), not at
+// startup:
+//   - no token now: the check applies from the first request, so the CLI's
+//     name must already be in the policy. The lookup runs before listening,
+//     bounded by the run context, tailscaleStatusTimeout and
+//     tailscaleWaitDelay.
+//   - a token now: no request is Host-checked while it stays set, so startup
+//     does not wait. The lookup still runs, in the background, because the
+//     token is a live keystore setting that the Settings panel can clear at
+//     runtime, after which the check applies with this policy. Skipping the
+//     lookup would then refuse a renamed node's MagicDNS name until a
+//     restart. Until the lookup lands, only the hostname rules apply, which
+//     can refuse a name but never accept one.
+func (s *Server) startHostPolicy(ctx context.Context) (*liveHostPolicy, func()) {
+	base := s.newServerHostPolicy()
+	l := &liveHostPolicy{}
+	if s.dashboardToken() == "" {
+		p := base.withMagicDNS(tailscaleSelfDNSName(ctx))
+		l.p.Store(&p)
+		return l, func() {}
+	}
+	l.p.Store(&base)
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if name := tailscaleSelfDNSName(ctx); name != "" {
+			p := base.withMagicDNS(name)
+			l.p.Store(&p)
+		}
+	}()
+	return l, func() { cancel(); <-done }
 }

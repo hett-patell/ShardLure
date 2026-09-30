@@ -1140,10 +1140,12 @@ func (s *Server) RunContext(ctx context.Context) error {
 				"Keep it on Tailscale/loopback or set SHARDLURE_DASH_TOKEN.")
 	}
 
+	hosts, stopHosts := s.startHostPolicy(ctx)
+	defer stopHosts() // cancels a background lookup; it returns within tailscaleWaitDelay
 	var handlers handlerDrain
 	srv := &http.Server{
 		Addr: s.addr,
-		Handler: handlers.wrap(securityHeaders(s.requireKnownHost(s.newServerHostPolicy(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Handler: handlers.wrap(securityHeaders(s.requireKnownHost(hosts, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mux.ServeHTTP(w, r.WithContext(observability.WithMonitor(r.Context(), s.monitor)))
 		})))),
 		ReadTimeout: 10 * time.Second,
