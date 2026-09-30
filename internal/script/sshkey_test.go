@@ -1,6 +1,12 @@
 package script
 
-import "testing"
+import (
+	"encoding/base64"
+	"encoding/binary"
+	bigpkg "math/big"
+	"strings"
+	"testing"
+)
 
 const (
 	testED25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKBT1fubDzcjP8Ntf33MZwaTgCpwTQRaj7IrSvXO0lBU mdrfckr"
@@ -74,5 +80,75 @@ func TestExtractKeysRejectsMalformedBlobs(t *testing.T) {
 	}
 	if k := ExtractKeys(`echo "` + testED25519 + `">>f`); len(k) != 1 || k[0].Comment != "mdrfckr" {
 		t.Errorf("comment before >>: %+v", k)
+	}
+}
+
+// RSA and DSA keys follow OpenSSH's mpint and modulus rules, and a blob
+// with redundant leading zeros hashes in the minimal form ssh-keygen
+// re-encodes (final audit M6). Every fingerprint and refusal below is
+// ssh-keygen -l's (OpenSSH 9.6p1) on the same blob.
+func TestExtractKeysFollowsSSHKeygenRules(t *testing.T) {
+	fields := func(line string) [][]byte {
+		b, err := base64.StdEncoding.DecodeString(strings.Fields(line)[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out [][]byte
+		for len(b) >= 4 {
+			n := binary.BigEndian.Uint32(b)
+			out, b = append(out, b[4:4+n]), b[4+n:]
+		}
+		return out
+	}
+	line := func(fs ...[]byte) string {
+		var b []byte
+		for _, f := range fs {
+			b = appendField(b, f)
+		}
+		return string(fs[0]) + " " + base64.StdEncoding.EncodeToString(b) + " x"
+	}
+	big := func(bits int) []byte { // 2^(bits-1)+1 as an mpint
+		b := make([]byte, (bits+7)/8)
+		b[0], b[len(b)-1] = 1<<((bits-1)%8), 1
+		if b[0]&0x80 != 0 {
+			b = append([]byte{0}, b...)
+		}
+		return b
+	}
+	r := fields(testRSA)
+	typ, e, n := r[0], r[1], r[2]
+	half := new(bigpkg.Int).Rsh(new(bigpkg.Int).SetBytes(n), 1).Bytes()
+	const rsaFP = "SHA256:MFVG9OVG2g61VtrAFp9fBDhfN6wLIZM124oJHVji5Kg"
+	for _, tc := range []struct{ name, line, fp string }{
+		{"e with a leading zero", line(typ, append([]byte{0}, e...), n), rsaFP},
+		{"n with leading zeros", line(typ, e, append([]byte{0, 0}, n...)), rsaFP},
+		{"n with five leading zeros", line(typ, e, append(make([]byte, 5), n...)), rsaFP},
+		{"e empty (zero)", line(typ, nil, n), "SHA256:Vji8eqgHS4fPGAkvNrVkYc60DUtCZhTrWDY7v/XVXkU"},
+		{"e of 2049 bytes with a leading zero", line(typ, append([]byte{0, 1}, make([]byte, 2047)...), n), "SHA256:df+Upvr2B3sn7dfbFjeAkMH9ejeJNrprNbADtlgVXeI"},
+		{"n of 16384 bits", line(typ, e, big(16384)), "SHA256:R79tKCrT82fagTFW5iOxVjaGA3yjEpHnc4enARbBJns"},
+		{"n of 1023 bits", line(typ, e, half), ""},
+		{"n of 16385 bits", line(typ, e, big(16385)), ""},
+		{"n negative", line(typ, e, n[1:]), ""},
+		{"n empty", line(typ, e, nil), ""},
+		{"e of 2049 bytes", line(typ, append([]byte{1}, make([]byte, 2048)...), n), ""},
+		{"e of 2050 bytes", line(typ, append([]byte{0, 0, 1}, make([]byte, 2047)...), n), ""},
+		{"the auditor's 63-bit n", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAACH8BAgMEBQYH x", ""},
+	} {
+		k := ExtractKeys(tc.line)
+		switch {
+		case tc.fp == "" && len(k) != 0:
+			t.Errorf("%s: accepted %+v", tc.name, k)
+		case tc.fp != "" && (len(k) != 1 || k[0].Fingerprint != tc.fp):
+			t.Errorf("%s: got %+v, want %s", tc.name, k, tc.fp)
+		}
+	}
+	d := fields(testDSS)
+	for _, tc := range []struct{ name, line, fp string }{
+		{"q with a leading zero", line(d[0], d[1], append([]byte{0}, d[2]...), d[3], d[4]), "SHA256:ZIy4Hr0KEfYMXr0pVmyDfgnbcndcWCKPfswaqHBKgNg"},
+		{"y empty (zero)", line(d[0], d[1], d[2], d[3], nil), "SHA256:IEE7HBSeyD7nSToRv+P6LhQ5LHrjXhrIULY0LBhSsBo"},
+	} {
+		if k := ExtractKeys(tc.line); len(k) != 1 || k[0].Fingerprint != tc.fp {
+			t.Errorf("dss %s: got %+v, want %s", tc.name, k, tc.fp)
+		}
 	}
 }

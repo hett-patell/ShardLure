@@ -63,7 +63,10 @@ import (
 // \f and the separator bytes are word bytes (these two encode as <us> and
 // <rs>) and only an all-CRLF event has its line endings read as LF (M7); an
 // arithmetic (( )) runs no program and [, test, :, true, false and sleep are
-// recon (M4); a quoted delimiter's placeholder is <heredoc-q> (M5).
+// recon (M4); a quoted delimiter's placeholder is <heredoc-q> (M5);
+// ExtractKeys follows OpenSSH's mpint and RSA modulus rules and hashes the
+// key as ssh-keygen re-encodes it (M6: its ssh_key evidence is rebuilt by
+// the same reset).
 const Version = 5
 
 const (
