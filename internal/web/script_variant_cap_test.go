@@ -65,8 +65,10 @@ VALUES(?,?,?,3,1,?,0.1,3,?,?)`, smallest, "n", "cd /tmp", family, ts, ts); err !
 	for _, v := range d.Variants {
 		shown = shown || v.Fingerprint == smallest
 	}
-	if !shown || d.SessionsTotal != 1 {
-		t.Fatalf("the shown variant must stay listed (found %v) and its total come from the full list (%d)", shown, d.SessionsTotal)
+	// sessionsTotal is the store's count for this fingerprint (no session
+	// rows here), never the materialised family's variant figure.
+	if !shown || d.SessionsTotal != 0 {
+		t.Fatalf("the shown variant must stay listed (found %v); sessionsTotal = %d, want the store's 0", shown, d.SessionsTotal)
 	}
 	// A stored value that is not an array still degrades to [] with total 0.
 	seedScriptFamily(t, raw, strings.Repeat("f", 64), 0, "not json")

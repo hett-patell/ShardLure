@@ -4774,7 +4774,7 @@ async function openScript(fp) {
     const fam = typeof d.familySessions === 'number' && nVariants > 1;
     document.getElementById('cm-sub').textContent = fam
       ? 'this variant: ' + fmt(total) + ' of ' + fmt(d.familySessions) + ' family sessions · family: ' + fmt(nVariants) + ' variants, ' + fmt(d.familyActors) + ' actors'
-      : fmt(total) + ' sessions · ' + (d.actors || []).length + ' actors';
+      : fmt(total) + ' sessions · ' + fmt(typeof d.actorsTotal === 'number' ? d.actorsTotal : (d.actors || []).length) + ' actors';
     const vrows = fam ? variants.map(function (v) {
       const fp = String(v.fingerprint || '');
       const tags = (fp === d.fingerprint ? 'shown' : '') + (fp === d.family ? (fp === d.fingerprint ? ', ' : '') + 'representative' : '');

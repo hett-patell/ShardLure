@@ -383,7 +383,12 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 		sessions = append(sessions, scriptSessionJSON{SessionID: x.SessionID, ActorID: x.ActorID, SrcIP: x.SrcIP, FirstSeen: campaignJSONTime(x.FirstSeen)})
 	}
 	out := map[string]any{"fingerprint": d.Fingerprint, "display": d.Display, "family": d.Family,
-		"sessions": sessions, "actors": nonNilStrings(d.Actors), "sessionsTotal": len(sessions)}
+		"sessions": sessions, "actors": nonNilStrings(d.Actors),
+		// True counts for this fingerprint from the store: sessions is capped
+		// at 500 newest and actors is drawn from those only, so their lengths
+		// undercount any script with more sessions than the cap (store-reads
+		// audit M2). Floored at the lists in case the reads straddle a write.
+		"sessionsTotal": max(d.SessionsTotal, len(sessions)), "actorsTotal": max(d.ActorsTotal, len(d.Actors))}
 	// The Scripts row counts the whole family, but GetScript lists only this
 	// fingerprint's sessions (capped at 500). Without the family block the
 	// dialog read "4 sessions" under a row claiming 6 and the other variants
@@ -394,22 +399,10 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 	//
 	// The variant list is capped at scriptVariantCap (largest first, plus
 	// this fingerprint and the representative so the dialog can mark them)
-	// with the true variantsTotal beside it (final audit M2); this variant's
-	// session total is read from the full list before the cut.
+	// with the true variantsTotal beside it (final audit M2).
 	if fam, ok := s.scriptFamily(r.Context(), d.Family); ok {
 		out["variants"], out["variantsTotal"] = capVariants(fam.Variants, scriptVariantCap, d.Fingerprint, d.Family)
 		out["familySessions"], out["familyActors"], out["familyIps"] = fam.Sessions, fam.Actors, fam.IPs
-		var vs []struct {
-			Fingerprint string `json:"fingerprint"`
-			Sessions    int    `json:"sessions"`
-		}
-		if json.Unmarshal(rawJSONList(fam.Variants), &vs) == nil {
-			for _, v := range vs {
-				if v.Fingerprint == d.Fingerprint && v.Sessions > len(sessions) {
-					out["sessionsTotal"] = v.Sessions
-				}
-			}
-		}
 	}
 	writeCampaignJSON(w, out)
 }
