@@ -25,8 +25,11 @@ package campaign
 //	SHARDLURE_CAMPAIGN_SIM_NO_BRIDGE, _NO_ORGANIC, _NO_NEW_VALUE, _NO_EDITS=1  disable that feature
 //
 // Reading the output:
-//   - It logs failure counts per class with example seeds and NEVER fails on
-//     them; the counts are the result. Compare them before and after a change.
+//   - The hard invariants of Group (simHardClasses: shuffle, alias-cycle,
+//     fixpoint, merge-alias, removed-actor, id-change-same-evidence) FAIL the
+//     test when broken: they are regressions, never residue. The residue
+//     classes below are logged per class with example seeds and never fail;
+//     their counts are the result. Compare them before and after a change.
 //   - A small residue in home-collision / id-lost-hard / id-lost-soft is the
 //     expected "born-in-bridge" case: a family whose first evidence arrives in
 //     a session shared with an existing campaign inherits that lineage. This
@@ -907,21 +910,44 @@ func qShow(out Output) string {
 	return b.String()
 }
 
+// simHardClasses are invariants of Group itself, not residue of the world's
+// bookkeeping: determinism under input order (shuffle), an acyclic alias map
+// (alias-cycle), a fixed point on its own output (fixpoint), a merge whose
+// two IDs resolve together (merge-alias), a removed actor staying out
+// (removed-actor) and an unchanged evidence set keeping its ID on a day with
+// no edit (id-change-same-evidence). Any of them failing is a regression and
+// fails the test. They were tallied beside the accepted residue and never
+// failed (final audit M-2), so a regression that wrote an alias cycle or
+// broke determinism passed whenever someone ran the sim.
+var simHardClasses = map[string]bool{"shuffle": true, "alias-cycle": true, "fixpoint": true, "merge-alias": true, "removed-actor": true, "id-change-same-evidence": true}
+
 func TestCampaignWorldSimulation(t *testing.T) {
 	trials, err := strconv.Atoi(os.Getenv("SHARDLURE_CAMPAIGN_SIM"))
 	if err != nil || trials <= 0 {
 		t.Skip("opt-in: set SHARDLURE_CAMPAIGN_SIM=<trials> to run the identity world simulation")
 	}
+	// A knob that does not parse is an error, not base 0 or seed 0 replayed
+	// silently (final audit M-2).
 	base := int64(0)
 	if s := os.Getenv("SHARDLURE_CAMPAIGN_SIM_BASE"); s != "" {
-		base, _ = strconv.ParseInt(s, 10, 64)
+		if base, err = strconv.ParseInt(s, 10, 64); err != nil {
+			t.Fatalf("SHARDLURE_CAMPAIGN_SIM_BASE=%q: %v", s, err)
+		}
 	}
 	mode := os.Getenv("SHARDLURE_CAMPAIGN_SIM_MODE")
 	if s := os.Getenv("SHARDLURE_CAMPAIGN_SIM_SEED"); s != "" {
-		seed, _ := strconv.ParseInt(s, 10, 64)
+		seed, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			t.Fatalf("SHARDLURE_CAMPAIGN_SIM_SEED=%q: %v", s, err)
+		}
 		res := qRun(seed, mode, true)
 		for _, l := range res.log {
 			t.Log(l)
+		}
+		for cat, msg := range res.fails {
+			if simHardClasses[cat] {
+				t.Errorf("%s (hard invariant broken): %s", cat, msg)
+			}
 		}
 		t.Logf("fails: %v", res.fails)
 		return
@@ -979,6 +1005,10 @@ func TestCampaignWorldSimulation(t *testing.T) {
 	sort.Strings(keys)
 	t.Logf("trials=%d mode=%q", trials, mode)
 	for _, k := range keys {
+		if simHardClasses[k] {
+			t.Errorf("%-26s %4d trials (hard invariant broken), e.g. %v", k, len(cats[k]), firstMsg[k])
+			continue
+		}
 		t.Logf("%-26s %4d trials, e.g. %v", k, len(cats[k]), firstMsg[k])
 	}
 	// ambLitOnly counts a trial's days where the literal check passed and the
