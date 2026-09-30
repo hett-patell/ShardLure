@@ -1299,6 +1299,14 @@ func (s *Store) ActorUsers(id string) ([]models.ActorUser, error) {
 // ActorUsersLimit query per listed actor (80 point queries per poll).
 // The window function needs SQLite 3.25+; modernc.org/sqlite bundles 3.4x.
 func (s *Store) ActorUsersForActors(ids []string, perActor int) (map[string][]models.ActorUser, error) {
+	return s.ActorUsersForActorsContext(context.Background(), ids, perActor)
+}
+
+// ActorUsersForActorsContext is ActorUsersForActors on ctx, so the web
+// layer's background cache refresh is interrupted at shutdown: the window
+// sorts every username of the listed actors, seconds on ARM for brute-force
+// actors holding tens of thousands each.
+func (s *Store) ActorUsersForActorsContext(ctx context.Context, ids []string, perActor int) (map[string][]models.ActorUser, error) {
 	if len(ids) == 0 {
 		return map[string][]models.ActorUser{}, nil
 	}
@@ -1318,7 +1326,7 @@ SELECT actor_id, username, count FROM (
          ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY count DESC, username) AS rn
   FROM actor_users WHERE actor_id IN (` + strings.Join(placeholders, ",") + `)
 ) WHERE rn <= ? ORDER BY actor_id, count DESC`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -234,9 +234,10 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// one indexed GROUP BY, not one per actor.
 	rates := s.recentRatesCached()
 
-	// One window-function query for all actors' top users instead of one
-	// point query per actor (was ~80 queries per poll).
-	usersByActor, err := s.st.ActorUsersForActors(actorIDs, 8)
+	// Top users per actor from a 60 s per-actor SWR cache (actorUsersTTL): the
+	// batched window query sorts every username of the listed actors, which
+	// was ~92% of this handler's CPU on the production copy.
+	usersByActor, err := s.actorUsersCached(actorIDs)
 	if err != nil {
 		httpError(w, "intel", err, http.StatusInternalServerError)
 		return

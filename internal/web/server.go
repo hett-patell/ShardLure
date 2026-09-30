@@ -207,6 +207,10 @@ type Server struct {
 
 	// Windowed per-actor attack rates; see report_candidate.go.
 	ratesCache swrCache[*recentCounts]
+	// actorUsers caches /api/intel's per-actor top usernames (60 s SWR, see
+	// actorUsersTTL); actorUsersFetch substitutes its store read in tests.
+	actorUsers      actorUsersCache
+	actorUsersFetch actorUsersFetch
 
 	// Advisory per-IP evidence only; actual report POSTs bypass this cache.
 	reportEvidenceMu     sync.Mutex
