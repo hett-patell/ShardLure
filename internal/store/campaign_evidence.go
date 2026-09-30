@@ -51,12 +51,43 @@ type ctxQueryer interface {
 // evidenceCursor reads the recorder's durable cursor (0 when unset) from a
 // connection or an open transaction.
 func evidenceCursor(ctx context.Context, q ctxRowQueryer) (int64, error) {
-	var cursor int64
-	err := q.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, evidenceCursorSource, evidenceCursorPath).Scan(&cursor)
+	cursor, _, err := evidenceCursorState(ctx, q)
+	return cursor, err
+}
+
+// evidenceCursorState reads the recorder's cursor and the reset epoch, both
+// 0 when the row is absent. The epoch lives in the cursor row's inode column
+// (unused by the campaign rows: it holds a file inode for the Cowrie log
+// cursor) and is bumped by every rewind of the cursor that changes what the
+// stored lines mean: ResetScriptsForVersion (a new encoder) and a Cowrie
+// --replace (the rows behind the cursor are gone). Ordinary recording moves
+// only the offset.
+//
+// "Cursor unchanged" alone was an ABA check for RecordCampaignEvidence's
+// phase 2 (pipeline audit M1): a reset in another process rewinds to 0 and
+// can record back up to exactly the value phase 1 read, after which phase 2
+// wrote lines the old encoder produced under the new version stamp. With the
+// epoch, any reset or replace between the phases makes phase 2 give up.
+func evidenceCursorState(ctx context.Context, q ctxRowQueryer) (cursor, epoch int64, err error) {
+	err = q.QueryRowContext(ctx, `SELECT offset, inode FROM ingest_state WHERE source=? AND path=?`, evidenceCursorSource, evidenceCursorPath).Scan(&cursor, &epoch)
 	if err != nil && err != sql.ErrNoRows {
-		return 0, err
+		return 0, 0, err
 	}
-	return cursor, nil
+	return cursor, epoch, nil
+}
+
+// evidenceEpochSQL is the reset epoch as a scalar subquery (0 when the cursor
+// row is absent), for a write that must be conditional on it.
+const evidenceEpochSQL = `COALESCE((SELECT inode FROM ingest_state WHERE source='` + evidenceCursorSource + `' AND path='` + evidenceCursorPath + `'),0)`
+
+// rewindEvidenceCursorTx sets the recorder's cursor and bumps the reset
+// epoch (see evidenceCursorState). A fresh row starts at epoch 1, so it
+// differs from the 0 a reader saw while the row was absent.
+func rewindEvidenceCursorTx(tx *sql.Tx, offset int64, stamp string) error {
+	_, err := tx.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,1,?,'',?)
+ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, inode=ingest_state.inode+1, updated_at=excluded.updated_at`,
+		evidenceCursorSource, evidenceCursorPath, offset, stamp)
+	return err
 }
 
 type evidenceEvent struct {
@@ -161,10 +192,12 @@ type precomputed struct {
 //     AUTOINCREMENT and sqlite_sequence is never reset, so an id names one
 //     immutable command forever: a row can only disappear (purge, --replace)
 //     or change actor_id (HASSH re-key). The byte budget applies here.
-//  2. Phase 2, one writeMu transaction: re-read the cursor and give up
-//     (Done:false, no error, the tick retries) if another writer moved it,
-//     because advancing to end would overwrite a --replace's reset and skip
-//     the re-ingested rows. Re-run the same rowid seek for the same
+//  2. Phase 2, one writeMu transaction: re-read the cursor and the reset
+//     epoch (evidenceCursorState) and give up (Done:false, no error, the
+//     tick retries) if another writer moved either, because advancing to end
+//     would overwrite a --replace's reset and skip the re-ingested rows, and
+//     a reset that recorded back to the same cursor would otherwise get this
+//     phase's lines from the old encoder. Re-run the same rowid seek for the same
 //     (cursor, end], take session_id/actor_id fresh from each row (re-key
 //     correctness) and the line and keys from the map; a row absent from the
 //     map or from the table is skipped. Then advance the cursor to end. The
@@ -185,7 +218,7 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 		window = maxEvidenceWindow
 	}
 	var res EvidenceRecordResult
-	cursor, err := evidenceCursor(ctx, s.db)
+	cursor, epoch, err := evidenceCursorState(ctx, s.db)
 	if err != nil {
 		return res, err
 	}
@@ -245,11 +278,11 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 		evidenceBetweenPhases()
 	}
 	err = s.WithTxContext(ctx, func(tx *sql.Tx) error {
-		cur, err := evidenceCursor(ctx, tx)
+		cur, ep, err := evidenceCursorState(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if cur != cursor {
+		if cur != cursor || ep != epoch {
 			res = EvidenceRecordResult{}
 			return nil
 		}
@@ -631,7 +664,7 @@ SELECT session_id, fingerprint FROM session_scripts WHERE fingerprint<>''`); err
 		return err
 	}
 	stamp := formatFixedUTC(time.Now())
-	if err := upsertIngestOffsetTx(tx, evidenceCursorSource, evidenceCursorPath, floor, stamp); err != nil {
+	if err := rewindEvidenceCursorTx(tx, floor, stamp); err != nil {
 		return err
 	}
 	if err := upsertIngestOffsetTx(tx, scriptVersionSource, scriptHoldHWMPath, scriptHoldRemeasure, stamp); err != nil {

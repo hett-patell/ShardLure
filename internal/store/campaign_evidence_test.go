@@ -973,3 +973,89 @@ func TestLateLineResettlesAfterFutureSettle(t *testing.T) {
 		t.Fatalf("fingerprint %s -> %s: still the prefix", before, after)
 	}
 }
+
+// Phase 2's guard was "cursor unchanged", an ABA check (pipeline audit M1):
+// a version reset in another process rewinds the cursor to 0 and can record
+// back up to exactly the value phase 1 read, after which phase 2 wrote lines
+// the OLD encoder produced under the NEW version stamp. The guard now compares
+// the reset epoch as well (bumped by ResetScriptsForVersion and a Cowrie
+// --replace), so phase 2 gives up and the tick retries with the new encoder.
+func TestRecorderPhaseTwoRefusesStaleCursorAcrossReset(t *testing.T) {
+	s := newTestStore(t, "evidence-aba.db")
+	ctx := context.Background()
+	if _, err := s.ResetScriptsForVersion(ctx, 1); err != nil { // stamp version 1 on the empty DB
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-time.Hour)
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "id", "", "", now)
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "uname -a", "", "", now.Add(time.Second))
+	if res, err := s.RecordCampaignEvidence(ctx, 2); err != nil || !res.Done {
+		t.Fatalf("%+v %v", res, err)
+	}
+	cowrieEvent(t, s, "s2", "cowrie:b", "command", "id", "", "", now.Add(2*time.Second))
+	cowrieEvent(t, s, "s2", "cowrie:b", "command", "uname -a", "", "", now.Add(3*time.Second))
+	if c := evidenceCursorValue(t, s); c != 2 {
+		t.Fatalf("cursor %d", c)
+	}
+	orig := evidenceEncodeLine
+	evidenceEncodeLine = func(c string) string { return "OLD:" + orig(c) }
+	t.Cleanup(func() { evidenceEncodeLine = orig; evidenceBetweenPhases = nil })
+	evidenceBetweenPhases = func() {
+		evidenceBetweenPhases = nil
+		evidenceEncodeLine = orig
+		// The other process (the new binary): version bump, rewind to 0,
+		// record the first window, which lands the cursor back on 2.
+		if reset, err := s.ResetScriptsForVersion(ctx, 2); err != nil || !reset {
+			t.Fatalf("reset=%v %v", reset, err)
+		}
+		if res, err := s.RecordCampaignEvidence(ctx, 2); err != nil || res.Done {
+			t.Fatalf("%+v %v", res, err)
+		}
+		if c := evidenceCursorValue(t, s); c != 2 {
+			t.Fatalf("inner cursor %d", c)
+		}
+	}
+	res, err := s.RecordCampaignEvidence(ctx, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Done || res.Recorded != 0 {
+		t.Fatalf("phase 2 wrote through a reset: %+v", res)
+	}
+	lines := func() map[int64]string {
+		t.Helper()
+		out := map[int64]string{}
+		rows, err := s.db.Query(`SELECT event_id, line FROM session_script_lines ORDER BY event_id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			var line string
+			if err := rows.Scan(&id, &line); err != nil {
+				t.Fatal(err)
+			}
+			out[id] = line
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for id, line := range lines() {
+		if strings.HasPrefix(line, "OLD:") {
+			t.Fatalf("event %d carries the old encoding under the new version: %q", id, line)
+		}
+	}
+	if got := lines(); len(got) != 2 || got[3] != "" {
+		t.Fatalf("lines after the refused window = %v, want only the first window's two", got)
+	}
+	// The retry records the second window with the new encoder.
+	if res, err := s.RecordCampaignEvidence(ctx, 2); err != nil || !res.Done || res.Recorded != 2 {
+		t.Fatalf("retry %+v %v", res, err)
+	}
+	if got := lines(); len(got) != 4 || got[3] != script.EncodeLine("id") || got[4] != script.EncodeLine("uname -a") {
+		t.Fatalf("lines after the retry = %v", got)
+	}
+}

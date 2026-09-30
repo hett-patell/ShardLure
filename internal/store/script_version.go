@@ -178,7 +178,10 @@ SELECT session_id, fingerprint FROM session_scripts WHERE rowid>? AND rowid<=? A
 			offset int64
 		}
 		stamp := formatFixedUTC(now)
-		if err := upsertIngestOffsetTx(tx, evidenceCursorSource, evidenceCursorPath, 0, stamp); err != nil {
+		// The rewind bumps the reset epoch too (evidenceCursorState), so a
+		// recorder window in flight in another process cannot land its old
+		// encoding once this reset has recorded back to the cursor it read.
+		if err := rewindEvidenceCursorTx(tx, 0, stamp); err != nil {
 			return err
 		}
 		// A deadline left by an earlier, unfinished hold must not carry over:
