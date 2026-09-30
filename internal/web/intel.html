@@ -4588,6 +4588,11 @@ function listCount(shown, total, noun) {
     ? 'showing ' + fmt(shown) + ' of ' + fmt(total) + ' ' + noun
     : fmt(shown) + ' ' + noun;
 }
+// variantCount is a family's true variant count: the API caps the variants
+// it sends (50 per list row, 200 in the dialog) and carries the total.
+function variantCount(f) {
+  return typeof f.variantsTotal === 'number' ? f.variantsTotal : (f.variants || []).length;
+}
 function campaignDisplayName(c) {
   return c.name || (c.suggestedName ? c.suggestedName + ' (suggested)' : c.id);
 }
@@ -4635,7 +4640,7 @@ async function refreshScripts() {
     tb.innerHTML = _lastScripts.map(function (f) {
       const first = String(f.display || '').split('\n')[0].slice(0, 120);
       return '<tr data-script="' + esc(f.family) + '" title="' + esc(f.reason) + '">' +
-        '<td><button type="button" class="row-open"><code>' + esc(first) + '</code></button></td><td class="num">' + (f.variants || []).length + '</td><td class="num">' + fmt(f.sessions) + '</td>' +
+        '<td><button type="button" class="row-open"><code>' + esc(first) + '</code></button></td><td class="num">' + fmt(variantCount(f)) + '</td><td class="num">' + fmt(f.sessions) + '</td>' +
         '<td class="num">' + fmt(f.actors) + '</td><td class="num">' + fmt(f.ips) + '</td><td>' + (f.links ? 'links sessions' : 'display only') + '</td>' +
         '<td class="range">' + esc(shortTime(f.firstSeen)) + ' → ' + esc(shortTime(f.lastSeen)) + '</td></tr>';
     }).join('');
@@ -4763,10 +4768,12 @@ async function openScript(fp) {
     // row and the dialog never disagree about what is there (audit-web I1).
     const shown = (d.sessions || []).length;
     const total = typeof d.sessionsTotal === 'number' ? d.sessionsTotal : shown;
+    // The variant list is capped (largest first); variantCount is the whole.
     const variants = d.variants || [];
-    const fam = typeof d.familySessions === 'number' && variants.length > 1;
+    const nVariants = variantCount(d);
+    const fam = typeof d.familySessions === 'number' && nVariants > 1;
     document.getElementById('cm-sub').textContent = fam
-      ? 'this variant: ' + fmt(total) + ' of ' + fmt(d.familySessions) + ' family sessions · family: ' + fmt(variants.length) + ' variants, ' + fmt(d.familyActors) + ' actors'
+      ? 'this variant: ' + fmt(total) + ' of ' + fmt(d.familySessions) + ' family sessions · family: ' + fmt(nVariants) + ' variants, ' + fmt(d.familyActors) + ' actors'
       : fmt(total) + ' sessions · ' + (d.actors || []).length + ' actors';
     const vrows = fam ? variants.map(function (v) {
       const fp = String(v.fingerprint || '');
@@ -4781,7 +4788,7 @@ async function openScript(fp) {
         '</td><td>' + esc(x.srcIp) + '</td><td class="range">' + esc(shortTime(x.firstSeen)) + '</td></tr>';
     }).join('');
     cmBody('<pre class="sm-tty">' + esc(d.display) + '</pre>' +
-      (vrows ? '<h3 class="cm-h">variants in this family</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + vrows + '</tbody></table></div>' : '') +
+      (vrows ? '<h3 class="cm-h">variants in this family' + ofTotal(variants.length, nVariants) + '</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + vrows + '</tbody></table></div>' : '') +
       '<h3 class="cm-h">' + (fam ? 'sessions of this variant' : 'sessions') + ofTotal(shown, total) + '</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' +
       (sessions || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>');
   } catch (e) { if (view === _cmView) cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }

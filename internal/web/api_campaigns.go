@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -258,19 +260,77 @@ func (s *Server) handleCampaign(w http.ResponseWriter, r *http.Request) {
 	writeCampaignJSON(w, out)
 }
 
+// Variant caps (final audit M2). A family stores one variant per member
+// fingerprint with no bound, and a bot whose scripts differ only in text the
+// normaliser keeps mints one per session, so both responses carry only the
+// largest variants beside the true count (variantsTotal). The list is polled
+// every 30 s and shows only the count (the palette matches a fingerprint
+// prefix against these), so it keeps fewer; the script dialog is on demand
+// and lists each variant as a row.
+const (
+	listVariantCap   = 50
+	scriptVariantCap = 200
+)
+
+// capVariants returns the stored variants array cut to its limit largest
+// entries by sessions (ties in stored order), plus any keep fingerprint that
+// fell below the cut, and the array's full length. Anything that is not a
+// JSON array of objects degrades to [] with total 0, as rawJSONList does.
+func capVariants(stored string, limit int, keep ...string) (json.RawMessage, int) {
+	var all []json.RawMessage
+	if err := json.Unmarshal(rawJSONList(stored), &all); err != nil {
+		return json.RawMessage("[]"), 0
+	}
+	if len(all) <= limit {
+		return rawJSONList(stored), len(all)
+	}
+	type ranked struct {
+		raw         json.RawMessage
+		fingerprint string
+		sessions    int
+	}
+	rs := make([]ranked, 0, len(all))
+	for _, raw := range all {
+		var v struct {
+			Fingerprint string `json:"fingerprint"`
+			Sessions    int    `json:"sessions"`
+		}
+		if json.Unmarshal(raw, &v) != nil {
+			return json.RawMessage("[]"), 0
+		}
+		rs = append(rs, ranked{raw, v.Fingerprint, v.Sessions})
+	}
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].sessions > rs[j].sessions })
+	out := make([]json.RawMessage, 0, limit+len(keep))
+	for _, r := range rs[:limit] {
+		out = append(out, r.raw)
+	}
+	for _, r := range rs[limit:] {
+		if slices.Contains(keep, r.fingerprint) {
+			out = append(out, r.raw)
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return json.RawMessage("[]"), 0
+	}
+	return b, len(all)
+}
+
 type scriptFamilyJSON struct {
-	Family       string          `json:"family"`
-	Display      string          `json:"display"`
-	Variants     json.RawMessage `json:"variants"`
-	Sessions     int             `json:"sessions"`
-	Actors       int             `json:"actors"`
-	IPs          int             `json:"ips"`
-	CommandCount int             `json:"commandCount"`
-	Distinctive  bool            `json:"distinctive"`
-	Links        bool            `json:"links"`
-	Reason       string          `json:"reason"`
-	FirstSeen    string          `json:"firstSeen"`
-	LastSeen     string          `json:"lastSeen"`
+	Family        string          `json:"family"`
+	Display       string          `json:"display"`
+	Variants      json.RawMessage `json:"variants"`
+	VariantsTotal int             `json:"variantsTotal"`
+	Sessions      int             `json:"sessions"`
+	Actors        int             `json:"actors"`
+	IPs           int             `json:"ips"`
+	CommandCount  int             `json:"commandCount"`
+	Distinctive   bool            `json:"distinctive"`
+	Links         bool            `json:"links"`
+	Reason        string          `json:"reason"`
+	FirstSeen     string          `json:"firstSeen"`
+	LastSeen      string          `json:"lastSeen"`
 }
 
 func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
@@ -281,7 +341,8 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]scriptFamilyJSON, 0, len(fams))
 	for _, f := range fams {
-		out = append(out, scriptFamilyJSON{Family: f.Family, Display: f.Display, Variants: rawJSONList(f.Variants), Sessions: f.Sessions,
+		variants, variantsTotal := capVariants(f.Variants, listVariantCap)
+		out = append(out, scriptFamilyJSON{Family: f.Family, Display: f.Display, Variants: variants, VariantsTotal: variantsTotal, Sessions: f.Sessions,
 			Actors: f.Actors, IPs: f.IPs, CommandCount: f.CommandCount, Distinctive: f.Distinctive, Links: f.Links, Reason: f.Reason,
 			FirstSeen: campaignJSONTime(f.FirstSeen), LastSeen: campaignJSONTime(f.LastSeen)})
 	}
@@ -330,15 +391,19 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 	// every variant with its session count, so the dialog says "this variant:
 	// N of M family sessions" and each variant opens through its fingerprint.
 	// A lookup failure only omits the block (the script itself still shows).
+	//
+	// The variant list is capped at scriptVariantCap (largest first, plus
+	// this fingerprint and the representative so the dialog can mark them)
+	// with the true variantsTotal beside it (final audit M2); this variant's
+	// session total is read from the full list before the cut.
 	if fam, ok := s.scriptFamily(r.Context(), d.Family); ok {
-		variants := rawJSONList(fam.Variants)
-		out["variants"] = variants
+		out["variants"], out["variantsTotal"] = capVariants(fam.Variants, scriptVariantCap, d.Fingerprint, d.Family)
 		out["familySessions"], out["familyActors"], out["familyIps"] = fam.Sessions, fam.Actors, fam.IPs
 		var vs []struct {
 			Fingerprint string `json:"fingerprint"`
 			Sessions    int    `json:"sessions"`
 		}
-		if json.Unmarshal(variants, &vs) == nil {
+		if json.Unmarshal(rawJSONList(fam.Variants), &vs) == nil {
 			for _, v := range vs {
 				if v.Fingerprint == d.Fingerprint && v.Sessions > len(sessions) {
 					out["sessionsTotal"] = v.Sessions
