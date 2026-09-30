@@ -225,6 +225,23 @@ ON CONFLICT(source,path) DO UPDATE SET offset=excluded.offset, updated_at=exclud
 // then delete the hold, so the first regroup after the hold sees the carried
 // rows. Sessions a purge removed during the hold simply have nothing to
 // carry.
+//
+// The decision is made on reads outside any transaction and acted on in a
+// later one, so every write is conditional on what was decided on: the
+// hold_hwm row must still hold the mark that was read and the reset epoch
+// (evidenceCursorState) must be the one read with the cursor
+// (holdMarkUnchangedSQL). A Cowrie --replace committing in between (the CLI,
+// another process, while the release waited on writeMu behind an ingest
+// write queued behind the replace's own lock) used to let the release run
+// on the post-replace state: no session rows to join, so it carried nothing,
+// emptied the carry and deleted the hold rows, the sentinel the replace had
+// just written included, and campaign_ids kept an old fingerprint nothing
+// would ever carry (pipeline audit I2). The mark alone covers a replace
+// (its sentinel differs from any measured mark, and a re-measure after a
+// replace that inserted anything lands strictly above the old one, ids being
+// AUTOINCREMENT); the epoch also covers a second reset that measures the
+// same mark. A failed condition reports held: the hold restarted, and the
+// next check reads it afresh.
 func (s *Store) ScriptRebuildHold(ctx context.Context, now time.Time) (bool, error) {
 	var hwm int64
 	err := s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldHWMPath).Scan(&hwm)
@@ -235,9 +252,9 @@ func (s *Store) ScriptRebuildHold(ctx context.Context, now time.Time) (bool, err
 		return false, err
 	}
 	if hwm == scriptHoldRemeasure {
-		// A --replace ran during the hold: measure the mark again over the
-		// re-inserted events. The UPDATE is guarded by the sentinel so a
-		// concurrent re-measure cannot move it twice.
+		// A --replace ran: measure the mark again over the re-inserted
+		// events. The UPDATE is guarded by the sentinel so a concurrent
+		// re-measure cannot move it twice.
 		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
 			if _, err := tx.Exec(`UPDATE ingest_state SET offset=(SELECT COALESCE(MAX(id),0) FROM events), updated_at=?
 WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSource, scriptHoldHWMPath, scriptHoldRemeasure); err != nil {
@@ -248,7 +265,7 @@ WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSourc
 			return false, err
 		}
 	}
-	cursor, err := evidenceCursor(ctx, s.db)
+	cursor, epoch, err := evidenceCursorState(ctx, s.db)
 	if err != nil {
 		return false, err
 	}
@@ -263,16 +280,28 @@ WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSourc
 	err = s.db.QueryRowContext(ctx, `SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath).Scan(&deadline)
 	if err == sql.ErrNoRows {
 		// First observation past the mark: start the clock. INSERT OR IGNORE
-		// keeps an existing deadline if one was written meanwhile.
+		// keeps an existing deadline if one was written meanwhile, and the
+		// condition writes none when the hold restarted since the reads (a
+		// replace drops the anchor on purpose: the new hold starts its clock
+		// when the recorder catches up again).
 		deadline = now.Add(scriptHoldDuration).Unix()
+		started := false
 		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES(?,?,0,?,'',?)`,
-				scriptVersionSource, scriptHoldDeadlinePath, deadline, formatFixedUTC(now)); err != nil {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO ingest_state(source,path,inode,offset,head_sig,updated_at)
+SELECT ?,?,0,?,'',? WHERE `+holdMarkUnchangedSQL, scriptVersionSource, scriptHoldDeadlinePath, deadline, formatFixedUTC(now), hwm, epoch); err != nil {
 				return err
 			}
-			return tx.QueryRow(`SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath).Scan(&deadline)
+			err := tx.QueryRow(`SELECT offset FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath).Scan(&deadline)
+			if err == sql.ErrNoRows {
+				return nil
+			}
+			started = err == nil
+			return err
 		}); err != nil {
 			return false, err
+		}
+		if !started {
+			return true, nil
 		}
 	} else if err != nil {
 		return false, err
@@ -288,17 +317,40 @@ WHERE source=? AND path=? AND offset=?`, formatFixedUTC(now), scriptVersionSourc
 			return true, nil
 		}
 	}
-	return false, s.WithTxContext(ctx, func(tx *sql.Tx) error {
+	held := false
+	err = s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		// The compare-and-swap: the mark row goes only if it still holds the
+		// mark decided on. Nothing else is touched when it does not.
+		r, err := tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path=? AND `+holdMarkUnchangedSQL, scriptVersionSource, scriptHoldHWMPath, hwm, epoch)
+		if err != nil {
+			return err
+		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			held = true
+			return nil
+		}
 		if err := carryScriptAssignmentsTx(tx); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM script_version_carry`); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path IN (?,?)`, scriptVersionSource, scriptHoldHWMPath, scriptHoldDeadlinePath)
+		_, err = tx.Exec(`DELETE FROM ingest_state WHERE source=? AND path=?`, scriptVersionSource, scriptHoldDeadlinePath)
 		return err
 	})
+	return held, err
 }
+
+// holdMarkUnchangedSQL is the predicate every write of ScriptRebuildHold
+// carries, bound to (hwm, epoch) in that order: the hold_hwm row still holds
+// the mark the decision was made on, and the reset epoch is the one read with
+// the recorder cursor.
+const holdMarkUnchangedSQL = `EXISTS (SELECT 1 FROM ingest_state WHERE source='` + scriptVersionSource + `' AND path='` + scriptHoldHWMPath + `' AND offset=?)
+  AND ` + evidenceEpochSQL + `=?`
 
 // holdPendingQuery asks whether any unsettled session has a line at or below
 // the hold's mark: the pending partial index lists unsettled sessions and each

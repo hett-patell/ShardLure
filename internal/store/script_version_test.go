@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -574,5 +575,108 @@ func TestVersionResetRebuildsKeyEvidence(t *testing.T) {
 	var cid, name string
 	if err := s.db.QueryRow(`SELECT c.campaign_id, k.name FROM campaign_ids c JOIN campaigns k ON k.id=c.campaign_id WHERE c.kind='ssh_key' AND c.value=?`, validKey).Scan(&cid, &name); err != nil || cid != "c-key" || name != "Outlaw/Dota" {
 		t.Fatalf("campaign identity = %q %q, %v", cid, name, err)
+	}
+}
+
+// ScriptRebuildHold decides on reads outside any transaction and acts in a
+// later one. A Cowrie --replace committing in between (the CLI, another
+// process, while the worker's release waits on writeMu behind an ingest write
+// that is itself queued behind the replace's lock) left the release running
+// on the post-replace state: no session_scripts rows to join, so it carried
+// nothing, emptied the carry and deleted the hold rows, the sentinel the
+// replace had just written included. campaign_ids kept the old fingerprint
+// and nothing would ever carry it (pipeline audit I2). Every write now
+// re-checks the mark and the reset epoch it decided on, so a replace or reset
+// in between leaves the hold for the next check.
+func TestHoldReleaseRacingReplaceKeepsHold(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hold-race.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	at := time.Now().UTC().Add(-time.Hour)
+	settledScriptCampaign(t, s, at)
+	if reset, err := s.ResetScriptsForVersion(ctx, 99); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
+		t.Fatalf("caught up, unsettled: held=%v err=%v", held, err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Minute), 10); err != nil || n != 2 {
+		t.Fatalf("settle %d %v", n, err)
+	}
+	count := func(q string) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRow(q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(`SELECT COUNT(*) FROM script_version_carry`); n != 2 {
+		t.Fatalf("precondition: carry rows = %d", n)
+	}
+	// Stall every write of this process: the check's reads run, its release
+	// transaction parks on writeMu.
+	s.writeMu.Lock()
+	type result struct {
+		held bool
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		held, err := s.ScriptRebuildHold(ctx, time.Now())
+		done <- result{held, err}
+	}()
+	time.Sleep(400 * time.Millisecond)
+	// Another process: `ingest cowrie --replace` with the same file.
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, twoSessionEvents(at), nil); err != nil {
+		t.Fatal(err)
+	}
+	var hwm int64
+	if err := s2.db.QueryRow(`SELECT offset FROM ingest_state WHERE source='script_version' AND path='hold_hwm'`).Scan(&hwm); err != nil || hwm != scriptHoldRemeasure {
+		t.Fatalf("after the replace hold_hwm=%d %v, want the sentinel", hwm, err)
+	}
+	s2.Close()
+	s.writeMu.Unlock()
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	holds, carried := count(`SELECT COUNT(*) FROM ingest_state WHERE source='script_version' AND path<>'normaliser'`), count(`SELECT COUNT(*) FROM script_version_carry`)
+	if !r.held || holds != 1 || carried != 2 {
+		t.Fatalf("release ran through the replace: held=%v hold rows=%d carry rows=%d; want held with the sentinel row and both carry rows kept", r.held, holds, carried)
+	}
+	if err := s.db.QueryRow(`SELECT offset FROM ingest_state WHERE source='script_version' AND path='hold_hwm'`).Scan(&hwm); err != nil || hwm != scriptHoldRemeasure {
+		t.Fatalf("hold_hwm after the parked release = %d %v, want the replace's sentinel untouched", hwm, err)
+	}
+	// The re-ingested sessions re-record, settle, and the carry then applies.
+	for i := 0; i < 5; i++ {
+		if _, err := s.RecordCampaignEvidence(ctx, 5000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || !held {
+		t.Fatalf("re-recorded but unsettled: held=%v err=%v", held, err)
+	}
+	if n, err := s.SettleSessionScripts(ctx, time.Now().Add(time.Minute), 10); err != nil || n != 2 {
+		t.Fatalf("settle %d %v", n, err)
+	}
+	if held, err := s.ScriptRebuildHold(ctx, time.Now()); err != nil || held {
+		t.Fatalf("settled: held=%v err=%v", held, err)
+	}
+	var fp, value, id string
+	s.db.QueryRow(`SELECT fingerprint FROM session_scripts WHERE session_id='s0'`).Scan(&fp)
+	if err := s.db.QueryRow(`SELECT value, campaign_id FROM campaign_ids WHERE kind='script'`).Scan(&value, &id); err != nil || value != fp || id != "c-keep" {
+		t.Fatalf("script row %s -> %s (%v), want %s -> c-keep", value, id, err, fp)
 	}
 }
