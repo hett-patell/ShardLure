@@ -4580,6 +4580,14 @@ function actionButton(action, label, attrs, aria) {
   return '<button type="button" class="cm-btn" data-action="' + esc(action) + '"' + a +
     (aria ? ' aria-label="' + esc(aria) + '"' : '') + '>' + esc(label) + '</button>';
 }
+// listCount is a list panel's meta text. The API caps both lists (200 by
+// default) and sends the true total, so a capped list says "showing N of M"
+// instead of reading as the whole. Plain text: it goes to textContent.
+function listCount(shown, total, noun) {
+  return (typeof total === 'number' && total > shown)
+    ? 'showing ' + fmt(shown) + ' of ' + fmt(total) + ' ' + noun
+    : fmt(shown) + ' ' + noun;
+}
 function campaignDisplayName(c) {
   return c.name || (c.suggestedName ? c.suggestedName + ' (suggested)' : c.id);
 }
@@ -4592,7 +4600,7 @@ async function refreshCampaigns() {
     _lastCampaigns = d.campaigns || [];
     const tb = document.querySelector('#campaigns-table tbody');
     const held = d.regroup && d.regroup.held;
-    document.getElementById('campaigns-meta').textContent = _lastCampaigns.length + ' campaigns' +
+    document.getElementById('campaigns-meta').textContent = listCount(_lastCampaigns.length, d.total, 'campaigns') +
       (held ? ' · ' + regroupText(d.regroup) : '');
     noteRegroup(d.regroup);
     if (!_lastCampaigns.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">no linked sessions yet</td></tr>'; return; }
@@ -4617,7 +4625,7 @@ async function refreshScripts() {
     // after the hold, 10-30 min later: say so instead of showing an empty
     // table that reads as data loss. Same regroup block as the campaigns list.
     const held = d.regroup && d.regroup.held;
-    document.getElementById('scripts-meta').textContent = _lastScripts.length + ' script families' +
+    document.getElementById('scripts-meta').textContent = listCount(_lastScripts.length, d.total, 'script families') +
       (held ? ' · ' + regroupText(d.regroup) : '');
     noteRegroup(d.regroup);
     if (!_lastScripts.length) {

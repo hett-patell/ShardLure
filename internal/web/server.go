@@ -188,6 +188,8 @@ type Server struct {
 	radarErrLog opLogLimiter
 	// lastCmdErrLog does the same for the actor table's "Last cmd" read.
 	lastCmdErrLog opLogLimiter
+	// listTotalErrLog does the same for the Campaigns/Scripts list totals.
+	listTotalErrLog opLogLimiter
 	// bg tracks background cache refreshes; RunContext joins it before
 	// returning so none of them outlives the store.
 	bg handlerDrain

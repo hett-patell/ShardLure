@@ -120,8 +120,27 @@ func (s *Server) handleCampaigns(w http.ResponseWriter, r *http.Request) {
 	for _, c := range list {
 		out = append(out, campaignSummaryToJSON(c))
 	}
-	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "campaigns": out,
+	total := s.campaignListTotal(r.Context(), "campaigns_total", s.st.CountCampaigns, len(out))
+	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "campaigns": out, "total": total,
 		"regroup": s.campaignRegroupStatus(r.Context())})
+}
+
+// campaignListTotal is the true row count behind a capped list (final audit
+// M1: past the cap the panel read "200 script families" and silently dropped
+// the smallest). The count is a separate read, so it is floored at the rows
+// actually returned. On a count failure the total is omitted (nil) rather
+// than failing the list, and the failure is logged at most once per
+// radarErrLogEvery; the panel then shows the plain row count.
+func (s *Server) campaignListTotal(ctx context.Context, op string, count func(context.Context) (int, error), shown int) any {
+	n, err := count(ctx)
+	if err != nil {
+		s.listTotalErrLog.log(op, err)
+		return nil
+	}
+	if n < shown {
+		n = shown
+	}
+	return n
 }
 
 // campaignRegroupJSON tells the dashboard why an edit has not applied yet.
@@ -271,7 +290,8 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 	// first regroup after the hold, so for the 10-30 minutes in between this
 	// list is legitimately empty and the panel must say why rather than read
 	// as data loss (fix-all review M5).
-	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "families": out,
+	total := s.campaignListTotal(r.Context(), "scripts_total", s.st.CountScriptFamilies, len(out))
+	writeCampaignJSON(w, map[string]any{"generatedAt": campaignJSONTime(time.Now()), "families": out, "total": total,
 		"regroup": s.campaignRegroupStatus(r.Context())})
 }
 
