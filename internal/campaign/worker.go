@@ -82,7 +82,10 @@ var logf = log.Printf
 // the grouping, so a test can append an edit in that window. beforeGroup runs
 // after the reads and classification, before the lease renewal that
 // precedes Group, so a test can stall that phase past the lease.
-var beforeSave, beforeGroup func()
+// regroupStart runs at the top of regroup, after the tick's hold check and
+// before any of the regroup's reads, so a test can commit a Cowrie
+// --replace from "another process" in exactly that window.
+var beforeSave, beforeGroup, regroupStart func()
 
 // Worker drives the campaign pipeline from the live runtime: record evidence
 // in bounded windows, settle scripts, assign families, regroup, prune.
@@ -441,6 +444,16 @@ func (w *Worker) tick(ctx context.Context) error {
 	if _, err := w.st.AssignScriptFamilies(ctx, familyBatch); err != nil {
 		return err
 	}
+	// The reset epoch is read BEFORE the hold check, not merely before the
+	// regroup's reads: a Cowrie --replace bumps it and arms the hold in one
+	// transaction, so either this read already sees the replace (and the
+	// hold check sees its hold) or the save below sees the epoch move and
+	// refuses. Read between the hold check and the evidence reads, a replace
+	// landing just before it would match at save time over empty evidence.
+	epoch, err := w.st.EvidenceResetEpoch(ctx)
+	if err != nil {
+		return err
+	}
 	held, err := w.rebuildHeld(ctx)
 	if err != nil {
 		return err
@@ -469,11 +482,13 @@ func (w *Worker) tick(ctx context.Context) error {
 			}
 			return err
 		}
-		err := w.regroup(ctx)
+		err := w.regroup(ctx, epoch)
 		switch {
 		case errors.Is(err, store.ErrStaleGrouping):
-			// An edit landed between reading the edit log and saving. Not a
-			// failure: regroup again on the next tick, without backoff.
+			// An edit landed between reading the edit log and saving, or a
+			// replace/reset moved the reset epoch after the hold check. Not
+			// a failure: regroup again on the next tick (behind a fresh hold
+			// check), without backoff.
 			w.Wake()
 		case err != nil:
 			w.pending = true // retried once the backoff expires
@@ -508,6 +523,10 @@ func (w *Worker) Regroup(ctx context.Context) error {
 	if _, err := w.holdLease(ctx, w.clock()); err != nil {
 		return err
 	}
+	epoch, err := w.st.EvidenceResetEpoch(ctx) // before the hold check; see Tick
+	if err != nil {
+		return err
+	}
 	held, err := w.rebuildHeld(ctx)
 	if err != nil {
 		return err
@@ -515,7 +534,7 @@ func (w *Worker) Regroup(ctx context.Context) error {
 	if held {
 		return ErrRegroupHeld
 	}
-	return w.regroup(ctx)
+	return w.regroup(ctx, epoch)
 }
 
 // rebuildHeld reports whether a script rebuild still holds regroups. A
@@ -536,7 +555,12 @@ func (w *Worker) rebuildHeld(ctx context.Context) (bool, error) {
 	return w.st.ScriptRebuildHold(ctx, time.Now())
 }
 
-func (w *Worker) regroup(ctx context.Context) error {
+// regroup reads, groups and saves. epoch is the recorder reset epoch the
+// caller read before its hold check; the save refuses if it moved.
+func (w *Worker) regroup(ctx context.Context, epoch int64) error {
+	if regroupStart != nil {
+		regroupStart()
+	}
 	// Commonness is measured against Cowrie actors seen within the retention
 	// window, the same population the evidence itself is kept for.
 	since := time.Time{}
@@ -615,7 +639,7 @@ func (w *Worker) regroup(ctx context.Context) error {
 	// its re-review residual). A lost lease is not retaken here; the next
 	// tick's holdLease takes over and the owed regroup runs behind fresh
 	// version and hold checks.
-	if err := w.st.SaveGroupingAsLeaseHolder(ctx, w.leaseOwner, w.clock(), rows, assign, out.Aliases, lastEdit); err != nil {
+	if err := w.st.SaveGroupingAsLeaseHolder(ctx, w.leaseOwner, w.clock(), epoch, rows, assign, out.Aliases, lastEdit); err != nil {
 		if errors.Is(err, store.ErrCampaignLeaseLost) {
 			w.leaseUntil = time.Time{}
 			return ErrLeaseLapsed

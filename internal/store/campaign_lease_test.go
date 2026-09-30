@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/networkshard/shardlure/pkg/models"
 )
 
 // One process holds the campaign worker lease at a time: a second owner is
@@ -143,25 +145,25 @@ func TestSaveGroupingAsLeaseHolderRequiresLiveOwnLease(t *testing.T) {
 		}
 		return len(list)
 	}
-	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0, row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0, 0, row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
 		t.Fatalf("save with no lease row = %v (campaigns %d), want ErrCampaignLeaseLost and nothing written", err, count())
 	}
 	if held, err := st.AcquireCampaignLease(ctx, "b", t0, time.Minute); err != nil || !held {
 		t.Fatalf("acquire = %v, %v", held, err)
 	}
-	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(time.Second), row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(time.Second), 0, row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
 		t.Fatalf("save under another owner's lease = %v (campaigns %d), want ErrCampaignLeaseLost", err, count())
 	}
 	if held, err := st.AcquireCampaignLease(ctx, "a", t0.Add(time.Minute), time.Minute); err != nil || !held {
 		t.Fatalf("takeover = %v, %v", held, err)
 	}
-	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(2*time.Minute), row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(2*time.Minute), 0, row("c-1"), nil, nil, 0); !errors.Is(err, ErrCampaignLeaseLost) || count() != 0 {
 		t.Fatalf("save on an own lease expired at the caller's clock = %v (campaigns %d), want ErrCampaignLeaseLost", err, count())
 	}
-	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(90*time.Second), row("c-1"), nil, nil, 0); err != nil || count() != 1 {
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0.Add(90*time.Second), 0, row("c-1"), nil, nil, 0); err != nil || count() != 1 {
 		t.Fatalf("save under a live own lease = %v (campaigns %d)", err, count())
 	}
-	if err := st.SaveGroupingAsLeaseHolder(ctx, "", t0, row("c-2"), nil, nil, 0); err != ErrCampaignLeaseInvalid {
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "", t0, 0, row("c-2"), nil, nil, 0); err != ErrCampaignLeaseInvalid {
 		t.Fatalf("empty owner = %v, want ErrCampaignLeaseInvalid (never an unfenced save)", err)
 	}
 	if err := st.SaveGrouping(ctx, row("c-3"), nil, nil, 0); err != nil {
@@ -228,5 +230,48 @@ func TestNonHolderAcquireDoesNotWaitForTheWriteLock(t *testing.T) {
 	}
 	if held, err := holder.AcquireCampaignLease(ctx, "holder", now.Add(2*time.Minute), time.Minute); err != nil || held {
 		t.Fatalf("evicted owner re-acquired: %v, %v", held, err)
+	}
+}
+
+// The worker save is also fenced by the recorder reset epoch it read before
+// its hold check: a Cowrie --replace committing after that read (another
+// process, the CLI) bumps the epoch, and the save must refuse with
+// ErrStaleGrouping, leaving the previous grouping in place, instead of
+// replacing campaign_ids with a grouping read over the emptied evidence
+// (final re-review, store/campaign open item).
+func TestSaveGroupingAsLeaseHolderRefusesMovedResetEpoch(t *testing.T) {
+	st := newTestStore(t, "fenced-epoch.db")
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	// Named, so the replace (which drops unnamed campaigns) keeps it.
+	row := func(id string) []CampaignRow {
+		return []CampaignRow{{ID: id, Name: "Keep", AnchorKind: "ssh_key", AnchorValue: "K"}}
+	}
+	if held, err := st.AcquireCampaignLease(ctx, "a", t0, time.Minute); err != nil || !held {
+		t.Fatalf("acquire = %v, %v", held, err)
+	}
+	before, err := st.EvidenceResetEpoch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0, before, row("c-1"), nil, nil, 0); err != nil {
+		t.Fatalf("save under an unchanged epoch = %v", err)
+	}
+	if err := st.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := st.EvidenceResetEpoch(ctx)
+	if err != nil || after == before {
+		t.Fatalf("precondition: a replace moves the epoch (%d -> %d, %v)", before, after, err)
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0, before, row("c-2"), nil, nil, 0); !errors.Is(err, ErrStaleGrouping) {
+		t.Fatalf("save under a moved epoch = %v, want ErrStaleGrouping", err)
+	}
+	list, err := st.ListCampaigns(ctx, 10)
+	if err != nil || len(list) != 1 || list[0].ID != "c-1" {
+		t.Fatalf("the refused save wrote: %+v %v", list, err)
+	}
+	if err := st.SaveGroupingAsLeaseHolder(ctx, "a", t0, after, row("c-2"), nil, nil, 0); err != nil {
+		t.Fatalf("save under the re-read epoch = %v", err)
 	}
 }

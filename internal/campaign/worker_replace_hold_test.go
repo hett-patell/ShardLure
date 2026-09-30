@@ -180,3 +180,59 @@ func TestReplaceWithoutPriorHoldKeepsRenamedScriptCampaignAcrossRestart(t *testi
 	}
 	expectKept(t, st, id)
 }
+
+// Final re-review, store/campaign open item. The hold check and the
+// regroup's reads are separate statements with no shared snapshot: a CLI
+// --replace committing after this tick's hold check read "no hold" but
+// before the regroup read the evidence left the regroup looking at empty
+// evidence and scripts beside the kept campaign_ids. Group dropped every
+// assignment, and the save was accepted (its fence checked only the lease
+// and the edit log, and a replace moves neither), so "Keep" was left on an
+// empty shell and the sessions came back under a fresh ID. The save must
+// refuse (ErrStaleGrouping, retried on the next tick, which sees the hold
+// the replace armed) and the campaign must survive once the hold releases.
+func TestReplaceBetweenHoldCheckAndRegroupReadsKeepsCampaign(t *testing.T) {
+	st, events, one := scriptCampaignStore(t, "cowrie:a", "cowrie:b")
+	ctx := context.Background()
+	w := NewWorker(st, 90, t.TempDir())
+	t.Cleanup(w.Close)
+	w.idle = -time.Minute
+	id := renamedScriptCampaign(t, st, w)
+
+	replaced := false
+	regroupStart = func() {
+		regroupStart = nil
+		replaced = true
+		if err := st.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, events, nil); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { regroupStart = nil })
+	w.idle = settleIdle // the re-recorded sessions are fresh: nothing settles yet
+	w.Wake()
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !replaced {
+		t.Fatal("precondition: the tick never reached regroup")
+	}
+	// The refused save leaves the pre-replace grouping in place: the named
+	// campaign still owns the script row and both actors.
+	if list, shown := showCampaigns(t, st); len(list) != 1 || list[0].ID != id || list[0].Name != "Keep" || list[0].Actors != 2 ||
+		one(`SELECT COUNT(*) FROM campaign_ids WHERE kind='script' AND campaign_id=?`, id) != "1" {
+		t.Fatalf("the regroup saved over a replace that landed after its hold check: %v (script rows=%s)",
+			shown, one(`SELECT COUNT(*) FROM campaign_ids WHERE kind='script'`))
+	}
+	if !w.wake.Load() {
+		t.Fatal("the refused save was not kept owed (wake cleared)")
+	}
+	// The next tick sees the hold; once the sessions settle it releases and
+	// the owed regroup keeps the campaign.
+	w.idle = -time.Minute
+	for i := 0; i < 3; i++ {
+		if err := w.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expectKept(t, st, id)
+}

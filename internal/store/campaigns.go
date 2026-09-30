@@ -443,11 +443,14 @@ func (s *Store) SaveGrouping(ctx context.Context, rows []CampaignRow, assign []C
 	return s.saveGrouping(ctx, rows, assign, aliases, lastEditID, nil)
 }
 
-// leaseFence is the campaign worker lease a save must still hold: owner, and
-// the caller's wall clock the row's expiry is judged at.
+// leaseFence is what a worker save must still find inside its transaction:
+// the campaign worker lease (owner, and the caller's wall clock the row's
+// expiry is judged at) and the recorder reset epoch the grouping's reads
+// were made under (see EvidenceResetEpoch).
 type leaseFence struct {
 	owner string
 	now   time.Time
+	epoch int64
 }
 
 // SaveGroupingAsLeaseHolder is SaveGrouping fenced by the campaign worker
@@ -460,11 +463,31 @@ type leaseFence struct {
 // overwrote the newer one (re-review, M-2 residual). now must be the wall
 // clock, which is what the other process judged the expiry on; an empty
 // owner or zero now is refused rather than saved unfenced.
-func (s *Store) SaveGroupingAsLeaseHolder(ctx context.Context, owner string, now time.Time, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64) error {
+//
+// epoch is the recorder reset epoch (EvidenceResetEpoch) the caller read
+// before its rebuild-hold check. Inside the same transaction the save is
+// refused with ErrStaleGrouping when the epoch has moved since: a Cowrie
+// --replace (or a version reset) in another process committed after the
+// hold check read "no hold" but before the grouping read its evidence, so
+// the grouping saw empty evidence and scripts beside the kept campaign_ids
+// and dropped every assignment. The lease and the edit log did not move,
+// so nothing else refused it and every renamed campaign lost its identity
+// (final re-review, store/campaign open item). The replace arms the hold
+// in the transaction that bumps the epoch, so the retry sees the hold.
+func (s *Store) SaveGroupingAsLeaseHolder(ctx context.Context, owner string, now time.Time, epoch int64, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64) error {
 	if owner == "" || now.IsZero() {
 		return ErrCampaignLeaseInvalid
 	}
-	return s.saveGrouping(ctx, rows, assign, aliases, lastEditID, &leaseFence{owner: owner, now: now})
+	return s.saveGrouping(ctx, rows, assign, aliases, lastEditID, &leaseFence{owner: owner, now: now, epoch: epoch})
+}
+
+// EvidenceResetEpoch reads the recorder's reset epoch (0 while the cursor
+// row is absent). It moves only when a version reset or a Cowrie --replace
+// rewinds the recorder, never on ordinary recording; the campaign worker
+// reads it before its hold check and hands it to SaveGroupingAsLeaseHolder.
+func (s *Store) EvidenceResetEpoch(ctx context.Context) (int64, error) {
+	_, epoch, err := evidenceCursorState(ctx, s.db)
+	return epoch, err
 }
 
 func (s *Store) saveGrouping(ctx context.Context, rows []CampaignRow, assign []CampaignAssignmentRow, aliases map[string]string, lastEditID int64, fence *leaseFence) error {
@@ -480,6 +503,13 @@ func (s *Store) saveGrouping(ctx context.Context, rows []CampaignRow, assign []C
 			}
 			if !held {
 				return ErrCampaignLeaseLost
+			}
+			var epoch int64
+			if err := tx.QueryRow(`SELECT ` + evidenceEpochSQL).Scan(&epoch); err != nil {
+				return err
+			}
+			if epoch != fence.epoch {
+				return ErrStaleGrouping
 			}
 		}
 		var maxEdit int64
