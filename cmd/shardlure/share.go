@@ -70,6 +70,18 @@ func abuseCHKey(cfg config.Config, keys *settings.Keystore, extraEnv ...string) 
 	return ""
 }
 
+// validateOutboundLimit refuses a negative --limit on share/report. The
+// intel packages read any non-positive budget as "no cap", so a typo'd -1
+// used to turn a bounded run of irreversible submissions into an unbounded
+// one — the pattern already refused for actors (final audit M4). 0 stays the
+// documented "unbounded".
+func validateOutboundLimit(n int) error {
+	if n < 0 {
+		return fmt.Errorf("--limit must be 0 (unbounded) or positive, got %d", n)
+	}
+	return nil
+}
+
 func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
 	// intel.bazaar.freshness_days tightens both the default candidate-selection
 	// window and Vet. --since may widen local selection, but never Vet policy.
@@ -83,7 +95,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	// of the candidate list. Truncating first meant the budget was consumed by
 	// already-shared hashes at the top of the newest-first list, so the default
 	// shipped nothing while vettable samples sat just below the cut.
-	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded); counts submissions, not candidates examined")
+	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded, negative refused); counts submissions, not candidates examined")
 	sha := fs.String("sha", "", "select only the sample with this sha256 (still subject to dedup and Vet)")
 	since := fs.Duration("since", time.Duration(freshDays)*24*time.Hour, "local candidate-selection window; does not change the 10-day upload ceiling")
 	anonymous := fs.Bool("anonymous", false, "submit without attribution to your account")
@@ -91,6 +103,9 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	comment := fs.String("comment", "", "extra comment appended to every sample's context.comment")
 	endpoint := fs.String("endpoint", "", "override MalwareBazaar endpoint (default from config or builtin)")
 	_ = fs.Parse(args)
+	if err := validateOutboundLimit(*limit); err != nil {
+		fatal(err)
+	}
 
 	if *statusOnly {
 		printBazaarStatus(st)

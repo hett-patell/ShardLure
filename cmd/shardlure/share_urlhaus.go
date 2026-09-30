@@ -44,7 +44,7 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 	// recur here in full, but Vet's shortener and private-host rejects are NOT
 	// in SQL: a page of unvettable URLs could still spend every slot while
 	// vettable ones sat below the query's cut.
-	limit := fs.Int("limit", 25, "max URLs to submit in this run (0 = unbounded); counts submissions, not candidates examined")
+	limit := fs.Int("limit", 25, "max URLs to submit in this run (0 = unbounded, negative refused); counts submissions, not candidates examined")
 	statusOnly := fs.Bool("status", false, "list past submissions from urlhaus_submissions instead of submitting")
 	anonymous := fs.Bool("anonymous", cfg.Intel.URLhaus.Anonymous, "hide your abuse.ch handle on the public record")
 	activeDaysFlag := fs.Int("active-days", activeDays, "only submit URLs confirmed serving within this many days (may only tighten)")
@@ -56,6 +56,9 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 	}
 	if fs.NArg() > 0 {
 		fatal(fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	}
+	if err := validateOutboundLimit(*limit); err != nil {
+		fatal(err)
 	}
 
 	if *statusOnly {

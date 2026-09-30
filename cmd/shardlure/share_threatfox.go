@@ -35,7 +35,7 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 	// Bounds SUBMISSIONS, enforced inside threatfox.Share after Vet and dedup —
 	// never a LIMIT on the candidate query (the D3 lesson: a pre-gate LIMIT
 	// spends the budget on already-shared entries at the top of the list).
-	limit := fs.Int("limit", 25, "max candidates to submit in this run (0 = unbounded); counts submissions, not candidates examined")
+	limit := fs.Int("limit", 25, "max candidates to submit in this run (0 = unbounded, negative refused); counts submissions, not candidates examined")
 	statusOnly := fs.Bool("status", false, "list past submissions from threatfox_submissions instead of submitting")
 	activeDaysFlag := fs.Int("active-days", activeDays, "only submit IOCs confirmed serving within this many days (may only tighten)")
 	endpoint := fs.String("endpoint", "", "override the ThreatFox endpoint (default builtin)")
@@ -44,6 +44,9 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 	}
 	if fs.NArg() > 0 {
 		fatal(fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	}
+	if err := validateOutboundLimit(*limit); err != nil {
+		fatal(err)
 	}
 
 	if *statusOnly {

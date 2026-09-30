@@ -108,12 +108,15 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 	// was consumed by IPs already inside the re-report window at the top of the
 	// worst-offender-first list, so a run could report nothing while reportable
 	// brute-forcers sat just below the cut (the same bug fixed in share bazaar).
-	limit := fs.Int("limit", 25, "max actors to report in this run (0 = unbounded); counts reports sent, not candidates examined")
+	limit := fs.Int("limit", 25, "max actors to report in this run (0 = unbounded, negative refused); counts reports sent, not candidates examined")
 	minProbe := fs.Int("min-probe", minProbeDefault, "minimum actor ProbeScore to report (0-100)")
 	rewindowHours := fs.Int("rewindow", rewindowDefault, "hours before a reported IP may be reported again")
 	statusOnly := fs.Bool("status", false, "list past reports from abuseipdb_reports instead of reporting")
 	endpoint := fs.String("endpoint", "", "override AbuseIPDB endpoint (default from config or builtin)")
 	_ = fs.Parse(args)
+	if err := validateOutboundLimit(*limit); err != nil {
+		fatal(err)
+	}
 
 	if *statusOnly {
 		printAbuseReportStatus(st)
