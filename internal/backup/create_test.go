@@ -3,12 +3,13 @@ package backup
 import (
 	"context"
 	"errors"
-	"github.com/networkshard/shardlure/internal/safefile"
-	"github.com/networkshard/shardlure/internal/store"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/networkshard/shardlure/internal/safefile"
+	"github.com/networkshard/shardlure/internal/store"
 )
 
 func TestCreateVerifyProtectedBundle(t *testing.T) {
