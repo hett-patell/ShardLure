@@ -473,3 +473,43 @@ func TestGetCampaignReadsOneSnapshot(t *testing.T) {
 		t.Fatalf("after the save c-1 = %v, want gone", err)
 	}
 }
+
+// GetScript lists at most campaignDetailCap sessions, and its actor list is
+// the distinct actors among those, so a script with more sessions than the
+// cap showed the true session total beside an undercounted actor number with
+// no disclosure (reads audit M2). SessionsTotal and ActorsTotal are the true
+// counts for the fingerprint, read in the same snapshot as the list.
+func TestGetScriptReportsTrueTotals(t *testing.T) {
+	s := newTestStore(t, "script-totals.db")
+	ctx := context.Background()
+	old := campaignDetailCap
+	campaignDetailCap = 2
+	t.Cleanup(func() { campaignDetailCap = old })
+	fp := strings.Repeat("a", 64)
+	if _, err := s.db.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,first_seen,last_seen) VALUES(?,'n','d',1,1,'x','x')`, fp); err != nil {
+		t.Fatal(err)
+	}
+	for i, actor := range []string{"cowrie:a", "cowrie:b", "cowrie:c", "cowrie:a"} {
+		ts := formatFixedUTC(time.Date(2026, 9, 1, i, 0, 0, 0, time.UTC))
+		if _, err := s.db.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES(?,?,?,?,?,?,?,?)`,
+			fmt.Sprintf("s%d", i), actor, fmt.Sprintf("198.51.100.%d", i), ts, ts, ts, ts, fp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := s.GetScript(ctx, fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Sessions) != 2 || d.Sessions[0].SessionID != "s3" || d.Sessions[1].SessionID != "s2" {
+		t.Fatalf("sessions %+v, want the newest 2", d.Sessions)
+	}
+	if d.SessionsTotal != 4 || d.ActorsTotal != 3 {
+		t.Fatalf("totals: sessions=%d actors=%d, want 4 sessions and 3 distinct actors", d.SessionsTotal, d.ActorsTotal)
+	}
+	if len(d.Actors) != 2 || d.Actors[0] != "cowrie:a" || d.Actors[1] != "cowrie:c" {
+		t.Fatalf("actors among the listed sessions = %v, want [cowrie:a cowrie:c]", d.Actors)
+	}
+	if _, err := s.GetScript(ctx, strings.Repeat("b", 64)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unknown fingerprint = %v, want sql.ErrNoRows", err)
+	}
+}

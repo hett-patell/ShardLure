@@ -91,10 +91,16 @@ type ScriptSession struct {
 	FirstSeen                 time.Time
 }
 
+// ScriptDetail lists at most campaignDetailCap sessions (newest first) and
+// the distinct actors among those; SessionsTotal and ActorsTotal are the
+// true counts for the fingerprint, so a caller can tell a truncated list
+// from a complete one. Actors alone read as the script's actor count and
+// undercounted any script with more sessions than the cap (reads audit M2).
 type ScriptDetail struct {
 	Fingerprint, Display, Family string
 	Sessions                     []ScriptSession
 	Actors                       []string
+	SessionsTotal, ActorsTotal   int
 }
 
 var ErrStaleGrouping = errors.New("store: campaign edits changed during grouping")
@@ -839,13 +845,24 @@ FROM script_families ORDER BY sessions DESC, family LIMIT ?`, limit)
 	return out, rows.Err()
 }
 
-// GetScript returns sql.ErrNoRows when the fingerprint is unknown.
+// GetScript returns sql.ErrNoRows when the fingerprint is unknown. The
+// three reads share one read-only transaction (one WAL snapshot, as
+// GetCampaign), so the totals and the list describe the same rows.
 func (s *Store) GetScript(ctx context.Context, fp string) (ScriptDetail, error) {
 	d := ScriptDetail{Fingerprint: fp}
-	if err := s.db.QueryRowContext(ctx, `SELECT display, family FROM scripts WHERE fingerprint=?`, fp).Scan(&d.Display, &d.Family); err != nil {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
 		return d, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT session_id, actor_id, src_ip, first_seen FROM session_scripts WHERE fingerprint=? ORDER BY first_seen DESC LIMIT 500`, fp)
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `SELECT display, family FROM scripts WHERE fingerprint=?`, fp).Scan(&d.Display, &d.Family); err != nil {
+		return d, err
+	}
+	// Both counts come off idx_session_scripts_fp; the list below is capped.
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT actor_id) FROM session_scripts WHERE fingerprint=?`, fp).Scan(&d.SessionsTotal, &d.ActorsTotal); err != nil {
+		return d, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT session_id, actor_id, src_ip, first_seen FROM session_scripts WHERE fingerprint=? ORDER BY first_seen DESC LIMIT ?`, fp, campaignDetailCap)
 	if err != nil {
 		return d, err
 	}
