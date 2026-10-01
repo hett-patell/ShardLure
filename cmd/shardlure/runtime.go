@@ -209,7 +209,7 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 	serve := func(parent context.Context) error {
 		sampled, cancel := context.WithCancel(parent)
 		var group sync.WaitGroup
-		group.Add(2)
+		group.Add(3)
 		go func() { defer group.Done(); observability.RunSampler(sampled, m, probe) }()
 		go func() {
 			defer group.Done()
@@ -217,6 +217,12 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				s, err := st.OperationalSnapshot(ctx)
 				return observability.AggregateSample{At: s.At, FilePending: s.FilePending, FileRetry: s.FileRetry, FileLeased: s.FileLeased, URLPending: s.URLPending, URLRetry: s.URLRetry, URLLeased: s.URLLeased, FileDiscoveryLag: s.FileDiscoveryLag, CommandDiscoveryLag: s.CommandDiscoveryLag, ProtectedFileJobs: s.ProtectedFileJobs, PoolOpen: s.PoolOpen, PoolInUse: s.PoolInUse, PoolWaits: s.PoolWaits}, err
 			})
+		}()
+		go func() {
+			defer group.Done()
+			// 5-minute cadence, 30 s budget: the funnel is a trend metric and a
+			// 7-day window costs seconds on the ARM sensor (see RunFunnelSampler).
+			observability.RunFunnelSampler(sampled, m, 5*time.Minute, 30*time.Second, collectFunnel(st))
 		}()
 		err := server.RunContext(sampled)
 		cancel()
