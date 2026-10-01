@@ -455,28 +455,18 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 	writeCampaignJSON(w, out)
 }
 
-// scriptFamilyLookupLimit bounds the family lookup below: ListScriptFamilies
-// orders by sessions, so a family beyond it is one of the smallest, and the
-// dialog then shows the script without the family block.
-const scriptFamilyLookupLimit = 1000
-
-// scriptFamily returns the materialised script_families row for family.
-// There is no single-family store read yet, so it scans the bounded list; it
-// runs only when an analyst opens a script, never on a poll.
+// scriptFamily returns the materialised script_families row for family: a
+// primary-key read, so a family of any rank keeps its dialog block. A lookup
+// failure only omits the block (the script itself still shows).
 func (s *Server) scriptFamily(ctx context.Context, family string) (store.ScriptFamilyRow, bool) {
 	if family == "" {
 		return store.ScriptFamilyRow{}, false
 	}
-	fams, err := s.st.ListScriptFamilies(ctx, scriptFamilyLookupLimit)
+	f, err := s.st.GetScriptFamily(ctx, family)
 	if err != nil {
 		return store.ScriptFamilyRow{}, false
 	}
-	for _, f := range fams {
-		if f.Family == family {
-			return f, true
-		}
-	}
-	return store.ScriptFamilyRow{}, false
+	return f, true
 }
 
 // handleCampaignEdit validates and records one edit, then wakes the worker.

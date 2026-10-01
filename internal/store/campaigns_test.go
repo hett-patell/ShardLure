@@ -512,3 +512,20 @@ func TestGetScriptReportsTrueTotals(t *testing.T) {
 		t.Fatalf("unknown fingerprint = %v, want sql.ErrNoRows", err)
 	}
 }
+
+func TestGetScriptFamily(t *testing.T) {
+	s := newTestStore(t, "family.db")
+	ctx := context.Background()
+	const ts = "2026-09-20T00:00:00.000000000Z"
+	if _, err := s.db.Exec(`INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen)
+VALUES('fam','cd /tmp','[]',7,2,3,4,1,0,'r',?,?)`, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.GetScriptFamily(ctx, "fam")
+	if err != nil || f.Family != "fam" || f.Sessions != 7 || f.IPs != 3 || !f.Distinctive || f.Links || f.FirstSeen.IsZero() {
+		t.Fatalf("family %+v %v", f, err)
+	}
+	if _, err := s.GetScriptFamily(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing family err = %v", err)
+	}
+}

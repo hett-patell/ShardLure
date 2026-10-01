@@ -127,3 +127,45 @@ func TestScriptListParsesVariantsOnlyWhenChanged(t *testing.T) {
 	}
 	check(3, map[string]int{fp(1000): 420, fp(1001): 3})
 }
+
+// Premerge store-read M2 / web M2: the dialog found its family by scanning
+// ListScriptFamilies(1000), so a family ranked past 1000 (the family count
+// is attacker-driven) silently lost its block. It is a primary-key read now.
+func TestScriptDialogFindsFamilyBeyondListRank(t *testing.T) {
+	_, mux, _, raw := listTotalsServer(t)
+	fp := func(i int) string { return fmt.Sprintf("%064x", i+1) }
+	tx, err := raw.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ts = "2026-09-20T00:00:00.000000000Z"
+	for i := 0; i < 1001; i++ { // all larger than the family under test
+		if _, err := tx.Exec(`INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen)
+VALUES(?,'x','[]',?,1,1,3,1,0,'r',?,?)`, fp(i), 100+i, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	small, member := fp(5000), fp(5001)
+	b, _ := json.Marshal([]map[string]any{
+		{"fingerprint": small, "distance": 0, "sessions": 1, "links": false, "reason": "r"},
+		{"fingerprint": member, "distance": 0.1, "sessions": 1, "links": false, "reason": "r"},
+	})
+	seedScriptFamily(t, raw, small, 2, string(b))
+	for _, f := range []string{small, member} {
+		if _, err := raw.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen)
+VALUES(?,'n','cd /tmp',3,1,?,0.1,3,?,?)`, f, small, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var d struct {
+		FamilySessions *int              `json:"familySessions"`
+		Variants       []json.RawMessage `json:"variants"`
+	}
+	getJSON(t, mux, "/api/intel/script?fp="+member, &d)
+	if d.FamilySessions == nil || *d.FamilySessions != 2 || len(d.Variants) != 2 {
+		t.Fatalf("family ranked 1002nd lost its dialog block: familySessions=%v variants=%d", d.FamilySessions, len(d.Variants))
+	}
+}

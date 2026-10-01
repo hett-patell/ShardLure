@@ -850,7 +850,7 @@ func (s *Store) ListScriptFamilies(ctx context.Context, limit int) ([]ScriptFami
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT family, display, variants, reason, sessions, actors, ips, command_count, distinctive, links, first_seen, last_seen
+	rows, err := s.db.QueryContext(ctx, `SELECT `+scriptFamilyColumns+`
 FROM script_families ORDER BY sessions DESC, family LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -858,16 +858,36 @@ FROM script_families ORDER BY sessions DESC, family LIMIT ?`, limit)
 	defer rows.Close()
 	var out []ScriptFamilyRow
 	for rows.Next() {
-		var f ScriptFamilyRow
-		var d, l int
-		var first, last string
-		if err := rows.Scan(&f.Family, &f.Display, &f.Variants, &f.Reason, &f.Sessions, &f.Actors, &f.IPs, &f.CommandCount, &d, &l, &first, &last); err != nil {
+		f, err := scanScriptFamily(rows)
+		if err != nil {
 			return nil, err
 		}
-		f.Distinctive, f.Links, f.FirstSeen, f.LastSeen = d == 1, l == 1, parseCampaignTime(first), parseCampaignTime(last)
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+const scriptFamilyColumns = `family, display, variants, reason, sessions, actors, ips, command_count, distinctive, links, first_seen, last_seen`
+
+func scanScriptFamily(sc interface{ Scan(...any) error }) (ScriptFamilyRow, error) {
+	var f ScriptFamilyRow
+	var d, l int
+	var first, last string
+	if err := sc.Scan(&f.Family, &f.Display, &f.Variants, &f.Reason, &f.Sessions, &f.Actors, &f.IPs, &f.CommandCount, &d, &l, &first, &last); err != nil {
+		return f, err
+	}
+	f.Distinctive, f.Links, f.FirstSeen, f.LastSeen = d == 1, l == 1, parseCampaignTime(first), parseCampaignTime(last)
+	return f, nil
+}
+
+// GetScriptFamily returns one materialised script_families row by its
+// primary key, or sql.ErrNoRows. The script dialog used to find its family
+// by scanning ListScriptFamilies(1000): the family count is attacker-driven
+// (every non-distinctive script is its own family), so a real family pushed
+// past rank 1000 silently lost its dialog block, and every open read up to
+// 1000 rows of variants to use one (premerge store-read M2).
+func (s *Store) GetScriptFamily(ctx context.Context, family string) (ScriptFamilyRow, error) {
+	return scanScriptFamily(s.db.QueryRowContext(ctx, `SELECT `+scriptFamilyColumns+` FROM script_families WHERE family=?`, family))
 }
 
 // GetScript returns sql.ErrNoRows when the fingerprint is unknown. The
