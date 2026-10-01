@@ -255,3 +255,75 @@ func TestRestoreNamesRefusedTargetAncestor(t *testing.T) {
 		t.Fatalf("refused path = %q %v, want %q", path, ok, shared)
 	}
 }
+
+// Premerge store-read M6: no backup test seeded the campaign tables. The
+// operator's edits and names (campaign_edits is never purged) must survive
+// create -> restore, every table must be counted, and the remap must leave
+// the recorder's cursor and reset epoch alone: it resets only
+// source='cowrie' cursors, and widening it would zero the epoch that fences
+// the recorder against a concurrent --replace.
+func TestRestoreRoundTripKeepsCampaignTables(t *testing.T) {
+	f := newFixture(t)
+	db, err := sql.Open("sqlite", filepath.Join(f.Root, "shardlure.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	const ts, fp = "2026-09-21T00:00:00.000000000Z", "1111111111111111111111111111111111111111111111111111111111111111"
+	seed := map[string]string{
+		"campaigns":            `INSERT INTO campaigns(id,name,notes,actors,ips,sessions,updated_at) VALUES('c-00000000000a','Operator Name','operator notes',1,1,1,'` + ts + `')`,
+		"campaign_members":     `INSERT INTO campaign_members(campaign_id,actor_id,sessions,ips,reasons) VALUES('c-00000000000a','cowrie:inert',1,1,'')`,
+		"campaign_ids":         `INSERT INTO campaign_ids(kind,value,campaign_id,seq) VALUES('script','` + fp + `','c-00000000000a',1)`,
+		"campaign_aliases":     `INSERT INTO campaign_aliases(old_id,new_id,created_at) VALUES('c-00000000000b','c-00000000000a','` + ts + `')`,
+		"campaign_edits":       `INSERT INTO campaign_edits(campaign_id,action,arg,who,created_at) VALUES('c-00000000000a','rename','Operator Name','cli','` + ts + `')`,
+		"campaign_evidence":    `INSERT INTO campaign_evidence(kind,value,session_id,actor_id,first_seen,last_seen) VALUES('script','` + fp + `','s1','cowrie:inert','` + ts + `','` + ts + `')`,
+		"scripts":              `INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen) VALUES('` + fp + `','n','inert command',1,1,'` + fp + `',0,1,'` + ts + `','` + ts + `')`,
+		"script_families":      `INSERT INTO script_families(family,display,variants,sessions,actors,ips,command_count,distinctive,links,reason,first_seen,last_seen) VALUES('` + fp + `','inert command','[]',1,1,1,1,1,1,'r','` + ts + `','` + ts + `')`,
+		"session_scripts":      `INSERT INTO session_scripts(session_id,actor_id,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES('s1','cowrie:inert','` + ts + `','` + ts + `','` + ts + `','` + ts + `','` + fp + `')`,
+		"session_script_lines": `INSERT INTO session_script_lines(session_id,event_id,line) VALUES('s1',2,'inert command')`,
+		"script_version_carry": `INSERT INTO script_version_carry(session_id,fingerprint) VALUES('s1','` + fp + `')`,
+	}
+	for table, q := range seed {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", table, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('campaign','evidence-v1',7,123,'','` + ts + `')`); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(t.TempDir(), "backup")
+	if _, err := Create(context.Background(), CreateOptions{ConfigPath: f.Config, Output: bundle}); err != nil {
+		t.Fatal(err)
+	}
+	to := filepath.Join(t.TempDir(), "recovered")
+	report, err := Restore(context.Background(), RestoreOptions{Input: bundle, To: to})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for table := range seed {
+		if report.TableCounts[table] != 1 {
+			t.Errorf("restore report counts %d rows in %s, want 1", report.TableCounts[table], table)
+		}
+	}
+	restored, err := store.Open(filepath.Join(to, "shardlure.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	c, err := restored.GetCampaign(context.Background(), "Operator Name")
+	if err != nil || c.ID != "c-00000000000a" || c.Notes != "operator notes" || len(c.Edits) != 1 || c.Edits[0].Arg != "Operator Name" {
+		t.Fatalf("restored campaign %+v %v", c, err)
+	}
+	if id, ok, err := restored.ResolveCampaignID(context.Background(), "c-00000000000b"); err != nil || !ok || id != "c-00000000000a" {
+		t.Fatalf("alias lost: %q %v %v", id, ok, err)
+	}
+	var epoch, offset int64
+	rdb, err := sql.Open("sqlite", filepath.Join(to, "shardlure.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb.Close()
+	if err := rdb.QueryRow(`SELECT inode, offset FROM ingest_state WHERE source='campaign' AND path='evidence-v1'`).Scan(&epoch, &offset); err != nil || epoch != 7 || offset != 123 {
+		t.Fatalf("recorder cursor after restore: epoch %d offset %d %v; want 7 and 123 untouched", epoch, offset, err)
+	}
+}
