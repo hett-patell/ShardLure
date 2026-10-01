@@ -1721,10 +1721,13 @@ WHERE COALESCE(campaigns,'')=''
 		if err := deleteScriptLinesForActors(tx, orphanIDs); err != nil {
 			return err
 		}
-		for _, child := range []string{"actor_ips", "actor_users", "session_scripts", "campaign_evidence", "campaign_members"} {
+		for _, child := range []string{"actor_ips", "actor_users", "session_scripts", "campaign_evidence"} {
 			if err := deleteStringRowsByKey(tx, child, "actor_id", orphanIDs); err != nil {
 				return err
 			}
+		}
+		if err := removeCampaignMembersTx(tx, orphanIDs); err != nil {
+			return err
 		}
 		if err := deleteStringRowsByKey(tx, "actors", "id", orphanIDs); err != nil {
 			return err

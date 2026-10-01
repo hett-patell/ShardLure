@@ -217,8 +217,11 @@ func TestReplaceBetweenHoldCheckAndRegroupReadsKeepsCampaign(t *testing.T) {
 		t.Fatal("precondition: the tick never reached regroup")
 	}
 	// The refused save leaves the pre-replace grouping in place: the named
-	// campaign still owns the script row and both actors.
-	if list, shown := showCampaigns(t, st); len(list) != 1 || list[0].ID != id || list[0].Name != "Keep" || list[0].Actors != 2 ||
+	// campaign still owns the script row. Its members and counts went with
+	// the replace (which zeroes the counts of the campaigns it keeps, so they
+	// never sit beside an empty member list); a save would have dropped the
+	// script row instead.
+	if list, shown := showCampaigns(t, st); len(list) != 1 || list[0].ID != id || list[0].Name != "Keep" || list[0].Actors != 0 ||
 		one(`SELECT COUNT(*) FROM campaign_ids WHERE kind='script' AND campaign_id=?`, id) != "1" {
 		t.Fatalf("the regroup saved over a replace that landed after its hold check: %v (script rows=%s)",
 			shown, one(`SELECT COUNT(*) FROM campaign_ids WHERE kind='script'`))

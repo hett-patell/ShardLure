@@ -520,8 +520,9 @@ func (s *Store) ReconcileSessionHASSH(sessionID, newActorID, hassh string,
 						return err
 					}
 					// Membership is derived; without this the actor detail
-					// shows a ghost member until the next regroup.
-					if _, err := tx.Exec("DELETE FROM campaign_members WHERE actor_id=?", a.ID); err != nil {
+					// shows a ghost member until the next regroup. The
+					// campaigns it leaves get their counts refreshed with it.
+					if err := removeCampaignMembersTx(tx, []string{a.ID}); err != nil {
 						return err
 					}
 				}

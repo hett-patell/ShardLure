@@ -670,6 +670,12 @@ SELECT session_id, fingerprint FROM session_scripts WHERE fingerprint<>''`); err
 	for _, q := range []string{
 		`DELETE FROM session_script_lines`, `DELETE FROM session_scripts`, `DELETE FROM scripts`, `DELETE FROM script_families`,
 		`DELETE FROM campaign_evidence`, `DELETE FROM campaign_members`, `DELETE FROM campaigns WHERE name='' AND notes=''`,
+		// The named and noted campaigns kept above have no members left. The
+		// hold this transaction arms suppresses the regroup that would
+		// recount them for 10+ minutes after the re-recorded sessions settle,
+		// so their old counts would sit beside an empty member list
+		// (premerge store-write M3).
+		`UPDATE campaigns SET actors=0, ips=0, sessions=0`,
 	} {
 		if _, err := tx.Exec(q); err != nil {
 			return err

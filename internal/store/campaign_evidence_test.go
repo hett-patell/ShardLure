@@ -1084,3 +1084,72 @@ func TestRecorderPhaseTwoRefusesStaleCursorAcrossReset(t *testing.T) {
 		t.Fatalf("lines after the retry = %v", got)
 	}
 }
+
+// Premerge store-write M3: a Cowrie --replace keeps named campaigns but
+// deletes every member, and the hold it arms suppresses the regroup that
+// would recount them, so the list read "N actors" over an empty dialog.
+func TestReplaceZeroesKeptCampaignCounts(t *testing.T) {
+	s := newTestStore(t, "replace-counts.db")
+	if _, err := s.db.Exec(`INSERT INTO campaigns(id,name,actors,ips,sessions,updated_at) VALUES('c-named','Outlaw',3,4,9,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO campaign_members(campaign_id,actor_id,sessions,ips,reasons) VALUES('c-named','cowrie:a',9,4,'')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceSourceEventsAndActorsAgg(models.SourceCowrie, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.GetCampaign(context.Background(), "c-named")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Actors != 0 || c.IPs != 0 || c.Sessions != 0 || len(c.Members) != 0 {
+		t.Fatalf("after replace: actors %d ips %d sessions %d over %d members", c.Actors, c.IPs, c.Sessions, len(c.Members))
+	}
+}
+
+// Premerge store-read M3: an actor removed between regroups (HASSH re-key,
+// orphan sweep) took its member row but left the campaign's counts.
+func TestRemovedMemberRefreshesCampaignCounts(t *testing.T) {
+	s := newTestStore(t, "member-counts.db")
+	cowrieEvent(t, s, "s1", "cowrie:203.0.113.7", "command", injector, "", "", time.Now().UTC())
+	old := time.Now().UTC().AddDate(0, 0, -120)
+	if err := upsertActor(s.db, &models.Actor{ID: "cowrie:gone", Source: models.SourceCowrie, FirstSeen: old, LastSeen: old}); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO campaigns(id,actors,ips,sessions,updated_at) VALUES('c-two',2,3,5,'now'),('c-one',1,2,2,'now'),('c-swept',1,1,1,'now')`,
+		`INSERT INTO campaign_members(campaign_id,actor_id,sessions,ips,reasons) VALUES
+  ('c-two','cowrie:203.0.113.7',2,2,''),('c-two','cowrie:keep',3,2,''),
+  ('c-one','cowrie:keep',2,2,''),('c-swept','cowrie:gone',1,1,'')`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub := func(map[string]*ActorState, func(func(*models.Event) error) error) ([]*models.AggregatedActor, error) {
+		return []*models.AggregatedActor{{Actor: &models.Actor{ID: "cowrie:203.0.113.7", Source: models.SourceCowrie}}}, nil
+	}
+	if err := s.ReconcileSessionHASSH("s1", "cowrie:hh", "hh", stub); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MaintenancePurge(90); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct {
+		id                    string
+		actors, ips, sessions int
+	}{
+		{"c-two", 1, 2, 3},   // one member left: its own sessions, IPs capped at its own
+		{"c-one", 1, 2, 2},   // untouched
+		{"c-swept", 0, 0, 0}, // its only member swept
+	} {
+		var a, i, ss, members int
+		if err := s.db.QueryRow(`SELECT actors, ips, sessions, (SELECT COUNT(*) FROM campaign_members m WHERE m.campaign_id=c.id) FROM campaigns c WHERE id=?`, want.id).Scan(&a, &i, &ss, &members); err != nil {
+			t.Fatal(err)
+		}
+		if a != want.actors || i != want.ips || ss != want.sessions || members != a {
+			t.Fatalf("%s: actors %d ips %d sessions %d over %d members; want %d/%d/%d", want.id, a, i, ss, members, want.actors, want.ips, want.sessions)
+		}
+	}
+}

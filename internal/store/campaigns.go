@@ -969,3 +969,70 @@ func (s *Store) GetScript(ctx context.Context, fp string) (ScriptDetail, error) 
 	}
 	return d, rows.Err()
 }
+
+// removeCampaignMembersTx deletes actorIDs' campaign_members rows and
+// refreshes the summary counts of every campaign that lost one, in the
+// caller's transaction. Membership is derived and the next regroup rewrites
+// both, but an actor removed between regroups (a HASSH re-key emptying the
+// IP actor, the orphan-actor sweep) used to leave the list row and the
+// dialog header at N actors over N-1 members, and a campaign whose only
+// members were swept with a positive count over an empty list (premerge
+// store-read M3). actors is the member count; sessions and ips are capped at
+// the members' sums: a session belongs to one actor, so the sessions sum is
+// exact, while an IP shared by two members is counted twice in the ips sum,
+// so that cap only bounds the figure (to 0 with no members left).
+func removeCampaignMembersTx(tx *sql.Tx, actorIDs []string) error {
+	const chunk = 400
+	affected := map[string]bool{}
+	for lo := 0; lo < len(actorIDs); lo += chunk {
+		part := actorIDs[lo:min(lo+chunk, len(actorIDs))]
+		args := make([]any, len(part))
+		for i, id := range part {
+			args[i] = id
+		}
+		// idx_campaign_members_actor serves the lookup.
+		rows, err := tx.Query(`SELECT DISTINCT campaign_id FROM campaign_members WHERE actor_id IN (?`+strings.Repeat(",?", len(part)-1)+`)`, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			affected[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+	if err := deleteStringRowsByKey(tx, "campaign_members", "actor_id", actorIDs); err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(affected))
+	for id := range affected {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for lo := 0; lo < len(ids); lo += chunk {
+		part := ids[lo:min(lo+chunk, len(ids))]
+		args := make([]any, len(part))
+		for i, id := range part {
+			args[i] = id
+		}
+		if _, err := tx.Exec(`UPDATE campaigns SET
+  actors=(SELECT COUNT(*) FROM campaign_members m WHERE m.campaign_id=campaigns.id),
+  sessions=min(sessions, (SELECT COALESCE(SUM(m.sessions),0) FROM campaign_members m WHERE m.campaign_id=campaigns.id)),
+  ips=min(ips, (SELECT COALESCE(SUM(m.ips),0) FROM campaign_members m WHERE m.campaign_id=campaigns.id))
+WHERE id IN (?`+strings.Repeat(",?", len(part)-1)+`)`, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
