@@ -805,3 +805,34 @@ VALUES(?,'n','x',3,0,?,?,3,?,?)`, fp, fam, dist, ts, ts); err != nil {
 		t.Fatal(err)
 	}
 }
+
+// A representative read as an orphan can re-settle before the write; the
+// dissolve step re-checks it too, or its live members would lose their
+// family while the representative itself is kept.
+func TestPruneOrphanScriptsKeepsFamilyOfReSettledRepresentative(t *testing.T) {
+	s := newTestStore(t, "prune-rep-recheck.db")
+	ts := "2026-09-20T00:00:00.000000000Z"
+	for _, fp := range []string{"r", "m"} {
+		if _, err := s.db.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen)
+VALUES(?,'n','x',3,0,'r',?,3,?,?)`, fp, map[string]float64{"r": 0, "m": 0.2}[fp], ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addSession := func(id, fp string) {
+		if _, err := s.db.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES(?,'a','1.2.3.4',?,?,?,?,?)`, id, ts, ts, ts, ts, fp); err != nil {
+			t.Error(err)
+		}
+	}
+	addSession("sm", "m")
+	pruneAfterRead = func() { addSession("sr", "r") }
+	t.Cleanup(func() { pruneAfterRead = nil })
+	if err := s.PruneOrphanScripts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var reps, members int
+	s.db.QueryRow(`SELECT COUNT(*) FROM scripts WHERE fingerprint='r'`).Scan(&reps)
+	s.db.QueryRow(`SELECT COUNT(*) FROM scripts WHERE fingerprint='m' AND family='r'`).Scan(&members)
+	if reps != 1 || members != 1 {
+		t.Fatalf("re-settled representative kept=%d, member still filed under it=%d; want 1 and 1", reps, members)
+	}
+}
