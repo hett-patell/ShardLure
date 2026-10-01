@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -527,5 +528,70 @@ VALUES('fam','cd /tmp','[]',7,2,3,4,1,0,'r',?,?)`, ts, ts); err != nil {
 	}
 	if _, err := s.GetScriptFamily(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing family err = %v", err)
+	}
+}
+
+// Premerge store-read M1: a family stored every member's variant, so a bot
+// minting one fingerprint per session grew the row the 30 s Scripts poll
+// reads without bound. The rebuild keeps the FamilyVariantCap largest plus
+// the representative, and VariantsTotal still counts every member.
+func TestRebuildScriptFamiliesCapsStoredVariants(t *testing.T) {
+	s := newTestStore(t, "famcap.db")
+	ctx := context.Background()
+	const ts = "2026-09-20T00:00:00.000000000Z"
+	const n = FamilyVariantCap + 50
+	rep := fmt.Sprintf("%064x", 1)
+	sid := 0
+	if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+		for i := 0; i < n; i++ {
+			fp := fmt.Sprintf("%064x", i+1)
+			dist, sessions := 0.1+float64(i)/1000, 1+i%5
+			if fp == rep {
+				dist, sessions = 0, 1 // the representative is among the smallest
+			}
+			if _, err := tx.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen)
+VALUES(?,'n','cd /tmp',3,0,?,?,3,?,?)`, fp, rep, dist, ts, ts); err != nil {
+				return err
+			}
+			for j := 0; j < sessions; j++ {
+				sid++
+				if _, err := tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES(?,'a','1.2.3.4',?,?,?,?,?)`,
+					fmt.Sprintf("s%d", sid), ts, ts, ts, ts, fp); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RebuildScriptFamilies(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.GetScriptFamily(ctx, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vs []familyVariant
+	if err := json.Unmarshal([]byte(f.Variants), &vs); err != nil {
+		t.Fatal(err)
+	}
+	if len(vs) != FamilyVariantCap+1 || f.VariantsTotal != n || f.Sessions != sid {
+		t.Fatalf("stored %d variants, total %d, sessions %d; want %d (cap + representative) of %d, %d sessions",
+			len(vs), f.VariantsTotal, f.Sessions, FamilyVariantCap+1, n, sid)
+	}
+	for i, v := range vs {
+		// 50 variants each hold 1..5 sessions: the 200 largest are exactly
+		// those with 2+, in stored (distance) order, the representative first.
+		if (v.Fingerprint == rep) != (i == 0) || (v.Fingerprint != rep && v.Sessions < 2) {
+			t.Fatalf("variant %d = %+v", i, v)
+		}
+		if i > 1 && v.Distance < vs[i-1].Distance {
+			t.Fatalf("capped variants left stored order at %d", i)
+		}
+	}
+	l, err := s.ListScriptFamilies(ctx, 0)
+	if err != nil || len(l) != 1 || l[0].VariantsTotal != n || l[0].Variants != f.Variants {
+		t.Fatalf("list %+v %v", l, err)
 	}
 }

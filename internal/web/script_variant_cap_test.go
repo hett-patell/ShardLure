@@ -1,10 +1,13 @@
 package web
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/networkshard/shardlure/internal/store"
 )
 
 // Final audit M2: a family's variants JSON was passed through uncapped, so a
@@ -24,11 +27,7 @@ func TestScriptVariantsAreCappedWithTotal(t *testing.T) {
 	b, _ := json.Marshal(vs)
 	family, smallest := fp(n-1), fp(0) // the representative is the largest here
 	seedScriptFamily(t, raw, family, n*(n+1)/2, string(b))
-	const ts = "2026-09-20T00:00:00.000000000Z"
-	if _, err := raw.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen)
-VALUES(?,?,?,3,1,?,0.1,3,?,?)`, smallest, "n", "cd /tmp", family, ts, ts); err != nil {
-		t.Fatal(err)
-	}
+	seedFamilyScripts(t, raw, family, 0, n) // variantsTotal counts these
 
 	type variant struct {
 		Fingerprint string `json:"fingerprint"`
@@ -96,6 +95,8 @@ func TestScriptListParsesVariantsOnlyWhenChanged(t *testing.T) {
 	}
 	seedScriptFamily(t, raw, fp(1000), 10, variants(300))
 	seedScriptFamily(t, raw, fp(1001), 5, variants(3))
+	seedFamilyScripts(t, raw, fp(1000), 0, 300)
+	seedFamilyScripts(t, raw, fp(1001), 300, 3)
 	var l struct {
 		Families []struct {
 			Family        string            `json:"family"`
@@ -125,6 +126,7 @@ func TestScriptListParsesVariantsOnlyWhenChanged(t *testing.T) {
 	if _, err := raw.Exec(`UPDATE script_families SET variants=? WHERE family=?`, variants(420), fp(1000)); err != nil {
 		t.Fatal(err)
 	}
+	seedFamilyScripts(t, raw, fp(1000), 303, 120)
 	check(3, map[string]int{fp(1000): 420, fp(1001): 3})
 }
 
@@ -167,5 +169,62 @@ VALUES(?,'n','cd /tmp',3,1,?,0.1,3,?,?)`, f, small, ts, ts); err != nil {
 	getJSON(t, mux, "/api/intel/script?fp="+member, &d)
 	if d.FamilySessions == nil || *d.FamilySessions != 2 || len(d.Variants) != 2 {
 		t.Fatalf("family ranked 1002nd lost its dialog block: familySessions=%v variants=%d", d.FamilySessions, len(d.Variants))
+	}
+}
+
+// seedFamilyScripts files n scripts (fingerprints from+1 .. from+n) under
+// family: variantsTotal is the store's count of those, not the length of
+// the materialised array.
+func seedFamilyScripts(t *testing.T, raw *sql.DB, family string, from, n int) {
+	t.Helper()
+	const ts = "2026-09-20T00:00:00.000000000Z"
+	tx, err := raw.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := from; i < from+n; i++ {
+		if _, err := tx.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen)
+VALUES(?,'n','cd /tmp',3,1,?,0.1,3,?,?)`, fmt.Sprintf("%064x", i+1), family, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The store keeps only store.FamilyVariantCap variants per family (plus the
+// representative), so a response cap above it would silently show fewer
+// than it claims to.
+func TestVariantCapsFitTheStoredCap(t *testing.T) {
+	if listVariantCap > store.FamilyVariantCap || scriptVariantCap > store.FamilyVariantCap {
+		t.Fatalf("caps %d/%d exceed the stored %d", listVariantCap, scriptVariantCap, store.FamilyVariantCap)
+	}
+}
+
+// Premerge store-read M1: the stored array is capped, so a small variant of a
+// large family is not in it. Its dialog must still list it (marked "shown")
+// and keep the family's true variant count.
+func TestScriptDialogListsShownVariantBelowStoredCap(t *testing.T) {
+	_, mux, _, raw := listTotalsServer(t)
+	fp := func(i int) string { return fmt.Sprintf("%064x", i+1) }
+	family, small := fp(0), fp(400)
+	var vs []map[string]any
+	for i := 0; i < store.FamilyVariantCap; i++ { // as the rebuild stores it: small is cut
+		vs = append(vs, map[string]any{"fingerprint": fp(i), "distance": 0.1, "sessions": 1000 - i, "links": false, "reason": "r"})
+	}
+	b, _ := json.Marshal(vs)
+	seedScriptFamily(t, raw, family, 99999, string(b))
+	seedFamilyScripts(t, raw, family, 0, 401)
+	var d struct {
+		Variants []struct {
+			Fingerprint string `json:"fingerprint"`
+			Sessions    int    `json:"sessions"`
+		} `json:"variants"`
+		VariantsTotal int `json:"variantsTotal"`
+	}
+	getJSON(t, mux, "/api/intel/script?fp="+small, &d)
+	if d.VariantsTotal != 401 || len(d.Variants) != store.FamilyVariantCap+1 || d.Variants[len(d.Variants)-1].Fingerprint != small {
+		t.Fatalf("dialog: %d variants of %d, last %+v; want the shown one appended, of 401", len(d.Variants), d.VariantsTotal, d.Variants[len(d.Variants)-1])
 	}
 }

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -261,13 +262,15 @@ func (s *Server) handleCampaign(w http.ResponseWriter, r *http.Request) {
 	writeCampaignJSON(w, out)
 }
 
-// Variant caps (final audit M2). A family stores one variant per member
+// Variant caps (final audit M2). A family has one variant per member
 // fingerprint with no bound, and a bot whose scripts differ only in text the
 // normaliser keeps mints one per session, so both responses carry only the
-// largest variants beside the true count (variantsTotal). The list is polled
-// every 30 s and shows only the count (the palette matches a fingerprint
-// prefix against these), so it keeps fewer; the script dialog is on demand
-// and lists each variant as a row.
+// largest variants beside the true count (variantsTotal, the store's count
+// of the family's scripts). The list is polled every 30 s and shows only the
+// count (the palette matches a fingerprint prefix against these), so it
+// keeps fewer; the script dialog is on demand and lists each variant as a
+// row. The store keeps only store.FamilyVariantCap per family (plus the
+// representative), so neither cap may exceed it (pinned by a test).
 const (
 	listVariantCap   = 50
 	scriptVariantCap = 200
@@ -318,17 +321,18 @@ func capVariants(stored string, limit int, keep ...string) (json.RawMessage, int
 	return b, len(all)
 }
 
-// listVariantMemo remembers, per family, the stored variants array the last
-// Scripts poll capped and what capVariants made of it. capVariants parses
-// every stored element (twice) to rank them, and a family stores one
-// variant per member fingerprint with no bound, so the 30 s poll's CPU grew
-// with the stored arrays although the response was capped (final re-review,
-// web item 3). The arrays change only when a regroup rebuilds families
-// (every 10 min at most), so almost every poll now costs one string
-// comparison per family (the store read already pays for those bytes); only
-// a family whose array changed is parsed again. The map is rebuilt from each
-// poll's families, so it holds at most one list page (≤ 1000 families) and
-// drops families that left the list.
+// listVariantMemo remembers, per family, a hash of the stored variants array
+// the last Scripts poll capped and what capVariants made of it. capVariants
+// parses every stored element (twice) to rank them, so the 30 s poll's CPU
+// grew with the stored arrays although the response was capped (final
+// re-review, web item 3). The arrays change only when a regroup rebuilds
+// families (every 10 min at most), so almost every poll now costs one hash
+// per family; only a family whose array changed is parsed again. The entry
+// keeps the hash, not the stored string: holding every listed family's array
+// between polls only to compare it pinned the arrays on the heap for the
+// life of the process (premerge web M1). The map is rebuilt from each poll's
+// families, so it holds at most one list page (≤ 1000 families of at most
+// listVariantCap variants each) and drops families that left the list.
 type listVariantMemo struct {
 	mu      sync.Mutex
 	entries map[string]listVariantEntry
@@ -336,15 +340,17 @@ type listVariantMemo struct {
 }
 
 type listVariantEntry struct {
-	stored string
-	out    json.RawMessage
-	total  int
+	sum [sha256.Size]byte
+	out json.RawMessage
+	n   int // elements in out
 }
 
 // cappedListVariants returns capVariants(f.Variants, listVariantCap) for
 // each family, in order, reusing a memoised result whose stored array is
-// unchanged. The totals are those of the stored array, as capVariants
-// computes them.
+// unchanged, and each family's variantsTotal: the store's count, floored at
+// the variants sent in case the count and the materialised row straddle a
+// regroup (a dissolved family reads 0 scripts until the next rebuild drops
+// its row).
 func (s *Server) cappedListVariants(fams []store.ScriptFamilyRow) ([]json.RawMessage, []int) {
 	m := &s.listVariants
 	m.mu.Lock()
@@ -352,14 +358,17 @@ func (s *Server) cappedListVariants(fams []store.ScriptFamilyRow) ([]json.RawMes
 	next := make(map[string]listVariantEntry, len(fams))
 	outs, totals := make([]json.RawMessage, len(fams)), make([]int, len(fams))
 	for i, f := range fams {
+		sum := sha256.Sum256([]byte(f.Variants))
 		e, ok := m.entries[f.Family]
-		if !ok || e.stored != f.Variants {
-			e.stored = f.Variants
-			e.out, e.total = capVariants(f.Variants, listVariantCap)
+		if !ok || e.sum != sum {
+			var stored int
+			e.sum = sum
+			e.out, stored = capVariants(f.Variants, listVariantCap)
+			e.n = min(stored, listVariantCap)
 			m.parses++
 		}
 		next[f.Family] = e
-		outs[i], totals[i] = e.out, e.total
+		outs[i], totals[i] = e.out, max(f.VariantsTotal, e.n)
 	}
 	m.entries = next
 	return outs, totals
@@ -430,13 +439,14 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 	for _, x := range d.Sessions {
 		sessions = append(sessions, scriptSessionJSON{SessionID: x.SessionID, ActorID: x.ActorID, SrcIP: x.SrcIP, FirstSeen: campaignJSONTime(x.FirstSeen)})
 	}
+	sessionsTotal := max(d.SessionsTotal, len(sessions))
 	out := map[string]any{"fingerprint": d.Fingerprint, "display": d.Display, "family": d.Family,
 		"sessions": sessions, "actors": nonNilStrings(d.Actors),
 		// True counts for this fingerprint from the store: sessions is capped
 		// at 500 newest and actors is drawn from those only, so their lengths
 		// undercount any script with more sessions than the cap (store-reads
 		// audit M2). Floored at the lists in case the reads straddle a write.
-		"sessionsTotal": max(d.SessionsTotal, len(sessions)), "actorsTotal": max(d.ActorsTotal, len(d.Actors))}
+		"sessionsTotal": sessionsTotal, "actorsTotal": max(d.ActorsTotal, len(d.Actors))}
 	// The Scripts row counts the whole family, but GetScript lists only this
 	// fingerprint's sessions (capped at 500). Without the family block the
 	// dialog read "4 sessions" under a row claiming 6 and the other variants
@@ -448,11 +458,49 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 	// The variant list is capped at scriptVariantCap (largest first, plus
 	// this fingerprint and the representative so the dialog can mark them)
 	// with the true variantsTotal beside it (final audit M2).
+	//
+	// The stored array is itself capped (store.FamilyVariantCap largest plus
+	// the representative), so a shown fingerprint below that cut is not in
+	// it; it is appended from this script's own count. Its distance, links
+	// and reason are not: links depend on the population measured at the
+	// rebuild, and the dialog renders only the fingerprint and sessions.
 	if fam, ok := s.scriptFamily(r.Context(), d.Family); ok {
-		out["variants"], out["variantsTotal"] = capVariants(fam.Variants, scriptVariantCap, d.Fingerprint, d.Family)
+		variants, _ := capVariants(fam.Variants, scriptVariantCap, d.Fingerprint, d.Family)
+		variants, n := withShownVariant(variants, d.Fingerprint, sessionsTotal)
+		out["variants"], out["variantsTotal"] = variants, max(fam.VariantsTotal, n)
 		out["familySessions"], out["familyActors"], out["familyIps"] = fam.Sessions, fam.Actors, fam.IPs
 	}
 	writeCampaignJSON(w, out)
+}
+
+// withShownVariant returns the capped variants with fp appended when it is
+// missing, and the element count. A list that does not parse is returned
+// unchanged (capVariants already degraded it to []).
+func withShownVariant(variants json.RawMessage, fp string, sessions int) (json.RawMessage, int) {
+	var all []json.RawMessage
+	if json.Unmarshal(variants, &all) != nil {
+		return variants, 0
+	}
+	for _, raw := range all {
+		var v struct {
+			Fingerprint string `json:"fingerprint"`
+		}
+		if json.Unmarshal(raw, &v) == nil && v.Fingerprint == fp {
+			return variants, len(all)
+		}
+	}
+	extra, err := json.Marshal(struct {
+		Fingerprint string `json:"fingerprint"`
+		Sessions    int    `json:"sessions"`
+	}{fp, sessions})
+	if err != nil {
+		return variants, len(all)
+	}
+	b, err := json.Marshal(append(all, extra))
+	if err != nil {
+		return variants, len(all)
+	}
+	return b, len(all) + 1
 }
 
 // scriptFamily returns the materialised script_families row for family: a

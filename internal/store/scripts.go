@@ -448,6 +448,42 @@ type familyVariant struct {
 	Reason      string  `json:"reason"`
 }
 
+// FamilyVariantCap bounds the variants a script_families row stores: the
+// FamilyVariantCap largest by sessions (ties in stored order), plus the
+// representative. A family stores one variant per member fingerprint, and a
+// bot whose scripts differ only in text the normaliser keeps mints one per
+// session, so the uncapped array grew without bound: 20 families of 30,000
+// variants made every 30 s Scripts poll read ~113 MB and take ~0.8 s, and
+// the web memo kept those strings resident (premerge store-read M1, web
+// M1/M5). Nothing reads past the cap: the list sends 50 and the script
+// dialog 200 (web listVariantCap/scriptVariantCap, pinned <= this), and the
+// "N of M" total is a count of the family's scripts (VariantsTotal), not the
+// length of this array. Capping keeps the survivors in stored order, so the
+// largest-N view of the capped array is exactly that of the whole one.
+const FamilyVariantCap = 200
+
+func capFamilyVariants(vs []familyVariant, representative string) []familyVariant {
+	if len(vs) <= FamilyVariantCap {
+		return vs
+	}
+	idx := make([]int, len(vs))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return vs[idx[a]].Sessions > vs[idx[b]].Sessions })
+	keep := make([]bool, len(vs))
+	for _, i := range idx[:FamilyVariantCap] {
+		keep[i] = true
+	}
+	out := make([]familyVariant, 0, FamilyVariantCap+1)
+	for i, v := range vs {
+		if keep[i] || v.Fingerprint == representative {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // RebuildScriptFamilies materialises the Scripts view so the panel reads one
 // small table. population is the Cowrie actor count within retention. Reads
 // run in one read-only snapshot outside writeMu, and so does the comparison
@@ -563,7 +599,7 @@ WHERE sc.family<>'' GROUP BY sc.fingerprint ORDER BY sc.family, sc.family_distan
 	}
 	want := make(map[string]familyRow, len(fams))
 	for id, f := range fams {
-		v, err := json.Marshal(f.variants)
+		v, err := json.Marshal(capFamilyVariants(f.variants, id))
 		if err != nil {
 			return err
 		}

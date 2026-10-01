@@ -79,9 +79,15 @@ type CampaignDetail struct {
 // it. A var so tests can shrink it.
 var campaignDetailCap = 500
 
+// ScriptFamilyRow is one materialised family. Variants is a JSON array of
+// at most FamilyVariantCap variants plus the representative (see
+// RebuildScriptFamilies); VariantsTotal is the family's true variant count,
+// counted from scripts in the same read so a capped array never reads as
+// the whole.
 type ScriptFamilyRow struct {
-	Family, Display, Variants, Reason   string // Variants is JSON
+	Family, Display, Variants, Reason   string
 	Sessions, Actors, IPs, CommandCount int
+	VariantsTotal                       int
 	Distinctive, Links                  bool
 	FirstSeen, LastSeen                 time.Time
 }
@@ -850,7 +856,12 @@ func (s *Store) ListScriptFamilies(ctx context.Context, limit int) ([]ScriptFami
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+scriptFamilyColumns+`
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT `+scriptFamilyColumns+`
 FROM script_families ORDER BY sessions DESC, family LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -864,7 +875,18 @@ FROM script_families ORDER BY sessions DESC, family LIMIT ?`, limit)
 		}
 		out = append(out, f)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := countFamilyVariants(ctx, tx, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 const scriptFamilyColumns = `family, display, variants, reason, sessions, actors, ips, command_count, distinctive, links, first_seen, last_seen`
@@ -880,6 +902,16 @@ func scanScriptFamily(sc interface{ Scan(...any) error }) (ScriptFamilyRow, erro
 	return f, nil
 }
 
+// countFamilyVariants sets VariantsTotal: the stored array is capped, so the
+// total is the family's scripts, an idx_scripts_family range count (index
+// entries only, no row or text read). It is the set RebuildScriptFamilies
+// materialised from (every script filed under the family, with or without
+// a session), counted live, so a member assigned since the last rebuild is
+// already in it.
+func countFamilyVariants(ctx context.Context, q campaignReader, f *ScriptFamilyRow) error {
+	return q.QueryRowContext(ctx, `SELECT COUNT(*) FROM scripts WHERE family=?`, f.Family).Scan(&f.VariantsTotal)
+}
+
 // GetScriptFamily returns one materialised script_families row by its
 // primary key, or sql.ErrNoRows. The script dialog used to find its family
 // by scanning ListScriptFamilies(1000): the family count is attacker-driven
@@ -887,7 +919,16 @@ func scanScriptFamily(sc interface{ Scan(...any) error }) (ScriptFamilyRow, erro
 // past rank 1000 silently lost its dialog block, and every open read up to
 // 1000 rows of variants to use one (premerge store-read M2).
 func (s *Store) GetScriptFamily(ctx context.Context, family string) (ScriptFamilyRow, error) {
-	return scanScriptFamily(s.db.QueryRowContext(ctx, `SELECT `+scriptFamilyColumns+` FROM script_families WHERE family=?`, family))
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ScriptFamilyRow{}, err
+	}
+	defer tx.Rollback()
+	f, err := scanScriptFamily(tx.QueryRowContext(ctx, `SELECT `+scriptFamilyColumns+` FROM script_families WHERE family=?`, family))
+	if err != nil {
+		return f, err
+	}
+	return f, countFamilyVariants(ctx, tx, &f)
 }
 
 // GetScript returns sql.ErrNoRows when the fingerprint is unknown. The
