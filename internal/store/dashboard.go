@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -26,7 +27,14 @@ var topCountsColumns = map[string]string{
 	"command":  "command IS NOT NULL AND command != ''",
 }
 
-func (s *Store) TopSourceIPs(limit int) ([]CountRow, error) { return s.topCounts("src_ip", limit) }
+func (s *Store) TopSourceIPs(limit int) ([]CountRow, error) {
+	return s.topCounts(context.Background(), "src_ip", limit)
+}
+
+// TopSourceIPsContext is TopSourceIPs under a context (see EventCountContext).
+func (s *Store) TopSourceIPsContext(ctx context.Context, limit int) ([]CountRow, error) {
+	return s.topCounts(ctx, "src_ip", limit)
+}
 
 // CountryHit is a per-country event tally for the "Attack Geography" widget.
 type CountryHit struct {
@@ -88,17 +96,35 @@ LIMIT ?`, limit)
 	return out, rows.Err()
 }
 
-func (s *Store) TopUsernames(limit int) ([]CountRow, error) { return s.topCounts("username", limit) }
+func (s *Store) TopUsernames(limit int) ([]CountRow, error) {
+	return s.topCounts(context.Background(), "username", limit)
+}
 
-func (s *Store) TopCommands(limit int) ([]CountRow, error) { return s.topCounts("command", limit) }
+func (s *Store) TopUsernamesContext(ctx context.Context, limit int) ([]CountRow, error) {
+	return s.topCounts(ctx, "username", limit)
+}
 
-func (s *Store) UniqueIPCount() (int, error) {
+func (s *Store) TopCommands(limit int) ([]CountRow, error) {
+	return s.topCounts(context.Background(), "command", limit)
+}
+
+func (s *Store) TopCommandsContext(ctx context.Context, limit int) ([]CountRow, error) {
+	return s.topCounts(ctx, "command", limit)
+}
+
+func (s *Store) UniqueIPCount() (int, error) { return s.UniqueIPCountContext(context.Background()) }
+
+func (s *Store) UniqueIPCountContext(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow("SELECT COUNT(DISTINCT src_ip) FROM events WHERE src_ip IS NOT NULL AND src_ip != ''").Scan(&n)
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(DISTINCT src_ip) FROM events WHERE src_ip IS NOT NULL AND src_ip != ''").Scan(&n)
 	return n, err
 }
 
 func (s *Store) HourlyEventCounts(limit int) ([]HourCount, error) {
+	return s.HourlyEventCountsContext(context.Background(), limit)
+}
+
+func (s *Store) HourlyEventCountsContext(ctx context.Context, limit int) ([]HourCount, error) {
 	if limit <= 0 {
 		limit = 72
 	}
@@ -107,7 +133,7 @@ func (s *Store) HourlyEventCounts(limit int) ([]HourCount, error) {
 	cutoff := time.Now().UTC().Add(-time.Duration(limit+1) * time.Hour)
 	window, args := eventTimeBranches("id", &cutoff, "", nil)
 	args = append(args, limit)
-	rows, err := s.db.Query("WITH hourly_events AS ("+window+") "+`
+	rows, err := s.db.QueryContext(ctx, "WITH hourly_events AS ("+window+") "+`
 SELECT hour, hits FROM (
   SELECT substr(exact_ts, 1, 13) AS hour, COUNT(*) AS hits
   FROM hourly_events
@@ -139,7 +165,7 @@ SELECT hour, hits FROM (
 // topCounts aggregates row counts grouped by an allowlisted column.
 // column MUST be a key of topCountsColumns; any other value returns an error.
 // Never accept user input here.
-func (s *Store) topCounts(column string, limit int) ([]CountRow, error) {
+func (s *Store) topCounts(ctx context.Context, column string, limit int) ([]CountRow, error) {
 	where, ok := topCountsColumns[column]
 	if !ok {
 		return nil, fmt.Errorf("topCounts: column %q not in allowlist", column)
@@ -154,7 +180,7 @@ func (s *Store) topCounts(column string, limit int) ([]CountRow, error) {
 		limit = defaultTopLimit
 	}
 	query := "SELECT " + column + ", COUNT(*) AS hits FROM events WHERE " + where + " GROUP BY " + column + " ORDER BY hits DESC LIMIT ?"
-	rows, err := s.db.Query(query, limit)
+	rows, err := s.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}

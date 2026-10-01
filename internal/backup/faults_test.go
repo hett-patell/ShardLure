@@ -12,13 +12,20 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/safefile"
+	"github.com/networkshard/shardlure/internal/store"
 )
 
-func TestCreateRetainsIncompleteOutputOnLateFailures(t *testing.T) {
+// A failure after publication keeps the published output with its incomplete
+// marker. A failure before it (including a raced destination, where the
+// no-replace publish refused) removes this run's own staging directory, which
+// holds a database snapshot, and touches nothing else (final audit M3).
+func TestCreateFailureKeepsPublishedOutputAndRemovesStaging(t *testing.T) {
+	wantPublished := map[string]bool{"no-space": false, "file-sync": false, "destination-race": false, "after-rename": true, "final-sync": true}
 	for _, kind := range []string{"no-space", "file-sync", "after-rename", "destination-race", "final-sync"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t)
-			out := filepath.Join(t.TempDir(), "backup")
+			parentDir := t.TempDir()
+			out := filepath.Join(parentDir, "backup")
 			ops := nativeOperations()
 			published := false
 			switch kind {
@@ -60,23 +67,43 @@ func TestCreateRetainsIncompleteOutputOnLateFailures(t *testing.T) {
 			if err == nil || m.Complete {
 				t.Errorf("failed publication advertised completion: complete=%v error=%v", m.Complete, err)
 			}
-			var failure *Failure
-			if !errors.As(err, &failure) || failure.Staging == "" {
-				t.Fatalf("recovery location lost: %v", err)
-			}
 			if strings.Contains(err.Error(), f.Root) || strings.Contains(err.Error(), "never-send-fixture-value") {
 				t.Fatal("private diagnostic leaked")
+			}
+			var failure *Failure
+			if !errors.As(err, &failure) {
+				t.Fatalf("not a Failure: %v", err)
+			}
+			entries, readErr := os.ReadDir(parentDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".incomplete") {
+					t.Fatalf("staging directory %q left behind", e.Name())
+				}
+			}
+			if !wantPublished[kind] {
+				if failure.Staging != "" {
+					t.Fatalf("removed staging still reported retained at %q", failure.Staging)
+				}
+				if kind == "destination-race" {
+					if b, err := os.ReadFile(filepath.Join(out, "keep")); err != nil || string(b) != "keep" || len(entries) != 1 {
+						t.Fatalf("raced destination touched (entries %d)", len(entries))
+					}
+				} else if len(entries) != 0 {
+					t.Fatalf("output parent not left empty: %d entries", len(entries))
+				}
+				return
+			}
+			if failure.Staging != out {
+				t.Fatalf("published output location lost: %q", failure.Staging)
 			}
 			if _, err := os.Stat(filepath.Join(failure.Staging, incompleteName)); err != nil {
 				t.Fatalf("failure deleted recovery marker/material: %v", err)
 			}
 			if _, err := Verify(context.Background(), failure.Staging); err == nil {
 				t.Fatal("incomplete output verified")
-			}
-			if kind == "destination-race" {
-				if b, err := os.ReadFile(filepath.Join(out, "keep")); err != nil || string(b) != "keep" {
-					t.Fatal("raced destination overwritten")
-				}
 			}
 		})
 	}
@@ -165,7 +192,7 @@ func TestManifestLimitsBeforeMaterializingOrCopying(t *testing.T) {
 	if _, err := Verify(context.Background(), root); !errors.Is(err, ErrManifestLimit) {
 		t.Fatalf("oversized manifest not bounded: %v", err)
 	}
-	m := Manifest{FormatVersion: 1, Complete: true, Schema: 24, CreatedAt: time.Now().UTC(), Entries: make([]Entry, maxManifestEntries+1)}
+	m := Manifest{FormatVersion: 1, Complete: true, Schema: store.LatestSnapshotSchema, CreatedAt: time.Now().UTC(), Entries: make([]Entry, maxManifestEntries+1)}
 	if _, _, err := validateManifest(m); !errors.Is(err, ErrManifestLimit) {
 		t.Fatalf("entry count not bounded: %v", err)
 	}

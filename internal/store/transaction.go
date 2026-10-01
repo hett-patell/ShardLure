@@ -197,6 +197,13 @@ func clearSourceTx(tx *sql.Tx, source models.Source) error {
 	if err := deleteActorsTx(tx, source); err != nil {
 		return err
 	}
+	// Campaign rows are derived from Cowrie events only; a replace must not
+	// leave evidence citing sessions that no longer exist.
+	if source == models.SourceCowrie {
+		if err := clearCampaignDerivedTx(tx); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec("DELETE FROM events WHERE source=?", source)
 	return err
 }
@@ -512,13 +519,23 @@ func (s *Store) ReconcileSessionHASSH(sessionID, newActorID, hassh string,
 					if _, err := tx.Exec("DELETE FROM actors WHERE id=?", a.ID); err != nil {
 						return err
 					}
+					// Membership is derived; without this the actor detail
+					// shows a ghost member until the next regroup. The
+					// campaigns it leaves get their counts refreshed with it.
+					if err := removeCampaignMembersTx(tx, []string{a.ID}); err != nil {
+						return err
+					}
 				}
 			}
 		}
 		// Also repairs legacy rows whose actor_id was already moved but whose
 		// HASSH was left empty. Blank actor IDs (admin exemptions) stay blank.
-		_, err = tx.Exec("UPDATE events SET hassh=?,actor_id=CASE WHEN COALESCE(actor_id,'')='' THEN actor_id ELSE ? END WHERE source=? AND session_id=? AND (COALESCE(hassh,'')<>? OR (actor_id<>'' AND actor_id<>?))", hassh, newActorID, models.SourceCowrie, sessionID, hassh, newActorID)
-		return err
+		if _, err = tx.Exec("UPDATE events SET hassh=?,actor_id=CASE WHEN COALESCE(actor_id,'')='' THEN actor_id ELSE ? END WHERE source=? AND session_id=? AND (COALESCE(hassh,'')<>? OR (actor_id<>'' AND actor_id<>?))", hassh, newActorID, models.SourceCowrie, sessionID, hassh, newActorID); err != nil {
+			return err
+		}
+		// Scripts and campaign evidence are per session, so they move with
+		// the session's events or campaigns would keep citing the IP actor.
+		return rekeyCampaignEvidenceTx(tx, sessionID, newActorID)
 	})
 }
 

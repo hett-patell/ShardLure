@@ -21,7 +21,7 @@ func TestPostHandlersAreNotWrappedReadOnly(t *testing.T) {
 
 	// Handlers that enforce POST, found by looking at what they actually do.
 	postOnly := map[string]bool{}
-	for _, f := range []string{"api_intel.go", "api_settings.go", "api_vt.go", "api_urlhaus.go"} {
+	for _, f := range []string{"api_intel.go", "api_settings.go", "api_vt.go", "api_urlhaus.go", "api_campaigns.go"} {
 		src, err := os.ReadFile(f)
 		if err != nil {
 			continue

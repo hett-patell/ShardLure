@@ -822,6 +822,47 @@
   .vt-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
   .vt-btn:disabled { opacity: .55; cursor: default; }
 
+  /* ==== Campaigns and scripts ==== */
+  #campaigns-table tbody tr[data-campaign], #scripts-table tbody tr[data-script] { cursor: pointer; }
+  #campaigns-table tbody tr[data-campaign]:hover, #scripts-table tbody tr[data-script]:hover { background: color-mix(in srgb, var(--accent-2) 5%, transparent); }
+  #scripts-table code { font-family: var(--mono); font-size: 11px; word-break: break-all; }
+  /* The row's first cell is a real <button> (Enter/Space, a control role and
+     the cell's own text as its name); the whole row still opens on click. */
+  .row-open {
+    display: block; max-width: 100%; padding: 0; margin: 0; border: 0; background: none;
+    color: inherit; font: inherit; text-align: left; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: inherit;
+  }
+  .cm-btn {
+    font-family: var(--mono, monospace); font-size: 11px; padding: 1px 6px; margin: 1px 4px 1px 0;
+    background: transparent; color: var(--blue-team); max-width: 100%;
+    border: 1px solid var(--line-strong); border-radius: 3px; cursor: pointer;
+    overflow-wrap: anywhere; text-align: left;
+  }
+  .cm-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .cm-badges { margin: 8px 0 4px; }
+  .cm-row { margin: 6px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .cm-row input { flex: 1 1 200px; min-width: 0; font: 12px var(--mono); color: var(--text);
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: 3px; padding: 3px 6px; }
+  .cm-h { margin: 14px 0 6px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; }
+  .cm-status { min-height: 1.2em; font-size: 11px; color: var(--dim); }
+  .cm-notes { display: block; width: 100%; min-height: 80px; margin-bottom: 6px; font: 12px var(--mono); color: var(--text);
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: 3px; padding: 6px; box-sizing: border-box; }
+  .cm-scroll { overflow-x: auto; }
+  /* Detail tables show whole values (fingerprints, key comments, actor IDs):
+     the global fixed layout would ellipsise exactly what the analyst needs. */
+  .cm-table { table-layout: auto; }
+  .cm-table td { white-space: normal; overflow-wrap: break-word; text-overflow: clip; vertical-align: top; }
+  /* Member rows at 760 px: only overflow-wrap:anywhere lowers a cell's
+     min-content width, so the actor-ID and reason cells (39-character
+     cowrie:<hassh> IDs, key comments with no spaces) use it and wrap; with
+     break-word the table outgrew the dialog and pushed "remove" off-screen.
+     Short tokens (IP, playbook) and the action button stay on one line. */
+  .cm-table td.cm-wrap { overflow-wrap: anywhere; }
+  .cm-table td.cm-nw, .cm-table td.cm-act { white-space: nowrap; }
+  .cm-table td.cm-act { width: 1%; }
+  .cm-more { font-size: 11px; color: var(--dim); text-transform: none; letter-spacing: 0; }
+
   /* URLhaus sharing table. Attacker URLs are long and untrusted, so the cell
      truncates with an ellipsis (full value stays in the title attribute)
      rather than blowing out the table width. */
@@ -1247,7 +1288,7 @@
     .grid > .panel, .panel-body { overflow-x: auto; }
     #actors-table, #cmds-table, #capture-table, #abuse-suggest-table, #urlhaus-table, #urlhaus-log,
     #threatfox-table, #threatfox-log, #ttp-table, #payloads-table, #pending-table, #bazaar-table,
-    #ioc-table, #tunnels-table, #set-reports-table { min-width: 620px; }
+    #ioc-table, #tunnels-table, #set-reports-table, #campaigns-table, #scripts-table { min-width: 620px; }
     .sess-head, .sess-row { min-width: 640px; }
     .cred-grid { grid-template-columns: 1fr; }
     .set-row { grid-template-columns: 1fr; gap: 6px; }
@@ -1763,6 +1804,36 @@
         </div>
       </section>
 
+      <section class="panel" id="panel-campaigns">
+        <div class="panel-head">
+          <h2>Campaigns</h2>
+          <span class="meta" id="campaigns-meta">sessions linked by the same SSH key, payload or script</span>
+        </div>
+        <div class="panel-body">
+        <div class="table-scroll">
+        <table class="dense" id="campaigns-table">
+          <thead><tr><th>campaign</th><th class="num">actors</th><th class="num">IPs</th><th class="num">sessions</th><th>linked by</th><th>first → last</th></tr></thead>
+          <tbody><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
+        </table>
+        </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-scripts">
+        <div class="panel-head">
+          <h2>Scripts</h2>
+          <span class="meta" id="scripts-meta">normalised command scripts and their variants</span>
+        </div>
+        <div class="panel-body">
+        <div class="table-scroll">
+        <table class="dense" id="scripts-table">
+          <thead><tr><th>script</th><th class="num">variants</th><th class="num">sessions</th><th class="num">actors</th><th class="num">IPs</th><th>links</th><th>first → last</th></tr></thead>
+          <tbody><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
+        </table>
+        </div>
+        </div>
+      </section>
+
       <section class="panel" id="panel-replay">
         <div class="panel-head">
           <h2>Attack replay / synthesis</h2>
@@ -2025,6 +2096,18 @@
   </div>
 </dialog>
 
+<!-- Campaign / script detail -->
+<dialog class="sess-modal" id="campaign-modal" aria-labelledby="cm-title">
+  <div class="sm-card">
+    <div class="sm-head">
+      <h2 class="sm-title" id="cm-title">campaign</h2>
+      <div class="sm-sub" id="cm-sub"></div>
+      <button type="button" class="sm-close" id="cm-close">close (esc)</button>
+    </div>
+    <div class="sm-body" id="cm-body" tabindex="0"></div>
+  </div>
+</dialog>
+
 <script>
 // ── Dashboard auth token forwarding ──────────────────────────────────────
 // When SHARDLURE_DASH_TOKEN is set, the server requires the token on every
@@ -2165,20 +2248,30 @@ function withToken(url) {
   if (/[?&]token=/.test(u)) return u + hash;
   return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(currentToken) + hash;
 }
-// Wrap fetch so every same-origin /api/ request sends the Bearer token. Install
-// the wrapper whenever auth was on at load (DASH_TOKEN non-empty); it reads the
-// live currentToken each call so a rotation takes effect immediately.
+// Wrap fetch so every same-origin /api/ request sends X-ShardLure-Request
+// (open mode requires it on the quota-spending lookups, which a cross-site
+// <img> could otherwise trigger) and, when auth is on, the Bearer token. It
+// reads the live currentToken each call so a rotation takes effect immediately.
+//
+// Only a RELATIVE URL beginning with "/api/" gets the headers, and this is
+// deliberate: a relative path can only ever name this origin, so the Bearer
+// token cannot be sent to another host by a mistyped or attacker-influenced
+// absolute URL. The cost is that an absolute same-origin URL
+// ("http://host:8080/api/…"), a Request object built from one, or a URL
+// object would silently go out WITHOUT the headers and get 401/403. Every
+// call site on this page uses a relative "/api/…" string (grep before adding
+// one), and the intel page has no reason to build absolute API URLs.
 (function () {
-  if (!DASH_TOKEN) return;
   var _fetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
     try {
       var url = (typeof input === 'string') ? input : (input && input.url) || '';
       // Same-origin API path: a relative URL beginning with "/api/".
-      if (url.indexOf('/api/') === 0 && currentToken) {
+      if (url.indexOf('/api/') === 0) {
         init = init || {};
         var h = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
-        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + currentToken);
+        h.set('X-ShardLure-Request', '1');
+        if (currentToken && !h.has('Authorization')) h.set('Authorization', 'Bearer ' + currentToken);
         init.headers = h;
       }
     } catch (_) {}
@@ -2456,6 +2549,13 @@ async function loadActorDetail(id) {
   const cmds = d.commands || [];
   const events = d.events || [];
   let html = '';
+  // Campaign badges: opened by the delegated listener on #detail-cmds in the
+  // campaigns block; the id travels in an escaped data-* attribute.
+  if (d.campaigns && d.campaigns.length) {
+    html += '<div class="cm-badges">' + d.campaigns.map(function(c) {
+      return '<button type="button" class="cm-btn" data-campaign-open="' + esc(c.id) + '">campaign: ' + esc(c.name || c.suggestedName || c.id) + '</button>';
+    }).join('') + '</div>';
+  }
   if (cmds.length) {
     html += '<div style="color:var(--dim);margin:8px 0 4px;font-size:10px;text-transform:uppercase;letter-spacing:.08em">Commands executed (' + cmds.length + ')</div>';
     html += cmds.map(function(c) {
@@ -3237,6 +3337,60 @@ function buildPalette(q) {
       action: function () { openPayload(p.sha256); closePalette(); }
     });
   });
+  (_lastCampaigns || []).forEach(function (c) {
+    var hay = ((c.search || '') + ' ' + (c.name || '') + ' ' + (c.suggestedName || '') + ' ' + (c.id || '')).toLowerCase();
+    if (hay.indexOf(q) < 0) return;
+    if (out.filter(function (r) { return r.group === 'Campaigns'; }).length >= 5) return;
+    out.push({
+      group: 'Campaigns', label: campaignDisplayName(c),
+      sub: (c.actors || 0) + ' actors · ' + (c.sessions || 0) + ' sessions',
+      action: function () { setActiveView('red'); openCampaign(c.id); closePalette(); }
+    });
+  });
+  // Plain text searches a script's display text only. A hex-looking query of
+  // 8+ characters is a fingerprint lookup: it matches the representative or
+  // any variant (a campaign's evidence names a variant, not always the
+  // representative) by PREFIX and opens that fingerprint. Substring matching
+  // over fingerprints made "cd" open whichever variant's hash contained it.
+  //
+  // The list carries only each family's 50 largest variants (listVariantCap:
+  // the 30 s poll must stay bounded), so a prefix cannot reach a variant
+  // ranked below that. A FULL 64-hex fingerprint needs no list: the script
+  // dialog resolves any fingerprint server-side, so it always opens (campaign
+  // evidence and the CLI print full fingerprints). A shorter prefix with no
+  // listed match says so instead of reading as "no such script".
+  var fpQuery = /^[0-9a-f]{8,64}$/.test(q);
+  var fpFull = /^[0-9a-f]{64}$/.test(q), fpListed = false;
+  (_lastScripts || []).forEach(function (f) {
+    var vfps = (f.variants || []).map(function (v) { return String(v.fingerprint || ''); });
+    var fp = f.family;
+    if (fpQuery) {
+      fp = [String(f.family || '')].concat(vfps).filter(function (v) { return v.indexOf(q) === 0; })[0];
+      if (fp) fpListed = true;
+      if (!fp && String(f.display || '').toLowerCase().indexOf(q) < 0) return;
+      fp = fp || f.family;
+    } else if (String(f.display || '').toLowerCase().indexOf(q) < 0) {
+      return;
+    }
+    if (out.filter(function (r) { return r.group === 'Scripts'; }).length >= 5) return;
+    out.push({
+      group: 'Scripts', label: String(f.display || '').split('\n')[0].slice(0, 80) || String(f.family || '').slice(0, 16),
+      sub: (f.sessions || 0) + ' sessions' + (fp !== f.family ? ' · variant ' + String(fp).slice(0, 12) : ''),
+      action: function () { setActiveView('red'); openScript(fp); closePalette(); }
+    });
+  });
+  if (fpFull && !fpListed) {
+    out.push({
+      group: 'Scripts', label: 'open script ' + q.slice(0, 16) + '…', sub: 'full fingerprint · not among the listed variants',
+      action: function () { setActiveView('red'); openScript(q); closePalette(); }
+    });
+  } else if (fpQuery && !fpListed) {
+    out.push({
+      group: 'Scripts', label: 'no listed variant starts with ' + q.slice(0, 16),
+      sub: 'prefix search covers each family\'s 50 largest variants; paste the full 64-hex fingerprint to open any script',
+      action: function () { closePalette(); }
+    });
+  }
   return out;
 }
 
@@ -4381,12 +4535,15 @@ async function refreshTTP() {
 const _setActiveForTTP = setActiveView;
 setActiveView = function(name) {
   _setActiveForTTP(name);
-  if (name === 'red') { refreshTTP(); refreshTunnels(); }
+  if (name === 'red') { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); }
 };
-onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); });
+onWindowChange('view-red', function() { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); });
 pollEvery(30000, function() {
-  if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); }
+  if (document.getElementById('view-red').classList.contains('active')) { refreshTTP(); refreshTunnels(); refreshCampaigns(); refreshScripts(); }
 });
+// Campaigns and scripts are not refreshed here: their block ends with an
+// unconditional first load (the palette searches them on every tab), so a
+// red-tab deep link fetched both lists twice.
 if (readTabFromHash() === 'red') { refreshTTP(); refreshTunnels(); }
 
 // ==== Proxy targets (direct-tcpip pivots) =========================
@@ -4427,6 +4584,484 @@ async function refreshTunnels() {
     renderTunnels(await r.json());
   } catch (_) {}
 }
+
+// ==== Campaigns and scripts ======================================
+// Everything rendered here is attacker-controlled (script text, SSH key
+// comments, payload names, hosts, client versions, actor IDs). Every value
+// goes through esc() (escapes & < > " ' and maps null to ''), whether it lands
+// in text or in a quoted data-* attribute; values travel back out through
+// dataset in delegated listeners, never through inline handlers or URLs.
+var _lastCampaigns = [], _lastScripts = [];
+
+function kindLabel(k) { return ({ ssh_key: 'SSH key', payload: 'payload', script: 'script' })[k] || String(k || ''); }
+function shortTime(s) { return s ? String(s).slice(0, 10) : '—'; }
+function actionButton(action, label, attrs, aria) {
+  var a = '';
+  Object.keys(attrs).forEach(function (k) { a += ' data-' + k + '="' + esc(attrs[k]) + '"'; });
+  return '<button type="button" class="cm-btn" data-action="' + esc(action) + '"' + a +
+    (aria ? ' aria-label="' + esc(aria) + '"' : '') + '>' + esc(label) + '</button>';
+}
+// listCount is a list panel's meta text. The API caps both lists (200 by
+// default) and sends the true total, so a capped list says "showing N of M"
+// instead of reading as the whole. Plain text: it goes to textContent.
+function listCount(shown, total, noun) {
+  return (typeof total === 'number' && total > shown)
+    ? 'showing ' + fmt(shown) + ' of ' + fmt(total) + ' ' + noun
+    : fmt(shown) + ' ' + noun;
+}
+// variantCount is a family's true variant count: the API caps the variants
+// it sends (50 per list row, 200 in the dialog) and carries the total.
+function variantCount(f) {
+  return typeof f.variantsTotal === 'number' ? f.variantsTotal : (f.variants || []).length;
+}
+function campaignDisplayName(c) {
+  return c.name || (c.suggestedName ? c.suggestedName + ' (suggested)' : c.id);
+}
+
+async function refreshCampaigns() {
+  try {
+    const r = await fetch('/api/intel/campaigns?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    _lastCampaigns = d.campaigns || [];
+    const tb = document.querySelector('#campaigns-table tbody');
+    const held = d.regroup && d.regroup.held;
+    document.getElementById('campaigns-meta').textContent = listCount(_lastCampaigns.length, d.total, 'campaigns') +
+      (held ? ' · ' + regroupText(d.regroup) : '');
+    noteRegroup(d.regroup);
+    if (!_lastCampaigns.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">no linked sessions yet</td></tr>'; return; }
+    tb.innerHTML = _lastCampaigns.map(function (c) {
+      const name = campaignDisplayName(c);
+      return '<tr data-campaign="' + esc(c.id) + '">' +
+        '<td><button type="button" class="row-open">' + esc(name) + '</button></td><td class="num">' + fmt(c.actors) + '</td><td class="num">' + fmt(c.ips) + '</td><td class="num">' + fmt(c.sessions) + '</td>' +
+        '<td>' + esc((c.kinds || []).map(kindLabel).join(', ')) + '</td><td class="range">' + esc(shortTime(c.firstSeen)) + ' → ' + esc(shortTime(c.lastSeen)) + '</td></tr>';
+    }).join('');
+  } catch (_) {}
+}
+
+async function refreshScripts() {
+  try {
+    const r = await fetch('/api/intel/scripts?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    _lastScripts = d.families || [];
+    const tb = document.querySelector('#scripts-table tbody');
+    // During a script rebuild (after an upgrade that changed the normaliser,
+    // or a manual `shardlure scripts --rebuild`) the families table is emptied first and refilled by the first regroup
+    // after the hold, 10-30 min later: say so instead of showing an empty
+    // table that reads as data loss. Same regroup block as the campaigns list.
+    const held = d.regroup && d.regroup.held;
+    document.getElementById('scripts-meta').textContent = listCount(_lastScripts.length, d.total, 'script families') +
+      (held ? ' · ' + regroupText(d.regroup) : '');
+    noteRegroup(d.regroup);
+    if (!_lastScripts.length) {
+      tb.innerHTML = '<tr><td colspan="7" class="empty">' + (held ? esc('scripts are being rebuilt; families return when the rebuilt scripts settle (' + regroupWhen(d.regroup) + ')') : 'no settled scripts yet') + '</td></tr>';
+      return;
+    }
+    tb.innerHTML = _lastScripts.map(function (f) {
+      const first = String(f.display || '').split('\n')[0].slice(0, 120);
+      return '<tr data-script="' + esc(f.family) + '" title="' + esc(f.reason) + '">' +
+        '<td><button type="button" class="row-open"><code>' + esc(first) + '</code></button></td><td class="num">' + fmt(variantCount(f)) + '</td><td class="num">' + fmt(f.sessions) + '</td>' +
+        '<td class="num">' + fmt(f.actors) + '</td><td class="num">' + fmt(f.ips) + '</td><td>' + (f.links ? 'links sessions' : 'display only') + '</td>' +
+        '<td class="range">' + esc(shortTime(f.firstSeen)) + ' → ' + esc(shortTime(f.lastSeen)) + '</td></tr>';
+    }).join('');
+  } catch (_) {}
+}
+
+function cmBody(html) { document.getElementById('cm-body').innerHTML = html; }
+
+// _cmView is a monotonic token for what the dialog shows: every open bumps it,
+// so a slow response for an earlier open (or a post-edit reload the analyst
+// has since navigated away from) sees a stale token and leaves the dialog
+// alone. _cmRendered holds the editable fields' values as last rendered (or
+// last saved), so a reload never discards typing that has not been saved.
+var _cmView = 0, _cmRendered = null;
+
+function showCampaignDialog(title) {
+  const modal = document.getElementById('campaign-modal');
+  _cmView++;
+  _cmRendered = null;
+  document.getElementById('cm-title').textContent = title;
+  document.getElementById('cm-sub').textContent = '';
+  cmBody('<div class="empty">loading…</div>');
+  if (!modal.open) modal.showModal();
+  return _cmView;
+}
+
+function cmDirty() {
+  if (!_cmRendered) return false;
+  const n = document.getElementById('cm-name'), t = document.getElementById('cm-notes'), m = document.getElementById('cm-merge');
+  return (n && n.value !== _cmRendered.name) || (t && t.value !== _cmRendered.notes) || (m && m.value !== _cmRendered.merge);
+}
+
+// errorText reads a failed response's plain-text body (the edit and lookup
+// endpoints explain a 400 there, e.g. an ambiguous name) for textContent.
+async function errorText(r) {
+  let t = '';
+  try { t = (await r.text()).trim(); } catch (_) {}
+  return (t || 'request failed') + ' (' + r.status + ')';
+}
+
+async function openCampaign(id) {
+  const view = showCampaignDialog('campaign ' + id);
+  try {
+    const r = await fetch('/api/intel/campaign?id=' + encodeURIComponent(id) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      const msg = await errorText(r);
+      if (view === _cmView) cmBody('<div class="empty">' + esc(msg) + '</div>');
+      return;
+    }
+    const c = await r.json();
+    if (view === _cmView) renderCampaign(c);
+  } catch (e) { if (view === _cmView) cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
+}
+
+// ofTotal renders " (showing N of M)" when a capped list holds fewer rows
+// than the true total, else nothing.
+function ofTotal(shown, total) {
+  return (typeof total === 'number' && total > shown)
+    ? ' <span class="cm-more">(showing ' + esc(fmt(shown)) + ' of ' + esc(fmt(total)) + ')</span>' : '';
+}
+
+function renderCampaign(c) {
+  document.getElementById('cm-title').textContent = c.name || c.suggestedName || c.id;
+  document.getElementById('cm-sub').textContent = c.id + ' · ' + fmt(c.actors) + ' actors · ' + fmt(c.ips) + ' IPs · ' + fmt(c.sessions) +
+    ' sessions · ' + shortTime(c.firstSeen) + ' → ' + shortTime(c.lastSeen);
+  const values = {};
+  const members = (c.members || []).map(function (m) {
+    (m.reasons || []).forEach(function (r) { values[r.kind + ':' + r.value] = r; });
+    const why = (m.reasons || []).map(function (r) { return kindLabel(r.kind) + ' ' + (r.label || String(r.value || '').slice(0, 16)); }).join('; ');
+    return '<tr><td class="cm-wrap">' + actionButton('actor', m.actorId, { actor: m.actorId }, 'open actor ' + m.actorId) + '</td><td class="cm-nw">' + esc(m.primaryIp) + '</td><td class="cm-nw">' + esc(m.playbook) +
+      '</td><td class="num">' + fmt(m.sessions) + '</td><td class="cm-wrap">' + esc(why) + '</td><td class="cm-act">' +
+      actionButton('remove_actor', 'remove', { id: c.id, arg: m.actorId }, 'remove actor ' + m.actorId + ' from this campaign') + '</td></tr>';
+  }).join('');
+  const evidence = Object.keys(values).sort().map(function (k) {
+    const r = values[k];
+    const val = r.kind === 'script'
+      ? actionButton('script', String(r.value || '').slice(0, 16), { fp: r.value }, 'open script ' + String(r.value || '').slice(0, 12))
+      : '<code>' + esc(r.value) + '</code>';
+    return '<tr><td>' + esc(kindLabel(r.kind)) + '</td><td>' + val + '</td><td>' + esc(r.label) + '</td><td class="cm-act">' +
+      actionButton('ignore_evidence', 'ignore', { id: c.id, arg: k }, 'ignore this ' + kindLabel(r.kind) + ' as linking evidence') + '</td></tr>';
+  }).join('');
+  // The API caps each list (500) and reports the true total beside it; say
+  // "N of M" wherever the cap bit, so a truncated list never reads as whole.
+  const ctx = [['HASSH', c.hasshes, c.hasshesTotal], ['clients', c.clients, c.clientsTotal], ['download hosts', c.hosts, c.hostsTotal]].map(function (p) {
+    return (p[1] && p[1].length) ? '<div><b>' + esc(p[0]) + ':</b> ' + esc(p[1].join(', ')) + ofTotal(p[1].length, p[2]) + '</div>' : '';
+  }).join('');
+  const edits = (c.edits || []).map(function (e) {
+    const arg = (e.action === 'rename' && !e.arg) ? '(name cleared)' : e.arg;
+    return '<tr><td class="range">' + esc(shortTime(e.createdAt)) + '</td><td>' + esc(e.action) + '</td><td>' + esc(arg) + '</td><td>' + esc(e.who) + '</td></tr>';
+  }).join('');
+  cmBody(
+    '<div id="cm-status" class="cm-status" role="status"></div>' +
+    '<div class="cm-row"><label for="cm-name">name</label> <input id="cm-name" maxlength="200" value="' + esc(c.name || '') + '"' +
+      (c.suggestedName ? ' placeholder="' + esc(c.suggestedName) + '"' : '') + '> ' +
+      actionButton('rename', 'save name', { id: c.id }) +
+      // An empty rename clears the operator's name (the suggested name shows
+      // again); only offered while there is a name to clear.
+      (c.name ? ' ' + actionButton('clear_name', 'clear name', { id: c.id }, 'clear the name; the suggested name shows again') : '') + '</div>' +
+    '<div class="cm-row"><label for="cm-merge">merge into campaign ID</label> <input id="cm-merge" maxlength="14" placeholder="c-…" autocomplete="off"> ' +
+      actionButton('merge', 'merge', { id: c.id }) + '</div>' +
+    '<h3 class="cm-h">members' + ofTotal((c.members || []).length, c.membersTotal) + '</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (members || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
+    '<h3 class="cm-h">linking evidence</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + (evidence || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>' +
+    '<h3 class="cm-h">context (never links)</h3>' + (ctx || '<div class="empty">none</div>') +
+    '<h3 class="cm-h">notes</h3><textarea id="cm-notes" class="cm-notes" maxlength="4000" aria-label="Campaign notes">' + esc(c.notes) + '</textarea> ' +
+      actionButton('notes', 'save notes', { id: c.id }) +
+    (edits ? '<h3 class="cm-h">edit history</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + edits + '</tbody></table></div>' : ''));
+  // Baseline from the DOM: the browser normalises textarea newlines.
+  _cmRendered = { name: document.getElementById('cm-name').value, notes: document.getElementById('cm-notes').value, merge: '' };
+}
+
+async function openScript(fp) {
+  const view = showCampaignDialog('script ' + String(fp || '').slice(0, 12));
+  try {
+    const r = await fetch('/api/intel/script?fp=' + encodeURIComponent(fp) + '&_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      const msg = await errorText(r);
+      if (view === _cmView) cmBody('<div class="empty">' + esc(msg) + '</div>');
+      return;
+    }
+    const d = await r.json();
+    if (view !== _cmView) return;
+    // The Scripts row counts the whole family; this dialog lists one
+    // fingerprint's sessions. Say which ("this variant: N of M family
+    // sessions") and list every variant so each one can be opened, so the
+    // row and the dialog never disagree about what is there (audit-web I1).
+    const shown = (d.sessions || []).length;
+    const total = typeof d.sessionsTotal === 'number' ? d.sessionsTotal : shown;
+    // The variant list is capped (largest first); variantCount is the whole.
+    const variants = d.variants || [];
+    const nVariants = variantCount(d);
+    const fam = typeof d.familySessions === 'number' && nVariants > 1;
+    document.getElementById('cm-sub').textContent = fam
+      ? 'this variant: ' + fmt(total) + ' of ' + fmt(d.familySessions) + ' family sessions · family: ' + fmt(nVariants) + ' variants, ' + fmt(d.familyActors) + ' actors'
+      : fmt(total) + ' sessions · ' + fmt(typeof d.actorsTotal === 'number' ? d.actorsTotal : (d.actors || []).length) + ' actors';
+    const vrows = fam ? variants.map(function (v) {
+      const fp = String(v.fingerprint || '');
+      const tags = (fp === d.fingerprint ? 'shown' : '') + (fp === d.family ? (fp === d.fingerprint ? ', ' : '') + 'representative' : '');
+      const open = fp === d.fingerprint ? '<code>' + esc(fp.slice(0, 16)) + '</code>'
+        : actionButton('script', fp.slice(0, 16), { fp: fp }, 'open script variant ' + fp.slice(0, 12));
+      return '<tr><td>' + open + '</td><td class="num">' + esc(fmt(v.sessions || 0)) + ' sessions</td><td>' + esc(tags) + '</td></tr>';
+    }).join('') : '';
+    const sessions = (d.sessions || []).map(function (x) {
+      return '<tr><td>' + actionButton('session', x.sessionId, { session: x.sessionId }, 'replay session ' + x.sessionId) + '</td><td>' +
+        actionButton('actor', x.actorId, { actor: x.actorId }, 'open actor ' + x.actorId) +
+        '</td><td>' + esc(x.srcIp) + '</td><td class="range">' + esc(shortTime(x.firstSeen)) + '</td></tr>';
+    }).join('');
+    cmBody('<pre class="sm-tty">' + esc(d.display) + '</pre>' +
+      (vrows ? '<h3 class="cm-h">variants in this family' + ofTotal(variants.length, nVariants) + '</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' + vrows + '</tbody></table></div>' : '') +
+      '<h3 class="cm-h">' + (fam ? 'sessions of this variant' : 'sessions') + ofTotal(shown, total) + '</h3><div class="cm-scroll"><table class="dense cm-table"><tbody>' +
+      (sessions || '<tr><td class="empty">none</td></tr>') + '</tbody></table></div>');
+  } catch (e) { if (view === _cmView) cmBody('<div class="empty">error: ' + esc(e.message) + '</div>'); }
+}
+
+// campaignEdit records one edit. The server only appends it and wakes the
+// campaign worker, which applies it on its next tick (5 s), so the dialog says
+// "applying…" and reloads after that. The ID is always the API's own campaign
+// id: edits are recorded literally, and a name may be ambiguous. The reload
+// only happens while the same view is still shown with no unsaved typing
+// (the ledger is append-only, so wiping a half-written note would cost a
+// second edit); otherwise only the lists refresh. A merge reopens its target:
+// the source ID has just been merged away.
+// _cmPending is the one scheduled reload for the current view. Each successful
+// edit reschedules it, so the reload runs 6 s after the LAST edit: two edits
+// a few seconds apart both show, and the first reload cannot render (and
+// baseline) the dialog before the worker applied the second edit. A reload
+// only ever clears the pending entry it belongs to.
+//
+// _cmFlight counts edit POSTs still in flight for one view. A reload that
+// fires while one is outstanding would bump _cmView, and that edit's late
+// response would then only refresh the lists: the dialog would never show it.
+// So the timer defers (keeping its entry, merge target included) and the
+// response reschedules through the normal path.
+var _cmPending = null, _cmFlight = { view: -1, n: 0 };
+
+// _cmHeld is the reload an edit owes while a script-rebuild hold keeps the
+// worker from regrouping (after an upgrade that changed the script
+// normaliser, or a manual `shardlure scripts --rebuild`; 10-30 min). The 6 s reload would only re-render the unchanged
+// campaign and baseline it, so it is parked here instead and released by the
+// Red tab's 30 s list poll (refreshCampaigns -> noteRegroup) once the hold
+// ends.
+var _cmHeld = null;
+
+// The hold follows ANY script rebuild: an upgrade that changed the normaliser
+// or a manual `shardlure scripts --rebuild`, so the text names neither
+// (audit-web M6: it said "after an upgrade" for a manual rebuild too).
+function regroupWhen(g) {
+  let when = g.phase === 'recording' ? 'recording ' + Math.floor((g.progress || 0) * 100) + '%' : 'settling';
+  if (g.until) {
+    const t = new Date(g.until);
+    if (!isNaN(t)) when += ', until ~' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+  }
+  return when;
+}
+function regroupText(g) {
+  return 'campaigns are waiting for a script rebuild (' + regroupWhen(g) + ')';
+}
+
+// noteRegroup is fed every regroup block the server sends. While held, a
+// parked reload stays parked and the dialog says why; once released it is
+// scheduled normally (the worker applies the edit within a tick).
+function noteRegroup(g) {
+  if (!_cmHeld) return;
+  const status = document.getElementById('cm-status');
+  if (g && g.held) {
+    if (status && _cmHeld.view === _cmView) status.textContent = 'recorded — ' + regroupText(g) + '; your edit applies then';
+    return;
+  }
+  const h = _cmHeld;
+  _cmHeld = null;
+  if (h.view === _cmView) {
+    if (status) status.textContent = 'applying…';
+    scheduleCampaignReload(h.view, h.target);
+  }
+}
+
+function scheduleCampaignReload(view, target) {
+  if (_cmPending && _cmPending.view === view) {
+    clearTimeout(_cmPending.timer);
+    // A pending merge target wins: the source ID has been merged away, and
+    // the dialog still shows the source until the reload opens the target.
+    if (_cmPending.merged) target = { id: _cmPending.target, merged: true };
+  } else {
+    _cmPending = null;
+  }
+  const entry = { view: view, target: target.id, merged: target.merged || false, timer: 0, fired: false };
+  entry.timer = setTimeout(function () {
+    entry.fired = true;
+    if (_cmFlight.view === entry.view && _cmFlight.n > 0) return; // deferred: the response reschedules
+    if (_cmPending === entry) _cmPending = null;
+    refreshCampaigns();
+    const modal = document.getElementById('campaign-modal');
+    if (entry.target && modal.open && entry.view === _cmView && !cmDirty()) openCampaign(entry.target);
+  }, 6000);
+  _cmPending = entry;
+}
+
+// CAMPAIGN_EDIT_TIMEOUT_MS bounds one edit POST. The server only appends a
+// row and wakes the worker, so a healthy answer is milliseconds; a POST that
+// hangs (a stalled proxy, a wedged connection) used to hold _cmFlight above
+// zero and defer every reload of the dialog forever.
+const CAMPAIGN_EDIT_TIMEOUT_MS = 15000;
+
+// raw is the field's value at click time (arg may be trimmed): it, not the
+// live field, becomes the saved baseline, so keystrokes typed while the POST
+// is in flight stay unsaved and block the reload instead of being wiped.
+async function campaignEdit(id, action, arg, raw) {
+  const view = _cmView;
+  if (_cmFlight.view !== view) _cmFlight = { view: view, n: 0 };
+  _cmFlight.n++;
+  const landed = function () { if (_cmFlight.view === view && _cmFlight.n > 0) _cmFlight.n--; };
+  // A failed edit still owes any reload it deferred.
+  const failed = function () {
+    landed();
+    if (_cmPending && _cmPending.view === view && _cmPending.fired && view === _cmView && _cmFlight.n === 0) {
+      scheduleCampaignReload(view, { id: _cmPending.target, merged: _cmPending.merged });
+    }
+  };
+  const status = document.getElementById('cm-status');
+  if (status) status.textContent = 'saving…';
+  // The abort also covers reading a refusal's body, which can hang as well.
+  const ctl = new AbortController();
+  const abortTimer = setTimeout(function () { ctl.abort(); }, CAMPAIGN_EDIT_TIMEOUT_MS);
+  let r;
+  try {
+    r = await fetch('/api/intel/campaign/edit', { method: 'POST', signal: ctl.signal, body: new URLSearchParams({ id: id || '', action: action, arg: arg || '' }) });
+    if (!r.ok) {
+      const msg = await errorText(r);
+      clearTimeout(abortTimer);
+      // errorText swallows the abort, so say that the refusal's reason timed
+      // out rather than showing its generic "request failed".
+      if (status) status.textContent = ctl.signal.aborted
+        ? 'edit refused (' + r.status + '); the reason could not be read within ' + (CAMPAIGN_EDIT_TIMEOUT_MS / 1000) + ' s'
+        : 'edit refused: ' + msg;
+      failed();
+      return;
+    }
+  } catch (e) {
+    clearTimeout(abortTimer);
+    // Timed out: the server may still have recorded it (reopen to check).
+    if (status) status.textContent = e.name === 'AbortError'
+      ? 'edit timed out after ' + (CAMPAIGN_EDIT_TIMEOUT_MS / 1000) + ' s; it may or may not have been saved (reopen to check)'
+      : 'edit failed: ' + e.message;
+    failed();
+    return;
+  }
+  let regroup = null;
+  try { regroup = (await r.json()).regroup; } catch (_) {}
+  clearTimeout(abortTimer);
+  landed();
+  if (status) status.textContent = 'applying…';
+  if (view !== _cmView) {
+    // The analyst has moved on; only the lists need the result.
+    setTimeout(refreshCampaigns, 6000);
+    return;
+  }
+  if (_cmRendered) {
+    const saved = raw == null ? arg : raw;
+    if (action === 'rename') {
+      // A clear empties the field only now that it succeeded (a refused or
+      // timed-out clear leaves the name, and the field, as they were), and
+      // only if the analyst has not typed a new name meanwhile.
+      const n = document.getElementById('cm-name');
+      if (saved === '' && n && n.value === _cmRendered.name) n.value = '';
+      _cmRendered.name = saved;
+    }
+    if (action === 'notes') _cmRendered.notes = saved;
+    if (action === 'merge') _cmRendered.merge = saved;
+  }
+  const target = action === 'merge' ? { id: arg, merged: true } : { id: id };
+  if (regroup && regroup.held) {
+    // Park the reload (a merge target wins, as in scheduleCampaignReload).
+    if (!(_cmHeld && _cmHeld.view === view && _cmHeld.target.merged)) _cmHeld = { view: view, target: target };
+    noteRegroup(regroup);
+    return;
+  }
+  scheduleCampaignReload(view, target);
+}
+
+// campaignDialogClosed is the one cleanup for every way the dialog closes:
+// the close button, a backdrop click, the session/actor actions and Esc. Esc
+// closes a native <dialog> without any of our handlers, so the cleanup hangs
+// off its 'close' event rather than off closeCampaign (audit-web M4: Esc left
+// _cmHeld and _cmPending behind). The open check skips a close event that
+// lands after the dialog was already reopened.
+//
+// It also retires the view (_cmView++): an edit POST still in flight when the
+// dialog closed (Esc included) would otherwise land with view === _cmView and
+// park _cmHeld or schedule _cmPending into the closed dialog. Retired, its
+// reply takes the "analyst has moved on" path and only refreshes the lists.
+function campaignDialogClosed() {
+  if (document.getElementById('campaign-modal').open) return;
+  _cmView++;
+  _cmRendered = null;
+  _cmHeld = null;
+  if (_cmPending) {
+    // Nothing left to reload into, but the lists still owe the edit's result.
+    clearTimeout(_cmPending.timer);
+    _cmPending = null;
+    setTimeout(refreshCampaigns, 6000);
+  }
+}
+function closeCampaign() {
+  const m = document.getElementById('campaign-modal');
+  if (m.open) m.close(); // fires 'close' -> campaignDialogClosed
+  else campaignDialogClosed();
+}
+
+document.getElementById('campaign-modal').addEventListener('close', campaignDialogClosed);
+document.getElementById('cm-close').addEventListener('click', closeCampaign);
+document.getElementById('campaign-modal').addEventListener('click', function (e) {
+  // Light dismiss: a click on the <dialog> itself (frame or ::backdrop). Esc is native.
+  if (e.target.id === 'campaign-modal') { closeCampaign(); return; }
+  const b = e.target.closest('button[data-action]');
+  if (!b) return;
+  const a = b.dataset.action;
+  if (a === 'session') { closeCampaign(); openSession(b.dataset.session); return; }
+  if (a === 'actor') { closeCampaign(); setActiveView('overview'); selectedActor = b.dataset.actor; loadActorDetail(b.dataset.actor); return; }
+  if (a === 'script') { openScript(b.dataset.fp); return; }
+  if (a === 'clear_name') {
+    // Recorded as a rename with an empty name. campaignEdit empties the field
+    // once the server has accepted it, so the saved baseline ('') matches and
+    // the post-edit reload is not held back as unsaved typing.
+    campaignEdit(b.dataset.id || '', 'rename', '', '');
+    return;
+  }
+  let arg = b.dataset.arg || '', raw;
+  if (a === 'rename') {
+    raw = document.getElementById('cm-name').value;
+    arg = raw.trim();
+    if (!arg) {
+      document.getElementById('cm-status').textContent = 'a name is required' +
+        (document.querySelector('#cm-body button[data-action="clear_name"]') ? ' (to remove the name, use clear name)' : '');
+      return;
+    }
+  }
+  if (a === 'notes') arg = raw = document.getElementById('cm-notes').value;
+  if (a === 'merge') { raw = document.getElementById('cm-merge').value; arg = raw.trim(); }
+  campaignEdit(b.dataset.id || '', a, arg, raw);
+});
+// rowOpens: a click anywhere on a row opens it. Keyboard and screen-reader
+// users reach the row's first-cell <button class="row-open">, whose native
+// Enter/Space click bubbles here (a focusable <tr> with an aria-label read
+// as a row, not a control, and hid the cell text; audit-web M5).
+function rowOpens(table, attr, fn) {
+  const tb = document.querySelector(table + ' tbody');
+  tb.addEventListener('click', function (e) {
+    const tr = e.target.closest('tr[' + attr + ']');
+    if (tr) fn(tr.getAttribute(attr));
+  });
+}
+rowOpens('#campaigns-table', 'data-campaign', openCampaign);
+rowOpens('#scripts-table', 'data-script', openScript);
+// Actor-detail campaign badges (rendered by loadActorDetail): one delegated
+// listener, registered once, since #detail-cmds is re-rendered per actor.
+document.getElementById('detail-cmds').addEventListener('click', function (e) {
+  const b = e.target.closest('button[data-campaign-open]');
+  if (b) { setActiveView('red'); openCampaign(b.dataset.campaignOpen); }
+});
+refreshCampaigns(); refreshScripts();
+// ==== end campaigns and scripts ==================================
 
 // ==== Slice G: payload library ====================================
 function fmtSize(b) {

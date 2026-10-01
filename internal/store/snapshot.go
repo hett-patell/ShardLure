@@ -60,9 +60,19 @@ var snapshotTables = [...]struct {
 	{"urlhaus_submissions", 1}, {"threatfox_submissions", 1}, {"payload_intel", 1},
 	{"cowrie_session_hassh", 1}, {"cowrie_session_meta", 1}, {"journal_summaries", 23},
 	{"capture_file_jobs", 24}, {"capture_discovery_errors", 24},
+	{"session_script_lines", 25}, {"session_scripts", 25}, {"scripts", 25}, {"script_families", 25},
+	{"campaign_evidence", 25}, {"campaign_ids", 25}, {"campaign_aliases", 25}, {"campaigns", 25},
+	{"campaign_members", 25}, {"campaign_edits", 25},
+	// Created by the v26 rung: the campaigns rc1 stamped v25 without it (see
+	// scriptVersionCarrySchema), so a v25 database may legitimately lack it.
+	{"script_version_carry", 26},
 }
 
-const latestSnapshotSchema = 24
+const latestSnapshotSchema = 26
+
+// LatestSnapshotSchema is the newest schema a snapshot can carry; backup
+// manifest validation uses it as the schema ceiling.
+const LatestSnapshotSchema = latestSnapshotSchema
 
 func snapshotContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {

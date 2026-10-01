@@ -129,6 +129,34 @@ func openSource(path string, optional bool) (*sourceRoot, error) {
 	return &sourceRoot{path, root, info}, nil
 }
 
+// refuseSourceFile names a source file (the config file or an --include-file)
+// that a no-follow open refused, as safefile.OpenRoot already does for
+// directories: a symlinked file used to surface only as "invalid or missing
+// configuration" or "filesystem or database operation failed" (final audit
+// M3). The reason is fixed text, so Error stays path-free; the CLI prints
+// the path. Anything that is not a refusal of the file itself is returned
+// unchanged.
+func refuseSourceFile(path string, err error) error {
+	var refusal *safefile.PathRefusal
+	if err == nil || errors.Is(err, safefile.ErrNotExist) || errors.As(err, &refusal) {
+		return err
+	}
+	info, lerr := os.Lstat(path)
+	switch {
+	case lerr == nil && info.Mode()&fs.ModeSymlink != 0:
+		return &safefile.PathRefusal{Kind: safefile.ErrUnsafePath, Path: path, Reason: "file is a symbolic link"}
+	case lerr == nil && !info.Mode().IsRegular():
+		return &safefile.PathRefusal{Kind: safefile.ErrUnsafePath, Path: path, Reason: "not a regular file"}
+	case errors.Is(err, safefile.ErrNotRegular):
+		return &safefile.PathRefusal{Kind: safefile.ErrUnsafePath, Path: path, Reason: "file has more than one hard link"}
+	case errors.Is(err, safefile.ErrUnsupported):
+		return &safefile.PathRefusal{Kind: safefile.ErrUnsupported, Path: path, Reason: "file is not on ext4, xfs, btrfs, tmpfs or overlayfs"}
+	case errors.Is(err, safefile.ErrChanged):
+		return &safefile.PathRefusal{Kind: safefile.ErrChanged, Path: path, Reason: "file changed while it was opened"}
+	}
+	return err
+}
+
 func Create(ctx context.Context, opts CreateOptions) (Manifest, error) {
 	return createWithOperations(ctx, opts, nativeOperations())
 }
@@ -142,7 +170,7 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 			manifest.Complete = false
 			var f *Failure
 			if !errors.As(result, &f) {
-				result = failure(ErrIO, result, stagePath)
+				result = failure(failureKind(ErrIO, result), result, stagePath)
 			}
 		}
 	}()
@@ -170,7 +198,8 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 	defer configRoot.root.Close()
 	cf, err := configRoot.root.OpenRegular(filepath.Base(configPath))
 	if err != nil {
-		return manifest, failure(ErrConfiguration, err, "")
+		err = refuseSourceFile(configPath, err)
+		return manifest, failure(failureKind(ErrConfiguration, err), err, "")
 	}
 	configInfo, err := cf.Stat()
 	if err != nil {
@@ -269,6 +298,23 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 	if err != nil {
 		return manifest, err
 	}
+	// A failure before publication removes this run's own staging directory
+	// (it holds a database snapshot); only a published output, which keeps its
+	// incomplete marker, or a staging directory cleanup could not remove is
+	// reported as retained (final audit M3). Registered after stage.Close's
+	// defer, so it runs first, while parent is still open.
+	defer func() {
+		if result == nil || stagePath != filepath.Join(filepath.Dir(output), stageName) {
+			return
+		}
+		parentInfo, err := parent.Info()
+		if err != nil {
+			return
+		}
+		if removeOwnStaging(filepath.Dir(output), parentInfo, stageInfo, stageName) == nil {
+			stagePath = ""
+		}
+	}()
 	if err := writePrivate(stage, incompleteName, []byte("incomplete\n"), ops); err != nil {
 		return manifest, err
 	}
@@ -400,9 +446,17 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 		if pathsOverlap(output, absolute) {
 			return manifest, ErrUnsafePath
 		}
+		// Open it now, as the copy will: a symlinked, hard-linked or
+		// non-regular include is refused naming the file, not with a generic
+		// I/O failure after the whole inventory (final audit M3).
+		probe, err := source.root.OpenRegular(filepath.Base(absolute))
+		if err != nil {
+			return manifest, refuseSourceFile(absolute, err)
+		}
+		probe.Close()
 		relative := fmt.Sprintf("metadata/included/%04d-%s", i, filepath.Base(absolute))
 		if err := catalog.add(source, filepath.Base(absolute), relative, "included", "", 0); err != nil {
-			return manifest, err
+			return manifest, refuseSourceFile(absolute, err)
 		}
 	}
 	free, err = ops.space(stage)

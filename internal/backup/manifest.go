@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/networkshard/shardlure/internal/store"
 )
 
 func relativeName(name string) bool {
@@ -54,7 +56,7 @@ func entryAllowed(e Entry) bool {
 }
 
 func validateManifest(m Manifest) (map[string]Entry, int64, error) {
-	if m.FormatVersion != 1 || !m.Complete || m.Schema < 1 || m.Schema > 24 || m.CreatedAt.IsZero() {
+	if m.FormatVersion != 1 || !m.Complete || m.Schema < 1 || m.Schema > store.LatestSnapshotSchema || m.CreatedAt.IsZero() {
 		return nil, 0, ErrInvalidManifest
 	}
 	if _, zone := m.CreatedAt.Zone(); zone != 0 {

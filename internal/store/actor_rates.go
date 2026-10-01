@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -89,15 +91,50 @@ func (s *Store) RecentRatesByActor(since time.Time) (map[string]float64, error) 
 	return out, nil
 }
 
+// recentActorCountsQuery counts events per actor over exactly the window
+// IterateEventsSinceContext walks: the same two exact-time branches (migrated
+// rows through the ts index, pre-v20 rows parsed by shardlure_event_time through
+// the pinned partial legacy index), so an offset legacy timestamp lands on the
+// same side of `since` as it did before. Only actor_id leaves each branch.
+//
+// The actor filter sits outside the branches on purpose: pushed inside, a
+// non-empty actor_id range lets the planner pick idx_events_actor_ts and walk every
+// actor's whole history instead of the window.
+func recentActorCountsQuery(since time.Time) (string, []any) {
+	window, args := eventTimeBranches("actor_id", &since, "", nil)
+	return "SELECT actor_id, COUNT(*) FROM (" + window + ") WHERE actor_id<>'' GROUP BY actor_id", args
+}
+
+// recentEventCountsByActor is one GROUP BY. It used to stream and decode every
+// event of the window into a models.Event just to bump a map counter: 1.65 s of
+// a 60 s ARM CPU profile with the dashboard polled every 10 s, and ~20
+// allocations per event. A malformed legacy timestamp still fails the query,
+// exactly as it failed the iterator.
 func (s *Store) recentEventCountsByActor(ctx context.Context, since time.Time) (map[string]int, error) {
+	query, args := recentActorCountsQuery(since)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	counts := make(map[string]int)
-	err := s.IterateEventsSinceContext(ctx, since, func(event *models.Event) error {
-		if event.ActorID != "" {
-			counts[event.ActorID]++
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	return counts, err
+		counts[id] = n
+	}
+	return counts, rows.Err()
+}
+
+// RecentEventCountsByActor is the per-actor event count over the window, the
+// raw material of both RecentRatesByActor and TopActorRatesFromCounts. The web
+// layer caches it once and derives both, so a poll does not count the window
+// twice.
+func (s *Store) RecentEventCountsByActor(ctx context.Context, since time.Time) (map[string]int, error) {
+	return s.recentEventCountsByActor(ctx, since)
 }
 
 // TopActorsByRecentRate ranks actors by how hard they are hitting IN THE WINDOW,
@@ -106,9 +143,6 @@ func (s *Store) recentEventCountsByActor(ctx context.Context, since time.Time) (
 // It replaces ORDER BY attempts_per_hour, which ordered by lifetime average: an
 // actor mid-escalation sorted below one that was briefly loud a month ago.
 func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, error) {
-	if limit <= 0 {
-		limit = 8
-	}
 	hours := time.Since(since).Hours()
 	if hours <= 0 {
 		hours = RecentRateWindow.Hours()
@@ -116,6 +150,19 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 	counts, err := s.recentEventCountsByActor(context.Background(), since)
 	if err != nil {
 		return nil, err
+	}
+	return s.TopActorRatesFromCounts(counts, hours, limit)
+}
+
+// TopActorRatesFromCounts ranks already-counted actors (highest count first,
+// ties by ID) and loads the top `limit` by primary key. hours is the window
+// length the counts cover.
+func (s *Store) TopActorRatesFromCounts(counts map[string]int, hours float64, limit int) ([]ActorRate, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+	if hours <= 0 {
+		hours = RecentRateWindow.Hours()
 	}
 	type hit struct {
 		id string
@@ -131,18 +178,26 @@ func (s *Store) TopActorsByRecentRate(since time.Time, limit int) ([]ActorRate, 
 		}
 		return hits[i].id < hits[j].id
 	})
-	if len(hits) > limit {
-		hits = hits[:limit]
-	}
 
-	out := make([]ActorRate, 0, len(hits))
+	out := make([]ActorRate, 0, limit)
 	for _, h := range hits {
+		if len(out) >= limit {
+			break
+		}
 		a, err := s.GetActor(h.id)
-		if err != nil || a == nil {
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && a == nil) {
 			// An actor row can legitimately be missing: purge removes actors
 			// whose events aged out while a concurrent window still counted
 			// them. Skip rather than fail the whole radar.
 			continue
+		}
+		if err != nil {
+			// Any other error is the store failing, not a missing actor.
+			// Treating it as "missing" walked one point read per counted
+			// actor (thousands on prod) on every /api/intel poll and then
+			// returned an empty radar with no error (store-reads audit
+			// Minor 1).
+			return nil, err
 		}
 		out = append(out, ActorRate{Actor: *a, PerHour: float64(h.n) / hours, Events: h.n})
 	}

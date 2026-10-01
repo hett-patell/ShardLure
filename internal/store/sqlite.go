@@ -62,6 +62,15 @@ type Store struct {
 	errThreatFox    error
 	errPayloadIntel error
 	errFileCapture  error
+
+	// getCampaignAfterSummary, when set (tests only, on the test's own
+	// Store), runs between GetCampaign's summary read and its member reads,
+	// where a concurrent SaveGrouping used to split the detail across two
+	// groupings. A field rather than a package variable: a package-level hook
+	// is read on every GetCampaign and shared by every parallel test in the
+	// process, so one test setting it while another's GetCampaign ran was a
+	// data race (reads audit M3). Production never sets it.
+	getCampaignAfterSummary func()
 }
 
 type sqlExecer interface {
@@ -760,7 +769,101 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
-	return nil
+	if current < 25 {
+		if err := s.migrateCampaigns(now); err != nil {
+			return err
+		}
+	}
+	// v26: two partial indexes over command-bearing events. No existing index
+	// can skip rows without a command, so /api/intel walked far more than it
+	// returned: LastCommandsForActors went through every command-less actor's
+	// whole history (idx_events_actor_ts; 0.87 s per request on 640k events)
+	// and RecentCommands through every migrated row (~260 ms).
+	// idx_events_actor_cmd serves the per-actor newest command (with
+	// idx_events_actor_cmd_legacy for its unconverted rows), idx_events_cmd_ts
+	// the global newest commands. Commands are ~1% of
+	// events, so only those inserts pay (compare v9, which dropped a
+	// full-width write-amplifying index). The WHERE clauses must stay
+	// identical to the queries' predicates, or the planner cannot use them.
+	//
+	// The rung also creates script_version_carry: it was added to the v25 DDL
+	// after rc1 had stamped production at 25, so only a later rung reaches
+	// that database (see scriptVersionCarrySchema).
+	if current < 26 {
+		if err := s.WithTx(func(tx *sql.Tx) error {
+			for _, obj := range v26Objects {
+				if _, err := tx.Exec(obj.ddl); err != nil {
+					return err
+				}
+			}
+			_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(26,?)`, now)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
+	// After the ladder, on every Open: the v26 rung was amended in place
+	// after branch builds had already stamped databases 26 (see v26Objects),
+	// and `current < 26` never lets those databases see the later objects.
+	return s.healV26Objects()
+}
+
+// v26Objects is the v26 rung's DDL, one idempotent statement per object.
+//
+// The rung was amended in place four times: 09cf7fd created only
+// idx_events_actor_cmd, 7067d76 added idx_events_cmd_ts, 90140fa
+// idx_events_actor_cmd_legacy and 1c69a01 script_version_carry. A database
+// stamped 26 by one of the earlier builds (a dev copy, the 1.87M benchmark
+// database, a rehearsal restore) never re-runs a rung guarded by
+// `current < 26`, and because the /api/intel reads name these indexes with
+// INDEXED BY, a missing one is a hard "no such index" on every request, not a
+// slow plan; a missing carry table kills the campaign worker at its first
+// version reset (store-reads audit I1, the fix-all C1 trap one rung later).
+// So these objects are self-healing: healV26Objects re-asserts them on every
+// Open. The stamp stays 26; a v27 rung repeating the DDL would only move the
+// same trap to whichever build shipped it.
+var v26Objects = []struct {
+	typ, name, ddl string
+}{
+	{"table", "script_version_carry", scriptVersionCarrySchema},
+	{"index", "idx_events_actor_cmd", `CREATE INDEX IF NOT EXISTS idx_events_actor_cmd ON events(actor_id, ts) WHERE command IS NOT NULL AND command != ''`},
+	{"index", "idx_events_cmd_ts", `CREATE INDEX IF NOT EXISTS idx_events_cmd_ts ON events(ts) WHERE command IS NOT NULL AND command != ''`},
+	// The per-actor legacy read's own index: its predicate carries
+	// ts_unix_ns IS NULL so the read never looks up converted rows, and the
+	// backfill empties it (see lastCommandLegacyQuery).
+	{"index", "idx_events_actor_cmd_legacy", `CREATE INDEX IF NOT EXISTS idx_events_actor_cmd_legacy ON events(actor_id, ts) WHERE command IS NOT NULL AND command != '' AND ts_unix_ns IS NULL`},
+}
+
+// healV26Objects creates whichever v26 object is missing. It runs only from
+// migrate (Open), never on a request or worker path. It first reads
+// sqlite_master without a lock, so a healthy database (every database but an
+// intermediate v26 one) takes no write lock and no writeMu at all: a `web`
+// opened beside a busy `live` must not queue behind its writer just to learn
+// there is nothing to do. Only a database that lacks an object pays for the
+// index build, once.
+func (s *Store) healV26Objects() error {
+	missing := false
+	for _, obj := range v26Objects {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?`, obj.typ, obj.name).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return nil
+	}
+	return s.WithTx(func(tx *sql.Tx) error {
+		for _, obj := range v26Objects {
+			if _, err := tx.Exec(obj.ddl); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // columnExists reports whether a table has a given column (via PRAGMA
@@ -855,7 +958,12 @@ func (s *Store) ensureLegacyColumns() error {
 // It is exposed so ingest helpers (e.g. batchDedupJournal) can issue
 // ad-hoc IN-list queries without re-implementing rows.Close handling.
 func (s *Store) QueryRows(query string, args []any, scan func(scan func(...any) error) error) error {
-	rows, err := s.db.Query(query, args...)
+	return s.QueryRowsContext(context.Background(), query, args, scan)
+}
+
+// QueryRowsContext is QueryRows under a context (see EventCountContext).
+func (s *Store) QueryRowsContext(ctx context.Context, query string, args []any, scan func(scan func(...any) error) error) error {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -1200,6 +1308,14 @@ func (s *Store) ActorUsers(id string) ([]models.ActorUser, error) {
 // ActorUsersLimit query per listed actor (80 point queries per poll).
 // The window function needs SQLite 3.25+; modernc.org/sqlite bundles 3.4x.
 func (s *Store) ActorUsersForActors(ids []string, perActor int) (map[string][]models.ActorUser, error) {
+	return s.ActorUsersForActorsContext(context.Background(), ids, perActor)
+}
+
+// ActorUsersForActorsContext is ActorUsersForActors on ctx, so the web
+// layer's background cache refresh is interrupted at shutdown: the window
+// sorts every username of the listed actors, seconds on ARM for brute-force
+// actors holding tens of thousands each.
+func (s *Store) ActorUsersForActorsContext(ctx context.Context, ids []string, perActor int) (map[string][]models.ActorUser, error) {
 	if len(ids) == 0 {
 		return map[string][]models.ActorUser{}, nil
 	}
@@ -1219,7 +1335,7 @@ SELECT actor_id, username, count FROM (
          ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY count DESC, username) AS rn
   FROM actor_users WHERE actor_id IN (` + strings.Join(placeholders, ",") + `)
 ) WHERE rn <= ? ORDER BY actor_id, count DESC`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1317,15 +1433,23 @@ LIMIT 1`, ip)
 	return &a, nil
 }
 
-func (s *Store) EventCount() (int, error) {
+func (s *Store) EventCount() (int, error) { return s.EventCountContext(context.Background()) }
+
+// EventCountContext is EventCount under a context: the dashboard's background
+// cache refreshes run on the server's drain context, so a shutdown interrupts
+// the scan (modernc calls sqlite3_interrupt when ctx is done) instead of
+// waiting for it. The context-free readers stay for callers with no context.
+func (s *Store) EventCountContext(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&n)
 	return n, err
 }
 
-func (s *Store) ActorCount() (int, error) {
+func (s *Store) ActorCount() (int, error) { return s.ActorCountContext(context.Background()) }
+
+func (s *Store) ActorCountContext(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM actors`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM actors`).Scan(&n)
 	return n, err
 }
 
@@ -1361,7 +1485,7 @@ func (s *Store) MaintenancePurge(retentionDays int) error {
 // mid-purge, skipping the WAL checkpoint in Close. Every committed chunk is
 // complete on its own, so stopping between chunks leaves consistent state and
 // the next run resumes.
-func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) error {
+func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) (retErr error) {
 	if retentionDays <= 0 {
 		return nil
 	}
@@ -1506,6 +1630,26 @@ ORDER BY id LIMIT ?`, eventCursor, cutoffTime.UnixNano(), legacyCeiling, purgeCh
 		}
 	}
 
+	// Campaign-derived rows follow event retention. This runs before the
+	// orphan-actor sweep so the bulk of an aged DB's lines goes in 5,000-row
+	// chunks here, leaving the sweep's single transaction only an orphan's
+	// sessions still inside retention. It takes writeMu per chunk via
+	// WithTxContext (writeMu is not reentrant), so it runs outside any lock.
+	// A failure here is derived data only: it must not skip the orphan sweep
+	// or the capture diagnostics below, so it is reported after them (a
+	// cancellation still stops the purge at once).
+	campaignErr := s.purgeCampaignDerived(ctx, cutoffTime)
+	if campaignErr != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if campaignErr != nil {
+		// Joined into whatever the rest returns, so a later failure cannot
+		// swallow it (and a clean rest still reports it).
+		defer func() {
+			retErr = errors.Join(retErr, fmt.Errorf("campaign-derived retention: %w", campaignErr))
+		}()
+	}
+
 	// Actors are DERIVED from events, so an actor whose every event the sweep
 	// above deleted has no evidence left behind it. Those orphans kept a stale
 	// event_count, a playbook frozen at whatever the classifier said months
@@ -1567,10 +1711,23 @@ WHERE COALESCE(campaigns,'')=''
 			return err
 		}
 		rows.Close()
-		for _, child := range []string{"actor_ips", "actor_users"} {
+		// The campaign tables only change what is deleted for an actor the
+		// three guards above already selected; they never widen the selection.
+		// Lines go first, through their session rows, so no line is left
+		// without its session_scripts row (purgeCampaignDerived has no
+		// orphan-line step). Retention already ran and removed every session
+		// older than the cutoff in chunks, so this is only an orphan's
+		// sessions still inside retention: a handful of rows.
+		if err := deleteScriptLinesForActors(tx, orphanIDs); err != nil {
+			return err
+		}
+		for _, child := range []string{"actor_ips", "actor_users", "session_scripts", "campaign_evidence"} {
 			if err := deleteStringRowsByKey(tx, child, "actor_id", orphanIDs); err != nil {
 				return err
 			}
+		}
+		if err := removeCampaignMembersTx(tx, orphanIDs); err != nil {
+			return err
 		}
 		if err := deleteStringRowsByKey(tx, "actors", "id", orphanIDs); err != nil {
 			return err
@@ -1736,9 +1893,29 @@ func deleteRowsByRowID(tx *sql.Tx, table string, ids []int64) error {
 	return nil
 }
 
+// deleteScriptLinesForActors deletes the session_script_lines of every
+// session_scripts row owned by actorIDs, in the caller's transaction. It must
+// run before those session_scripts rows are deleted.
+func deleteScriptLinesForActors(tx *sql.Tx, actorIDs []string) error {
+	const chunk = 400
+	for start := 0; start < len(actorIDs); start += chunk {
+		end := min(start+chunk, len(actorIDs))
+		args := make([]any, 0, end-start)
+		for _, id := range actorIDs[start:end] {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec(`DELETE FROM session_script_lines WHERE session_id IN (SELECT session_id FROM session_scripts WHERE actor_id IN (?`+
+			strings.Repeat(",?", end-start-1)+`))`, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func deleteStringRowsByKey(tx *sql.Tx, table, column string, values []string) error {
 	valid := (table == "actors" && column == "id") ||
-		((table == "actor_ips" || table == "actor_users") && column == "actor_id")
+		((table == "actor_ips" || table == "actor_users" || table == "session_scripts" ||
+			table == "campaign_evidence" || table == "campaign_members") && column == "actor_id")
 	if !valid {
 		return fmt.Errorf("unsupported purge target %s.%s", table, column)
 	}

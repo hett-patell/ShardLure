@@ -97,6 +97,15 @@ type actorDetailResponse struct {
 	// the report path enforces. The dashboard shows the "Report" button only
 	// when true, so a mis-click can't file a report the backend would reject.
 	ReportEligible bool `json:"reportEligible"`
+	// Campaigns is the actor's campaign badge; omitted when it has none or
+	// the lookup failed (a badge never fails the actor view).
+	Campaigns []actorCampaignJSON `json:"campaigns,omitempty"`
+}
+
+type actorCampaignJSON struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	SuggestedName string `json:"suggestedName"`
 }
 
 func (s *Server) handleIntelPage(w http.ResponseWriter, r *http.Request) {
@@ -158,12 +167,25 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// attempts_per_hour, which is a lifetime average, so a widget captioned
 	// "most aggressive" put an actor mid-escalation below one that was briefly
 	// loud a month ago, and printed a figure 2-3x below the real current rate.
-	if rad, err := s.st.TopActorsByRecentRate(time.Now().Add(-recentRateWindow), 8); err == nil {
-		for _, r := range rad {
-			resp.Radar = append(resp.Radar, radarRow{
-				IP:       r.Actor.PrimaryIP,
-				RateHour: r.PerHour,
-			})
+	//
+	// Derived from the cached per-actor counts (recentCountsCached): ranking is
+	// in memory and only the top 8 are read, by primary key.
+	if rc := s.recentCountsCached(); rc != nil {
+		top := s.st.TopActorRatesFromCounts
+		if s.topActorRates != nil {
+			top = s.topActorRates
+		}
+		// A store error drops only the radar: the rest of the page renders.
+		// It is logged once per radarErrLogEvery, not on every 5 s poll.
+		if rad, err := top(rc.counts, rc.hours, 8); err != nil {
+			s.radarErrLog.log("intel_radar", err)
+		} else {
+			for _, r := range rad {
+				resp.Radar = append(resp.Radar, radarRow{
+					IP:       r.Actor.PrimaryIP,
+					RateHour: r.PerHour,
+				})
+			}
 		}
 	}
 
@@ -212,9 +234,10 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// one indexed GROUP BY, not one per actor.
 	rates := s.recentRatesCached()
 
-	// One window-function query for all actors' top users instead of one
-	// point query per actor (was ~80 queries per poll).
-	usersByActor, err := s.st.ActorUsersForActors(actorIDs, 8)
+	// Top users per actor from a 60 s per-actor SWR cache (actorUsersTTL): the
+	// batched window query sorts every username of the listed actors, which
+	// was ~92% of this handler's CPU on the production copy.
+	usersByActor, err := s.actorUsersCached(actorIDs)
 	if err != nil {
 		httpError(w, "intel", err, http.StatusInternalServerError)
 		return
@@ -222,8 +245,15 @@ func (s *Server) handleIntel(w http.ResponseWriter, r *http.Request) {
 	// Last command per actor in one batched query so the actor table's
 	// "Last cmd" column is populated (it was permanently blank — handleIntel
 	// never set LastCommand, only the detail endpoint did). Best-effort: on
-	// error just leave the column empty rather than failing the whole panel.
-	lastCmdByActor, _ := s.st.LastCommandsForActors(actorIDs)
+	// error leave the column empty rather than failing the whole panel, but
+	// log it (rate-limited like the radar). Since v26 the read names its
+	// indexes via INDEXED BY, so a dropped index fails it on every poll until
+	// the next Open heals it; a silent blank column hid that.
+	lastCmdByActor, err := s.st.LastCommandsForActors(actorIDs)
+	if err != nil {
+		s.lastCmdErrLog.log("intel_last_command", err)
+		lastCmdByActor = nil
+	}
 
 	for _, a := range actors {
 		row := intelActorRow{
@@ -365,11 +395,19 @@ func (s *Server) handleActorDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var camps []actorCampaignJSON
+	if cs, err := s.st.CampaignsForActor(r.Context(), a.ID); err == nil {
+		for _, c := range cs {
+			camps = append(camps, actorCampaignJSON{ID: c.ID, Name: c.Name, SuggestedName: c.SuggestedName})
+		}
+	}
+
 	_ = json.NewEncoder(w).Encode(actorDetailResponse{
 		Actor:          row,
 		Commands:       cmds,
 		Events:         all,
 		ReportEligible: reportEligible,
+		Campaigns:      camps,
 	})
 }
 

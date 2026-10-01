@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -107,12 +108,21 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 	// was consumed by IPs already inside the re-report window at the top of the
 	// worst-offender-first list, so a run could report nothing while reportable
 	// brute-forcers sat just below the cut (the same bug fixed in share bazaar).
-	limit := fs.Int("limit", 25, "max actors to report in this run (0 = unbounded); counts reports sent, not candidates examined")
+	limit := fs.Int("limit", 25, "max actors to report in this run (0 = unbounded, negative refused); counts reports sent, not candidates examined")
 	minProbe := fs.Int("min-probe", minProbeDefault, "minimum actor ProbeScore to report (0-100)")
 	rewindowHours := fs.Int("rewindow", rewindowDefault, "hours before a reported IP may be reported again")
 	statusOnly := fs.Bool("status", false, "list past reports from abuseipdb_reports instead of reporting")
 	endpoint := fs.String("endpoint", "", "override AbuseIPDB endpoint (default from config or builtin)")
 	_ = fs.Parse(args)
+	// flag stops at the first non-flag, so a stray positional would silently
+	// drop every flag after it — including --dry-run, turning a preview into a
+	// real, irreversible run. Refuse it, as share urlhaus/threatfox do.
+	if fs.NArg() > 0 {
+		fatal(fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	}
+	if err := validateOutboundLimit(*limit); err != nil {
+		fatal(err)
+	}
 
 	if *statusOnly {
 		printAbuseReportStatus(st)
@@ -182,7 +192,7 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 	reported, skipped, ferr := abuseipdb.Report(ctx, &abuseReportRecorderAdapter{st: st}, cands, opts)
 	fmt.Printf("\nresult: reported=%d skipped=%d\n", reported, skipped)
 	if ferr != nil {
-		fatal(ferr)
+		fatalRemote(ferr)
 	}
 }
 
@@ -252,16 +262,22 @@ func collectReportCandidatesContext(ctx context.Context, st *store.Store, minPro
 }
 
 func printAbuseReportProgress(c abuseipdb.ReportCandidate, res *abuseipdb.Result, err error) {
-	header := fmt.Sprintf("  %-15s  probe=%3d  %-24s ev=%d users=%d", c.SrcIP, c.ProbeScore, c.Playbook, c.EventCount, c.UniqueUsers)
+	fprintAbuseReportProgress(os.Stdout, c, res, err)
+}
+
+func fprintAbuseReportProgress(w io.Writer, c abuseipdb.ReportCandidate, res *abuseipdb.Result, err error) {
+	// The IP comes from attacker telemetry and the error can carry
+	// AbuseIPDB's response body: termSafe both.
+	header := fmt.Sprintf("  %-15s  probe=%3d  %-24s ev=%d users=%d", termSafe(c.SrcIP), c.ProbeScore, termSafe(c.Playbook), c.EventCount, c.UniqueUsers)
 	switch {
 	case err != nil:
-		fmt.Printf("%s\n    %v\n", header, err)
+		fmt.Fprintf(w, "%s\n    %s\n", header, termSafe(err.Error()))
 	case res == nil:
-		fmt.Printf("%s\n    (no result)\n", header)
+		fmt.Fprintf(w, "%s\n    (no result)\n", header)
 	case res.RateLimited:
-		fmt.Printf("%s\n    -> rate limited\n", header)
+		fmt.Fprintf(w, "%s\n    -> rate limited\n", header)
 	default:
-		fmt.Printf("%s\n    -> reported (score now %d/100)\n", header, res.Score)
+		fmt.Fprintf(w, "%s\n    -> reported (score now %d/100)\n", header, res.Score)
 	}
 }
 
@@ -270,17 +286,21 @@ func printAbuseReportStatus(st *store.Store) {
 	if err != nil {
 		fatal(err)
 	}
+	fprintAbuseReportStatus(os.Stdout, rows)
+}
+
+func fprintAbuseReportStatus(w io.Writer, rows []store.AbuseReport) {
 	if len(rows) == 0 {
-		fmt.Println("(no reports recorded)")
+		fmt.Fprintln(w, "(no reports recorded)")
 		return
 	}
-	fmt.Printf("%-15s  %-25s  %-10s  %-10s  %s\n", "ip", "reported_at (UTC)", "status", "score", "categories")
+	fmt.Fprintf(w, "%-15s  %-25s  %-10s  %-10s  %s\n", "ip", "reported_at (UTC)", "status", "score", "categories")
 	for _, r := range rows {
 		ts := r.ReportedAt.UTC().Format("2006-01-02 15:04:05")
 		cats := make([]string, 0, len(r.Categories))
 		for _, c := range r.Categories {
 			cats = append(cats, fmt.Sprintf("%d", c))
 		}
-		fmt.Printf("%-15s  %-25s  %-10s  %-10d  %s\n", r.IP, ts, r.Status, r.AbuseScore, strings.Join(cats, ","))
+		fmt.Fprintf(w, "%-15s  %-25s  %-10s  %-10d  %s\n", termSafe(r.IP), ts, termSafe(r.Status), r.AbuseScore, strings.Join(cats, ","))
 	}
 }

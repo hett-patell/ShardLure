@@ -99,7 +99,8 @@ func IngestFileAppend(st *store.Store, path string, adminIPs []string) (*Result,
 	return IngestFileAppendContext(context.Background(), st, path, adminIPs)
 }
 
-func IngestFileAppendContext(ctx context.Context, st *store.Store, path string, adminIPs []string) (*Result, error) {
+func IngestFileAppendContext(ctx context.Context, st *store.Store, path string, adminIPs []string) (res *Result, err error) {
+	defer func() { err = cancelledFileError(ctx, err) }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -208,7 +209,7 @@ func IngestFileAppendContext(ctx context.Context, st *store.Store, path string, 
 		}
 		return &Result{Skipped: skipped}, nil
 	}
-	res, err := syncCowrieActorsContext(ctx, st, fresh, adminIPs)
+	res, err = syncCowrieActorsContext(ctx, st, fresh, adminIPs)
 	if res != nil {
 		res.Skipped = skipped
 	}
@@ -219,6 +220,21 @@ func IngestFileAppendContext(ctx context.Context, st *store.Store, path string, 
 		return res, err
 	}
 	return res, nil
+}
+
+// cancelledFileError reports the cancellation, not its side effect. The
+// AfterFunc above closes f the moment ctx ends so a blocked read returns, which
+// makes any file operation still ahead of the next ctx check (Stat, Seek, the
+// head signature) fail with os.ErrClosed: "seek …/cowrie.json: file already
+// closed". That error does not unwrap to context.Canceled, so a SIGTERM during
+// the live seed exited 1 even once the lifecycle forgave cancellations
+// (3 of 100 unfixed shutdown runs, 2026-09-30). Only ErrClosed while ctx is
+// done is rewritten; every other error, and ErrClosed with ctx live, is kept.
+func cancelledFileError(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil && errors.Is(err, os.ErrClosed) {
+		return ctx.Err()
+	}
+	return err
 }
 
 // batchDedupCowrie filters events that already exist in the DB. Identity is

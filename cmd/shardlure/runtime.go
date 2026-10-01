@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/networkshard/shardlure/internal/actor"
+	"github.com/networkshard/shardlure/internal/campaign"
 	"github.com/networkshard/shardlure/internal/capture"
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/ingest/cowrie"
@@ -28,11 +29,17 @@ type runtimeOptions struct {
 }
 
 func workerCycle(m *observability.Monitor, id observability.Worker, budget time.Duration) func(bool, error) {
+	return workerCycleWith(m, id, budget, true)
+}
+
+// workerCycleWith reports a worker's cycles to the monitor. A worker that is
+// not required still shows its failures in /metrics but never gates /readyz.
+func workerCycleWith(m *observability.Monitor, id observability.Worker, budget time.Duration, required bool) func(bool, error) {
 	return func(begin bool, err error) {
 		now := time.Now().UTC()
 		state := m.Snapshot().Workers[id]
 		state.Enabled = true
-		state.Required = true
+		state.Required = required
 		state.Running = true
 		state.Completed = false
 		state.LastProgress = now
@@ -70,24 +77,71 @@ func runPeriodicWorker(ctx context.Context, m *observability.Monitor, id observa
 		}
 		cancel()
 		notify(false, err)
-		timer := time.NewTimer(gap)
-		heartbeat := time.NewTicker(5 * time.Second)
-	wait:
-		for {
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				heartbeat.Stop()
-				return
-			case <-timer.C:
-				break wait
-			case <-heartbeat.C:
-				state := m.Snapshot().Workers[id]
-				state.LastProgress = time.Now().UTC()
-				_ = m.SetWorker(id, state)
-			}
+		if !waitGap(ctx, m, id, gap) {
+			return
 		}
-		heartbeat.Stop()
+	}
+}
+
+// waitGap sleeps gap between cycles, refreshing the worker's LastProgress
+// every 5 s so a long gap never reads as a stalled worker. It reports false
+// when ctx ends first. Shared by runPeriodicWorker and runOptionalWorker so a
+// fix to the wait or heartbeat semantics reaches both (audit M4).
+func waitGap(ctx context.Context, m *observability.Monitor, id observability.Worker, gap time.Duration) bool {
+	timer := time.NewTimer(gap)
+	defer timer.Stop()
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		case <-heartbeat.C:
+			state := m.Snapshot().Workers[id]
+			state.LastProgress = time.Now().UTC()
+			_ = m.SetWorker(id, state)
+		}
+	}
+}
+
+// runOptionalWorker is runPeriodicWorker for auxiliary analysis: failures are
+// reported in /metrics but never make the daemon not-ready.
+//
+// It also logs them, because /metrics is not read on every deployment: the
+// first failure of a streak and each change of the error text, then the
+// recovery. Not every cycle, since a worker in backoff returns the same
+// retained error on each 5 s tick (campaign.Worker.Tick) and a permanent
+// failure would otherwise fill the journal; the failing tick before this
+// logged nothing at all, which is how a worker dead from its first tick went
+// unnoticed on the upgrade rehearsal (fix-all review I1).
+func runOptionalWorker(ctx context.Context, m *observability.Monitor, id observability.Worker, gap, budget time.Duration, fn func(context.Context) error) {
+	notify := workerCycleWith(m, id, budget, false)
+	defer workerStopped(m, id, false)
+	logged := "" // text of the failure last logged; "" while healthy
+	for ctx.Err() == nil {
+		notify(true, nil)
+		work, cancel := context.WithTimeout(ctx, budget)
+		err := fn(work)
+		if err == nil && work.Err() != nil {
+			err = work.Err()
+		}
+		cancel()
+		notify(false, err)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			// Shutdown cancelled the cycle: not a worker failure.
+		case err != nil && err.Error() != logged:
+			logged = err.Error()
+			log.Printf("%s worker failed (reported in /metrics until it succeeds): %v", id, err)
+		case err == nil && logged != "":
+			logged = ""
+			log.Printf("%s worker recovered", id)
+		}
+		if !waitGap(ctx, m, id, gap) {
+			return
+		}
 	}
 }
 
@@ -148,6 +202,8 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 			opts.OnListening(addr)
 		}
 	}
+	campaigns := campaign.NewWorker(st, cfg.RetentionDays, cfg.CaptureEvidenceDir())
+	options.OnCampaignEdit = campaigns.Wake
 	server := web.New(st, keys, opts.Addr, options)
 	probe := observability.NewFilesystemProbe(st.Probe, cfg.DataDir, cfg.CaptureEvidenceDir(), opts.Live && cfg.Capture.Enabled)
 	serve := func(parent context.Context) error {
@@ -213,6 +269,9 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				return err
 			})
 		})
+		start(func() {
+			runOptionalWorker(ctx, m, observability.Campaigns, 5*time.Second, 2*time.Minute, campaigns.Tick)
+		})
 		if opts.Live {
 			start(func() {
 				runPeriodicWorker(ctx, m, observability.CowrieIngest, opts.Interval, 2*time.Minute, func(ctx context.Context) error {
@@ -270,6 +329,9 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 		}
 		<-ctx.Done()
 		group.Wait()
+		// Only the campaign goroutine ticks the worker, and it has returned:
+		// release the evidence-root descriptor familyOf pinned.
+		campaigns.Close()
 		return nil
 	}
 	return runLiveLifecycle(ctx, m, liveHooks{Seed: seed, Serve: serve, Workers: workers, Close: st.Close})

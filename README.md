@@ -71,6 +71,7 @@ Longer operational guides (installation, backup, security, troubleshooting) live
 - **Local geolocation (recommended):** point `geoip.mmdb` at a MaxMind GeoLite2/GeoIP2 City database and geo resolves **locally** — tier 1, before any HTTP. It fixes three things at once: coverage (the HTTP tier is capped per poll and only resolves IPs currently on screen, so most attacker IPs were never resolved at all), privacy (the free ip-api tier is plain HTTP, so every attacker IP you looked up was visible on the wire), and air-gap (works with outbound geo turned off entirely). A missing or corrupt database is fail-open — it degrades to the HTTP tier and says so in Settings.
 - **URLhaus URL submission:** MalwareBazaar gets the payload *files*; [URLhaus](https://urlhaus.abuse.ch/) gets the **URLs they were served from**. Because ShardLure fetches attacker URLs itself, a successful fetch is first-hand proof the URL was live and serving — exactly URLhaus's bar. Blue Team panel shows the vetting gate's decision per candidate, including *why* anything was held back. One abuse.ch Auth-Key covers both services.
 - **VirusTotal payload verdicts:** check captured payload hashes against VirusTotal without ever uploading a file — only the sha256 leaves the host. The payload library shows a `virustotal` column: cached verdicts render as an engine ratio, hashes VT has never seen render as **novel** (a genuinely interesting signal for a honeypot), and everything else gets an opt-in `check` button. The list view never spends quota; the free tier allows ~4 lookups/minute, so live lookups are always deliberate.
+- **Campaigns and scripts:** sessions that planted the same SSH key, delivered the same payload or ran the same distinctive script are linked into campaigns, each link showing its evidence. Links are made between sessions, not whole actors, because one HASSH fingerprint can cover several unrelated tools. Bot command scripts are fingerprinted after normalising the parts bots randomise, and near-identical variants are grouped for display. Names and notes you set are kept, and operator edits override automatic grouping.
 
 ## Setup Guide
 
@@ -207,6 +208,17 @@ of access logs).
 > dashboard would bind a *public* address — loopback, private, and Tailscale
 > (`100.64.0.0/10`) binds are allowed (with a warning). Either keep it private or
 > set `SHARDLURE_DASH_TOKEN`.
+>
+> Without a token the dashboard also refuses (`421`) any request whose `Host` is
+> not its listen IP, a loopback address, `localhost`, the `dashboard.public_origin`
+> hostname, or one of this machine's Tailscale names, which stops DNS-rebinding
+> pages from reading it. The Tailscale names are the MagicDNS name that
+> `tailscale status --json` reports at startup (and its short form), plus names
+> derived from the hostname the way Tailscale derives them (`my_box` becomes
+> `my-box`, a duplicate `arm` becomes `arm-1`), alone or as
+> `<name>.<tailnet>.ts.net`. Reaching it by another name (a LAN DNS name, or a
+> node renamed in the Tailscale console on a machine without a working
+> `tailscale` CLI) needs `dashboard.public_origin` or a token.
 
 ### Step 5 (optional) — Enable IP reputation enrichment & MalwareBazaar sharing
 
@@ -273,10 +285,13 @@ sudo systemctl restart shardlure-live
 shardlure version
 ```
 
-- **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues.
+- **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues. When the bot-script normaliser changed (v2.9 is normaliser version 5; the second release candidate was 4, so upgrading from it rebuilds once more), the campaigns worker also re-records every script in the background; campaign regrouping waits until the rebuilt scripts settle (at most 30 minutes after it catches up), the dashboard explains the wait, and campaign names and IDs are carried over. `ingest cowrie --replace` starts the same wait, so a replaced log keeps its campaign names and IDs too.
 - **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
 - **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
+- **Rolling back from v2.9 to an older build:** older binaries (v2.8 at schema 24, the v2.9 campaigns rc1 at schema 25) cannot create backups of the v26 database; restore the pre-upgrade bundle instead.
+- **Upgrading again after a rollback:** an older build writes bot-script lines in its own encoding and leaves the stored normaliser version alone, so the next upgrade would keep them and fingerprint the same script two ways. Run `shardlure scripts --rebuild` as the service account, then restart every `shardlure live` and `web` process on that database. Campaign names and IDs are kept.
+- **A token-less dashboard answers only names it knows.** Without `SHARDLURE_DASH_TOKEN`, a request by a `Host` the dashboard does not recognise gets `421` (this blocks DNS rebinding). The accepted names, and what to set if you use another one, are listed under [Step 4](#step-4--check-services-and-open-the-dashboard).
 
 ## Local Development
 
@@ -300,10 +315,10 @@ Tests:
 ```bash
 make test                     # go test ./...
 go test ./internal/store/ -run TestName    # single package / single test
-make fuzz                     # fuzz the 3 attacker-input parsers (FUZZTIME=5m to extend)
+make fuzz                     # fuzz the 4 attacker-input parsers (FUZZTIME=5m to extend)
 ```
 
-`make fuzz` exercises the parsers that consume attacker-controlled bytes: the sshd journal line parser, the Cowrie jsonlog reader, and the Cowrie TTY binary decoder (a packed `<iLiiLL` C struct — the sharpest edge, since its own length arithmetic could over-read). CI does **not** fuzz, but `go test ./...` runs each target's seed corpus, so known-bad inputs stay covered. Note that Go writes *failing* fuzz inputs to `testdata/fuzz/` as binary files — don't commit those (`check-utf8.sh` rejects them); pin the finding as a readable unit test instead.
+`make fuzz` exercises the parsers that consume attacker-controlled bytes: the sshd journal line parser, the Cowrie jsonlog reader, the Cowrie TTY binary decoder (a packed `<iLiiLL` C struct — the sharpest edge, since its own length arithmetic could over-read), and the script normaliser behind campaigns (it reads attacker-typed shell syntax word by word). CI does **not** fuzz, but `go test ./...` runs each target's seed corpus, so known-bad inputs stay covered. Note that Go writes *failing* fuzz inputs to `testdata/fuzz/` as binary files — don't commit those (`check-utf8.sh` rejects them); pin the finding as a readable unit test instead.
 
 ### Verifying the dashboard numbers
 
@@ -343,8 +358,12 @@ sudo ./shardlure run
 | --- | --- |
 | `ingest journal <file> [--replace]` | Parse journal auth lines and build actors |
 | `ingest cowrie <file> [--replace]` | Parse Cowrie JSON logs and build actors |
-| `actors [--limit=N]` | List actors by last seen. `CONF` is an evidence **tier** (`LOW`/`MEDIUM`/`HIGH`/`CONFIRMED`), not a percentage — it is a coarse label chosen by source and signals, so showing it as `55%` would imply a calibrated probability it does not have. `probe` (0-100) is the computed score. |
+| `actors [--limit=N]` | List actors by last seen (default 25; `1..1000`, or `0` for every actor). `CONF` is an evidence **tier** (`LOW`/`MEDIUM`/`HIGH`/`CONFIRMED`), not a percentage — it is a coarse label chosen by source and signals, so showing it as `55%` would imply a calibrated probability it does not have. `probe` (0-100) is the computed score. |
 | `actor show <id\|ip>` | Show one actor profile |
+| `campaigns [--limit=N]` | List campaigns: sessions linked by a shared SSH key, payload or distinctive script, with actor, IP and session counts (default 50, `1..1000`) |
+| `campaign show <id\|name>` | Show one campaign: members with the evidence behind each link, context (HASSH, clients, payload hosts), notes and the newest 5 edits. Lists longer than the 500-entry cap say `showing N of M`. An ambiguous name is an error; use the ID |
+| `scripts [--limit=N]` | List settled bot command-script families with session, actor and IP counts and whether they link sessions (default 50, `1..1000`) |
+| `scripts --rebuild` | Ask for a script-fingerprint rebuild (after rolling back to an older build and upgrading again), then restart **every** `shardlure live` and `web` process using the database: whichever holds the campaign worker lease runs the rebuild. Campaign names and IDs are kept |
 | `dashboard`, `dash`, `tui` | Open the forensic TUI |
 | `web [:8080] [--tailscale]` | Serve the web dashboard |
 | `live [:8080] [--cowrie=PATH] [--interval=5s] [--no-journal] [--tailscale]` | Run live ingest and dashboard |
@@ -590,7 +609,7 @@ You can also share payloads from the web dashboard: open the payload inspector m
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--dry-run` | false | print classification + destination without POSTing |
-| `--limit N` | 10 | cap per-run uploads (0 = unbounded) |
+| `--limit N` | 10 | cap per-run uploads (0 = unbounded; a negative value is refused) |
 | `--sha SHA` | – | select only this sample; dedup and `Vet` still apply |
 | `--since DUR` | `freshness_days` (10d by default) | local candidate-selection window only |
 | `--anonymous` | false | submit without attribution to your account |
@@ -698,7 +717,7 @@ The same gate runs for both the CLI and the dashboard's "Report All" button. The
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--dry-run` | false | print what would be reported without contacting AbuseIPDB |
-| `--limit N` | 25 | cap per-run reports (0 = unbounded) |
+| `--limit N` | 25 | cap per-run reports (0 = unbounded; a negative value is refused) |
 | `--min-probe N` | 60 | minimum actor ProbeScore to report (0-100) |
 | `--rewindow N` | 24 | hours before a reported IP may be reported again |
 | `--status` | – | list past reports from `abuseipdb_reports` instead of reporting |
@@ -729,10 +748,10 @@ The destination's parent directories must be owned by root or the service accoun
 
 - **What a bundle holds.** A SQLite snapshot taken through the database's own backup API (safe on a live WAL database), the configuration exactly as the service parsed it, referenced evidence files, Cowrie downloads and TTY logs, and a `manifest.json` with every file's hash and size. `--include-file` adds extra administrative files.
 - **Ownership and limits.** Bundle directories are `0700` and files `0600`. The manifest is format v1, capped at 64 MiB and 1,000,000 entries. Every operation times out after 30 minutes unless `--timeout` says otherwise.
-- **Failure is visible.** A bundle is staged under a private `.incomplete` name and only published once every write and `fsync` succeeded. If publication fails late, the output keeps its incomplete marker and the command does not report success.
+- **Failure is visible.** A bundle is staged under a private `.incomplete` name and only published once every write and `fsync` succeeded. If `backup create` fails before publishing, it removes its own staging directory on Linux, and nothing else. If that cleanup fails, or on other platforms, the staging directory is kept and the command prints its path. If publication fails late, the output keeps its incomplete marker and the command does not report success. A refused source file, such as a symlinked config or `--include-file`, is named in the error with the reason.
 - **Restore never overwrites.** The destination must not exist. Restore re-checks every hash, remaps stored evidence paths into the new directory, resets Cowrie file cursors so a later replay deduplicates instead of duplicating history, and writes `shardlure.recovery.yaml` (capture and retention disabled) plus `recovery-report.json` describing every transformation. Your original config, settings, annotations and submission ledgers are preserved unchanged.
 - **Activation is manual.** Restore does not start, stop or reconfigure any service. Review the report, point a service at the recovered config, and enable capture and retention yourself when you are satisfied.
-- **Nothing is deleted.** No backup command removes old bundles, source evidence or incomplete output.
+- **Nothing is deleted.** No backup command removes old bundles, source evidence or published incomplete output. The only thing removed is a failed run's own unpublished staging directory.
 
 ## Health And Metrics
 

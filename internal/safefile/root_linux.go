@@ -469,10 +469,16 @@ func OpenRoot(path string) (*Root, error) {
 	}
 	fd, err := openDirConfined(unix.AT_FDCWD, abs, unix.O_NONBLOCK, unix.RESOLVE_NO_SYMLINKS|unix.RESOLVE_NO_MAGICLINKS)
 	if err != nil {
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+			return nil, refuse(ErrUnsafePath, abs, "path has a symlink or non-directory component")
+		}
 		return nil, safeError(err)
 	}
 	if err := supportedFilesystem(fd); err != nil {
 		unix.Close(fd)
+		if errors.Is(err, ErrUnsupported) {
+			return nil, refuse(ErrUnsupported, abs, "filesystem is not ext4, xfs, btrfs, tmpfs or overlayfs")
+		}
 		return nil, err
 	}
 	return &Root{dir: os.NewFile(uintptr(fd), "confined-root"), path: abs}, nil
@@ -664,23 +670,23 @@ func (r *Root) CheckOutput() error {
 }
 
 func (r *Root) checkOutputLocked() error {
-	if err := checkOutputDirectory(int(r.dir.Fd())); err != nil {
+	if err := checkOutputDirectory(int(r.dir.Fd()), r.path); err != nil {
 		return err
 	}
 	uid := uint32(os.Geteuid())
 	for name := r.path; ; name = filepath.Dir(name) {
 		var st unix.Stat_t
 		if err := unix.Lstat(name, &st); err != nil {
-			return ErrChanged
+			return refuse(ErrChanged, name, "directory could not be inspected")
 		}
 		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
-			return ErrChanged
+			return refuse(ErrChanged, name, "not a directory (a symlink or other file type)")
 		}
 		if st.Uid != uid && st.Uid != 0 {
-			return ErrPermission
+			return refuse(ErrPermission, name, foreignOwner(st.Uid, uid))
 		}
 		if st.Mode&0022 != 0 && st.Mode&unix.S_ISVTX == 0 {
-			return ErrPermission
+			return refuse(ErrPermission, name, sharedWritable(st.Mode))
 		}
 		if filepath.Dir(name) == name {
 			break
@@ -690,7 +696,7 @@ func (r *Root) checkOutputLocked() error {
 	// additionally require their published pathname to still name that root.
 	fd, err := openDirConfined(unix.AT_FDCWD, r.path, unix.O_NONBLOCK, unix.RESOLVE_NO_SYMLINKS|unix.RESOLVE_NO_MAGICLINKS)
 	if err != nil {
-		return ErrChanged
+		return refuse(ErrChanged, r.path, "path no longer opens as a directory without following symlinks")
 	}
 	defer unix.Close(fd)
 	var held, named unix.Stat_t
@@ -698,12 +704,14 @@ func (r *Root) checkOutputLocked() error {
 		return ErrIO
 	}
 	if !sameObject(held, named) {
-		return ErrChanged
+		return refuse(ErrChanged, r.path, "path was replaced after it was opened")
 	}
 	return nil
 }
 
-func checkOutputDirectory(fd int) error {
+// checkOutputDirectory checks the output directory itself; path only labels a
+// refusal and is never used to open anything.
+func checkOutputDirectory(fd int, path string) error {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return safeError(err)
@@ -717,7 +725,18 @@ func checkOutputDirectory(fd int) error {
 	if (st.Uid == 0 || st.Uid == uid) && st.Mode&unix.S_ISVTX != 0 {
 		return nil
 	}
-	return ErrPermission
+	if st.Uid != uid {
+		return refuse(ErrPermission, path, "output directory owned by uid "+strconv.FormatUint(uint64(st.Uid), 10)+", not the running user (uid "+strconv.FormatUint(uint64(uid), 10)+"), and not a sticky directory")
+	}
+	return refuse(ErrPermission, path, sharedWritable(st.Mode))
+}
+
+func foreignOwner(owner, uid uint32) string {
+	return "directory owned by uid " + strconv.FormatUint(uint64(owner), 10) + ", not root or the running user (uid " + strconv.FormatUint(uint64(uid), 10) + "); that account could swap directories during the write"
+}
+
+func sharedWritable(mode uint32) string {
+	return "directory mode 0" + strconv.FormatUint(uint64(mode&07777), 8) + " is writable by group or others without the sticky bit"
 }
 
 func (r *Root) Close() error {

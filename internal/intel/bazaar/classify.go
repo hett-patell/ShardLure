@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"debug/elf"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -16,6 +17,28 @@ type Classification struct {
 	Tags     []string
 	Family   string
 	FileKind string // human-readable label for CLI output
+	// HeaderMalformed is set for an ELF whose header debug/elf could not
+	// parse (a download cut short, a mangled section or program table).
+	// ClassifyFile still runs the family scan over such a head, for the
+	// campaign worker's generic-build exclusion; Classify, the outbound
+	// entry point, strips it again (see Outbound).
+	HeaderMalformed bool
+}
+
+// Outbound returns the classification as it may leave the host — the label
+// MalwareBazaar uploads and the ThreatFox Malpedia gate read. For an ELF
+// whose header did not parse that is exactly what the classifier produced
+// before head-scanning malformed ELFs: kind "ELF", tags elf + linux, and NO
+// family, family tags or packing tags. The head-scan family of a partial
+// file is good enough to keep a generic build from linking campaigns, but a
+// wrong signature on abuse.ch is what bans the shared account, and nothing
+// about a truncated file was ever shipped with a label (precision-first; see
+// elf_family.go). Every other classification is returned unchanged.
+func (c Classification) Outbound() Classification {
+	if !c.HeaderMalformed {
+		return c
+	}
+	return Classification{Tags: []string{"elf", "linux"}, FileKind: "ELF", HeaderMalformed: true}
 }
 
 // Classify inspects a file on disk and returns format/arch/family
@@ -43,16 +66,54 @@ func Classify(path string) (Classification, error) {
 		return Classification{}, err
 	}
 	defer f.Close()
+	// A read error is ignored here, as it always was: the share/intel callers
+	// tag whatever head was read (an unreadable file classifies "unknown").
+	// Every outbound caller (share bazaar, the ThreatFox family, the URLhaus
+	// and dashboard previews) comes through here, so the outbound view is
+	// applied here and nowhere else can forget it.
+	c, _ := classifyOpen(f)
+	return c.Outbound(), nil
+}
 
+// ClassifyFile is Classify over an already-open file, for callers that pin
+// the file themselves (safefile.Root.OpenRegular) so the classified bytes are
+// the checked file's and not whatever a path names by the time it is read.
+// It reads from offset 0 with ReadAt, so the file's own offset does not
+// matter, and it only reads: nothing is ever executed. The caller keeps
+// ownership of f.
+//
+// Unlike Classify it returns a read error (anything but a short file): a
+// caller that memoises families must not remember the answer for a partial
+// or empty head as the file's family.
+//
+// It is the INTERNAL view: an ELF whose header does not parse keeps the
+// family its head scan found (HeaderMalformed is set). That is what the
+// campaign worker's generic-build exclusion needs, and it must never reach
+// abuse.ch: a caller that would ship the result calls Outbound() on it, or
+// uses Classify.
+func ClassifyFile(f *os.File) (Classification, error) {
+	c, err := classifyOpen(f)
+	if err != nil {
+		return Classification{}, err
+	}
+	return c, nil
+}
+
+// classifyOpen classifies whatever head it could read and reports a read
+// error separately (io.EOF / io.ErrUnexpectedEOF only mean a short file).
+func classifyOpen(f *os.File) (Classification, error) {
 	buf := make([]byte, classifyScanBytes)
-	n, _ := io.ReadFull(f, buf)
+	n, readErr := io.ReadFull(io.NewSectionReader(f, 0, classifyScanBytes), buf)
+	if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+		readErr = nil
+	}
 	buf = buf[:n]
 
 	c := Classification{}
 
 	switch {
 	case bytes.HasPrefix(buf, []byte{0x7f, 'E', 'L', 'F'}):
-		classifyELF(path, buf, &c)
+		classifyELF(f, buf, &c)
 	case bytes.HasPrefix(buf, []byte("MZ")):
 		c.FileKind = "PE executable"
 		c.Tags = append(c.Tags, "exe")
@@ -94,51 +155,62 @@ func Classify(path string) (Classification, error) {
 	if !containsTag(c.Tags, "linux") {
 		c.Tags = append(c.Tags, "linux")
 	}
-	return c, nil
+	return c, readErr
 }
 
 // classifyELF reads the ELF header to attach format and arch tags.
 // We open with debug/elf rather than parsing by hand because the
 // e_machine field encoding is annoyingly broad (EM_ARM, EM_AARCH64,
 // EM_X86_64, EM_386, EM_MIPS, EM_MIPSEL, EM_PPC, EM_PPC64, ...).
-func classifyELF(path string, buf []byte, c *Classification) {
+func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
 	c.FileKind = "ELF"
 	c.Tags = append(c.Tags, "elf")
 	// Parse the FULL file for structure: debug/elf eagerly reads the section
 	// header table, which e_shoff places at the END of the binary. A truncated
 	// in-memory buffer makes NewFile return EOF for any ELF larger than the
 	// buffer — and statically-linked Mirai/XMRig droppers (exactly the samples
-	// the arch + "static" tags target) are routinely 1-2 MB. So open the file
-	// as a seekable ReaderAt here; the family scan below still uses the cheap
-	// 256 KiB buf since distinctive strings live near the top.
-	ef, err := elf.Open(path)
+	// the arch + "static" tags target) are routinely 1-2 MB. So parse the
+	// open file as a ReaderAt here (never by path: the caller may have pinned
+	// it); the family scan below still uses the cheap 256 KiB buf since
+	// distinctive strings live near the top. elf.NewFile does not own f.
+	//
+	// A header that does not parse (a download cut short, a mangled section
+	// table) only loses the structural tags below: the family scan runs on
+	// the head regardless. It used to return here, so a truncated copy of a
+	// generic build (XMRig) carried no family, and the campaign worker's
+	// generic-build exclusion, which keys on that family, let the payload
+	// link (campaign final audit M-1). Cowrie does capture partial downloads.
+	// Outbound() strips that family again for anything shipped to abuse.ch.
+	ef, err := elf.NewFile(f)
 	if err != nil {
-		return
-	}
-	defer ef.Close()
-	switch ef.Machine {
-	case elf.EM_X86_64:
-		c.Tags = append(c.Tags, "x86-64")
-	case elf.EM_386:
-		c.Tags = append(c.Tags, "i386")
-	case elf.EM_AARCH64:
-		c.Tags = append(c.Tags, "aarch64")
-	case elf.EM_ARM:
-		c.Tags = append(c.Tags, "arm")
-	case elf.EM_MIPS:
-		c.Tags = append(c.Tags, "mips")
-	case elf.EM_PPC:
-		c.Tags = append(c.Tags, "ppc")
-	case elf.EM_PPC64:
-		c.Tags = append(c.Tags, "ppc64")
-	}
-	// Statically linked ELFs are the Mirai-family fingerprint —
-	// they bundle libc to avoid the target's missing dynamic loader.
-	if isStaticELF(ef) {
-		c.Tags = append(c.Tags, "static")
+		ef = nil // isPackedELF and the checks below take nil as "no structure"
+		c.HeaderMalformed = true
+	} else {
+		switch ef.Machine {
+		case elf.EM_X86_64:
+			c.Tags = append(c.Tags, "x86-64")
+		case elf.EM_386:
+			c.Tags = append(c.Tags, "i386")
+		case elf.EM_AARCH64:
+			c.Tags = append(c.Tags, "aarch64")
+		case elf.EM_ARM:
+			c.Tags = append(c.Tags, "arm")
+		case elf.EM_MIPS:
+			c.Tags = append(c.Tags, "mips")
+		case elf.EM_PPC:
+			c.Tags = append(c.Tags, "ppc")
+		case elf.EM_PPC64:
+			c.Tags = append(c.Tags, "ppc64")
+		}
+		// Statically linked ELFs are the Mirai-family fingerprint —
+		// they bundle libc to avoid the target's missing dynamic loader.
+		if isStaticELF(ef) {
+			c.Tags = append(c.Tags, "static")
+		}
 	}
 	// Packing detection (verdict signal + reason to withhold a family guess).
 	// Tagged even when a family still matched, so the upload carries "packed".
+	// The byte checks run on any head; the structural ones need ef.
 	packed, packedTags := isPackedELF(buf, ef)
 	if packed {
 		c.Tags = append(c.Tags, packedTags...)

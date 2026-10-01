@@ -51,10 +51,19 @@ type Server struct {
 	originPolicy OriginPolicy
 	originError  error
 	onListening  func(net.Addr)
-	monitor      *observability.Monitor
-	st           *store.Store
-	addr         string
-	geo          *geoResolver
+	// testRoutes lets a test register an extra handler on the live mux that
+	// RunContext serves; nil in production.
+	testRoutes func(*http.ServeMux)
+	// publicOriginHost is dashboard.public_origin's hostname (lowercase), one
+	// of the names open mode answers to (see requireKnownHost).
+	publicOriginHost string
+	// onCampaignEdit wakes the campaign worker after an operator edit; nil
+	// when no worker runs (the edit is still recorded).
+	onCampaignEdit func()
+	monitor        *observability.Monitor
+	st             *store.Store
+	addr           string
+	geo            *geoResolver
 	// keys is the live runtime keystore. Secrets (dashboard token, bazaar +
 	// abuseipdb API keys) and the tunable knobs below are read THROUGH it at
 	// request time so a value saved from the Settings panel takes effect
@@ -154,20 +163,13 @@ type Server struct {
 	eventsCache  map[int]windowedEvents
 	eventsUseSeq uint64
 
-	// statsCache contains only cheap or recent operational values that justify
+	// liveStats contains only cheap or recent operational values that justify
 	// the short dashboard TTL. Whole-table distributions and lifetime values
-	// have separate, longer-lived caches below.
-	statsMu     sync.Mutex
-	statsCached *liveSummaryStats
-	statsAt     time.Time
-
-	distributionMu     sync.Mutex
-	distributionCached *distributionSummaryStats
-	distributionAt     time.Time
-
-	lifetimeMu     sync.Mutex
-	lifetimeCached *lifetimeSummaryStats
-	lifetimeAt     time.Time
+	// have separate, longer-lived caches below. All three, extraCache and
+	// ratesCache serve stale-while-revalidate; see swrCache.
+	liveStats         swrCache[*liveSummaryStats]
+	distributionStats swrCache[*distributionSummaryStats]
+	lifetimeStats     swrCache[*lifetimeSummaryStats]
 
 	// HASSH coverage gets its OWN, much longer TTL than the rest of
 	// summaryStats. See hasshCoverageCached for why it cannot ride statsTTL.
@@ -179,6 +181,18 @@ type Server struct {
 	hasshRefreshing    bool
 	// hasshCoverage is store.HASSHCoverage unless a test substitutes it.
 	hasshCoverage func() (int, int, error)
+	// topActorRates is store.TopActorRatesFromCounts unless a test
+	// substitutes it.
+	topActorRates func(map[string]int, float64, int) ([]store.ActorRate, error)
+	// radarErrLog rate-limits the Brute-Force Radar's store-error log line.
+	radarErrLog opLogLimiter
+	// lastCmdErrLog does the same for the actor table's "Last cmd" read.
+	lastCmdErrLog opLogLimiter
+	// listTotalErrLog does the same for the Campaigns/Scripts list totals.
+	listTotalErrLog opLogLimiter
+	// listVariants memoises the Scripts list's capped variants per family
+	// (see cappedListVariants).
+	listVariants listVariantMemo
 	// bg tracks background cache refreshes; RunContext joins it before
 	// returning so none of them outlives the store.
 	bg handlerDrain
@@ -187,11 +201,9 @@ type Server struct {
 	// /api/dashboard ran UNCACHED on every 5s poll: the 72h hourly-by-kind
 	// GROUP BY (substr(ts) grouping, whole-window sort) and RecentShellSessions
 	// (GROUP BY session_id + a ROW_NUMBER() CTE over the 24h cowrie window).
-	// Same cadence and staleness profile as statsCache — data only moves on
+	// Same cadence and staleness profile as liveStats — data only moves on
 	// the 5s ingest tick — so they share its TTL.
-	dashExtraMu     sync.Mutex
-	dashExtraCached *dashExtra
-	dashExtraAt     time.Time
+	extraCache swrCache[*dashExtra]
 
 	// Threat-gauge window aggregate. Same reasoning as the caches above: one
 	// indexed pass over the 24h window (~16ms cold on 670k rows), memoized so a
@@ -201,9 +213,11 @@ type Server struct {
 	threatAt     time.Time
 
 	// Windowed per-actor attack rates; see report_candidate.go.
-	ratesMu     sync.Mutex
-	ratesCached map[string]float64
-	ratesAt     time.Time
+	ratesCache swrCache[*recentCounts]
+	// actorUsers caches /api/intel's per-actor top usernames (60 s SWR, see
+	// actorUsersTTL); actorUsersFetch substitutes its store read in tests.
+	actorUsers      actorUsersCache
+	actorUsersFetch actorUsersFetch
 
 	// Advisory per-IP evidence only; actual report POSTs bypass this cache.
 	reportEvidenceMu     sync.Mutex
@@ -381,100 +395,91 @@ func (s *Server) refreshHASSHCoverage() {
 }
 
 func (s *Server) liveSummaryStatsCached() (*liveSummaryStats, error) {
-	s.statsMu.Lock()
-	defer s.statsMu.Unlock()
-	if s.statsCached != nil && time.Since(s.statsAt) < statsTTL {
-		return s.statsCached, nil
-	}
-	ec, err := s.st.EventCount()
+	return s.liveStats.get(&s.bg, statsTTL, s.computeLiveSummaryStats)
+}
+
+// computeLiveSummaryStats and the other tier computes take the cache's
+// context, which is the server drain's (swrCache), never a request's: this
+// populates a shared cache, so binding it to whichever request triggered the
+// refresh would let one client disconnecting abort the refresh for everyone.
+// The drain context is cancelled only at shutdown, when an in-flight scan
+// should stop rather than delay exit.
+func (s *Server) computeLiveSummaryStats(ctx context.Context) (*liveSummaryStats, time.Time, error) {
+	ec, err := s.st.EventCountContext(ctx)
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
-	ac, err := s.st.ActorCount()
+	ac, err := s.st.ActorCountContext(ctx)
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
-	intents, err := s.st.CountsByIntent()
+	intents, err := s.st.CountsByIntentContext(ctx)
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
-	playbooks, err := s.st.CountsByPlaybook()
+	playbooks, err := s.st.CountsByPlaybookContext(ctx)
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
-	hourlyByKind, err := s.st.HourlyEventCountsByKind(72)
+	hourlyByKind, err := s.st.HourlyEventCountsByKindContext(ctx, 72)
 	if err != nil {
-		return s.statsCached, err
+		return nil, time.Time{}, err
 	}
 	// Read-only liveness of the sibling honeypot unit. Best-effort: an unknown
 	// value simply hides the readout rather than failing the cache refresh.
-	//
-	// context.Background() is deliberate, NOT an oversight: this populates a
-	// shared 10s cache, so binding it to whichever request happened to trigger
-	// the refresh would let one client disconnecting abort the refresh for
-	// everyone. StartedAt applies its own 2s timeout, so nothing can hang.
-	cowrieUptime, cowrieUp := hostsvc.Uptime(context.Background(), s.cowrieUnit, time.Now())
-	s.statsCached = &liveSummaryStats{
+	// StartedAt applies its own 2s timeout, so nothing can hang.
+	cowrieUptime, cowrieUp := hostsvc.Uptime(ctx, s.cowrieUnit, time.Now())
+	return &liveSummaryStats{
 		Events: ec, Actors: ac, IntentCounts: intents, PlaybookCounts: playbooks,
 		HourlyByKind: hourlyByKind, CowrieUptime: cowrieUptime, CowrieUp: cowrieUp,
-	}
-	s.statsAt = time.Now()
-	return s.statsCached, nil
+	}, time.Now(), nil
 }
 
 func (s *Server) distributionSummaryStatsCached() (*distributionSummaryStats, error) {
-	s.distributionMu.Lock()
-	defer s.distributionMu.Unlock()
-	if s.distributionCached != nil && time.Since(s.distributionAt) < distributionStatsTTL {
-		return s.distributionCached, nil
-	}
-	kinds, err := s.st.CountsByKind()
-	if err != nil {
-		return s.distributionCached, err
-	}
-	sources, err := s.st.CountsBySource()
-	if err != nil {
-		return s.distributionCached, err
-	}
-	s.distributionCached = &distributionSummaryStats{KindCounts: kinds, SourceCounts: sources}
-	s.distributionAt = time.Now()
-	return s.distributionCached, nil
+	return s.distributionStats.get(&s.bg, distributionStatsTTL, func(ctx context.Context) (*distributionSummaryStats, time.Time, error) {
+		kinds, err := s.st.CountsByKindContext(ctx)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		sources, err := s.st.CountsBySourceContext(ctx)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		return &distributionSummaryStats{KindCounts: kinds, SourceCounts: sources}, time.Now(), nil
+	})
 }
 
 func (s *Server) lifetimeSummaryStatsCached() (*lifetimeSummaryStats, error) {
-	s.lifetimeMu.Lock()
-	defer s.lifetimeMu.Unlock()
-	if s.lifetimeCached != nil && time.Since(s.lifetimeAt) < lifetimeStatsTTL {
-		return s.lifetimeCached, nil
-	}
-	ips, err := s.st.UniqueIPCount()
+	return s.lifetimeStats.get(&s.bg, lifetimeStatsTTL, s.computeLifetimeSummaryStats)
+}
+
+func (s *Server) computeLifetimeSummaryStats(ctx context.Context) (*lifetimeSummaryStats, time.Time, error) {
+	ips, err := s.st.UniqueIPCountContext(ctx)
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
 	// Best-effort; 0 on error keeps the panel alive (and shortens the memo,
 	// see lifetimeStamp).
-	countries, countriesErr := s.st.DistinctGeoCountryCount()
-	topIPs, err := s.st.TopSourceIPs(25)
+	countries, countriesErr := s.st.DistinctGeoCountryCountContext(ctx)
+	topIPs, err := s.st.TopSourceIPsContext(ctx, 25)
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
-	topUsers, err := s.st.TopUsernames(20)
+	topUsers, err := s.st.TopUsernamesContext(ctx, 20)
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
-	topCommands, err := s.st.TopCommands(20)
+	topCommands, err := s.st.TopCommandsContext(ctx, 20)
 	if err != nil {
-		return s.lifetimeCached, err
+		return nil, time.Time{}, err
 	}
 	// Best-effort like countries: 0 on error keeps the panel alive.
-	sessionCount, sessionsErr := s.st.CountSessions()
-	s.lifetimeCached = &lifetimeSummaryStats{
+	sessionCount, sessionsErr := s.st.CountSessionsContext(ctx)
+	geoSettled := countriesErr == nil && (countries > 0 || !s.geo.isEnabled())
+	return &lifetimeSummaryStats{
 		UniqueIPs: ips, Countries: countries, TopIPs: topIPs, TopUsers: topUsers,
 		TopCommands: topCommands, Sessions: sessionCount,
-	}
-	geoSettled := countriesErr == nil && (countries > 0 || !s.geo.isEnabled())
-	s.lifetimeAt = lifetimeStamp(geoSettled && sessionsErr == nil)
-	return s.lifetimeCached, nil
+	}, lifetimeStamp(geoSettled && sessionsErr == nil), nil
 }
 
 // summaryStatsCached combines independently cached values according to how
@@ -514,33 +519,27 @@ func (s *Server) summaryStatsCached() (*summaryStats, error) {
 }
 
 // dashExtraCachedValues returns the memoized 72h hourly counts and recent shell
-// sessions, recomputing at most once per statsTTL. These two ran uncached on
+// sessions, refreshed at most once per statsTTL. These two ran uncached on
 // every 5s /api/dashboard poll; they share statsTTL because they change on the
-// same 5s ingest tick. On a recompute error the last-good value is served (nil
-// on first call), keeping the landing dashboard alive through a transient error.
+// same 5s ingest tick. An expired value is served while one background refresh
+// recomputes it (swrCache); a failed refresh keeps the last-good value, and a
+// first computation that fails yields nil, keeping the landing dashboard alive.
 func (s *Server) dashExtraCachedValues() ([]store.HourCount, []store.ShellSessionSummary) {
-	s.dashExtraMu.Lock()
-	defer s.dashExtraMu.Unlock()
-	if s.dashExtraCached != nil && time.Since(s.dashExtraAt) < statsTTL {
-		return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
-	}
-	hourly, err := s.st.HourlyEventCounts(72)
-	if err != nil {
-		if s.dashExtraCached != nil {
-			return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
+	extra, err := s.extraCache.get(&s.bg, statsTTL, func(ctx context.Context) (*dashExtra, time.Time, error) {
+		hourly, err := s.st.HourlyEventCountsContext(ctx, 72)
+		if err != nil {
+			return nil, time.Time{}, err
 		}
+		shell, err := s.st.RecentShellSessionsContext(ctx, time.Now().UTC().Add(-24*time.Hour), 30)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		return &dashExtra{Hourly: hourly, ShellSessions: shell}, time.Now(), nil
+	})
+	if err != nil || extra == nil {
 		return nil, nil
 	}
-	shell, err := s.st.RecentShellSessions(time.Now().UTC().Add(-24*time.Hour), 30)
-	if err != nil {
-		if s.dashExtraCached != nil {
-			return s.dashExtraCached.Hourly, s.dashExtraCached.ShellSessions
-		}
-		return hourly, nil
-	}
-	s.dashExtraCached = &dashExtra{Hourly: hourly, ShellSessions: shell}
-	s.dashExtraAt = time.Now()
-	return hourly, shell
+	return extra.Hourly, extra.ShellSessions
 }
 
 type windowedEvents struct {
@@ -685,7 +684,9 @@ type Options struct {
 	PublicOrigin   string
 	TrustedProxies []string
 	// OnListening announces successful binding before long application seeding.
-	OnListening     func(net.Addr)
+	OnListening func(net.Addr)
+	// OnCampaignEdit is called after a campaign edit is recorded.
+	OnCampaignEdit  func()
 	Monitor         *observability.Monitor
 	HomeLat         float64
 	HomeLon         float64
@@ -805,6 +806,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	}
 	server := &Server{
 		onListening:           firstOpt.OnListening,
+		onCampaignEdit:        firstOpt.OnCampaignEdit,
 		monitor:               firstOpt.Monitor,
 		st:                    st,
 		addr:                  addr,
@@ -835,6 +837,7 @@ func New(st *store.Store, keys *settings.Keystore, addr string, opts ...Options)
 	}
 	server.geo.monitor = firstOpt.Monitor
 	server.originPolicy, server.originError = NewOriginPolicy(firstOpt.PublicOrigin, firstOpt.TrustedProxies)
+	server.publicOriginHost = publicOriginHostname(firstOpt.PublicOrigin)
 	return server
 }
 
@@ -963,16 +966,9 @@ func (s *Server) homeLive() homePoint {
 	return h
 }
 
-// RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
-func (s *Server) RunContext(ctx context.Context) error {
-	defer func() {
-		if s.geo != nil {
-			s.geo.mmdb.close()
-		}
-	}()
-	if s.originError != nil {
-		return s.originError
-	}
+// routes builds the dashboard mux. It is split out of RunContext so tests can
+// drive the real registrations (every guard/guardRead wrapping) end to end.
+func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.guardOperationalRead(s.handleHealth))
 	mux.HandleFunc("/readyz", s.guardOperationalRead(s.handleReady))
@@ -986,7 +982,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/mitre", s.guardRead(s.handleIntelMitre))
 	mux.HandleFunc("/api/intel/sessions", s.guardRead(s.handleIntelSessions))
 	mux.HandleFunc("/api/intel/session", s.guardRead(s.handleIntelSession))
-	mux.HandleFunc("/api/intel/enrich", s.guardRead(s.handleIntelEnrich))
+	mux.HandleFunc("/api/intel/enrich", s.guardRead(s.requireQuotaHeader(s.handleIntelEnrich)))
 	mux.HandleFunc("/api/intel/ttp", s.guardRead(s.handleIntelTTP))
 	mux.HandleFunc("/api/intel/payloads", s.guardRead(s.handleIntelPayloads))
 	mux.HandleFunc("/api/intel/payload", s.guardRead(s.handleIntelPayload))
@@ -999,7 +995,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	// VirusTotal payload-hash lookups. /vt is ON DEMAND (one hash, spends
 	// quota); /vt/cached is a cache-only bulk decorator safe to call from a
 	// list render. See api_vt.go for why the split exists.
-	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.handleIntelPayloadVT))
+	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.requireQuotaHeader(s.handleIntelPayloadVT)))
 	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guardRead(s.handleIntelPayloadsVTCached))
 	mux.HandleFunc("/api/intel/urlhaus", s.guardRead(s.handleIntelURLhaus))
 	mux.HandleFunc("/api/intel/urlhaus/submit", s.guard(s.handleURLhausSubmit))
@@ -1009,6 +1005,7 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
 	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guardRead(s.handleAbuseIPDBSuggestions))
 	mux.HandleFunc("/api/intel/tunnels", s.guardRead(s.handleIntelTunnels))
+	s.registerCampaignRoutes(mux)
 	mux.HandleFunc("/api/intel/timeline", s.guardRead(s.handleIntelTimeline))
 	// Settings panel: read masked snapshot, save/clear one setting, test a
 	// provider key, rotate the dashboard token. Guarded like every other /api.
@@ -1096,6 +1093,23 @@ func (s *Server) RunContext(ctx context.Context) error {
 	mux.HandleFunc("/debug/pprof/symbol", s.guardDebug(pprof.Symbol))
 	mux.HandleFunc("/debug/pprof/trace", s.guardDebug(pprof.Trace))
 	mux.HandleFunc("/debug/runtime", s.guardDebug(s.handleRuntimeStats))
+	return mux
+}
+
+// RunContext runs the HTTP server and gracefully shuts it down when ctx is canceled.
+func (s *Server) RunContext(ctx context.Context) error {
+	defer func() {
+		if s.geo != nil {
+			s.geo.mmdb.close()
+		}
+	}()
+	if s.originError != nil {
+		return s.originError
+	}
+	mux := s.routes()
+	if s.testRoutes != nil {
+		s.testRoutes(mux)
+	}
 
 	// With SHARDLURE_DASH_TOKEN unset every /api/* endpoint is open —
 	// including the credential/password wordlist export. (/debug/* is the
@@ -1129,12 +1143,14 @@ func (s *Server) RunContext(ctx context.Context) error {
 				"Keep it on Tailscale/loopback or set SHARDLURE_DASH_TOKEN.")
 	}
 
+	hosts, stopHosts := s.startHostPolicy(ctx)
+	defer stopHosts() // cancels a background lookup; it returns within tailscaleWaitDelay
 	var handlers handlerDrain
 	srv := &http.Server{
 		Addr: s.addr,
-		Handler: handlers.wrap(securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Handler: handlers.wrap(securityHeaders(s.requireKnownHost(hosts, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mux.ServeHTTP(w, r.WithContext(observability.WithMonitor(r.Context(), s.monitor)))
-		}))),
+		})))),
 		ReadTimeout: 10 * time.Second,
 		// 60s rather than 20s so /debug/pprof/profile?seconds=30 can
 		// complete. No handler is supposed to take longer than a few
@@ -1180,6 +1196,14 @@ func (s *Server) RunContext(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		handlers.stop()
+		// Cancel the drain's context BEFORE waiting for requests: a cache's
+		// first value is computed synchronously inside a request handler on
+		// that context, and srv.Shutdown only cancels request contexts after
+		// its timeout. Without this a cold dashboard request in flight made
+		// shutdown sit out the whole 30 s window and then the rest of the
+		// scan in handlers.wait() (fix-D M1). stop is idempotent; the defer
+		// still joins the background refreshes last.
+		s.bg.stop()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		err := srv.Shutdown(shutdownCtx)
@@ -1829,9 +1853,27 @@ func (s *Server) guardRead(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// registerCampaignRoutes lives in server.go so route_method_test.go sees the
+// guardRead/guard wrapping of each route. The edit endpoint takes bare guard
+// and enforces POST itself.
+func (s *Server) registerCampaignRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/intel/campaigns", s.guardRead(s.handleCampaigns))
+	mux.HandleFunc("/api/intel/campaign", s.guardRead(s.handleCampaign))
+	mux.HandleFunc("/api/intel/scripts", s.guardRead(s.handleScripts))
+	mux.HandleFunc("/api/intel/script", s.guardRead(s.handleScript))
+	mux.HandleFunc("/api/intel/campaign/edit", s.guard(s.handleCampaignEdit))
+}
+
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireDashboardAuth(w, r) {
+			return
+		}
+		// Every guard route mutates state or spends a third-party quota; in
+		// open mode nothing else stops a foreign page driving it (see
+		// refuseCrossSiteBrowser). Checked for every method, not just POST:
+		// the VirusTotal lookup spends quota on GET.
+		if s.dashboardToken() == "" && s.refuseCrossSiteBrowser(w, r) {
 			return
 		}
 		if !s.applicationAvailable(w, r) {

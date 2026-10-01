@@ -62,25 +62,46 @@ func (s *Server) chooseReportCandidate(ip string, cands [2]abuseipdb.ReportCandi
 	return abuseipdb.ReportCandidate{SrcIP: ip}
 }
 
-// recentRatesCached memoizes the per-actor windowed rates on the same 10s TTL as
-// the other poll-path aggregates: /api/intel builds candidates for up to 80
+// recentCounts is the cached per-actor event count over recentRateWindow and
+// the rates derived from it. Both the report candidates (rates) and the
+// Brute-Force Radar (ranked counts) read it, so one /api/intel poll counts the
+// window at most once per statsTTL instead of once per consumer: the radar
+// used to call TopActorsByRecentRate, uncached, on every poll.
+type recentCounts struct {
+	counts map[string]int
+	rates  map[string]float64
+	hours  float64
+}
+
+// recentCountsCached memoizes the per-actor windowed counts on the same 10s TTL
+// as the other poll-path aggregates: /api/intel builds candidates for up to 80
 // actors per poll, and re-running the GROUP BY for each would turn one indexed
-// scan into eighty.
+// scan into eighty. Stale-while-revalidate like the summary tiers (swrCache).
+// A failed refresh serves the previous value rather than an empty one:
+// dropping every rate to zero would silently de-prioritise every suggestion.
+func (s *Server) recentCountsCached() *recentCounts {
+	c, _ := s.ratesCache.get(&s.bg, statsTTL, func(ctx context.Context) (*recentCounts, time.Time, error) {
+		counts, err := s.st.RecentEventCountsByActor(ctx, time.Now().Add(-recentRateWindow))
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		hours := recentRateWindow.Hours()
+		rates := make(map[string]float64, len(counts))
+		for id, n := range counts {
+			rates[id] = float64(n) / hours
+		}
+		return &recentCounts{counts: counts, rates: rates, hours: hours}, time.Now(), nil
+	})
+	return c
+}
+
+// recentRatesCached is the rate view of recentCountsCached (nil before the
+// first successful count).
 func (s *Server) recentRatesCached() map[string]float64 {
-	s.ratesMu.Lock()
-	defer s.ratesMu.Unlock()
-	if s.ratesCached != nil && time.Since(s.ratesAt) < statsTTL {
-		return s.ratesCached
+	if c := s.recentCountsCached(); c != nil {
+		return c.rates
 	}
-	m, err := s.st.RecentRatesByActor(time.Now().Add(-recentRateWindow))
-	if err != nil {
-		// Serve the previous map rather than an empty one: dropping every rate to
-		// zero would silently de-prioritise every suggestion.
-		return s.ratesCached
-	}
-	s.ratesCached = m
-	s.ratesAt = time.Now()
-	return s.ratesCached
+	return nil
 }
 
 // primaryIPSeenCached memoizes actor→primary-IP-last-seen on the same TTL and

@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/backup"
 	"github.com/networkshard/shardlure/internal/config"
+	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/store"
 	"github.com/networkshard/shardlure/pkg/models"
 	"gopkg.in/yaml.v3"
@@ -94,5 +97,297 @@ func TestBackupCLIMainAvoidsConfigAndStoreInitialization(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("verified")) || bytes.Contains(out, []byte("never-send-fixture-value")) {
 		t.Fatalf("unsafe or missing CLI result: %s", out)
+	}
+}
+
+func TestBackupCLINamesRefusedPathReasonAndRemedy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission refusal test must run as a non-root user")
+	}
+	cfg, bundle := cliBackupFixture(t)
+	shared := t.TempDir()
+	if err := os.Chmod(shared, 0770); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(shared, 0700) })
+	for _, args := range [][]string{
+		{"create", "--output", filepath.Join(shared, "NEW")},
+		{"restore", "--input", bundle, "--to", filepath.Join(shared, "restored")},
+	} {
+		var out bytes.Buffer
+		err := runBackup(context.Background(), cfg, args, &out)
+		if err == nil {
+			t.Fatalf("%v accepted a group-writable ancestor", args)
+		}
+		msg := err.Error()
+		t.Logf("%s: %s", args[0], msg)
+		for _, want := range []string{strconv.Quote(shared), "writable by group or others", "choose an output directory whose ancestors are all owned by root or by the running user"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("%v: error %q lacks %q", args[0], msg, want)
+			}
+		}
+		if strings.Contains(msg, "filesystem or database operation failed") {
+			t.Fatalf("%v: still the generic message: %q", args[0], msg)
+		}
+	}
+}
+
+// The remedy must match the check that failed and the side refused: ancestor
+// ownership advice is wrong for a symlink, an unsupported filesystem or the
+// --input bundle (review follow-up to 850e210).
+func TestBackupCLIRemedyMatchesRefusal(t *testing.T) {
+	cfg, bundle := cliBackupFixture(t)
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "real"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(filepath.Join(base, "real"), link); err != nil {
+		t.Fatal(err)
+	}
+	linkedBundle := filepath.Join(base, "real", "bundle")
+	if err := os.Rename(bundle, linkedBundle); err != nil {
+		t.Fatal(err)
+	}
+	viaLink := filepath.Join(link, "bundle")
+	const ownership = "whose ancestors are all owned by root"
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		want, deny []string
+	}{
+		{"verify-symlink-input", []string{"verify", "--input", viaLink}, []string{"symlink", "choose a bundle path without symlinks"}, []string{ownership, "output directory"}},
+		{"restore-symlink-input", []string{"restore", "--input", viaLink, "--to", filepath.Join(t.TempDir(), "r")}, []string{"choose a bundle path without symlinks"}, []string{ownership, "output directory"}},
+		{"create-symlink-output", []string{"create", "--output", filepath.Join(link, "NEW")}, []string{"choose an output directory without symlinks"}, []string{ownership, "bundle path"}},
+		{"restore-symlink-to", []string{"restore", "--input", linkedBundle, "--to", filepath.Join(link, "NEW")}, []string{strconv.Quote(link), "choose an output directory without symlinks"}, []string{ownership, "bundle path"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runBackup(context.Background(), cfg, tc.args, &bytes.Buffer{})
+			if err == nil {
+				t.Fatal("symlinked path accepted")
+			}
+			msg := err.Error()
+			t.Log(msg)
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Fatalf("%q lacks %q", msg, w)
+				}
+			}
+			for _, d := range tc.deny {
+				if strings.Contains(msg, d) {
+					t.Fatalf("%q wrongly contains %q", msg, d)
+				}
+			}
+		})
+	}
+	// An unsupported filesystem cannot be staged portably in a test, so the
+	// mapping is checked on a synthetic refusal of each side.
+	unsupported := &safefile.PathRefusal{Kind: safefile.ErrUnsupported, Path: "/mnt/nfs/b", Reason: "filesystem is not ext4, xfs, btrfs, tmpfs or overlayfs"}
+	for input, want := range map[string]string{"": "choose an output directory on a supported filesystem", "/mnt/nfs/b": "choose a bundle path on a supported filesystem"} {
+		msg := explainRefusedPath(fmt.Errorf("wrapped: %w", unsupported), refusalSides{input: input}).Error()
+		if !strings.Contains(msg, want) || !strings.Contains(msg, unsupported.Reason) || strings.Contains(msg, ownership) {
+			t.Fatalf("input=%q: %q", input, msg)
+		}
+	}
+	perm := &safefile.PathRefusal{Kind: safefile.ErrPermission, Path: "/srv", Reason: "directory owned by uid 1000, not root or the running user (uid 0)"}
+	if msg := explainRefusedPath(perm, refusalSides{input: "/var/backups/b"}).Error(); !strings.Contains(msg, "choose an output directory "+ownership) {
+		t.Fatalf("ownership refusal lost its advice: %q", msg)
+	}
+}
+
+// TestBackupCLIRemedyNamesRefusedSource pins the source side of backup
+// create: a config directory or an --include-file directory reached through a
+// symlink is refused, and the remedy must point that source at the real
+// directory, never tell the operator to choose a different output (audit I1).
+func TestBackupCLIRemedyNamesRefusedSource(t *testing.T) {
+	cfg, _ := cliBackupFixture(t)
+	base := t.TempDir()
+	cfgLink := filepath.Join(base, "cfglink")
+	if err := os.Symlink(filepath.Dir(cfg), cfgLink); err != nil {
+		t.Fatal(err)
+	}
+	incReal := filepath.Join(base, "increal")
+	if err := os.Mkdir(incReal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incReal, "f"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	incLink := filepath.Join(base, "inclink")
+	if err := os.Symlink(incReal, incLink); err != nil {
+		t.Fatal(err)
+	}
+	// A data root named by the config (the evidence directory) reached
+	// through a symlink is a source too.
+	loaded, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evReal := filepath.Join(base, "evreal")
+	if err := os.Mkdir(evReal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	evLink := filepath.Join(base, "evlink")
+	if err := os.Symlink(evReal, evLink); err != nil {
+		t.Fatal(err)
+	}
+	loaded.Capture.EvidenceDir = evLink
+	data, err := yaml.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evCfg := filepath.Join(filepath.Dir(cfg), "evidence-link.yaml")
+	if err := os.WriteFile(evCfg, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	const ownership = "whose ancestors are all owned by root"
+	for _, tc := range []struct {
+		name, config string
+		args         []string
+		want         []string
+	}{
+		{"config-dir-symlink", filepath.Join(cfgLink, filepath.Base(cfg)), []string{"create", "--output", filepath.Join(t.TempDir(), "NEW")},
+			[]string{strconv.Quote(cfgLink), "point the config", "real directory"}},
+		{"include-file-symlink", cfg, []string{"create", "--output", filepath.Join(t.TempDir(), "NEW"), "--include-file", filepath.Join(incLink, "f")},
+			[]string{strconv.Quote(incLink), "point --include-file", "real directory"}},
+		{"evidence-root-symlink", evCfg, []string{"create", "--output", filepath.Join(t.TempDir(), "NEW")},
+			[]string{strconv.Quote(evLink), "point the config", "evidence", "real directory"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runBackup(context.Background(), tc.config, tc.args, &bytes.Buffer{})
+			if err == nil {
+				t.Fatal("symlinked source accepted")
+			}
+			msg := err.Error()
+			t.Log(msg)
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Fatalf("%q lacks %q", msg, w)
+				}
+			}
+			for _, d := range []string{"output directory", "bundle path", ownership} {
+				if strings.Contains(msg, d) {
+					t.Fatalf("%q wrongly contains %q", msg, d)
+				}
+			}
+		})
+	}
+	// Unsupported filesystems cannot be staged portably: check the source
+	// mapping on a synthetic refusal, for the config and --include-file sides.
+	unsupported := &safefile.PathRefusal{Kind: safefile.ErrUnsupported, Path: "/mnt/nfs", Reason: "filesystem is not ext4, xfs, btrfs, tmpfs or overlayfs"}
+	for sides, want := range map[*refusalSides]string{
+		{create: true, config: "/mnt/nfs/etc/shardlure.yaml", output: "/var/backups/b"}:                               "point the config",
+		{create: true, config: "/etc/shardlure.yaml", output: "/var/backups/b", includes: []string{"/mnt/nfs/k/key"}}: "point --include-file",
+	} {
+		msg := explainRefusedPath(unsupported, *sides).Error()
+		if !strings.Contains(msg, want) || !strings.Contains(msg, "supported filesystem") || strings.Contains(msg, "output directory") {
+			t.Fatalf("%+v: %q", *sides, msg)
+		}
+	}
+}
+
+// When --output and --include-file sit under one symlinked directory, create
+// opens the output's parent first (create.go: output before includes), so the
+// refusal names the output's parent and the remedy must be about the output,
+// not --include-file (re-review of audit I1).
+func TestBackupCLIRemedySharedSymlinkAncestor(t *testing.T) {
+	cfg, _ := cliBackupFixture(t)
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(real, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{filepath.Join(real, "f"), filepath.Join(real, "sub", "f")} {
+		if err := os.WriteFile(f, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, inc := range map[string]string{"same-dir": filepath.Join(link, "f"), "include-below": filepath.Join(link, "sub", "f")} {
+		t.Run(name, func(t *testing.T) {
+			err := runBackup(context.Background(), cfg, []string{"create", "--output", filepath.Join(link, "NEW"), "--include-file", inc}, &bytes.Buffer{})
+			if err == nil {
+				t.Fatal("symlinked output accepted")
+			}
+			msg := err.Error()
+			t.Log(msg)
+			if !strings.Contains(msg, strconv.Quote(link)) || !strings.Contains(msg, "choose an output directory without symlinks") || strings.Contains(msg, "--include-file") {
+				t.Fatalf("remedy does not name the output: %q", msg)
+			}
+		})
+	}
+	// Synthetic: a refusal naming exactly an include's directory, under the
+	// same symlinked ancestor as the output, is the include's.
+	unsafe := &safefile.PathRefusal{Kind: safefile.ErrUnsafePath, Path: "/srv/link/sub", Reason: "path has a symlink or non-directory component"}
+	msg := explainRefusedPath(unsafe, refusalSides{create: true, config: "/etc/shardlure/shardlure.yaml", output: "/srv/link/NEW", includes: []string{"/srv/link/sub/f"}}).Error()
+	if !strings.Contains(msg, "point --include-file") {
+		t.Fatalf("include refusal misattributed: %q", msg)
+	}
+	// The config directory opens before the output's parent: when they are
+	// the same directory, the refusal is the config's.
+	unsafe.Path = "/srv/link"
+	msg = explainRefusedPath(unsafe, refusalSides{create: true, config: "/srv/link/shardlure.yaml", output: "/srv/link/NEW"}).Error()
+	if !strings.Contains(msg, "point the config") {
+		t.Fatalf("config refusal misattributed: %q", msg)
+	}
+}
+
+// A symlinked --include-file or config *file* (not directory) used to print
+// only "filesystem or database operation failed" / "invalid or missing
+// configuration", and the include case left a .incomplete staging directory
+// beside the output (final audit M3). The refusal must name the file with its
+// own side's remedy, and nothing may be left in the output's parent.
+func TestBackupCLIRemedyNamesRefusedSourceFile(t *testing.T) {
+	cfg, _ := cliBackupFixture(t)
+	base := t.TempDir()
+	real := filepath.Join(base, "real-key")
+	if err := os.WriteFile(real, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	incLink := filepath.Join(base, "key-link")
+	if err := os.Symlink(real, incLink); err != nil {
+		t.Fatal(err)
+	}
+	cfgLink := filepath.Join(filepath.Dir(cfg), "link.yaml")
+	if err := os.Symlink(cfg, cfgLink); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, config string
+		extra        []string
+		want         []string
+	}{
+		{"include-file", cfg, []string{"--include-file", incLink}, []string{strconv.Quote(incLink), "symbolic link", "point --include-file", "real directory"}},
+		{"config-file", cfgLink, nil, []string{strconv.Quote(cfgLink), "symbolic link", "point the config", "real directory"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			var out bytes.Buffer
+			err := runBackup(context.Background(), tc.config, append([]string{"create", "--output", filepath.Join(parent, "NEW")}, tc.extra...), &out)
+			if err == nil {
+				t.Fatal("symlinked source file accepted")
+			}
+			msg := err.Error()
+			t.Log(msg)
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Fatalf("%q lacks %q", msg, w)
+				}
+			}
+			for _, d := range []string{"output directory", "bundle path", "filesystem or database operation failed"} {
+				if strings.Contains(msg, d) {
+					t.Fatalf("%q wrongly contains %q", msg, d)
+				}
+			}
+			if strings.Contains(out.String(), "retained") {
+				t.Fatalf("staging reported retained: %q", out.String())
+			}
+			if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
+				t.Fatalf("output parent not empty after refusal: %v %v", entries, err)
+			}
+		})
 	}
 }

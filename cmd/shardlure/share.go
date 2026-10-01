@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -69,6 +70,18 @@ func abuseCHKey(cfg config.Config, keys *settings.Keystore, extraEnv ...string) 
 	return ""
 }
 
+// validateOutboundLimit refuses a negative --limit on share/report. The
+// intel packages read any non-positive budget as "no cap", so a typo'd -1
+// used to turn a bounded run of irreversible submissions into an unbounded
+// one — the pattern already refused for actors (final audit M4). 0 stays the
+// documented "unbounded".
+func validateOutboundLimit(n int) error {
+	if n < 0 {
+		return fmt.Errorf("--limit must be 0 (unbounded) or positive, got %d", n)
+	}
+	return nil
+}
+
 func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
 	// intel.bazaar.freshness_days tightens both the default candidate-selection
 	// window and Vet. --since may widen local selection, but never Vet policy.
@@ -82,7 +95,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	// of the candidate list. Truncating first meant the budget was consumed by
 	// already-shared hashes at the top of the newest-first list, so the default
 	// shipped nothing while vettable samples sat just below the cut.
-	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded); counts submissions, not candidates examined")
+	limit := fs.Int("limit", 10, "max samples to upload in this run (0 = unbounded, negative refused); counts submissions, not candidates examined")
 	sha := fs.String("sha", "", "select only the sample with this sha256 (still subject to dedup and Vet)")
 	since := fs.Duration("since", time.Duration(freshDays)*24*time.Hour, "local candidate-selection window; does not change the 10-day upload ceiling")
 	anonymous := fs.Bool("anonymous", false, "submit without attribution to your account")
@@ -90,6 +103,15 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	comment := fs.String("comment", "", "extra comment appended to every sample's context.comment")
 	endpoint := fs.String("endpoint", "", "override MalwareBazaar endpoint (default from config or builtin)")
 	_ = fs.Parse(args)
+	// flag stops at the first non-flag, so a stray positional would silently
+	// drop every flag after it — including --dry-run, turning a preview into a
+	// real, irreversible run. Refuse it, as share urlhaus/threatfox do.
+	if fs.NArg() > 0 {
+		fatal(fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	}
+	if err := validateOutboundLimit(*limit); err != nil {
+		fatal(err)
+	}
 
 	if *statusOnly {
 		printBazaarStatus(st)
@@ -158,7 +180,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	uploaded, skipped, ferr := bazaar.Share(ctx, &bazaarRecorderAdapter{st: st}, cands, opts)
 	fmt.Printf("\nresult: uploaded=%d skipped=%d\n", uploaded, skipped)
 	if ferr != nil {
-		fatal(ferr)
+		fatalRemote(ferr)
 	}
 }
 
@@ -246,29 +268,35 @@ func artifactToCandidate(a store.Artifact) bazaar.Candidate {
 // deliberately verbose: this is a destructive, public action and the
 // operator should be able to read the output as a contract.
 func printBazaarProgress(c bazaar.Candidate, cls bazaar.Classification, r *bazaar.Result, err error) {
-	prefix := shaShort(c.SHA256)
-	tags := strings.Join(cls.Tags, ",")
+	fprintBazaarProgress(os.Stdout, c, cls, r, err)
+}
+
+func fprintBazaarProgress(w io.Writer, c bazaar.Candidate, cls bazaar.Classification, r *bazaar.Result, err error) {
+	// Every field below is attacker-derived (classified from their bytes) or
+	// came back from MalwareBazaar, so each goes through termSafe.
+	prefix := termSafe(shaShort(c.SHA256))
+	tags := termSafe(strings.Join(cls.Tags, ","))
 	if tags == "" {
 		tags = "-"
 	}
-	fam := cls.Family
+	fam := termSafe(cls.Family)
 	if fam == "" {
 		fam = "-"
 	}
-	header := fmt.Sprintf("  %s %8d  %-18s %-25s", prefix, c.SizeBytes, cls.FileKind, fam)
+	header := fmt.Sprintf("  %s %8d  %-18s %-25s", prefix, c.SizeBytes, termSafe(cls.FileKind), fam)
 	switch {
 	case err != nil:
-		fmt.Printf("%s tags=%s\n    ERROR: %v\n", header, tags, err)
+		fmt.Fprintf(w, "%s tags=%s\n    ERROR: %s\n", header, tags, termSafe(err.Error()))
 	case r == nil:
-		fmt.Printf("%s tags=%s\n    (no result)\n", header, tags)
+		fmt.Fprintf(w, "%s tags=%s\n    (no result)\n", header, tags)
 	case r.Status == "dry-run":
-		fmt.Printf("%s tags=%s\n", header, tags)
+		fmt.Fprintf(w, "%s tags=%s\n", header, tags)
 	default:
 		extra := ""
 		if r.SampleURL != "" {
 			extra = " " + r.SampleURL
 		}
-		fmt.Printf("%s tags=%s\n    -> %s%s\n", header, tags, r.Status, extra)
+		fmt.Fprintf(w, "%s tags=%s\n    -> %s%s\n", header, tags, termSafe(r.Status), termSafe(extra))
 	}
 }
 
@@ -277,14 +305,18 @@ func printBazaarStatus(st *store.Store) {
 	if err != nil {
 		fatal(err)
 	}
+	fprintBazaarStatus(os.Stdout, rows)
+}
+
+func fprintBazaarStatus(w io.Writer, rows []store.BazaarUpload) {
 	if len(rows) == 0 {
-		fmt.Println("(no uploads recorded)")
+		fmt.Fprintln(w, "(no uploads recorded)")
 		return
 	}
-	fmt.Printf("%-12s  %-25s  %-22s  %s\n", "sha256", "uploaded_at (UTC)", "status", "url")
+	fmt.Fprintf(w, "%-12s  %-25s  %-22s  %s\n", "sha256", "uploaded_at (UTC)", "status", "url")
 	for _, u := range rows {
 		ts := u.UploadedAt.UTC().Format("2006-01-02 15:04:05")
-		fmt.Printf("%-12s  %-25s  %-22s  %s\n", shaShort(u.SHA256), ts, u.ResponseStatus, u.MBURL)
+		fmt.Fprintf(w, "%-12s  %-25s  %-22s  %s\n", termSafe(shaShort(u.SHA256)), ts, termSafe(u.ResponseStatus), termSafe(u.MBURL))
 	}
 }
 

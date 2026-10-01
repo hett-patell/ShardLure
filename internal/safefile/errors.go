@@ -22,6 +22,24 @@ var (
 	ErrClosed      = fs.ErrClosed
 )
 
+// PathRefusal explains why a safety check refused a directory: which one
+// (Path) and which check failed (Reason). Error renders only the fixed
+// category and Reason, never Path, so it stays safe to log; Reason is built
+// from uids, modes and fixed text only. Operator-facing CLI output may print
+// Path explicitly, since it is a location the operator chose or its ancestor.
+type PathRefusal struct {
+	Kind   error
+	Path   string
+	Reason string
+}
+
+func (e *PathRefusal) Error() string { return e.Kind.Error() + ": " + e.Reason }
+func (e *PathRefusal) Unwrap() error { return e.Kind }
+
+func refuse(kind error, path, reason string) error {
+	return &PathRefusal{Kind: kind, Path: path, Reason: reason}
+}
+
 // Category returns a fixed, non-sensitive sentinel name for the first
 // safefile error that matches err, or "unknown" if none match.  It is
 // safe to log because the sentinels are compile-time constants that

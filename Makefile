@@ -7,9 +7,9 @@ build:
 test:
 	go test ./...
 
-# Opt-in fuzzing of the three parsers that consume attacker-controlled input:
-# the sshd journal line parser, the cowrie jsonlog reader, and the cowrie TTY
-# binary decoder. NOT part of `make test` or CI — CI already executes each
+# Opt-in fuzzing of the four parsers that consume attacker-controlled input:
+# the sshd journal line parser, the cowrie jsonlog reader, the cowrie TTY
+# binary decoder, and the campaign script normaliser. NOT part of `make test` or CI — CI already executes each
 # target's seed corpus during `go test` (which is what catches regressions on
 # known-bad inputs); this target is for exploring new ones.
 #
@@ -19,6 +19,7 @@ fuzz:
 	go test ./internal/ingest/journal/ -run=XXX -fuzz=FuzzParseLine     -fuzztime=$(FUZZTIME)
 	go test ./internal/ingest/cowrie/  -run=XXX -fuzz=FuzzParseReader    -fuzztime=$(FUZZTIME)
 	go test ./internal/capture/        -run=XXX -fuzz=FuzzDecodeTTYReader -fuzztime=$(FUZZTIME)
+	go test ./internal/script/         -run=XXX -fuzz=FuzzNormalizeCommand -fuzztime=$(FUZZTIME)
 
 deploy:
 	bash scripts/push-sources.sh arm

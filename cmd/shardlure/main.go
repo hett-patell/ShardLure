@@ -103,6 +103,12 @@ func main() {
 		cmdActors(st, args[1:])
 	case "actor":
 		cmdActor(st, args[1:])
+	case "campaigns":
+		cmdCampaigns(st, args[1:])
+	case "campaign":
+		cmdCampaign(st, args[1:])
+	case "scripts":
+		cmdScripts(st, args[1:])
 	case "reclassify":
 		cmdReclassify(st, cfg, args[1:])
 	case "dashboard", "dash", "tui":
@@ -588,13 +594,41 @@ func planReclassify(st *store.Store, admin *netmatch.Set) (*reclassifyPlan, erro
 	return plan, nil
 }
 
-func cmdActors(st *store.Store, args []string) {
-	fs := flag.NewFlagSet("actors", flag.ExitOnError)
-	limit := fs.Int("limit", 25, "max actors to list")
-	if err := fs.Parse(args); err != nil {
-		fatal(err)
+// parseActorsArgs checks --limit: 0 lists every actor (the share/report
+// "0 = unbounded" idiom; ListActors reads a non-positive limit as no limit),
+// 1..1000 bounds the list like the campaign commands (validateListLimit), and
+// a negative value - which used to reach ListActors and silently list every
+// actor too - is refused, as is a stray positional argument.
+//
+// The 1000 bound here is not validateListLimit's reason: ListActors has no
+// cap of its own and would honour --limit=1500. It is a deliberate, documented
+// narrowing (CLAUDE.md Conventions, "--limit") so every list command takes the
+// same range, with 0 as the one explicit way to ask for everything; asking for
+// more than 1000 gets an error pointing at 0, never a quietly shorter list.
+func parseActorsArgs(args []string) (int, error) {
+	fs := flag.NewFlagSet("actors", flag.ContinueOnError)
+	limit := fs.Int("limit", 25, "max actors to list, 1..1000 (0 = all)")
+	if err := parseCmdFlags(fs, args); err != nil {
+		return 0, err
 	}
-	actors, err := st.ListActors(*limit)
+	if fs.NArg() > 0 {
+		return 0, fmt.Errorf("unexpected argument %q (usage: shardlure actors [--limit=N])", fs.Arg(0))
+	}
+	if *limit == 0 {
+		return 0, nil
+	}
+	if err := validateListLimit(*limit); err != nil {
+		return 0, fmt.Errorf("%w (or 0 for all actors)", err)
+	}
+	return *limit, nil
+}
+
+func cmdActors(st *store.Store, args []string) {
+	limit, err := parseActorsArgs(args)
+	if err != nil {
+		exitCmd(err)
+	}
+	actors, err := st.ListActors(limit)
 	if err != nil {
 		fatal(err)
 	}
@@ -602,14 +636,14 @@ func cmdActors(st *store.Store, args []string) {
 	fmt.Fprintln(w, "ACTOR\tIP\tPLAYBOOK\tEVENTS\tUSR\tRATE/h\tLAST\tCONF")
 	for _, a := range actors {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f\t%s\t%s\n",
-			actor.TrimActorPrefix(a.ID), a.PrimaryIP, a.Playbook, a.EventCount, a.UniqueUsers,
+			termSafe(actor.TrimActorPrefix(a.ID)), termSafe(a.PrimaryIP), termSafe(a.Playbook), a.EventCount, a.UniqueUsers,
 			a.AttemptsPerHour, a.LastSeen.Format(time.RFC3339), actor.ConfidenceTier(a.Confidence))
 	}
 	w.Flush()
 }
 
 func cmdActor(st *store.Store, args []string) {
-	if len(args) < 2 || args[0] != "show" {
+	if len(args) != 2 || args[0] != "show" {
 		fatal(fmt.Errorf("usage: shardlure actor show <id|ip>"))
 	}
 	id := args[1]
@@ -625,12 +659,26 @@ func cmdActor(st *store.Store, args []string) {
 		fatal(err)
 	}
 	users, _ := st.ActorUsers(id)
-	b, _ := json.MarshalIndent(a, "", "  ")
-	fmt.Println(string(b))
-	fmt.Println("\nTop usernames:")
-	for _, u := range users {
-		fmt.Printf("  %6d  %s\n", u.Count, u.Username)
+	if err := writeActor(os.Stdout, a, users); err != nil {
+		fatal(err)
 	}
+}
+
+// writeActor prints an actor for `actor show`. Usernames, the SSH client
+// string, notes and the actor ID are attacker bytes: the JSON is re-escaped
+// by jsonTermSafe (still valid, lossless JSON) and the username list goes
+// through termSafe, so neither can drive the operator's terminal.
+func writeActor(w io.Writer, a *models.Actor, users []models.ActorUser) error {
+	b, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, jsonTermSafe(string(b)))
+	fmt.Fprintln(w, "\nTop usernames:")
+	for _, u := range users {
+		fmt.Fprintf(w, "  %6d  %s\n", u.Count, termSafe(u.Username))
+	}
+	return nil
 }
 
 func cmdStatus(st *store.Store) {
@@ -647,7 +695,7 @@ func cmdIOC(st *store.Store) {
 	fmt.Println("# ShardLure IOC slice (all actors)")
 	for _, a := range actors {
 		fmt.Printf("%s  playbook=%s  events=%d  rate=%.0f/h  probe=%d\n",
-			a.PrimaryIP, a.Playbook, a.EventCount, a.AttemptsPerHour, a.ProbeScore)
+			termSafe(a.PrimaryIP), termSafe(a.Playbook), a.EventCount, a.AttemptsPerHour, a.ProbeScore)
 	}
 }
 
@@ -661,8 +709,12 @@ func usageTo(w io.Writer) {
 
 Usage:
   shardlure ingest <journal|cowrie> <file> [--replace]
-  shardlure actors [--limit=25]
-  shardlure actor show <ip>
+  shardlure actors [--limit=25]          (1..1000, 0 = all)
+  shardlure actor show <id|ip>
+  shardlure campaigns [--limit=50]       (1..1000)
+  shardlure campaign show <id|name>
+  shardlure scripts [--limit=50]         (1..1000)
+  shardlure scripts --rebuild
   shardlure reclassify cowrie [--dry-run]
   shardlure dashboard
   shardlure web [:8080] [--tailscale]

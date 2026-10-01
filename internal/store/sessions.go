@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -84,26 +85,12 @@ func (s *Store) sessionSummariesSince(since time.Time, minCommands, limit int) (
 // grouped rows, before LIMIT). Grouping the window a second time just to count
 // doubled the cost of the slowest intel panel on prod.
 func (s *Store) sessionSummaryPage(since time.Time, minCommands, limit int) ([]ShellSessionSummary, int, error) {
-	window, args := sessionWindow(since)
-	query := `WITH w AS (` + window + `)
-SELECT session_id, MAX(src_ip), COALESCE(MAX(CASE WHEN username<>'' THEN username END),''),
-  COALESCE(MAX(hassh),''), COALESCE(MAX(ssh_client),''), COALESCE(MAX(actor_id),''),
-  MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END),
-  COUNT(*) OVER ()
-FROM w GROUP BY session_id`
-	// HAVING, not WHERE: "has commands" is a property of the whole session.
-	// Filtering rows would drop its login/connect events and corrupt every
-	// other aggregate (event count, start time, username).
-	if minCommands > 0 {
-		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
-		args = append(args, minCommands)
-	}
-	query += ` ORDER BY MAX(exact_ts) DESC, session_id ASC`
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	rows, err := s.db.Query(query, args...)
+	return s.sessionSummaryPageContext(context.Background(), since, minCommands, limit)
+}
+
+func (s *Store) sessionSummaryPageContext(ctx context.Context, since time.Time, minCommands, limit int) ([]ShellSessionSummary, int, error) {
+	query, args := sessionSummaryQuery(since, minCommands, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -130,6 +117,78 @@ FROM w GROUP BY session_id`
 	return out, total, rows.Err()
 }
 
+// shellCandidates lists the sessions with at least one command-bearing event
+// in the window, from those rows alone. Commands are ~1% of events and ~99.5%
+// of sessions are bare connects, so this is what keeps a "sessions with
+// commands" page from grouping every session of the window (3.5 s of a 60 s
+// ARM profile with the landing dashboard polled every 10 s).
+//
+// The native branch reads the window through idx_events_cmd_ts, the v26
+// partial index over command-bearing events, so it visits only the ~1% of
+// in-window rows that carry a command. Its predicate must be the index's
+// WHERE clause character for character: SQLite's partial-index implication
+// check is syntactic, and the earlier spelling of the same condition,
+//
+//	COALESCE(command,'')<>''
+//
+// left the planner on the plain ts index, walking every in-window event
+// (fix-all review M2); it sits in a code block because gofmt rewrites a
+// pair of single quotes in doc-comment prose into a typographic quote.
+// INDEXED BY makes a future drift an error rather than a silent plan
+// change; the unary + keeps source out of
+// index selection, because answering source='cowrie' from idx_events_session
+// walks every Cowrie row ever stored (the planner's choice on an un-ANALYZEd
+// database). The legacy branch stays on the pinned legacy index and puts the
+// exact-time check FIRST, so a malformed legacy row in the window still fails
+// the query even when it carries no command, as it did when the whole window
+// was grouped.
+func shellCandidates(since time.Time) (string, []any) {
+	key := formatFixedUTC(since)
+	const pred = "command IS NOT NULL AND command != ''"
+	return `SELECT session_id FROM events INDEXED BY idx_events_cmd_ts WHERE ` + pred + ` AND ts_unix_ns IS NOT NULL AND ts>=? AND +source='cowrie' AND session_id<>''
+UNION SELECT session_id FROM events INDEXED BY idx_events_legacy_ts WHERE ts_unix_ns IS NULL AND ` + legacyEventTimeSQL + `>=? AND source='cowrie' AND session_id<>'' AND ` + pred,
+		[]any{key, key}
+}
+
+func sessionSummaryQuery(since time.Time, minCommands, limit int) (string, []any) {
+	window, args := sessionWindow(since)
+	query := `WITH w AS (` + window + `)
+`
+	if minCommands > 0 {
+		// Only a session with a command in the window can pass the HAVING
+		// below, so aggregate just those sessions - every in-window event of
+		// each, looked up through idx_events_session - instead of the window.
+		// The legacy branch stays pinned (globalEventTimeBranches), as in
+		// sessionWindow: left unpinned it rides idx_events_session too, and
+		// SQLite then ran the Go timestamp function on every candidate row,
+		// native ones included (~7 allocations per event, measured).
+		candidates, candidateArgs := shellCandidates(since)
+		scoped, scopedArgs := globalEventTimeBranches("id,session_id,src_ip,username,hassh,ssh_client,actor_id,command,kind", &since,
+			"source='cowrie' AND session_id IN (SELECT session_id FROM c)", nil)
+		query = `WITH c AS (` + candidates + `), w AS (` + scoped + `)
+`
+		args = append(candidateArgs, scopedArgs...)
+	}
+	query += `SELECT session_id, MAX(src_ip), COALESCE(MAX(CASE WHEN username<>'' THEN username END),''),
+  COALESCE(MAX(hassh),''), COALESCE(MAX(ssh_client),''), COALESCE(MAX(actor_id),''),
+  MIN(exact_ts), MAX(exact_ts), COUNT(*), SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END),
+  COUNT(*) OVER ()
+FROM w GROUP BY session_id`
+	// HAVING, not WHERE: "has commands" is a property of the whole session.
+	// Filtering rows would drop its login/connect events and corrupt every
+	// other aggregate (event count, start time, username).
+	if minCommands > 0 {
+		query += ` HAVING SUM(CASE WHEN COALESCE(command,'')<>'' THEN 1 ELSE 0 END) >= ?`
+		args = append(args, minCommands)
+	}
+	query += ` ORDER BY MAX(exact_ts) DESC, session_id ASC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	return query, args
+}
+
 // countSessionsSince counts the same population sessionSummariesSince lists,
 // without returning rows.
 func (s *Store) countSessionsSince(since time.Time, minCommands int) (int, error) {
@@ -147,7 +206,7 @@ func (s *Store) countSessionsSince(since time.Time, minCommands int) (int, error
 
 // stampFirstCommands fills FirstCommand for the (bounded) returned sessions:
 // the earliest in-window kind=command event, ties broken by event id.
-func (s *Store) stampFirstCommands(since time.Time, sums []ShellSessionSummary) error {
+func (s *Store) stampFirstCommands(ctx context.Context, since time.Time, sums []ShellSessionSummary) error {
 	if len(sums) == 0 {
 		return nil
 	}
@@ -162,7 +221,7 @@ func (s *Store) stampFirstCommands(since time.Time, sums []ShellSessionSummary) 
 	// Pinned legacy branch for the same reason as sessionWindow.
 	window, args := globalEventTimeBranches("id,session_id,command", &since,
 		"source='cowrie' AND kind='command' AND COALESCE(command,'')<>'' AND session_id IN ("+strings.Join(placeholders, ",")+")", ids)
-	rows, err := s.db.Query(`WITH w AS (`+window+`)
+	rows, err := s.db.QueryContext(ctx, `WITH w AS (`+window+`)
 SELECT session_id, command FROM (
   SELECT session_id, command, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY exact_ts ASC, id ASC) AS rn FROM w
 ) WHERE rn=1`, args...)
@@ -279,14 +338,20 @@ type ShellSessionSummary struct {
 // and include the earliest command observed (for the dashboard sample
 // column).
 func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionSummary, error) {
+	return s.RecentShellSessionsContext(context.Background(), since, limit)
+}
+
+// RecentShellSessionsContext is RecentShellSessions under a context (see
+// EventCountContext): the landing dashboard's background refresh runs it.
+func (s *Store) RecentShellSessionsContext(ctx context.Context, since time.Time, limit int) ([]ShellSessionSummary, error) {
 	if limit <= 0 {
 		limit = 30
 	}
-	out, err := s.sessionSummariesSince(since, 1, limit)
+	out, _, err := s.sessionSummaryPageContext(ctx, since, 1, limit)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.stampFirstCommands(since, out); err != nil {
+	if err := s.stampFirstCommands(ctx, since, out); err != nil {
 		return nil, err
 	}
 	// Stamp duration/arch from the side-channel. ShellSessionSummary embeds
@@ -297,7 +362,7 @@ func (s *Store) RecentShellSessions(since time.Time, limit int) ([]ShellSessionS
 			ids = append(ids, out[i].ID)
 		}
 	}
-	meta, err := s.SessionMetaForSessions(ids)
+	meta, err := s.SessionMetaForSessionsContext(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -360,9 +425,12 @@ FROM events WHERE source='cowrie' AND session_id=?`, sessionID)
 // beside all-time events/actors/IPs, and using len(RecentShellSessions) would be
 // worse still: that slice is LIMITed to 30, so the tile would read "30" forever
 // once a honeypot passed 30 sessions.
-func (s *Store) CountSessions() (int, error) {
+func (s *Store) CountSessions() (int, error) { return s.CountSessionsContext(context.Background()) }
+
+// CountSessionsContext is CountSessions under a context (see EventCountContext).
+func (s *Store) CountSessionsContext(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(DISTINCT session_id) FROM events
 WHERE source='cowrie' AND session_id != ''`).Scan(&n)
 	return n, err

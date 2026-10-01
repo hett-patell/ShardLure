@@ -31,9 +31,26 @@ func TestUsageDocumentsEveryDispatchedCommand(t *testing.T) {
 		"share urlhaus",
 		"share threatfox",
 		"report abuseipdb",
+		"campaigns",
+		"campaign show",
+		"scripts",
+		"scripts --rebuild",
 	} {
 		if !strings.Contains(got, "shardlure "+cmd) {
 			t.Errorf("usage() does not document %q\n---\n%s", cmd, got)
+		}
+	}
+}
+
+// The usage text matches what the commands accept: actor show takes an
+// actor ID as well as an IP, and actors documents its 0 = all (audit M6).
+func TestUsageDocumentsActorArgs(t *testing.T) {
+	var buf bytes.Buffer
+	usageTo(&buf)
+	got := buf.String()
+	for _, want := range []string{"shardlure actor show <id|ip>", "0 = all"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("usage lacks %q", want)
 		}
 	}
 }

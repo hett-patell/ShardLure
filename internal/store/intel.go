@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -37,12 +38,18 @@ type CommandEvent struct {
 }
 
 func (s *Store) HourlyEventCountsByKind(limitHours int) ([]HourlyKindCell, error) {
+	return s.HourlyEventCountsByKindContext(context.Background(), limitHours)
+}
+
+// HourlyEventCountsByKindContext is HourlyEventCountsByKind under a context
+// (see EventCountContext).
+func (s *Store) HourlyEventCountsByKindContext(ctx context.Context, limitHours int) ([]HourlyKindCell, error) {
 	if limitHours <= 0 {
 		limitHours = 72
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(limitHours) * time.Hour)
 	window, args := eventTimeBranches("kind", &cutoff, "", nil)
-	rows, err := s.db.Query("WITH hourly_events AS ("+window+") "+`
+	rows, err := s.db.QueryContext(ctx, "WITH hourly_events AS ("+window+") "+`
 SELECT substr(exact_ts, 1, 13) AS hour, kind, COUNT(*) AS hits
 FROM hourly_events
 GROUP BY hour, kind
@@ -68,23 +75,39 @@ ORDER BY hour ASC, kind ASC`, args...)
 }
 
 func (s *Store) CountsByKind() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT kind, COUNT(*) AS hits FROM events GROUP BY kind ORDER BY hits DESC`)
+	return s.CountsByKindContext(context.Background())
+}
+
+func (s *Store) CountsByKindContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, `SELECT kind, COUNT(*) AS hits FROM events GROUP BY kind ORDER BY hits DESC`)
 }
 
 func (s *Store) CountsByIntent() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT intent, COUNT(*) AS hits FROM actors WHERE intent != '' GROUP BY intent ORDER BY hits DESC`)
+	return s.CountsByIntentContext(context.Background())
+}
+
+func (s *Store) CountsByIntentContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, `SELECT intent, COUNT(*) AS hits FROM actors WHERE intent != '' GROUP BY intent ORDER BY hits DESC`)
 }
 
 func (s *Store) CountsByPlaybook() ([]LabelCount, error) {
-	return s.labelCounts("SELECT label,COUNT(*) AS hits FROM (SELECT " + actorVisiblePlaybookSQL + " AS label FROM actors) WHERE label<>'' GROUP BY label ORDER BY hits DESC,label")
+	return s.CountsByPlaybookContext(context.Background())
+}
+
+func (s *Store) CountsByPlaybookContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, "SELECT label,COUNT(*) AS hits FROM (SELECT "+actorVisiblePlaybookSQL+" AS label FROM actors) WHERE label<>'' GROUP BY label ORDER BY hits DESC,label")
 }
 
 func (s *Store) CountsBySource() ([]LabelCount, error) {
-	return s.labelCounts(`SELECT source, COUNT(*) AS hits FROM events GROUP BY source ORDER BY hits DESC`)
+	return s.CountsBySourceContext(context.Background())
 }
 
-func (s *Store) labelCounts(query string) ([]LabelCount, error) {
-	rows, err := s.db.Query(query)
+func (s *Store) CountsBySourceContext(ctx context.Context) ([]LabelCount, error) {
+	return s.labelCounts(ctx, `SELECT source, COUNT(*) AS hits FROM events GROUP BY source ORDER BY hits DESC`)
+}
+
+func (s *Store) labelCounts(ctx context.Context, query string) ([]LabelCount, error) {
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -100,13 +123,34 @@ func (s *Store) labelCounts(query string) ([]LabelCount, error) {
 	return out, rows.Err()
 }
 
+// RecentCommands returns the newest `limit` command-bearing events (exact
+// time, ties by id), newest first.
+//
+// It used to be orderedGlobalEventQuery over every migrated row: with no index
+// that can skip rows without a command, the native branch visited the whole
+// table to find the ~1% with one, ~260 ms per /api/intel request on a
+// 640k-event database. The native branch now reads idx_events_cmd_ts (v26,
+// partial over command rows) newest-first and stops after `limit` rows; ts is
+// canonical fixed-width text for migrated rows and rowid breaks ties in index
+// order, so its first `limit` rows are exactly its newest. The legacy branch
+// stays on the pinned, shrinking idx_events_legacy_ts, as every global mixed
+// read does, and the merge re-applies the exact-time order and the limit.
 func (s *Store) RecentCommands(limit int) ([]CommandEvent, error) {
+	query, args := recentCommandsQuery(limit)
+	return s.commandEvents(query, args)
+}
+
+func recentCommandsQuery(limit int) (string, []any) {
 	if limit <= 0 {
 		limit = 50
 	}
-	query, args := orderedGlobalEventQuery(commandEventColumns, nil,
-		"command IS NOT NULL AND command != ''", nil, true, limit)
-	return s.commandEvents(query, args)
+	const pred = "command IS NOT NULL AND command != ''"
+	query := `SELECT * FROM (SELECT ` + commandEventColumns + `,ts AS exact_ts FROM events INDEXED BY idx_events_cmd_ts
+WHERE ` + pred + ` AND ts_unix_ns IS NOT NULL ORDER BY ts DESC, id DESC LIMIT ?)
+UNION ALL SELECT ` + commandEventColumns + `,` + legacyEventTimeSQL + ` AS exact_ts FROM events INDEXED BY idx_events_legacy_ts
+WHERE ts_unix_ns IS NULL AND (` + pred + `)
+ORDER BY exact_ts DESC, id DESC LIMIT ?`
+	return query, []any{limit, limit}
 }
 
 func (s *Store) EventsByActor(actorID string, limit int) ([]CommandEvent, error) {
@@ -224,42 +268,89 @@ func (s *Store) LastCommandByActor(actorID string) (string, error) {
 	return cmd, err
 }
 
+// lastCommandNativeQuery / lastCommandLegacyQuery read ONE actor's newest
+// command through partial (actor_id, ts) indexes over command-bearing rows
+// only (schema v26).
+//
+// The native branch walks idx_events_actor_cmd newest-first (ts is canonical
+// fixed-width text for migrated rows, and rowid breaks ties in index order)
+// and stops at the first migrated row.
+//
+// The legacy branch reads idx_events_actor_cmd_legacy, whose predicate also
+// requires ts_unix_ns IS NULL. On idx_events_actor_cmd the legacy filter
+// could only be checked after a table lookup, so every call visited ALL of
+// the actor's command rows, converted or not (~9.5 ms for one actor with 19k
+// command rows under C SQLite, more under modernc on ARM), on every uncached
+// /api/intel poll. On the legacy-only index it visits just the actor's
+// unconverted command rows, ordered by the exact parsed time, and that index
+// really does shrink to nothing: the backfill sets ts_unix_ns, which removes
+// the row from it. Actor-scoped, never the global legacy index (see
+// eventTimeBranches).
+const (
+	lastCommandNativeQuery = `SELECT command, ts, id FROM events INDEXED BY idx_events_actor_cmd
+WHERE actor_id=? AND command IS NOT NULL AND command != '' AND ts_unix_ns IS NOT NULL ORDER BY ts DESC, id DESC LIMIT 1`
+	lastCommandLegacyQuery = `SELECT command, ` + legacyEventTimeSQL + ` AS exact_ts, id FROM events INDEXED BY idx_events_actor_cmd_legacy
+WHERE actor_id=? AND command IS NOT NULL AND command != '' AND ts_unix_ns IS NULL ORDER BY exact_ts DESC, id DESC LIMIT 1`
+)
+
 // LastCommandsForActors returns the most recent non-empty command per actor
-// for a batch of actor IDs in ONE query — so the /api/intel actor list can
-// fill its "Last cmd" column without an N+1 (or leaving it permanently blank,
-// which it was: handleIntel never called the per-actor version). Mirrors
-// ActorUsersForActors' window-function approach; actors with no command event
-// are simply absent from the map. Uses idx_events_actor_ts for the ordering.
+// (latest exact event time, ties by event id), so the /api/intel actor list
+// can fill its "Last cmd" column. Actors with no command event are absent.
+//
+// It used to rank every command event of each actor's whole history in one
+// window-function query through idx_events_actor_ts. That index cannot skip
+// the rows without a command, so every command-less actor - most of them:
+// handshake scanners - was walked end to end on every /api/intel poll: 0.87 s
+// of CPU per request on a 640k-event database, 97% of the handler. Two
+// LIMIT 1 reads per actor through the partial command index touch only
+// command rows, and a command-less actor costs one empty index seek.
 func (s *Store) LastCommandsForActors(ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	base, args := eventTimeBranches("id,actor_id,command", nil,
-		"actor_id IN ("+strings.Join(placeholders, ",")+") AND command IS NOT NULL AND command != ''", args)
-	q := "WITH command_events AS (" + base + ") " + `
-SELECT actor_id, command FROM (
-  SELECT actor_id, command,
-         ROW_NUMBER() OVER (PARTITION BY actor_id ORDER BY exact_ts DESC,id DESC) AS rn
-  FROM command_events
-) WHERE rn = 1`
-	rows, err := s.db.Query(q, args...)
+	native, err := s.db.Prepare(lastCommandNativeQuery)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, cmd string
-		if err := rows.Scan(&id, &cmd); err != nil {
+	defer native.Close()
+	legacy, err := s.db.Prepare(lastCommandLegacyQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer legacy.Close()
+	type hit struct {
+		command, ts string
+		id          int64
+		ok          bool
+	}
+	read := func(stmt *sql.Stmt, actor string) (hit, error) {
+		var h hit
+		err := stmt.QueryRow(actor).Scan(&h.command, &h.ts, &h.id)
+		if err == sql.ErrNoRows {
+			return h, nil
+		}
+		h.ok = err == nil
+		return h, err
+	}
+	for _, actor := range ids {
+		n, err := read(native, actor)
+		if err != nil {
 			return nil, err
 		}
-		out[id] = cmd
+		l, err := read(legacy, actor)
+		if err != nil {
+			return nil, err
+		}
+		// Both times are the fixed-width UTC form (formatFixedUTC), so they
+		// compare as strings; the id breaks a tie, as the ranking did.
+		best := n
+		if l.ok && (!n.ok || l.ts > n.ts || (l.ts == n.ts && l.id > n.id)) {
+			best = l
+		}
+		if best.ok {
+			out[actor] = best.command
+		}
 	}
-	return out, rows.Err()
+	return out, nil
 }

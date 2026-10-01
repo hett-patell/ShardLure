@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"time"
@@ -190,6 +191,12 @@ ON CONFLICT(sha256) DO UPDATE SET session_id=excluded.session_id, ts=excluded.ts
 // ids (only sessions with a recorded binding appear). Chunked to stay under
 // SQLite's bound-parameter limit. Mirrors HASSHForSessions.
 func (s *Store) SessionMetaForSessions(ids []string) (map[string]SessionMeta, error) {
+	return s.SessionMetaForSessionsContext(context.Background(), ids)
+}
+
+// SessionMetaForSessionsContext is SessionMetaForSessions under a context
+// (see EventCountContext).
+func (s *Store) SessionMetaForSessionsContext(ctx context.Context, ids []string) (map[string]SessionMeta, error) {
 	out := make(map[string]SessionMeta, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -212,7 +219,7 @@ func (s *Store) SessionMetaForSessions(ids []string) (map[string]SessionMeta, er
 		}
 		q := "SELECT session_id, COALESCE(duration_ms,0), COALESCE(arch,'') FROM cowrie_session_meta WHERE session_id IN (" +
 			strings.Join(placeholders, ",") + ")"
-		if err := s.QueryRows(q, args, func(scan func(...any) error) error {
+		if err := s.QueryRowsContext(ctx, q, args, func(scan func(...any) error) error {
 			var sid string
 			var m SessionMeta
 			if err := scan(&sid, &m.DurationMs, &m.Arch); err != nil {

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 
 	"flag"
@@ -33,7 +35,7 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 	// Bounds SUBMISSIONS, enforced inside threatfox.Share after Vet and dedup —
 	// never a LIMIT on the candidate query (the D3 lesson: a pre-gate LIMIT
 	// spends the budget on already-shared entries at the top of the list).
-	limit := fs.Int("limit", 25, "max candidates to submit in this run (0 = unbounded); counts submissions, not candidates examined")
+	limit := fs.Int("limit", 25, "max candidates to submit in this run (0 = unbounded, negative refused); counts submissions, not candidates examined")
 	statusOnly := fs.Bool("status", false, "list past submissions from threatfox_submissions instead of submitting")
 	activeDaysFlag := fs.Int("active-days", activeDays, "only submit IOCs confirmed serving within this many days (may only tighten)")
 	endpoint := fs.String("endpoint", "", "override the ThreatFox endpoint (default builtin)")
@@ -42,6 +44,9 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 	}
 	if fs.NArg() > 0 {
 		fatal(fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	}
+	if err := validateOutboundLimit(*limit); err != nil {
+		fatal(err)
 	}
 
 	if *statusOnly {
@@ -67,27 +72,7 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 
 	cands := make([]threatfox.Candidate, 0, len(rows))
 	for _, r := range rows {
-		// Classify off disk for BOTH the file kind (real payload / reject SSH
-		// keys) AND the malware family (ThreatFox's mandatory Malpedia label —
-		// a candidate whose family doesn't resolve is dropped by Vet). Reuses
-		// the bazaar classifier rather than duplicating it.
-		kind, family := "", ""
-		if r.LocalPath != "" {
-			if cls, cerr := bazaar.Classify(r.LocalPath); cerr == nil {
-				kind = cls.FileKind
-				family = cls.Family
-			}
-		}
-		cands = append(cands, threatfox.Candidate{
-			URL:       r.URL,
-			SHA256:    r.SHA256,
-			SizeBytes: r.SizeBytes,
-			Origin:    r.Origin,
-			Status:    r.Status,
-			FetchedAt: r.FetchedAt,
-			FileKind:  kind,
-			Family:    family,
-		})
+		cands = append(cands, threatfoxCandidateFromRow(r))
 	}
 
 	ep := *endpoint
@@ -123,7 +108,7 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 	submitted, skipped, ferr := threatfox.Share(ctx, &threatFoxRecorderAdapter{st: st}, cands, opts)
 	fmt.Printf("\nresult: submitted=%d skipped=%d\n", submitted, skipped)
 	if ferr != nil {
-		fatal(ferr)
+		fatalRemote(ferr)
 	}
 }
 
@@ -142,15 +127,21 @@ func (a *threatFoxRecorderAdapter) RecordThreatFoxSubmission(ioc, iocType, malwa
 // dataset is irreversible, so the operator reads the output as a contract of
 // what went out and what was held back.
 func printThreatFoxProgress(c threatfox.Candidate, submitted bool, iocCount int, reason string) {
+	fprintThreatFoxProgress(os.Stdout, c, submitted, iocCount, reason)
+}
+
+func fprintThreatFoxProgress(w io.Writer, c threatfox.Candidate, submitted bool, iocCount int, reason string) {
+	// Truncate raw, then termSafe (see fprintURLhausProgress).
 	url := c.URL
 	if len(url) > 64 {
 		url = url[:61] + "..."
 	}
+	url, reason = termSafe(url), termSafe(reason)
 	if submitted {
-		fmt.Printf("  SUBMIT  %-64s  %d IOC(s)  %s\n", url, iocCount, reason)
+		fmt.Fprintf(w, "  SUBMIT  %-64s  %d IOC(s)  %s\n", url, iocCount, reason)
 		return
 	}
-	fmt.Printf("  skip    %-64s  %s\n", url, reason)
+	fmt.Fprintf(w, "  skip    %-64s  %s\n", url, reason)
 }
 
 func printThreatFoxStatus(st *store.Store) {
@@ -158,13 +149,44 @@ func printThreatFoxStatus(st *store.Store) {
 	if err != nil {
 		fatal(err)
 	}
+	fprintThreatFoxStatus(os.Stdout, rows)
+}
+
+func fprintThreatFoxStatus(w io.Writer, rows []store.ThreatFoxSubmission) {
 	if len(rows) == 0 {
-		fmt.Println("(no submissions recorded)")
+		fmt.Fprintln(w, "(no submissions recorded)")
 		return
 	}
-	fmt.Printf("%-25s  %-12s  %-14s  %s\n", "submitted_at (UTC)", "type", "malware", "ioc")
+	fmt.Fprintf(w, "%-25s  %-12s  %-14s  %s\n", "submitted_at (UTC)", "type", "malware", "ioc")
 	for _, r := range rows {
-		fmt.Printf("%-25s  %-12s  %-14s  %s\n",
-			r.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), r.IOCType, r.Malware, r.IOC)
+		fmt.Fprintf(w, "%-25s  %-12s  %-14s  %s\n",
+			r.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), termSafe(r.IOCType), termSafe(r.Malware), termSafe(r.IOC))
+	}
+}
+
+// threatfoxCandidateFromRow classifies the payload off disk for BOTH the file
+// kind (real payload / reject SSH keys) AND the malware family (ThreatFox's
+// mandatory Malpedia label — a candidate whose family doesn't resolve is
+// dropped by Vet). Reuses the bazaar classifier rather than duplicating it,
+// and deliberately its outbound entry point, Classify: an ELF whose header
+// does not parse carries no family there, so a truncated payload can never
+// pass the Malpedia gate on a head-scan guess.
+func threatfoxCandidateFromRow(r store.ThreatFoxCandidateRow) threatfox.Candidate {
+	kind, family := "", ""
+	if r.LocalPath != "" {
+		if cls, cerr := bazaar.Classify(r.LocalPath); cerr == nil {
+			kind = cls.FileKind
+			family = cls.Family
+		}
+	}
+	return threatfox.Candidate{
+		URL:       r.URL,
+		SHA256:    r.SHA256,
+		SizeBytes: r.SizeBytes,
+		Origin:    r.Origin,
+		Status:    r.Status,
+		FetchedAt: r.FetchedAt,
+		FileKind:  kind,
+		Family:    family,
 	}
 }

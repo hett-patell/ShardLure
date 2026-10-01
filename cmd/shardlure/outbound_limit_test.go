@@ -1,11 +1,19 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/networkshard/shardlure/internal/config"
+	"github.com/networkshard/shardlure/internal/settings"
+	"github.com/networkshard/shardlure/internal/store"
 )
 
 // outboundCLIFiles maps each outbound command's CLI file to the Options field
@@ -242,6 +250,92 @@ func TestCLIPassesItsLimitAsASubmissionBudget(t *testing.T) {
 			t.Errorf("%s does not set %s from *limit — the --limit flag is then either "+
 				"unenforced (the whole backlog ships in one run) or enforced by truncation, "+
 				"which is the bug this pair of tests exists to prevent", file, field)
+		}
+	}
+}
+
+// A negative --limit on an outbound command used to mean "no cap": a typo'd
+// -1 turned a bounded run of irreversible submissions into an unbounded one.
+// The pattern was refused for actors; for share/report it is riskier, so a
+// negative is fatal (exit 1, one "error:" line) before any key, store read or
+// network step, and 0 stays the documented "unbounded" (final audit M4).
+// Each command runs in a child process because it exits through fatal.
+func TestOutboundNegativeLimitIsFatal(t *testing.T) {
+	commands := map[string]func(*store.Store, config.Config, *settings.Keystore, []string){
+		"share-bazaar":     cmdShareBazaar,
+		"share-urlhaus":    cmdShareURLhaus,
+		"share-threatfox":  cmdShareThreatFox,
+		"report-abuseipdb": cmdReportAbuseIPDB,
+	}
+	if name := os.Getenv("SHARDLURE_TEST_OUTBOUND_CMD"); name != "" {
+		st, err := store.Open(filepath.Join(os.Getenv("SHARDLURE_TEST_OUTBOUND_DIR"), "o.db"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "helper:", err)
+			os.Exit(3)
+		}
+		keys, err := settings.Load(st)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "helper:", err)
+			os.Exit(3)
+		}
+		commands[name](st, config.Default(), keys, strings.Fields(os.Getenv("SHARDLURE_TEST_OUTBOUND_ARGS")))
+		os.Exit(0)
+	}
+	for name := range commands {
+		for _, tc := range []struct {
+			limit string
+			fatal bool
+		}{{"-1", true}, {"-25", true}, {"0", false}, {"3", false}} {
+			t.Run(name+"/"+tc.limit, func(t *testing.T) {
+				cmd := exec.Command(os.Args[0], "-test.run=^TestOutboundNegativeLimitIsFatal$")
+				cmd.Env = append(os.Environ(), "SHARDLURE_TEST_OUTBOUND_CMD="+name, "SHARDLURE_TEST_OUTBOUND_DIR="+t.TempDir(),
+					"SHARDLURE_TEST_OUTBOUND_ARGS=--dry-run --limit="+tc.limit, "SHARDLURE_CONFIG=")
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if exit, ok := err.(*exec.ExitError); ok {
+					code = exit.ExitCode()
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if !tc.fatal {
+					if code != 0 {
+						t.Fatalf("--limit=%s refused (exit %d): %s", tc.limit, code, out)
+					}
+					return
+				}
+				if code != 1 || strings.Count(string(out), "error:") != 1 || !strings.Contains(string(out), "--limit must be 0 (unbounded) or positive, got "+tc.limit) {
+					t.Fatalf("--limit=%s: exit %d, want a single fatal error:\n%s", tc.limit, code, out)
+				}
+			})
+		}
+	}
+}
+
+// flag.Parse stops at the first non-flag, so `report abuseipdb 10 --dry-run`
+// used to drop --dry-run and run a real, irreversible reporting pass (and
+// `share bazaar x --dry-run` a real upload). Every outbound command must
+// refuse a stray positional before any key, store or network step
+// (premerge audit cmd I1). Reuses TestOutboundNegativeLimitIsFatal's child
+// helper, since the command exits through fatal.
+func TestOutboundStrayArgumentIsFatal(t *testing.T) {
+	for _, name := range []string{"share-bazaar", "share-urlhaus", "share-threatfox", "report-abuseipdb"} {
+		for _, args := range []string{"10 --dry-run", "x --dry-run --status"} {
+			t.Run(name+"/"+args, func(t *testing.T) {
+				cmd := exec.Command(os.Args[0], "-test.run=^TestOutboundNegativeLimitIsFatal$")
+				cmd.Env = append(os.Environ(), "SHARDLURE_TEST_OUTBOUND_CMD="+name, "SHARDLURE_TEST_OUTBOUND_DIR="+t.TempDir(),
+					"SHARDLURE_TEST_OUTBOUND_ARGS="+args, "SHARDLURE_CONFIG=")
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if exit, ok := err.(*exec.ExitError); ok {
+					code = exit.ExitCode()
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				want := fmt.Sprintf("unexpected argument %q", strings.Fields(args)[0])
+				if code != 1 || strings.Count(string(out), "error:") != 1 || !strings.Contains(string(out), want) {
+					t.Fatalf("%s %s: exit %d, want a single %q:\n%s", name, args, code, want, out)
+				}
+			})
 		}
 	}
 }
