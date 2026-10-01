@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"log"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/capture"
 	"github.com/networkshard/shardlure/internal/intel/bazaar"
 	"github.com/networkshard/shardlure/internal/observability"
 	"github.com/networkshard/shardlure/internal/store"
@@ -44,4 +46,35 @@ func collectFunnel(st *store.Store) func(context.Context) (observability.FunnelS
 		// cutoff, which must be wall-clock to match the stored timestamps.
 		return observability.FunnelSample{Day: funnelWindow(day), Week: funnelWindow(week)}, nil
 	}
+}
+
+// capturePauseNotifier reports SpaceGate transitions: one log line per
+// transition (not per cycle) and the monitor flag behind
+// shardlure_capture_paused and the Settings strip.
+func capturePauseNotifier(m *observability.Monitor) func(bool, uint64) {
+	return func(paused bool, free uint64) {
+		m.SetCapturePaused(paused)
+		if paused {
+			log.Printf("capture: paused, evidence filesystem has %d bytes free (below capture.min_free_bytes)", free)
+		} else {
+			log.Print("capture: resumed, evidence filesystem is above capture.min_free_bytes")
+		}
+	}
+}
+
+// wireCapturePause connects the runner's gate to the monitor. Call it right
+// after NewRunner, before seed or any worker can call runner.Run: Allow reads
+// OnChange under the gate's lock, but this write is unlocked, so assigning it
+// once a goroutine may be inside Allow is a data race.
+func wireCapturePause(runner *capture.Runner, m *observability.Monitor) {
+	runner.SpaceGate().OnChange = capturePauseNotifier(m)
+}
+
+// newURLWorker builds the quarantine-fetch retry worker. It shares the
+// runner's SpaceGate, so a pause stops URL fetches as well as file copies.
+func newURLWorker(st *store.Store, runner *capture.Runner, m *observability.Monitor) *capture.ArtifactWorker {
+	w := capture.NewArtifactWorker(st, runner.Fetch(), 5, 2*time.Minute)
+	w.Space = runner.SpaceGate()
+	w.OnCycle = workerCycle(m, observability.CaptureURL, 2*time.Minute)
+	return w
 }

@@ -191,6 +191,9 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 	var runner *capture.Runner
 	if opts.Live {
 		runner = capture.NewRunner(st, cfg)
+		// Before seed and every worker: all of them reach runner.Run, which
+		// consults the gate (see wireCapturePause).
+		wireCapturePause(runner, m)
 	}
 	bound := make(chan struct{})
 	var announce sync.Once
@@ -295,8 +298,7 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				fileWorker.OnCycle = workerCycle(m, observability.CaptureFiles, 2*time.Minute)
 				start(func() { defer workerStopped(m, observability.CaptureFiles, false); fileWorker.Run(ctx) })
 				if cfg.Capture.QuarantineFetch {
-					urlWorker := capture.NewArtifactWorker(st, runner.Fetch(), 5, 2*time.Minute)
-					urlWorker.OnCycle = workerCycle(m, observability.CaptureURL, 2*time.Minute)
+					urlWorker := newURLWorker(st, runner, m)
 					start(func() { defer workerStopped(m, observability.CaptureURL, false); urlWorker.Run(ctx) })
 				}
 			}

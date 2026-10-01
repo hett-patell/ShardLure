@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/capture"
 	"github.com/networkshard/shardlure/internal/config"
 	"github.com/networkshard/shardlure/internal/intel/bazaar"
 	"github.com/networkshard/shardlure/internal/observability"
@@ -155,4 +156,48 @@ func metricsPhase(t *testing.T, addr string) string {
 	}
 	t.Errorf("no active phase in /metrics (status %d)", resp.StatusCode)
 	return ""
+}
+
+func TestCapturePauseNotifierSetsMonitor(t *testing.T) {
+	m := observability.New(time.Now, 0)
+	notify := capturePauseNotifier(m)
+	notify(true, 1024)
+	if !m.Snapshot().CapturePaused {
+		t.Fatal("pause must reach the monitor")
+	}
+	notify(false, 1<<40)
+	if m.Snapshot().CapturePaused {
+		t.Fatal("resume must reach the monitor")
+	}
+}
+
+// TestCaptureSpaceWiring pins the live wiring: the runner's gate reports to
+// the monitor, and the URL worker shares that gate rather than writing
+// quarantine fetches past the free-space floor.
+func TestCaptureSpaceWiring(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "wiring.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Capture.EvidenceDir = t.TempDir()
+	runner := capture.NewRunner(st, cfg)
+	m := observability.New(time.Now, 0)
+	wireCapturePause(runner, m)
+	if runner.SpaceGate().OnChange == nil {
+		t.Fatal("the runner's gate must report transitions")
+	}
+	runner.SpaceGate().OnChange(true, 1)
+	if !m.Snapshot().CapturePaused {
+		t.Fatal("the gate's OnChange must reach this monitor")
+	}
+	urlWorker := newURLWorker(st, runner, m)
+	if urlWorker.Space != runner.SpaceGate() {
+		t.Fatal("the URL worker must share the runner's SpaceGate")
+	}
+	if urlWorker.OnCycle == nil {
+		t.Fatal("the URL worker must report cycles to the monitor")
+	}
 }

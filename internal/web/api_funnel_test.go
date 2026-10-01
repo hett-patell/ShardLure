@@ -120,3 +120,22 @@ func TestFunnelPanelIsWiredAndEscaped(t *testing.T) {
 		t.Fatal("funnel route must be registered read-only with guardRead")
 	}
 }
+
+func TestSettingsStatusReportsCapturePause(t *testing.T) {
+	s := newIntelTestServer(t, nil)
+	s.monitor = observability.New(time.Now, 0)
+	s.monitor.SetCapturePaused(true)
+	w := httptest.NewRecorder()
+	s.handleSettingsStatus(w, httptest.NewRequest(http.MethodGet, "/api/settings/status", nil))
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["capturePaused"] != true {
+		t.Fatalf("capturePaused = %v, want true", got["capturePaused"])
+	}
+	page, _ := os.ReadFile("intel.html")
+	if !strings.Contains(string(page), "d.capturePaused") {
+		t.Fatal("the Settings live-status strip must surface capturePaused")
+	}
+}

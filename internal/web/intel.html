@@ -3043,6 +3043,7 @@ async function loadStatus() {
     var flags = [];
     flags.push(flagHTML(d.tokenSet, d.tokenSet ? 'dashboard token set' : 'no dashboard token (unauthenticated)', d.tokenSet ? 'on' : 'warn'));
     flags.push(flagHTML(d.reportEnabled, d.reportEnabled ? 'AbuseIPDB reporting armed' : 'AbuseIPDB reporting off', d.reportEnabled ? 'on' : 'off'));
+    if (d.capturePaused) flags.push(flagHTML(false, 'capture paused: evidence disk below capture.min_free_bytes', 'warn'));
     document.getElementById('sh-flags').innerHTML = flags.join('');
     // Provider armed dots.
     document.getElementById('sh-providers').innerHTML = (d.providers || []).map(function (p) {
