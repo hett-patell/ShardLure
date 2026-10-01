@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import contextlib
 import io
 import json
@@ -627,6 +628,41 @@ class ServiceSafetyTests(unittest.TestCase):
         self.assertEqual(parser.get("honeypot", "etc_path"), f"{home}/etc")
         self.assertEqual(parser.get("shell", "filesystem"), f"{home}/src/cowrie/data/fs.pickle")
         self.assertEqual(parser.get("output_jsonlog", "logfile"), f"{home}/var/log/cowrie/cowrie.json")
+
+    def test_download_cap_is_under_honeypot(self):
+        # Cowrie reads download_limit_size only from [honeypot]
+        # (wget.py/curl.py/tftp.py/ssh/channel.py/filetransfer.py at the pin);
+        # under [output_jsonlog] it was ignored and downloads were unbounded.
+        template = Path(__file__).resolve().parent.parent / "install" / "persona" / "cowrie-stealth.cfg"
+        parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        parser.read_string(template.read_text())
+        self.assertEqual(parser.getint("honeypot", "download_limit_size"), 52428800)
+        self.assertFalse(parser.has_option("output_jsonlog", "download_limit_size"))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+        patched = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        patched.read_string(text)
+        self.assertEqual(patched.getint("honeypot", "download_limit_size"), 52428800)
+
+    def test_apply_stealth_merge_lands_download_cap_in_honeypot(self):
+        # The ARM/existing-install path (apply-stealth.sh) merges the template
+        # over the live cowrie.cfg with inline Python. Run that exact merge on
+        # the real template so the cap is proven to land in [honeypot] there
+        # too, not only through patch_cowrie_cfg.
+        root = Path(__file__).resolve().parent.parent
+        script = (root / "scripts" / "apply-stealth.sh").read_text()
+        heredoc = script[script.index("sudo python3 <<PY\n") + len("sudo python3 <<PY\n"):]
+        heredoc = heredoc[:heredoc.index("\nPY\n")]
+        funcs = heredoc[heredoc.index("def parse_ini("):heredoc.index("existing = cfg_path")]
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = {"cowrie_home": Path(tmp)}
+            exec(funcs, ns)
+            template = (root / "install" / "persona" / "cowrie-stealth.cfg").read_text()
+            stale = "[output_jsonlog]\nenabled = true\n"
+            merged = ns["merge"](stale, template)
+        parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        parser.read_string(merged)
+        self.assertEqual(parser.getint("honeypot", "download_limit_size"), 52428800)
 
     def test_fresh_cowrie_source_keeps_build_generated_version(self) -> None:
         # Regression (guest CI run 36101105698): cowrie.service runs with
