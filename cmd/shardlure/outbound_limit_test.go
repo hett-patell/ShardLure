@@ -310,3 +310,32 @@ func TestOutboundNegativeLimitIsFatal(t *testing.T) {
 		}
 	}
 }
+
+// flag.Parse stops at the first non-flag, so `report abuseipdb 10 --dry-run`
+// used to drop --dry-run and run a real, irreversible reporting pass (and
+// `share bazaar x --dry-run` a real upload). Every outbound command must
+// refuse a stray positional before any key, store or network step
+// (premerge audit cmd I1). Reuses TestOutboundNegativeLimitIsFatal's child
+// helper, since the command exits through fatal.
+func TestOutboundStrayArgumentIsFatal(t *testing.T) {
+	for _, name := range []string{"share-bazaar", "share-urlhaus", "share-threatfox", "report-abuseipdb"} {
+		for _, args := range []string{"10 --dry-run", "x --dry-run --status"} {
+			t.Run(name+"/"+args, func(t *testing.T) {
+				cmd := exec.Command(os.Args[0], "-test.run=^TestOutboundNegativeLimitIsFatal$")
+				cmd.Env = append(os.Environ(), "SHARDLURE_TEST_OUTBOUND_CMD="+name, "SHARDLURE_TEST_OUTBOUND_DIR="+t.TempDir(),
+					"SHARDLURE_TEST_OUTBOUND_ARGS="+args, "SHARDLURE_CONFIG=")
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if exit, ok := err.(*exec.ExitError); ok {
+					code = exit.ExitCode()
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				want := fmt.Sprintf("unexpected argument %q", strings.Fields(args)[0])
+				if code != 1 || strings.Count(string(out), "error:") != 1 || !strings.Contains(string(out), want) {
+					t.Fatalf("%s %s: exit %d, want a single %q:\n%s", name, args, code, want, out)
+				}
+			})
+		}
+	}
+}

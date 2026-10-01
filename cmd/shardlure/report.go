@@ -114,6 +114,12 @@ func cmdReportAbuseIPDB(st *store.Store, cfg config.Config, keys *settings.Keyst
 	statusOnly := fs.Bool("status", false, "list past reports from abuseipdb_reports instead of reporting")
 	endpoint := fs.String("endpoint", "", "override AbuseIPDB endpoint (default from config or builtin)")
 	_ = fs.Parse(args)
+	// flag stops at the first non-flag, so a stray positional would silently
+	// drop every flag after it — including --dry-run, turning a preview into a
+	// real, irreversible run. Refuse it, as share urlhaus/threatfox do.
+	if fs.NArg() > 0 {
+		fatal(fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	}
 	if err := validateOutboundLimit(*limit); err != nil {
 		fatal(err)
 	}

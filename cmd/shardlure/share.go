@@ -103,6 +103,12 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	comment := fs.String("comment", "", "extra comment appended to every sample's context.comment")
 	endpoint := fs.String("endpoint", "", "override MalwareBazaar endpoint (default from config or builtin)")
 	_ = fs.Parse(args)
+	// flag stops at the first non-flag, so a stray positional would silently
+	// drop every flag after it — including --dry-run, turning a preview into a
+	// real, irreversible run. Refuse it, as share urlhaus/threatfox do.
+	if fs.NArg() > 0 {
+		fatal(fmt.Errorf("unexpected argument %q", fs.Arg(0)))
+	}
 	if err := validateOutboundLimit(*limit); err != nil {
 		fatal(err)
 	}
