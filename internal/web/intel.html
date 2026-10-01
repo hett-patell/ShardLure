@@ -1595,6 +1595,27 @@
         </div>
       </section>
 
+      <section class="panel full" id="panel-funnel">
+        <div class="panel-head">
+          <h2>Payload funnel</h2>
+          <span class="meta" id="funnel-meta">cowrie sessions → payloads → shared</span>
+        </div>
+        <div class="panel-body">
+        <table class="dense" id="funnel-table">
+          <thead>
+            <tr>
+              <th>stage</th>
+              <th class="num">24h</th>
+              <th class="num">7d</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="3"><div class="empty">loading…</div></td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
       <section class="panel full" id="panel-urlhaus">
         <div class="panel-head">
           <h2>URLhaus URL sharing</h2>
@@ -3961,6 +3982,7 @@ setActiveView = function(name) {
     refreshAbuseSuggest();
     refreshURLhaus();
     refreshThreatFox();
+    refreshFunnel();
   }
 };
 pollEvery(30000, function() {
@@ -3968,9 +3990,43 @@ pollEvery(30000, function() {
     refreshAbuseSuggest();
     refreshURLhaus();
     refreshThreatFox();
+    refreshFunnel();
   }
 });
-if (readTabFromHash() === 'blue') { refreshAbuseSuggest(); refreshURLhaus(); refreshThreatFox(); }
+if (readTabFromHash() === 'blue') { refreshAbuseSuggest(); refreshURLhaus(); refreshThreatFox(); refreshFunnel(); }
+
+// ==== Payload funnel ==============================================
+// Read-only view of the live sampler's 24h/7d funnel (/api/intel/funnel).
+// Stage keys are a closed server-side set; labels still go through esc().
+const FUNNEL_LABELS = {
+  connected: 'connected', logged_in: 'logged in', ran_commands: 'ran commands',
+  download_attempt: 'tried a download', captured: 'payloads captured',
+  new_payloads: 'new payloads (first seen)', shared_bazaar: 'shared: MalwareBazaar',
+  shared_urlhaus: 'shared: URLhaus', shared_threatfox: 'shared: ThreatFox'
+};
+async function refreshFunnel() {
+  try {
+    const r = await fetch('/api/intel/funnel?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return;
+    renderFunnel(await r.json());
+  } catch (e) { /* the next poll retries */ }
+}
+function renderFunnel(d) {
+  const tb = document.querySelector('#funnel-table tbody');
+  const meta = document.getElementById('funnel-meta');
+  const stages = d.stages || [];
+  if (!stages.length) {
+    tb.innerHTML = '<tr><td colspan="3"><div class="empty">not computed yet — the funnel refreshes every 5 minutes</div></td></tr>';
+    meta.textContent = 'cowrie sessions → payloads → shared';
+    return;
+  }
+  tb.innerHTML = stages.map(function(s) {
+    return '<tr><td>' + esc(FUNNEL_LABELS[s.stage] || s.stage) + '</td><td class="num">' + esc(fmt(s.day)) +
+      '</td><td class="num">' + esc(fmt(s.week)) + '</td></tr>';
+  }).join('');
+  meta.textContent = 'cowrie sessions → payloads → shared · computed ' + fmtShortTime(d.at) +
+    (d.available ? '' : ' (stale)');
+}
 
 // ==== URLhaus URL sharing =========================================
 // Companion to the MalwareBazaar panel on the Red tab: bazaar ships the payload
