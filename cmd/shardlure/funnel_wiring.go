@@ -19,6 +19,10 @@ func funnelWindow(c store.FunnelCounts) observability.FunnelWindow {
 	}
 }
 
+// funnelCollector is the collector the runtime's workers hook starts. It is a
+// variable only so a test can observe when the first collection happens.
+var funnelCollector = collectFunnel
+
 // collectFunnel computes the 24h and 7d funnels. The payload stages use
 // MalwareBazaar's own Vet thresholds so "captured" means "would be eligible
 // to share", never a looser private definition (CLAUDE.md: candidate
@@ -35,6 +39,9 @@ func collectFunnel(st *store.Store) func(context.Context) (observability.FunnelS
 		if err != nil {
 			return observability.FunnelSample{}, err
 		}
-		return observability.FunnelSample{At: now, Day: funnelWindow(day), Week: funnelWindow(week)}, nil
+		// At stays zero: RunFunnelSampler stamps it with the monitor clock, so
+		// the staleness check compares like with like. now is only the window
+		// cutoff, which must be wall-clock to match the stored timestamps.
+		return observability.FunnelSample{Day: funnelWindow(day), Week: funnelWindow(week)}, nil
 	}
 }
