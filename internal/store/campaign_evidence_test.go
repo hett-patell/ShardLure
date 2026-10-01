@@ -73,22 +73,47 @@ func TestRecordCampaignEvidence(t *testing.T) {
 
 func TestEvidenceScanSeeksRowidWindow(t *testing.T) {
 	s := newTestStore(t, "evidence-plan.db")
-	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+evidenceScanQuery, 1, 2)
+	for _, q := range []string{evidenceScanQuery, evidenceRecheckQuery} {
+		rows, err := s.db.Query("EXPLAIN QUERY PLAN "+q, 1, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan []string
+		for rows.Next() {
+			var a, b, c int
+			var d string
+			if err := rows.Scan(&a, &b, &c, &d); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, d)
+		}
+		rows.Close()
+		if j := strings.Join(plan, "\n"); !strings.Contains(j, "SEARCH events USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)") {
+			t.Fatalf("must seek the rowid window:\n%s", j)
+		}
+	}
+}
+
+// Premerge store-write M2: phase 2 runs under writeMu and must not read the
+// command text phase 1 already normalised; it still records the line.
+func TestEvidencePhaseTwoReadsNoCommandText(t *testing.T) {
+	s := newTestStore(t, "evidence-nocmd.db")
+	ctx := context.Background()
+	cowrieEvent(t, s, "s1", "cowrie:a", "command", "uname -a; "+strings.Repeat("x", 70000), "", "", time.Now().UTC())
+	var rows, withText int
+	evidenceRecheckRow = func(e evidenceEvent) {
+		rows++
+		if e.cmd != "" {
+			withText++
+		}
+	}
+	t.Cleanup(func() { evidenceRecheckRow = nil })
+	res, err := s.RecordCampaignEvidence(ctx, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	var plan []string
-	for rows.Next() {
-		var a, b, c int
-		var d string
-		if err := rows.Scan(&a, &b, &c, &d); err != nil {
-			t.Fatal(err)
-		}
-		plan = append(plan, d)
-	}
-	if j := strings.Join(plan, "\n"); !strings.Contains(j, "SEARCH events USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)") {
-		t.Fatalf("must seek the rowid window:\n%s", j)
+	if rows != 1 || withText != 0 || res.Recorded != 1 {
+		t.Fatalf("phase 2 saw %d rows, %d with command text; recorded %d", rows, withText, res.Recorded)
 	}
 }
 

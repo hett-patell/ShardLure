@@ -17,9 +17,21 @@ const evidenceCursorSource, evidenceCursorPath = "campaign", "evidence-v1"
 // and kind out of index selection: commands are ~1% of events, so answering
 // source='cowrie' from idx_events_session would scan most Cowrie rows under
 // writeMu — the v2.8.0 HASSH-repair regression on ARM.
-const evidenceScanQuery = `SELECT id, ts, COALESCE(ts_unix_ns,0), kind, COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(src_ip,''),
-  substr(COALESCE(command,''),1,65536), COALESCE(sha256,''), substr(COALESCE(filename,''),1,4096)
+//
+// evidenceRecheckQuery is the same window for phase 2, under writeMu, with
+// the command column left out: phase 1 already normalised the text, and
+// re-reading up to 64 KiB of it per row inside the lock only to discard it
+// broke the "nothing attacker-proportional under writeMu" rule (premerge
+// store-write M2). actor_id sits after command and raw in the row, so SQLite
+// may still step over their overflow pages, but no text is copied out.
+const (
+	evidenceScanQuery    = evidenceScanHead + `substr(COALESCE(command,''),1,65536)` + evidenceScanTail
+	evidenceRecheckQuery = evidenceScanHead + `''` + evidenceScanTail
+	evidenceScanHead     = `SELECT id, ts, COALESCE(ts_unix_ns,0), kind, COALESCE(session_id,''), COALESCE(actor_id,''), COALESCE(src_ip,''),
+  `
+	evidenceScanTail = `, COALESCE(sha256,''), substr(COALESCE(filename,''),1,4096)
 FROM events WHERE id>? AND id<=? AND +source='cowrie' AND +kind IN ('command','file_download','file_upload') ORDER BY id`
+)
 
 // maxEvidenceWindowBytes bounds the command text one window normalises, and
 // so worker CPU and memory per window, not writeMu hold time: the recorder
@@ -38,6 +50,7 @@ var (
 	evidenceEncodeLine    = script.EncodeLine
 	evidenceExtractKeys   = script.ExtractKeys
 	evidenceBetweenPhases func()
+	evidenceRecheckRow    func(evidenceEvent) // sees each phase-2 row; tests only
 )
 
 type ctxRowQueryer interface {
@@ -95,10 +108,11 @@ type evidenceEvent struct {
 	ts, kind, session, actor, ip, cmd, sha, fn string
 }
 
-// scanEvidenceWindow reads the Cowrie command/file rows in (cursor, end] in
-// id order and hands each to visit until it returns false.
-func scanEvidenceWindow(ctx context.Context, q ctxQueryer, cursor, end int64, visit func(evidenceEvent) bool) error {
-	rows, err := q.QueryContext(ctx, evidenceScanQuery, cursor, end)
+// scanEvidenceWindow runs query (evidenceScanQuery, or evidenceRecheckQuery
+// whose cmd is always empty) over the Cowrie command/file rows in
+// (cursor, end] in id order and hands each to visit until it returns false.
+func scanEvidenceWindow(ctx context.Context, q ctxQueryer, query string, cursor, end int64, visit func(evidenceEvent) bool) error {
+	rows, err := q.QueryContext(ctx, query, cursor, end)
 	if err != nil {
 		return err
 	}
@@ -233,7 +247,7 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 	}
 	var batch []evidenceEvent
 	budget := 0
-	err = scanEvidenceWindow(ctx, s.db, cursor, end, func(e evidenceEvent) bool {
+	err = scanEvidenceWindow(ctx, s.db, evidenceScanQuery, cursor, end, func(e evidenceEvent) bool {
 		budget += len(e.cmd) + len(e.fn)
 		if budget > maxEvidenceWindowBytes && len(batch) > 0 {
 			end, res.Done = batch[len(batch)-1].id, false
@@ -287,8 +301,10 @@ func (s *Store) RecordCampaignEvidence(ctx context.Context, window int) (Evidenc
 			return nil
 		}
 		var live []evidenceEvent
-		if err := scanEvidenceWindow(ctx, tx, cursor, end, func(e evidenceEvent) bool {
-			e.cmd = "" // normalised in phase 1; never touched here
+		if err := scanEvidenceWindow(ctx, tx, evidenceRecheckQuery, cursor, end, func(e evidenceEvent) bool {
+			if evidenceRecheckRow != nil {
+				evidenceRecheckRow(e)
+			}
 			live = append(live, e)
 			return true
 		}); err != nil {
