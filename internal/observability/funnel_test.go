@@ -164,3 +164,25 @@ func TestCapturePausedGauge(t *testing.T) {
 		t.Fatal("paused capture must export 1")
 	}
 }
+
+func TestFunnelSampleAvailable(t *testing.T) {
+	at := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	good := FunnelSample{At: at, Valid: true}
+	for _, tc := range []struct {
+		name string
+		f    FunnelSample
+		now  time.Time
+		want bool
+	}{
+		{"fresh", good, at.Add(time.Minute), true},
+		{"at the bound", good, at.Add(funnelMaxAge), true},
+		{"past the bound", good, at.Add(funnelMaxAge + time.Second), false},
+		{"from the future", good, at.Add(-time.Second), false},
+		{"invalid", FunnelSample{At: at}, at, false},
+		{"never sampled", FunnelSample{Valid: true}, at, false},
+	} {
+		if got := tc.f.Available(tc.now); got != tc.want {
+			t.Errorf("%s: Available = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

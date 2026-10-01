@@ -26,9 +26,12 @@ func (s *Server) handleIntelFunnel(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	out := funnelJSON{Stages: []funnelStageJSON{}}
 	if s.monitor != nil {
-		f := s.monitor.Snapshot().Funnel
+		snap := s.monitor.Snapshot()
+		f := snap.Funnel
 		if !f.At.IsZero() {
-			out.Available = f.Valid
+			// Same predicate as shardlure_payload_funnel_available, so a
+			// stopped sampler shows "(stale)" here too.
+			out.Available = f.Available(snap.At)
 			out.At = f.At.UTC().Format(time.RFC3339)
 			day, week := f.Day.Stages(), f.Week.Stages()
 			for i := range day {

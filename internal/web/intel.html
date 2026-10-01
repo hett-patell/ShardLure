@@ -4007,7 +4007,15 @@ const FUNNEL_LABELS = {
 async function refreshFunnel() {
   try {
     const r = await fetch('/api/intel/funnel?_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return;
+    if (!r.ok) {
+      // Replace only the placeholder (e.g. a 503 while starting or draining);
+      // a table that already holds stages keeps them until the next poll.
+      const tb = document.querySelector('#funnel-table tbody');
+      if (tb && tb.querySelector('.empty')) {
+        tb.innerHTML = '<tr><td colspan="3"><div class="empty">unavailable (HTTP ' + esc(r.status) + ')</div></td></tr>';
+      }
+      return;
+    }
     renderFunnel(await r.json());
   } catch (e) { /* the next poll retries */ }
 }
@@ -4016,7 +4024,7 @@ function renderFunnel(d) {
   const meta = document.getElementById('funnel-meta');
   const stages = d.stages || [];
   if (!stages.length) {
-    tb.innerHTML = '<tr><td colspan="3"><div class="empty">not computed yet — the funnel refreshes every 5 minutes</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="3"><div class="empty">not computed yet</div></td></tr>';
     meta.textContent = 'cowrie sessions → payloads → shared';
     return;
   }

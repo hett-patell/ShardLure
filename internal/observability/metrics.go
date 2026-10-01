@@ -70,9 +70,8 @@ func WritePrometheus(out io.Writer, s Snapshot) error {
 	write("shardlure_capture_protected_file_jobs %d\n", s.Aggregates.ProtectedFileJobs)
 	header("capture_paused", "gauge", "1 while capture writes are paused because the evidence filesystem is below its free-space floor.")
 	write("shardlure_capture_paused %d\n", flag(s.CapturePaused))
-	fAge := s.At.Sub(s.Funnel.At)
 	header("payload_funnel_available", "gauge", "Whether the payload funnel was computed within the last 15 minutes.")
-	write("shardlure_payload_funnel_available %d\n", flag(s.Funnel.Valid && !s.Funnel.At.IsZero() && fAge >= 0 && fAge <= funnelMaxAge))
+	write("shardlure_payload_funnel_available %d\n", flag(s.Funnel.Available(s.At)))
 	header("payload_funnel", "gauge", "Cowrie sessions per stage, payloads captured/new, and ledger submissions, by fixed window.")
 	for _, w := range []struct {
 		name string

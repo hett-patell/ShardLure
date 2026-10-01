@@ -40,6 +40,18 @@ type FunnelSample struct {
 // unavailable: three missed 5-minute refreshes.
 const funnelMaxAge = 15 * time.Minute
 
+// Available reports whether the sample is a successful refresh no older than
+// funnelMaxAge at now. It is the single definition shared by /metrics and the
+// dashboard's /api/intel/funnel, so a sampler that silently stopped reads as
+// unavailable in both places rather than only in Prometheus.
+func (f FunnelSample) Available(now time.Time) bool {
+	if !f.Valid || f.At.IsZero() {
+		return false
+	}
+	age := now.Sub(f.At)
+	return age >= 0 && age <= funnelMaxAge
+}
+
 // RecordFunnel stores a sample. An invalid sample (a failed refresh) keeps
 // the last good values and only clears Valid, like RecordAggregates, so one
 // slow query does not zero the operator's dashboards.

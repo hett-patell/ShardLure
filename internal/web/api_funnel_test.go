@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,34 +13,91 @@ import (
 	"github.com/networkshard/shardlure/internal/observability"
 )
 
+func getFunnel(t *testing.T, s *Server) funnelJSON {
+	t.Helper()
+	w := httptest.NewRecorder()
+	s.handleIntelFunnel(w, httptest.NewRequest(http.MethodGet, "/api/intel/funnel", nil))
+	var got funnelJSON
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Stages == nil {
+		t.Fatalf("stages must never be null: %s", w.Body.String())
+	}
+	return got
+}
+
+// Every field carries a distinct value so a Day/Week swap, a reordered stage
+// or a truncated loop fails rather than matching by coincidence.
+var funnelTestDay = observability.FunnelWindow{Connected: 101, LoggedIn: 102, RanCommands: 103, DownloadAttempt: 104,
+	Captured: 105, NewPayloads: 106, SharedBazaar: 107, SharedURLhaus: 108, SharedThreatFox: 109}
+var funnelTestWeek = observability.FunnelWindow{Connected: 701, LoggedIn: 702, RanCommands: 703, DownloadAttempt: 704,
+	Captured: 705, NewPayloads: 706, SharedBazaar: 707, SharedURLhaus: 708, SharedThreatFox: 709}
+
+func wantFunnelStages() []funnelStageJSON {
+	names := []string{"connected", "logged_in", "ran_commands", "download_attempt", "captured",
+		"new_payloads", "shared_bazaar", "shared_urlhaus", "shared_threatfox"}
+	out := make([]funnelStageJSON, len(names))
+	for i, n := range names {
+		out[i] = funnelStageJSON{Stage: n, Day: int64(101 + i), Week: int64(701 + i)}
+	}
+	return out
+}
+
 func TestIntelFunnelServesMonitorSnapshot(t *testing.T) {
 	s := newIntelTestServer(t, nil)
 	now := time.Now().UTC()
 	s.monitor = observability.New(func() time.Time { return now }, 0)
-	s.monitor.RecordFunnel(observability.FunnelSample{At: now, Valid: true,
-		Day: observability.FunnelWindow{Connected: 12, Captured: 2}, Week: observability.FunnelWindow{Connected: 80, Captured: 9}})
-	w := httptest.NewRecorder()
-	s.handleIntelFunnel(w, httptest.NewRequest(http.MethodGet, "/api/intel/funnel", nil))
-	var got funnelJSON
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if !got.Available || len(got.Stages) != 9 || got.Stages[0].Stage != "connected" || got.Stages[0].Day != 12 || got.Stages[0].Week != 80 || got.Stages[4].Stage != "captured" || got.Stages[4].Week != 9 {
+	s.monitor.RecordFunnel(observability.FunnelSample{At: now, Valid: true, Day: funnelTestDay, Week: funnelTestWeek})
+	got := getFunnel(t, s)
+	if !got.Available || got.At != now.Format(time.RFC3339) || !reflect.DeepEqual(got.Stages, wantFunnelStages()) {
 		t.Fatalf("unexpected funnel response: %+v", got)
 	}
 }
 
-func TestIntelFunnelWithoutMonitorIsUnavailable(t *testing.T) {
-	s := newIntelTestServer(t, nil)
-	s.monitor = nil
-	w := httptest.NewRecorder()
-	s.handleIntelFunnel(w, httptest.NewRequest(http.MethodGet, "/api/intel/funnel", nil))
-	var got funnelJSON
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
+func TestIntelFunnelUnavailableStates(t *testing.T) {
+	base := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		setup      func(m *observability.Monitor, clock *time.Time)
+		nilMonitor bool
+		wantAt     bool
+		wantStages int
+	}{
+		{name: "no monitor", nilMonitor: true},
+		{name: "never sampled", setup: func(*observability.Monitor, *time.Time) {}},
+		{name: "failed refresh after a good one", wantAt: true, wantStages: 9,
+			setup: func(m *observability.Monitor, _ *time.Time) {
+				m.RecordFunnel(observability.FunnelSample{At: base, Valid: true, Day: funnelTestDay, Week: funnelTestWeek})
+				m.RecordFunnel(observability.FunnelSample{Valid: false})
+			}},
+		{name: "valid but older than the metrics age bound", wantAt: true, wantStages: 9,
+			setup: func(m *observability.Monitor, clock *time.Time) {
+				m.RecordFunnel(observability.FunnelSample{At: base, Valid: true, Day: funnelTestDay, Week: funnelTestWeek})
+				*clock = base.Add(20 * time.Minute)
+			}},
 	}
-	if got.Available || got.Stages == nil {
-		t.Fatalf("no monitor must give available=false with an empty (non-null) stage list: %+v", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newIntelTestServer(t, nil)
+			clock := base
+			if tc.nilMonitor {
+				s.monitor = nil
+			} else {
+				s.monitor = observability.New(func() time.Time { return clock }, 0)
+				tc.setup(s.monitor, &clock)
+			}
+			got := getFunnel(t, s)
+			if got.Available {
+				t.Fatalf("available must be false: %+v", got)
+			}
+			if (got.At != "") != tc.wantAt || len(got.Stages) != tc.wantStages {
+				t.Fatalf("at=%q stages=%d, want at set=%v stages=%d", got.At, len(got.Stages), tc.wantAt, tc.wantStages)
+			}
+			if tc.wantStages > 0 && !reflect.DeepEqual(got.Stages, wantFunnelStages()) {
+				t.Fatalf("last good values must be kept: %+v", got.Stages)
+			}
+		})
 	}
 }
 
