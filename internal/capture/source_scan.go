@@ -12,6 +12,12 @@ import (
 	"github.com/networkshard/shardlure/internal/store"
 )
 
+// errSpacePaused stops a directory pass when the free-space gate closes
+// partway through. It is not a failure: the remaining entries are left
+// unrecorded (or, for a TTY transcript, unpublished) and the next pass after
+// space returns picks them up.
+var errSpacePaused = errors.New("capture paused: evidence free space below floor")
+
 func (r *Runner) syncCowrieDownloads() (int, error) {
 	return r.syncCowrieSources(context.Background(), false)
 }
@@ -83,9 +89,16 @@ func (r *Runner) syncCowrieSources(ctx context.Context, tty bool) (int, error) {
 						}
 					}
 					if tty {
-						return ensureTTYTranscript(ctx, dest, name, info.Size())
+						return ensureTTYTranscript(ctx, dest, name, info.Size(), r.space)
 					}
 					return nil
+				}
+				// Re-checked per file, not just per pass: the first pass after
+				// a pause ends would otherwise copy the whole backlog Cowrie
+				// accumulated meanwhile (up to max_bytes each) and could drive
+				// the disk straight back to 100%.
+				if !r.space.Allow() {
+					return errSpacePaused
 				}
 				path := filepath.Join(output, name)
 				expected := ""
@@ -116,10 +129,13 @@ func (r *Runner) syncCowrieSources(ctx context.Context, tty bool) (int, error) {
 					n++
 				}
 				if tty && status == "fetched" && size <= 8<<20 {
-					return ensureTTYTranscript(ctx, dest, name, size)
+					return ensureTTYTranscript(ctx, dest, name, size, r.space)
 				}
 				return nil
 			})
+			if errors.Is(err, errSpacePaused) {
+				return n, firstErr
+			}
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -137,7 +153,9 @@ func (r *Runner) syncCowrieSources(ctx context.Context, tty bool) (int, error) {
 // A derivative is optional evidence, but a failed write must be retried even
 // after the raw artifact row exists. Only atomically completed files get their
 // final name; a failed partial write can never be mistaken for completion.
-func ensureTTYTranscript(ctx context.Context, dest *safefile.Root, name string, size int64) error {
+// space is consulted only once a transcript actually needs writing, so an
+// already-published transcript never stops a paused pass.
+func ensureTTYTranscript(ctx context.Context, dest *safefile.Root, name string, size int64, space *SpaceGate) error {
 	if size <= 0 || size > 8<<20 {
 		return nil
 	}
@@ -159,6 +177,9 @@ func ensureTTYTranscript(ctx context.Context, dest *safefile.Root, name string, 
 	raw.Close()
 	if decodeErr != nil {
 		return safeCaptureError(decodeErr, "capture transcript decode failed")
+	}
+	if !space.Allow() {
+		return errSpacePaused
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {

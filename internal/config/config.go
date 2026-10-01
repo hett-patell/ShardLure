@@ -55,6 +55,12 @@ type Config struct {
 		QuarantineFetch bool   `yaml:"quarantine_fetch"`
 		MaxBytes        int64  `yaml:"max_bytes"`
 		TimeoutSec      int    `yaml:"timeout_sec"`
+		// MinFreeBytes pauses capture writes while the evidence filesystem has
+		// less free space than this; 0 disables the guard. Separate from
+		// observability.min_free_bytes, which only gates readiness: an attacker
+		// can make the honeypot download without bound, and on 2026-10-01 the
+		// ARM root disk reached 100%.
+		MinFreeBytes int64 `yaml:"min_free_bytes"`
 	} `yaml:"capture"`
 
 	GeoIP struct {
@@ -239,6 +245,7 @@ func Default() Config {
 	c.Capture.Enabled = true
 	c.Capture.QuarantineFetch = true
 	c.Capture.MaxBytes = 50 << 20
+	c.Capture.MinFreeBytes = 2 << 30
 	c.Capture.TimeoutSec = 45
 	c.RetentionDays = 90
 	c.Intel.Bazaar.Endpoint = "https://mb-api.abuse.ch/api/v1/"
@@ -350,6 +357,9 @@ func (c Config) Validate() error {
 	}
 	if c.Capture.MaxBytes < 0 {
 		return fmt.Errorf("config: capture.max_bytes must be >= 0, got %d", c.Capture.MaxBytes)
+	}
+	if c.Capture.MinFreeBytes < 0 {
+		return fmt.Errorf("config: capture.min_free_bytes must be >= 0, got %d", c.Capture.MinFreeBytes)
 	}
 	if c.Capture.TimeoutSec < 0 {
 		return fmt.Errorf("config: capture.timeout_sec must be >= 0, got %d", c.Capture.TimeoutSec)

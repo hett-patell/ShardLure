@@ -998,6 +998,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/intel/payload/vt", s.guard(s.requireQuotaHeader(s.handleIntelPayloadVT)))
 	mux.HandleFunc("/api/intel/payloads/vt/cached", s.guardRead(s.handleIntelPayloadsVTCached))
 	mux.HandleFunc("/api/intel/urlhaus", s.guardRead(s.handleIntelURLhaus))
+	mux.HandleFunc("/api/intel/funnel", s.guardRead(s.handleIntelFunnel))
 	mux.HandleFunc("/api/intel/urlhaus/submit", s.guard(s.handleURLhausSubmit))
 	mux.HandleFunc("/api/intel/threatfox", s.guardRead(s.handleIntelThreatFox))
 	mux.HandleFunc("/api/intel/threatfox/submit", s.guard(s.handleThreatFoxSubmit))

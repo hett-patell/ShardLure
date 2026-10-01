@@ -68,6 +68,7 @@ stealth = persona_cfg.read_text() if persona_cfg.exists() else """
 [honeypot]
 hostname = prod-app-server-01
 sensor_name = prod-app-server-01
+download_limit_size = 52428800
 
 [shell]
 arch = linux-x64-lsb

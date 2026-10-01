@@ -191,6 +191,9 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 	var runner *capture.Runner
 	if opts.Live {
 		runner = capture.NewRunner(st, cfg)
+		// Before seed and every worker: all of them reach runner.Run, which
+		// consults the gate (see wireCapturePause).
+		wireCapturePause(runner, m)
 	}
 	bound := make(chan struct{})
 	var announce sync.Once
@@ -272,6 +275,16 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 		start(func() {
 			runOptionalWorker(ctx, m, observability.Campaigns, 5*time.Second, 2*time.Minute, campaigns.Tick)
 		})
+		start(func() {
+			// Started here, after seed and cache warm-up, not in serve: a first
+			// sample taken mid-seed competes with cold start, pins a WAL
+			// snapshot under heavy writes, and reports an undercount as valid
+			// for 5 minutes. Runs in web mode too: /metrics is served there
+			// and the windows slide and the share ledgers change on a static DB.
+			// 5-minute cadence, 30 s budget: a 7-day window costs seconds on
+			// the ARM sensor (see RunFunnelSampler).
+			observability.RunFunnelSampler(ctx, m, 5*time.Minute, 30*time.Second, funnelCollector(st))
+		})
 		if opts.Live {
 			start(func() {
 				runPeriodicWorker(ctx, m, observability.CowrieIngest, opts.Interval, 2*time.Minute, func(ctx context.Context) error {
@@ -285,8 +298,7 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				fileWorker.OnCycle = workerCycle(m, observability.CaptureFiles, 2*time.Minute)
 				start(func() { defer workerStopped(m, observability.CaptureFiles, false); fileWorker.Run(ctx) })
 				if cfg.Capture.QuarantineFetch {
-					urlWorker := capture.NewArtifactWorker(st, runner.Fetch(), 5, 2*time.Minute)
-					urlWorker.OnCycle = workerCycle(m, observability.CaptureURL, 2*time.Minute)
+					urlWorker := newURLWorker(st, runner, m)
 					start(func() { defer workerStopped(m, observability.CaptureURL, false); urlWorker.Run(ctx) })
 				}
 			}

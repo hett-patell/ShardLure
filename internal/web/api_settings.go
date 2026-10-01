@@ -518,6 +518,7 @@ func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 		"lastEvent":     lastEventStr,
 		"tokenSet":      s.dashboardToken() != "",
 		"reportEnabled": s.abuseEnabledLive(),
+		"capturePaused": s.monitor != nil && s.monitor.Snapshot().CapturePaused,
 		"providers":     armed,
 		"abuse": map[string]any{
 			"totalReported": stats.TotalReported,

@@ -46,6 +46,11 @@ class ReleaseContractTests(unittest.TestCase):
         )
         return {"INSTALL_SAFETY_HELPER": str(helper), "SHARDLURE_SYSTEMD_DIR": str(units)}
 
+    def test_install_sh_caps_cowrie_downloads(self):
+        script = (Path(__file__).resolve().parent / "install.sh").read_text()
+        block = script[script.index("# managed by shardlure install.sh"):]
+        self.assertIn("[honeypot]\ndownload_limit_size = 52428800", block[:600])
+
     def test_release_account_conflict_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

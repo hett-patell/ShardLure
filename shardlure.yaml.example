@@ -42,6 +42,9 @@ capture:
   quarantine_fetch: true
   max_bytes: 52428800
   timeout_sec: 45
+  # Pause new captures while the evidence filesystem has less free space than
+  # this (bytes; 0 disables). Attackers decide how much the honeypot downloads.
+  min_free_bytes: 2147483648
 
 geoip:
   # Required for globe arcs / country stats (resolves attacker IPs).

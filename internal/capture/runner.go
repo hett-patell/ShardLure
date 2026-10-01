@@ -21,7 +21,7 @@ type Runner struct {
 	cfg        config.Config
 	fetch      *SafeFetcher
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
-
+	space      *SpaceGate
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
@@ -40,8 +40,13 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 			time.Duration(capCfg.TimeoutSec)*time.Second,
 			cfg.AdminIPs,
 		),
+		space: NewSpaceGate(evidence, uint64(capCfg.MinFreeBytes)),
 	}
 }
+
+// SpaceGate is the runner's free-space guard, shared with the URL and file
+// workers so one pause covers every capture write path.
+func (r *Runner) SpaceGate() *SpaceGate { return r.space }
 
 // urlKeyDone reports whether key is already recorded in the DB.
 // The DB is the sole source of truth — the UNIQUE index on url makes
@@ -78,13 +83,16 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		}
 		n += c
 	}
-	c, err := r.syncCowrieSources(ctx, false)
-	if err != nil {
-		return n, err
+	// Discovery only writes database rows, so it keeps running while paused;
+	// the directory syncs copy bytes into evidence and wait for space.
+	if r.space.Allow() {
+		c, err := r.syncCowrieSources(ctx, false)
+		if err != nil {
+			return n, err
+		}
+		n += c
 	}
-	n += c
-	_, err = r.st.DiscoverFileCaptures(ctx, 2000)
-	if err != nil {
+	if _, err := r.st.DiscoverFileCaptures(ctx, 2000); err != nil {
 		return n, err
 	}
 	// One-shot: backfill the sha->session index from all available
@@ -97,6 +105,9 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 			return n, err
 		}
 		r.ttyIndexed = true
+	}
+	if !r.space.Allow() {
+		return n, nil
 	}
 	c3, err := r.syncCowrieSources(ctx, true)
 	return n + c3, err
@@ -278,5 +289,7 @@ func (r *Runner) Fetch() *SafeFetcher {
 }
 
 func (r *Runner) FileWorker() *FileWorker {
-	return NewFileWorker(r.st, r.cowrieDownloadsDir(), r.fetch.EvidenceDir, r.cfg.Capture.MaxBytes)
+	fw := NewFileWorker(r.st, r.cowrieDownloadsDir(), r.fetch.EvidenceDir, r.cfg.Capture.MaxBytes)
+	fw.space = r.space
+	return fw
 }

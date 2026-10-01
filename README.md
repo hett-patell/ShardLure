@@ -291,6 +291,7 @@ shardlure version
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
 - **Rolling back from v2.9 to an older build:** older binaries (v2.8 at schema 24, the v2.9 campaigns rc1 at schema 25) cannot create backups of the v26 database; restore the pre-upgrade bundle instead.
 - **Upgrading again after a rollback:** an older build writes bot-script lines in its own encoding and leaves the stored normaliser version alone, so the next upgrade would keep them and fingerprint the same script two ways. Run `shardlure scripts --rebuild` as the service account, then restart every `shardlure live` and `web` process on that database. Campaign names and IDs are kept.
+- **Cap Cowrie's downloads on existing installs (v2.10).** Cowrie reads `download_limit_size` only from the `[honeypot]` section of `cowrie.cfg`; earlier ShardLure persona configs put it under `[output_jsonlog]`, where it is ignored, so attackers' downloads were unbounded. A binary upgrade never touches `cowrie.cfg`, so add `download_limit_size = 52428800` under `[honeypot]` (or re-run `scripts/apply-stealth.sh`) and `sudo systemctl restart cowrie`. Fresh installs get it automatically. Separately, ShardLure now pauses new captures when the evidence filesystem drops below `capture.min_free_bytes` (2 GiB by default) and resumes on its own; a pause shows as `shardlure_capture_paused 1` and a Settings warning, never as a failed `/readyz`.
 - **A token-less dashboard answers only names it knows.** Without `SHARDLURE_DASH_TOKEN`, a request by a `Host` the dashboard does not recognise gets `421` (this blocks DNS rebinding). The accepted names, and what to set if you use another one, are listed under [Step 4](#step-4--check-services-and-open-the-dashboard).
 
 ## Local Development
@@ -455,6 +456,12 @@ capture:
   quarantine_fetch: true
   max_bytes: 52428800
   timeout_sec: 45
+  # Pause capture writes (URL fetches, Cowrie download/tty copies) while the
+  # evidence filesystem has less free space than this. Default 2147483648
+  # (2 GiB); 0 disables the guard; negative is rejected. Paused work is not
+  # claimed, so no retry attempt is spent, and it resumes on its own once
+  # space returns. Separate from observability.min_free_bytes (readiness only).
+  min_free_bytes: 2147483648
 
 # How long events, enrichment cache entries, artifacts and TTY transcripts are
 # kept before pruning. 0 disables purging (not recommended in production).
@@ -766,6 +773,8 @@ The web server exposes three operational endpoints:
 - **Access.** These endpoints follow the `/debug/*` rule. With `SHARDLURE_DASH_TOKEN` set they need the token as a header; without one they answer only loopback connections. A `?token=` query is refused. A trusted reverse proxy (below) cannot reach them without a token.
 - **Sampling.** Health is sampled every 5 seconds with a 1-second budget. Readiness fails if the newest sample is older than 15 seconds. Expensive gauges refresh at most once a minute and report their age rather than a silent zero.
 - **Disk threshold.** `observability.min_free_bytes` (default 268435456, 256 MiB) marks the data volume not ready below that free space. `0` disables only this check.
+- **Capture pause.** `shardlure_capture_paused` is `1` while capture writes are paused because the evidence filesystem is below `capture.min_free_bytes` (default 2 GiB). A pause is not a failure and does not affect `/readyz`; the dashboard's Settings tab shows a warning flag and the journal logs one line per pause/resume. Only `shardlure live` captures, so `web` always reports `0`.
+- **Payload funnel.** `shardlure_payload_funnel{window="24h"|"7d",stage=...}` counts Cowrie sessions per stage (`connected`, `logged_in`, `ran_commands`, `download_attempt`), distinct payloads (`captured` = eligible for MalwareBazaar sharing, `new_payloads` = captured and never seen before the window) and submissions (`shared_bazaar`, `shared_urlhaus`, `shared_threatfox`). It is recomputed every 5 minutes; `shardlure_payload_funnel_available` is `0` before the first refresh, after a failed one, or when the last good one is older than 15 minutes. The same numbers back `GET /api/intel/funnel` and the **Payload funnel** panel on the Blue Team tab.
 
 ### Behind a reverse proxy
 
