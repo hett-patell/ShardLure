@@ -654,14 +654,32 @@ class ServiceSafetyTests(unittest.TestCase):
         heredoc = script[script.index("sudo python3 <<PY\n") + len("sudo python3 <<PY\n"):]
         heredoc = heredoc[:heredoc.index("\nPY\n")]
         funcs = heredoc[heredoc.index("def parse_ini("):heredoc.index("existing = cfg_path")]
+        # The <<PY heredoc is unquoted, so on the box bash expands `$...` and
+        # backticks before Python sees this code. exec() here skips that
+        # expansion, so the test is only faithful while neither appears.
+        self.assertNotRegex(funcs, r"[$`]")
         with tempfile.TemporaryDirectory() as tmp:
             ns = {"cowrie_home": Path(tmp)}
             exec(funcs, ns)
             template = (root / "install" / "persona" / "cowrie-stealth.cfg").read_text()
-            stale = "[output_jsonlog]\nenabled = true\n"
+            # The live ARM cfg: a [honeypot] without the cap and the old,
+            # ignored copy under [output_jsonlog].
+            stale = "[honeypot]\nhostname = old\n\n[output_jsonlog]\nenabled = true\ndownload_limit_size = 52428800\n"
             merged = ns["merge"](stale, template)
         parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
         parser.read_string(merged)
+        self.assertEqual(parser.getint("honeypot", "download_limit_size"), 52428800)
+
+    def test_apply_stealth_fallback_template_caps_downloads(self):
+        # apply-stealth.sh writes an inline fallback when cowrie-stealth.cfg
+        # is missing; it must not be the one managed cfg left unbounded.
+        script = (Path(__file__).resolve().parent.parent / "scripts" / "apply-stealth.sh").read_text()
+        start = script.index('stealth = persona_cfg.read_text() if persona_cfg.exists() else """')
+        body = script[script.index('"""', start) + 3:]
+        body = body[:body.index('"""')]
+        self.assertNotRegex(body, r"[$`]")
+        parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        parser.read_string(body)
         self.assertEqual(parser.getint("honeypot", "download_limit_size"), 52428800)
 
     def test_fresh_cowrie_source_keeps_build_generated_version(self) -> None:
