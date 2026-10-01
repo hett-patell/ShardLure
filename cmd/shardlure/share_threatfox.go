@@ -72,27 +72,7 @@ func cmdShareThreatFox(st *store.Store, cfg config.Config, keys *settings.Keysto
 
 	cands := make([]threatfox.Candidate, 0, len(rows))
 	for _, r := range rows {
-		// Classify off disk for BOTH the file kind (real payload / reject SSH
-		// keys) AND the malware family (ThreatFox's mandatory Malpedia label —
-		// a candidate whose family doesn't resolve is dropped by Vet). Reuses
-		// the bazaar classifier rather than duplicating it.
-		kind, family := "", ""
-		if r.LocalPath != "" {
-			if cls, cerr := bazaar.Classify(r.LocalPath); cerr == nil {
-				kind = cls.FileKind
-				family = cls.Family
-			}
-		}
-		cands = append(cands, threatfox.Candidate{
-			URL:       r.URL,
-			SHA256:    r.SHA256,
-			SizeBytes: r.SizeBytes,
-			Origin:    r.Origin,
-			Status:    r.Status,
-			FetchedAt: r.FetchedAt,
-			FileKind:  kind,
-			Family:    family,
-		})
+		cands = append(cands, threatfoxCandidateFromRow(r))
 	}
 
 	ep := *endpoint
@@ -181,5 +161,32 @@ func fprintThreatFoxStatus(w io.Writer, rows []store.ThreatFoxSubmission) {
 	for _, r := range rows {
 		fmt.Fprintf(w, "%-25s  %-12s  %-14s  %s\n",
 			r.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), termSafe(r.IOCType), termSafe(r.Malware), termSafe(r.IOC))
+	}
+}
+
+// threatfoxCandidateFromRow classifies the payload off disk for BOTH the file
+// kind (real payload / reject SSH keys) AND the malware family (ThreatFox's
+// mandatory Malpedia label — a candidate whose family doesn't resolve is
+// dropped by Vet). Reuses the bazaar classifier rather than duplicating it,
+// and deliberately its outbound entry point, Classify: an ELF whose header
+// does not parse carries no family there, so a truncated payload can never
+// pass the Malpedia gate on a head-scan guess.
+func threatfoxCandidateFromRow(r store.ThreatFoxCandidateRow) threatfox.Candidate {
+	kind, family := "", ""
+	if r.LocalPath != "" {
+		if cls, cerr := bazaar.Classify(r.LocalPath); cerr == nil {
+			kind = cls.FileKind
+			family = cls.Family
+		}
+	}
+	return threatfox.Candidate{
+		URL:       r.URL,
+		SHA256:    r.SHA256,
+		SizeBytes: r.SizeBytes,
+		Origin:    r.Origin,
+		Status:    r.Status,
+		FetchedAt: r.FetchedAt,
+		FileKind:  kind,
+		Family:    family,
 	}
 }

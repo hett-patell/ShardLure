@@ -17,6 +17,28 @@ type Classification struct {
 	Tags     []string
 	Family   string
 	FileKind string // human-readable label for CLI output
+	// HeaderMalformed is set for an ELF whose header debug/elf could not
+	// parse (a download cut short, a mangled section or program table).
+	// ClassifyFile still runs the family scan over such a head, for the
+	// campaign worker's generic-build exclusion; Classify, the outbound
+	// entry point, strips it again (see Outbound).
+	HeaderMalformed bool
+}
+
+// Outbound returns the classification as it may leave the host — the label
+// MalwareBazaar uploads and the ThreatFox Malpedia gate read. For an ELF
+// whose header did not parse that is exactly what the classifier produced
+// before head-scanning malformed ELFs: kind "ELF", tags elf + linux, and NO
+// family, family tags or packing tags. The head-scan family of a partial
+// file is good enough to keep a generic build from linking campaigns, but a
+// wrong signature on abuse.ch is what bans the shared account, and nothing
+// about a truncated file was ever shipped with a label (precision-first; see
+// elf_family.go). Every other classification is returned unchanged.
+func (c Classification) Outbound() Classification {
+	if !c.HeaderMalformed {
+		return c
+	}
+	return Classification{Tags: []string{"elf", "linux"}, FileKind: "ELF", HeaderMalformed: true}
 }
 
 // Classify inspects a file on disk and returns format/arch/family
@@ -46,8 +68,11 @@ func Classify(path string) (Classification, error) {
 	defer f.Close()
 	// A read error is ignored here, as it always was: the share/intel callers
 	// tag whatever head was read (an unreadable file classifies "unknown").
+	// Every outbound caller (share bazaar, the ThreatFox family, the URLhaus
+	// and dashboard previews) comes through here, so the outbound view is
+	// applied here and nowhere else can forget it.
 	c, _ := classifyOpen(f)
-	return c, nil
+	return c.Outbound(), nil
 }
 
 // ClassifyFile is Classify over an already-open file, for callers that pin
@@ -60,6 +85,12 @@ func Classify(path string) (Classification, error) {
 // Unlike Classify it returns a read error (anything but a short file): a
 // caller that memoises families must not remember the answer for a partial
 // or empty head as the file's family.
+//
+// It is the INTERNAL view: an ELF whose header does not parse keeps the
+// family its head scan found (HeaderMalformed is set). That is what the
+// campaign worker's generic-build exclusion needs, and it must never reach
+// abuse.ch: a caller that would ship the result calls Outbound() on it, or
+// uses Classify.
 func ClassifyFile(f *os.File) (Classification, error) {
 	c, err := classifyOpen(f)
 	if err != nil {
@@ -149,9 +180,11 @@ func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
 	// generic build (XMRig) carried no family, and the campaign worker's
 	// generic-build exclusion, which keys on that family, let the payload
 	// link (campaign final audit M-1). Cowrie does capture partial downloads.
+	// Outbound() strips that family again for anything shipped to abuse.ch.
 	ef, err := elf.NewFile(f)
 	if err != nil {
 		ef = nil // isPackedELF and the checks below take nil as "no structure"
+		c.HeaderMalformed = true
 	} else {
 		switch ef.Machine {
 		case elf.EM_X86_64:
