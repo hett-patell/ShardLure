@@ -5,7 +5,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -199,5 +201,44 @@ func TestCaptureSpaceWiring(t *testing.T) {
 	}
 	if urlWorker.OnCycle == nil {
 		t.Fatal("the URL worker must report cycles to the monitor")
+	}
+}
+
+// TestRuntimeWiresSpaceGateBeforeWorkers pins the call sites the helper test
+// cannot see. OnChange is written unlocked, so wireCapturePause must run right
+// after NewRunner and before the first runner.Run (the seed hook), seed itself
+// and the workers; otherwise it races Allow's locked read. The URL worker must
+// be built by newURLWorker, the helper that shares the runner's SpaceGate.
+// Comments are stripped and whitespace is flexible, so only real calls count.
+func TestRuntimeWiresSpaceGateBeforeWorkers(t *testing.T) {
+	src, err := os.ReadFile("runtime.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(string(src), "")
+	pos := func(pattern string) int {
+		loc := regexp.MustCompile(pattern).FindStringIndex(code)
+		if loc == nil {
+			return -1
+		}
+		return loc[0]
+	}
+	// NewRunner's assignment followed directly by the wiring call: nothing but
+	// whitespace between the two statements.
+	if pos(`runner\s*=\s*capture\.NewRunner\([^)]*\)\s*wireCapturePause\(\s*runner\s*,\s*m\s*\)`) < 0 {
+		t.Fatal("wireCapturePause(runner, m) must be the statement right after capture.NewRunner")
+	}
+	wire := pos(`wireCapturePause\(\s*runner\s*,\s*m\s*\)`)
+	for name, pattern := range map[string]string{
+		"the first runner.Run": `runner\.Run\(`,
+		"the seed hook":        `seed\s*:=\s*func\(`,
+		"the worker starts":    `workers\s*:=\s*func\(`,
+	} {
+		if p := pos(pattern); p < 0 || wire > p {
+			t.Fatalf("wireCapturePause must precede %s (wire at %d, it at %d)", name, wire, p)
+		}
+	}
+	if pos(`capture\.NewArtifactWorker\(`) >= 0 || pos(`urlWorker\s*:=\s*newURLWorker\(\s*st\s*,\s*runner\s*,\s*m\s*\)`) < 0 {
+		t.Fatal("the live URL worker must be built by newURLWorker so it shares the runner's SpaceGate")
 	}
 }

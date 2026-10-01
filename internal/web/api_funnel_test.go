@@ -123,6 +123,18 @@ func TestFunnelPanelIsWiredAndEscaped(t *testing.T) {
 
 func TestSettingsStatusReportsCapturePause(t *testing.T) {
 	s := newIntelTestServer(t, nil)
+	// No monitor (static web mode): the key is present and false, never a
+	// permanent false "capture paused" warning.
+	s.monitor = nil
+	nw := httptest.NewRecorder()
+	s.handleSettingsStatus(nw, httptest.NewRequest(http.MethodGet, "/api/settings/status", nil))
+	var none map[string]any
+	if err := json.Unmarshal(nw.Body.Bytes(), &none); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := none["capturePaused"]; !ok || v != false {
+		t.Fatalf("nil monitor: capturePaused = %v (present %v), want false", v, ok)
+	}
 	s.monitor = observability.New(time.Now, 0)
 	s.monitor.SetCapturePaused(true)
 	w := httptest.NewRecorder()
