@@ -376,3 +376,41 @@ func captureStderr(t *testing.T, fn func()) string {
 	w.Close()
 	return <-done
 }
+
+// campaign show reads its argument through a FlagSet: --help/-h print the
+// usage and exit 0, another leading "-" is an unknown flag (exit 2, reported
+// once by the flag package), and "--" still reaches a name starting with "-".
+// It used to look "--help" up as a campaign name and fail with "no such
+// campaign: --help", exit 1 (premerge audit cmd M2).
+func TestCampaignShowHelpAndUnknownFlag(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	for _, tc := range []struct {
+		args   []string
+		code   int
+		report bool
+		want   string
+	}{
+		{[]string{"show", "--help"}, 0, false, ""},
+		{[]string{"show", "-h"}, 0, false, ""},
+		{[]string{"show", "-x"}, 2, false, ""},
+		{[]string{"show", "--", "-odd"}, 1, true, "no such campaign: -odd"},
+		{[]string{"show"}, 1, true, "usage"},
+	} {
+		var b bytes.Buffer
+		err := showCampaign(ctx, st, &b, tc.args)
+		if err == nil {
+			t.Fatalf("%q accepted", tc.args)
+		}
+		if code, report := cmdExitStatus(err); code != tc.code || report != tc.report || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: exit %d report=%v err=%v, want %d/%v containing %q", tc.args, code, report, err, tc.code, tc.report, tc.want)
+		}
+		if b.Len() != 0 {
+			t.Errorf("%q wrote to stdout: %q", tc.args, b.String())
+		}
+	}
+}

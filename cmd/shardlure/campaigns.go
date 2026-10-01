@@ -131,25 +131,41 @@ func formatDay(t time.Time) string {
 
 func cmdCampaign(st *store.Store, args []string) {
 	if err := showCampaign(context.Background(), st, os.Stdout, args); err != nil {
-		fatal(err)
+		exitCmd(err)
 	}
 }
+
+const campaignShowUsage = "usage: shardlure campaign show <id|name>"
 
 // showCampaign never picks one of several campaigns answering to a name:
 // sibling components routinely share a suggested name, and showing the wrong
 // one would mislead the operator silently.
+//
+// The argument after show goes through a FlagSet, like every other
+// subcommand: -h/--help prints the usage and exits 0, and any other leading
+// "-" is an unknown flag (exit 2), rather than being looked up as a campaign
+// called "--help". A name that really starts with "-" is reached after "--".
 func showCampaign(ctx context.Context, st *store.Store, out io.Writer, args []string) error {
-	if len(args) != 2 || args[0] != "show" {
-		return errors.New("usage: shardlure campaign show <id|name>")
+	if len(args) == 0 || args[0] != "show" {
+		return errors.New(campaignShowUsage)
 	}
-	d, err := st.GetCampaign(ctx, args[1])
+	fs := flag.NewFlagSet("campaign show", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprintln(fs.Output(), campaignShowUsage) }
+	if err := parseCmdFlags(fs, args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New(campaignShowUsage)
+	}
+	ref := fs.Arg(0)
+	d, err := st.GetCampaign(ctx, ref)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return fmt.Errorf("no such campaign: %s", termSafe(args[1]))
+		return fmt.Errorf("no such campaign: %s", termSafe(ref))
 	case errors.Is(err, store.ErrAmbiguousCampaign):
 		// The IDs are the store's own matches (same lower() rule, uncapped),
 		// never a second lookup that could disagree with it.
-		msg := fmt.Sprintf("ambiguous name %s; use the campaign ID", termSafe(args[1]))
+		msg := fmt.Sprintf("ambiguous name %s; use the campaign ID", termSafe(ref))
 		var amb *store.AmbiguousCampaignError
 		if errors.As(err, &amb) && len(amb.IDs) > 0 {
 			msg += ": " + termSafe(strings.Join(amb.IDs, ", "))
