@@ -127,10 +127,15 @@ func (s *Store) sessionSummaryPageContext(ctx context.Context, since time.Time, 
 // partial index over command-bearing events, so it visits only the ~1% of
 // in-window rows that carry a command. Its predicate must be the index's
 // WHERE clause character for character: SQLite's partial-index implication
-// check is syntactic, and the earlier COALESCE(command,”)<>” spelling of
-// the same condition left the planner on the plain ts index, walking every
-// in-window event (fix-all review M2). INDEXED BY makes a future drift an
-// error rather than a silent plan change; the unary + keeps source out of
+// check is syntactic, and the earlier spelling of the same condition,
+//
+//	COALESCE(command,'')<>''
+//
+// left the planner on the plain ts index, walking every in-window event
+// (fix-all review M2); it sits in a code block because gofmt rewrites a
+// pair of single quotes in doc-comment prose into a typographic quote.
+// INDEXED BY makes a future drift an error rather than a silent plan
+// change; the unary + keeps source out of
 // index selection, because answering source='cowrie' from idx_events_session
 // walks every Cowrie row ever stored (the planner's choice on an un-ANALYZEd
 // database). The legacy branch stays on the pinned legacy index and puts the

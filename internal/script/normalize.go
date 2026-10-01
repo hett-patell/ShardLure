@@ -77,8 +77,12 @@ const (
 	MinCommonActors    = 5
 	MaxLinkPercent     = 2.0
 
-	// Unit and record separators: stripped from input, so the encoding is
-	// exactly reversible without re-parsing quotes.
+	// Unit and record separators of the encoding. An attacker's own \x1f and
+	// \x1e inside a word encode as litUS/litRS (since Version 5; they used to
+	// be stripped to blanks), so the encoding is reversible without
+	// re-parsing quotes. Known exception, deferred to Version 6: an unquoted
+	// word matching keyTypes is returned raw, so a separator inside one
+	// (`ecdsa-sha2-a\x1fb`) still splits the token (premerge audit script M1).
 	tokSep  = "\x1f"
 	lineSep = "\x1e"
 
@@ -1295,8 +1299,11 @@ func normalizeToken(t string) string {
 // normaliser's placeholder or this escape: a typed `"<url>"` can neither
 // count as a URL toward Distinctive nor share a fingerprint with a real one.
 // A backslash escape (\<) would collide with a real placeholder after an
-// attacker's backslash (`"\http://x"` gives \<url>). Only quoted words can
-// hold < or >, the tokenizer splits them out elsewhere.
+// attacker's backslash (`"\http://x"` gives \<url>). Quoted words and
+// backslash-escaped bare words (`\<url\>`, since Version 5) can hold < or >;
+// everywhere else the tokenizer splits them out as redirections, which is
+// why normalizeToken checks every word, not only quoted ones (apart from
+// the raw keyTypes passthrough, deferred to Version 6: script M1).
 //
 // The pieces between the literals are substituted independently, which is
 // exactly equivalent to substituting the whole word: no pattern can match

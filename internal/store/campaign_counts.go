@@ -8,9 +8,6 @@ import "context"
 // list never reads as the whole. Both tables are bounded by distinct
 // campaigns and script families, so a COUNT(*) is a cheap scan of the
 // primary-key b-tree, not an events-sized read.
-//
-// They live in their own file so the list methods in campaigns.go stay
-// untouched.
 func (s *Store) CountCampaigns(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM campaigns`).Scan(&n)

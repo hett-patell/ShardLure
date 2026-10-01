@@ -71,7 +71,7 @@ Longer operational guides (installation, backup, security, troubleshooting) live
 - **Local geolocation (recommended):** point `geoip.mmdb` at a MaxMind GeoLite2/GeoIP2 City database and geo resolves **locally** — tier 1, before any HTTP. It fixes three things at once: coverage (the HTTP tier is capped per poll and only resolves IPs currently on screen, so most attacker IPs were never resolved at all), privacy (the free ip-api tier is plain HTTP, so every attacker IP you looked up was visible on the wire), and air-gap (works with outbound geo turned off entirely). A missing or corrupt database is fail-open — it degrades to the HTTP tier and says so in Settings.
 - **URLhaus URL submission:** MalwareBazaar gets the payload *files*; [URLhaus](https://urlhaus.abuse.ch/) gets the **URLs they were served from**. Because ShardLure fetches attacker URLs itself, a successful fetch is first-hand proof the URL was live and serving — exactly URLhaus's bar. Blue Team panel shows the vetting gate's decision per candidate, including *why* anything was held back. One abuse.ch Auth-Key covers both services.
 - **VirusTotal payload verdicts:** check captured payload hashes against VirusTotal without ever uploading a file — only the sha256 leaves the host. The payload library shows a `virustotal` column: cached verdicts render as an engine ratio, hashes VT has never seen render as **novel** (a genuinely interesting signal for a honeypot), and everything else gets an opt-in `check` button. The list view never spends quota; the free tier allows ~4 lookups/minute, so live lookups are always deliberate.
-- **Campaigns and scripts:** sessions that planted the same SSH key, delivered the same payload or ran the same distinctive script are linked into campaigns, each link showing its evidence. Links are made between sessions, not whole actors, because one HASSH fingerprint can cover several unrelated tools. Bot command scripts are fingerprinted after normalising the parts bots randomise, and near-identical variants are grouped for display. Names and edits you make always win.
+- **Campaigns and scripts:** sessions that planted the same SSH key, delivered the same payload or ran the same distinctive script are linked into campaigns, each link showing its evidence. Links are made between sessions, not whole actors, because one HASSH fingerprint can cover several unrelated tools. Bot command scripts are fingerprinted after normalising the parts bots randomise, and near-identical variants are grouped for display. Names and notes you set are kept, and operator edits override automatic grouping.
 
 ## Setup Guide
 
@@ -216,8 +216,9 @@ of access logs).
 > `tailscale status --json` reports at startup (and its short form), plus names
 > derived from the hostname the way Tailscale derives them (`my_box` becomes
 > `my-box`, a duplicate `arm` becomes `arm-1`), alone or as
-> `<name>.<tailnet>.ts.net`. Reaching it by another name needs
-> `dashboard.public_origin` or a token.
+> `<name>.<tailnet>.ts.net`. Reaching it by another name (a LAN DNS name, or a
+> node renamed in the Tailscale console on a machine without a working
+> `tailscale` CLI) needs `dashboard.public_origin` or a token.
 
 ### Step 5 (optional) — Enable IP reputation enrichment & MalwareBazaar sharing
 
@@ -290,7 +291,7 @@ shardlure version
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
 - **Rolling back from v2.9 to an older build:** older binaries (v2.8 at schema 24, the v2.9 campaigns rc1 at schema 25) cannot create backups of the v26 database; restore the pre-upgrade bundle instead.
 - **Upgrading again after a rollback:** an older build writes bot-script lines in its own encoding and leaves the stored normaliser version alone, so the next upgrade would keep them and fingerprint the same script two ways. Run `shardlure scripts --rebuild` as the service account, then restart every `shardlure live` and `web` process on that database. Campaign names and IDs are kept.
-- **A token-less dashboard answers only names it knows.** Without `SHARDLURE_DASH_TOKEN`, a request whose `Host` is not the listen IP, a loopback address, `localhost`, the `dashboard.public_origin` hostname or one of the machine's Tailscale names gets `421` (this blocks DNS rebinding). The Tailscale names are the MagicDNS name `tailscale status --json` reports at startup and its short form, plus the hostname sanitised and de-duplicated as Tailscale does it (`my_box` → `my-box`, `arm` → `arm-1`), alone or as `<name>.<tailnet>.ts.net`. If you reach the dashboard by another name (a LAN DNS name, or a node renamed in the Tailscale console on a machine without a working `tailscale` CLI), set `dashboard.public_origin` or a token.
+- **A token-less dashboard answers only names it knows.** Without `SHARDLURE_DASH_TOKEN`, a request by a `Host` the dashboard does not recognise gets `421` (this blocks DNS rebinding). The accepted names, and what to set if you use another one, are listed under [Step 4](#step-4--check-services-and-open-the-dashboard).
 
 ## Local Development
 
@@ -314,10 +315,10 @@ Tests:
 ```bash
 make test                     # go test ./...
 go test ./internal/store/ -run TestName    # single package / single test
-make fuzz                     # fuzz the 3 attacker-input parsers (FUZZTIME=5m to extend)
+make fuzz                     # fuzz the 4 attacker-input parsers (FUZZTIME=5m to extend)
 ```
 
-`make fuzz` exercises the parsers that consume attacker-controlled bytes: the sshd journal line parser, the Cowrie jsonlog reader, and the Cowrie TTY binary decoder (a packed `<iLiiLL` C struct — the sharpest edge, since its own length arithmetic could over-read). CI does **not** fuzz, but `go test ./...` runs each target's seed corpus, so known-bad inputs stay covered. Note that Go writes *failing* fuzz inputs to `testdata/fuzz/` as binary files — don't commit those (`check-utf8.sh` rejects them); pin the finding as a readable unit test instead.
+`make fuzz` exercises the parsers that consume attacker-controlled bytes: the sshd journal line parser, the Cowrie jsonlog reader, the Cowrie TTY binary decoder (a packed `<iLiiLL` C struct — the sharpest edge, since its own length arithmetic could over-read), and the script normaliser behind campaigns (it reads attacker-typed shell syntax word by word). CI does **not** fuzz, but `go test ./...` runs each target's seed corpus, so known-bad inputs stay covered. Note that Go writes *failing* fuzz inputs to `testdata/fuzz/` as binary files — don't commit those (`check-utf8.sh` rejects them); pin the finding as a readable unit test instead.
 
 ### Verifying the dashboard numbers
 
