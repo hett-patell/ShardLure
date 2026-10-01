@@ -807,8 +807,8 @@ func relativeTo(root, p string) (string, bool) {
 // linkingOccurrences applies the link rules. Counts are distinct actors per
 // value. Only ssh_key, payload and script values link: a key must not be
 // common; a payload must have a known size >= bazaar.MinSampleBytes, not be
-// the empty file, not be a generic public build (xmrig, coinminer) or
-// unclassifiable, and not be common; a script must pass script.LinkDecision.
+// the empty file, not be a generic public build (genericFamilies: xmrig,
+// coinminer, traffmonetizer) or unclassifiable, and not be common; a script must pass script.LinkDecision.
 //
 // A payload the classifier read but could not name still links: the spec
 // excludes only known generic builds, and the classifier is precision-first,

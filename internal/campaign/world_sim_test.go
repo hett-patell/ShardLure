@@ -34,7 +34,12 @@ package campaign
 //     expected "born-in-bridge" case: a family whose first evidence arrives in
 //     a session shared with an existing campaign inherits that lineage. This
 //     is the accepted known limitation documented in CLAUDE.md (Campaigns and
-//     scripts, Identity). Membership stays correct.
+//     scripts, Identity). Membership stays correct, except when an operator
+//     merge names such an inherited ID (an automatic alias inside the bridged
+//     campaign at that moment): the merge closure then fuses every piece
+//     holding a session of that lineage, so several families can share one
+//     campaign until the mis-stamped values age out of the evidence window.
+//     That is logged as fusion (rare; 4 of 600 trials at base 5000).
 //   - organic-churn counts baselines recorded on bridged or edit days, a known
 //     artifact of the simulation's bookkeeping, not an identity bug by itself.
 //   - Worker goroutines are bounded by GOMAXPROCS.

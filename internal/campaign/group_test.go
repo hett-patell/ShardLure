@@ -920,3 +920,29 @@ func TestResolveFollowsLongMergeChainToRoot(t *testing.T) {
 		t.Fatal("a cyclic map must still terminate")
 	}
 }
+
+// Rule 4's defers clause (campaign audit M2: mutating it out failed no test).
+// Two lineages permanently linked by one session showed K, with P aliased
+// into it. K's oldest value then aged out, so P's earliest assignment is now
+// older than K's. The shown ID must stay K: P deferred last cycle and defers
+// again, rather than the ID flipping the day the evidence turns over.
+func TestDeferringLineageKeepsTheShownID(t *testing.T) {
+	const k, p = "c-0000000000aa", "c-0000000000bb"
+	in := func(aliases map[string]string) Input {
+		return Input{Occurrences: []Occurrence{
+			o("ssh_key", "K2", "x1", "x", 10), o("payload", "P1", "x1", "x", 10),
+			o("payload", "P1", "b1", "b", 11), o("ssh_key", "K2", "a1", "a", 12),
+		}, Assignments: []Assignment{
+			{Kind: "ssh_key", Value: "K2", CampaignID: k, Seq: 5},
+			{Kind: "payload", Value: "P1", CampaignID: p, Seq: 3},
+		}, Aliases: aliases}
+	}
+	// Control: with no history the earliest assigned lineage (P) wins.
+	if out := groupT(in(map[string]string{})); len(out.Campaigns) != 1 || out.Campaigns[0].ID != p {
+		t.Fatalf("control: want one campaign %s, got %+v", p, out.Campaigns)
+	}
+	out := groupT(in(map[string]string{p: k}))
+	if len(out.Campaigns) != 1 || out.Campaigns[0].ID != k || out.Aliases[p] != k {
+		t.Fatalf("want %s shown with %s aliased into it, got %+v aliases %v", k, p, out.Campaigns, out.Aliases)
+	}
+}
