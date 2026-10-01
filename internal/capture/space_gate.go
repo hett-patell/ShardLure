@@ -14,6 +14,11 @@ import (
 // downloads; on 2026-10-01 the ARM root disk reached 100%.
 type SpaceGate struct {
 	// OnChange is called once per pause/resume transition (set before use).
+	// Calls are serialized and in transition order, because Allow holds the
+	// gate's lock while it measures, updates and notifies. OnChange must
+	// therefore not call back into the gate (Allow or Paused): that deadlocks.
+	// free is the measured free space; on a resume caused by a measurement
+	// error (fail-open) it is 0 and carries no meaning.
 	OnChange func(paused bool, free uint64)
 
 	dir     string
@@ -45,20 +50,29 @@ func (g *SpaceGate) Allow() bool {
 	if g == nil || g.minFree == 0 {
 		return true
 	}
-	free, err := g.avail(g.dir)
-	paused := err == nil && free < g.minFree
+	// The runner, the URL worker and the file worker share one gate. Holding
+	// the lock across the measurement and the notification keeps a stale
+	// reading from overwriting a fresher one and keeps OnChange in order, so
+	// an observer never ends on "paused" while the gate is open. A statfs is
+	// a few microseconds; serializing three callers costs nothing.
 	g.mu.Lock()
+	defer g.mu.Unlock()
+	free, err := g.avail(g.dir)
+	if err != nil {
+		free = 0
+	}
+	paused := err == nil && free < g.minFree
 	changed := paused != g.paused
 	g.paused = paused
-	notify := g.OnChange
-	g.mu.Unlock()
-	if changed && notify != nil {
-		notify(paused, free)
+	if changed && g.OnChange != nil {
+		g.OnChange(paused, free)
 	}
 	return !paused
 }
 
-// Paused reports the result of the last Allow.
+// Paused reports the result of the most recent Allow from any of the workers
+// sharing the gate, so it can be up to one worker tick stale. It does not
+// measure.
 func (g *SpaceGate) Paused() bool {
 	if g == nil {
 		return false
