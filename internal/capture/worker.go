@@ -15,7 +15,9 @@ import (
 // due artifact captures and processes them one at a time. It replaces the
 // process-lifetime doneKeys memo with durable DB-backed retry state.
 type ArtifactWorker struct {
-	OnCycle     func(bool, error)
+	OnCycle func(bool, error)
+	// Space, when set, is consulted before every claim (see SpaceGate).
+	Space       *SpaceGate
 	st          *store.Store
 	fetch       *SafeFetcher
 	maxAttempts int
@@ -78,6 +80,12 @@ func (w *ArtifactWorker) tick(ctx context.Context) (cycleErr error) {
 		w.mu.Unlock()
 	}()
 
+	// Checked after the busy/OnCycle bookkeeping so a paused cycle still
+	// reports progress (no worker_stalled) and before the claim so no
+	// attempt is spent.
+	if !w.Space.Allow() {
+		return
+	}
 	now := time.Now().UTC()
 	urls, err := w.st.DueArtifactCaptures(now, 1, w.maxAttempts)
 	if err != nil {
