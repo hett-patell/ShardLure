@@ -3,8 +3,8 @@ package observability
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -52,39 +52,106 @@ func TestFunnelUnavailableWhenStaleOrInvalid(t *testing.T) {
 }
 
 func TestStagesAreFixedAndOrdered(t *testing.T) {
-	names := []string{}
-	for _, st := range (FunnelWindow{}).Stages() {
-		names = append(names, st.Name)
+	w := FunnelWindow{Connected: 1, LoggedIn: 2, RanCommands: 3, DownloadAttempt: 4, Captured: 5,
+		NewPayloads: 6, SharedBazaar: 7, SharedURLhaus: 8, SharedThreatFox: 9}
+	want := []FunnelStage{{"connected", 1}, {"logged_in", 2}, {"ran_commands", 3}, {"download_attempt", 4},
+		{"captured", 5}, {"new_payloads", 6}, {"shared_bazaar", 7}, {"shared_urlhaus", 8}, {"shared_threatfox", 9}}
+	got := w.Stages()
+	if len(got) != len(want) {
+		t.Fatalf("stages = %v", got)
 	}
-	want := "connected,logged_in,ran_commands,download_attempt,captured,new_payloads,shared_bazaar,shared_urlhaus,shared_threatfox"
-	if strings.Join(names, ",") != want {
-		t.Fatalf("stages = %v", names)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stage %d = %+v, want %+v (all: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// waitFunnel polls the snapshot until cond holds or the deadline passes.
+func waitFunnel(t *testing.T, m *Monitor, cond func(FunnelSample) bool) FunnelSample {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f := m.Snapshot().Funnel
+		if cond(f) {
+			return f
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("funnel condition not reached, last %+v", f)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func runSamplerAsync(ctx context.Context, m *Monitor, every, budget time.Duration, collect func(context.Context) (FunnelSample, error)) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		RunFunnelSampler(ctx, m, every, budget, collect)
+		close(done)
+	}()
+	return done
+}
+
+func waitDone(t *testing.T, done chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sampler did not stop")
 	}
 }
 
 func TestRunFunnelSamplerRecordsAndStops(t *testing.T) {
 	m := New(time.Now, 0)
 	ctx, cancel := context.WithCancel(context.Background())
-	calls := 0
-	done := make(chan struct{})
-	go func() {
-		RunFunnelSampler(ctx, m, time.Hour, time.Second, func(context.Context) (FunnelSample, error) {
-			calls++
-			if calls == 1 {
-				cancel()
-				return FunnelSample{Day: FunnelWindow{Connected: 3}}, nil
-			}
-			return FunnelSample{}, errors.New("unreachable")
-		})
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("sampler did not stop after cancel")
+	defer cancel()
+	var calls atomic.Int32
+	done := runSamplerAsync(ctx, m, time.Hour, time.Second, func(context.Context) (FunnelSample, error) {
+		calls.Add(1)
+		return FunnelSample{Day: FunnelWindow{Connected: 3}}, nil
+	})
+	f := waitFunnel(t, m, func(f FunnelSample) bool { return f.Valid })
+	if f.Day.Connected != 3 || f.At.IsZero() || f.At.Location() != time.UTC {
+		t.Fatalf("recorded funnel = %+v", f)
 	}
-	if calls != 1 {
-		t.Fatalf("collect calls = %d, want 1", calls)
+	cancel()
+	waitDone(t, done)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("collect calls = %d, want 1 (period is an hour)", n)
+	}
+}
+
+func TestRunFunnelSamplerOverrunIsInvalidAndKeepsValues(t *testing.T) {
+	m := New(time.Now, 0)
+	m.RecordFunnel(FunnelSample{At: time.Now(), Valid: true, Day: FunnelWindow{Connected: 7}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runSamplerAsync(ctx, m, time.Hour, 20*time.Millisecond, func(cycle context.Context) (FunnelSample, error) {
+		<-cycle.Done()
+		// A collect that answers late with no error must still be dropped:
+		// only the budget marks it expired.
+		return FunnelSample{Day: FunnelWindow{Connected: 99}}, nil
+	})
+	f := waitFunnel(t, m, func(f FunnelSample) bool { return !f.Valid })
+	if f.Day.Connected != 7 {
+		t.Fatalf("an overrun must keep the last values, got %+v", f)
+	}
+	cancel()
+	waitDone(t, done)
+}
+
+func TestRunFunnelSamplerRejectsNonPositiveDurations(t *testing.T) {
+	for _, d := range []struct{ every, budget time.Duration }{{0, time.Second}, {-time.Second, time.Second}, {time.Hour, 0}, {time.Hour, -1}} {
+		m := New(time.Now, 0)
+		var calls atomic.Int32
+		done := runSamplerAsync(context.Background(), m, d.every, d.budget, func(context.Context) (FunnelSample, error) {
+			calls.Add(1)
+			return FunnelSample{}, nil
+		})
+		waitDone(t, done)
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("every=%v budget=%v: collect calls = %d, want 0", d.every, d.budget, n)
+		}
 	}
 }
 

@@ -59,7 +59,12 @@ func (m *Monitor) RecordFunnel(sample FunnelSample) {
 // sized for queue counts, while a 7-day funnel over ~2M events takes seconds
 // on the ARM sensor.
 func RunFunnelSampler(ctx context.Context, m *Monitor, every, budget time.Duration, collect func(context.Context) (FunnelSample, error)) {
-	if m == nil || collect == nil {
+	// A non-positive period would panic in time.NewTicker, and a non-positive
+	// budget expires every cycle before collect can answer. Both are caller
+	// misconfiguration, so the sampler returns without running rather than
+	// panicking the daemon or recording a stream of invalid samples. The gap
+	// stays visible: shardlure_payload_funnel_available reads 0.
+	if m == nil || collect == nil || every <= 0 || budget <= 0 {
 		return
 	}
 	ticker := time.NewTicker(every)
