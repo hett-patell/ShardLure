@@ -497,11 +497,11 @@ func (w *Worker) tick(ctx context.Context) error {
 			w.pending, w.lastGroup, regrouped = false, time.Now(), true
 		}
 	}
-	// PruneOrphanScripts is a DELETE ... WHERE NOT EXISTS scan under writeMu.
-	// Orphans appear only when a session re-settles under a new fingerprint
-	// or a regroup rebuilds families (retention orphans are collected on the
-	// next such tick), so an idle 5 s tick does not take the writer lock for
-	// nothing.
+	// PruneOrphanScripts scans every script for a missing session (on a read
+	// connection; it takes writeMu only to delete what it found). Orphans
+	// appear only when a session re-settles under a new fingerprint or a
+	// regroup rebuilds families (retention orphans are collected on the next
+	// such tick), so an idle 5 s tick does not pay for the scan.
 	if settled == 0 && !regrouped {
 		return nil
 	}

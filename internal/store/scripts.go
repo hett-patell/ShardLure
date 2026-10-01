@@ -700,18 +700,81 @@ func scriptBool(b bool) int {
 // concurrently, it could delete a representative an in-flight assign pass
 // has loaded, and that pass would then file new members under a family
 // whose representative row no longer exists.
+//
+// Candidates are found read-only, outside writeMu, and deleted in
+// pruneChunk-row transactions. Both statements used to run as one
+// transaction scanning every script under writeMu on every tick that
+// settled a session, so the lock hold grew with the attacker-driven script
+// count rather than the number of orphans: 100k scripts held it ~240 ms
+// per call on x86 (2-3x that on ARM) with nothing to prune (premerge
+// store-write M1). The steady state, no candidate, now takes no write lock
+// at all. Each chunk re-applies the orphan predicates inside its
+// transaction, so a candidate that gained a session after the read (a
+// re-settle onto an existing fingerprint) is kept; a script orphaned after
+// the read waits for the next prune. Chunking does not change the result:
+// a representative is dissolved in whichever chunk holds it, and a member
+// is deleted by its own predicates whichever side of that chunk it falls.
 func (s *Store) PruneOrphanScripts(ctx context.Context) error {
-	return s.WithTxContext(ctx, func(tx *sql.Tx) error {
-		// idx_scripts_family serves the member lookup; the representative
-		// set is bounded by families whose own sessions retention just took.
-		if _, err := tx.Exec(`UPDATE scripts SET family='', family_distance=0 WHERE family IN (
-  SELECT r.fingerprint FROM scripts r WHERE r.family=r.fingerprint
+	cands, err := s.orphanScriptCandidates(ctx)
+	if err != nil || len(cands) == 0 {
+		return err
+	}
+	if pruneAfterRead != nil {
+		pruneAfterRead()
+	}
+	for lo := 0; lo < len(cands); lo += pruneChunk {
+		chunk := cands[lo:min(lo+pruneChunk, len(cands))]
+		args := make([]any, len(chunk))
+		for i, fp := range chunk {
+			args[i] = fp
+		}
+		in := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		if err := s.WithTxContext(ctx, func(tx *sql.Tx) error {
+			// idx_scripts_family serves the member lookup; the dissolved set
+			// is the chunk's representatives whose own sessions are gone.
+			if _, err := tx.ExecContext(ctx, `UPDATE scripts SET family='', family_distance=0 WHERE family IN (
+  SELECT r.fingerprint FROM scripts r WHERE r.fingerprint IN (`+in+`) AND r.family=r.fingerprint
     AND NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=r.fingerprint)
-    AND EXISTS (SELECT 1 FROM scripts m WHERE m.family=r.fingerprint AND m.fingerprint<>r.fingerprint))`); err != nil {
+    AND EXISTS (SELECT 1 FROM scripts m WHERE m.family=r.fingerprint AND m.fingerprint<>r.fingerprint))`, args...); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, `DELETE FROM scripts WHERE fingerprint IN (`+in+`)
+  AND NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=scripts.fingerprint)
+  AND NOT EXISTS (SELECT 1 FROM scripts m WHERE m.family=scripts.fingerprint AND m.fingerprint<>scripts.fingerprint)`, args...)
+			return err
+		}); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM scripts WHERE NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=scripts.fingerprint)
-  AND NOT EXISTS (SELECT 1 FROM scripts m WHERE m.family=scripts.fingerprint AND m.fingerprint<>scripts.fingerprint)`)
-		return err
-	})
+	}
+	return nil
 }
+
+// orphanScriptCandidates lists every script no session points at: the
+// deleted set, with the representatives the prune dissolves first among
+// them. It is the whole-table scan, so it runs on a read connection.
+func (s *Store) orphanScriptCandidates(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT fingerprint FROM scripts
+WHERE NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=scripts.fingerprint) ORDER BY fingerprint`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			return nil, err
+		}
+		out = append(out, fp)
+	}
+	return out, rows.Err()
+}
+
+// pruneChunk bounds one PruneOrphanScripts write transaction, and its
+// parameters (each statement binds the chunk once) to batchParams. A var so
+// tests can shrink it.
+var pruneChunk = batchParams
+
+// pruneAfterRead, when set by a test, runs between the candidate read and
+// the first write transaction.
+var pruneAfterRead func()

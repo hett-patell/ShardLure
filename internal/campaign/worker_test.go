@@ -582,10 +582,10 @@ func TestFamilyOfFailsClosedOnCancel(t *testing.T) {
 	}
 }
 
-// PruneOrphanScripts is a DELETE ... WHERE NOT EXISTS scan under writeMu.
-// Orphans only arise when a session settles under a new fingerprint or a
-// regroup rebuilds families, so an idle tick must not take the writer lock
-// for it; a tick that settled or regrouped still prunes.
+// PruneOrphanScripts scans every script for a missing session. Orphans only
+// arise when a session settles under a new fingerprint or a regroup rebuilds
+// families, so an idle tick must not pay for the scan; a tick that settled
+// or regrouped still prunes.
 func TestPruneRunsOnlyAfterSettleOrRegroup(t *testing.T) {
 	st := openStore(t)
 	ctx := context.Background()

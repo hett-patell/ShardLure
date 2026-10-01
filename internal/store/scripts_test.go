@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -674,5 +675,133 @@ VALUES('s-new','cowrie:y','198.51.100.9',1,2,'` + stamp + `','` + stamp + `','` 
 	got := snapshot()
 	if want := fromScratch(); got != want {
 		t.Fatalf("diffed table differs from a full rebuild:\n got %s\nwant %s", got, want)
+	}
+}
+
+// Premerge store-write M1: the prune scanned every script under writeMu on
+// each tick that settled a session, so the lock hold grew with the
+// attacker-driven script count. With nothing to prune it takes no write
+// lock at all: here writeMu is held for the whole call.
+func TestPruneOrphanScriptsTakesNoWriteLockWithoutOrphans(t *testing.T) {
+	s := newTestStore(t, "prune-nolock.db")
+	seedPruneFixture(t, s, rand.New(rand.NewPCG(1, 2)), false)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.PruneOrphanScripts(ctx); err != nil {
+		t.Fatalf("prune with no orphans waited for writeMu: %v", err)
+	}
+}
+
+// A candidate read outside the lock can gain a session before the write (a
+// re-settle onto an existing fingerprint); the write re-checks and keeps it.
+func TestPruneOrphanScriptsRechecksCandidatesUnderTheLock(t *testing.T) {
+	s := newTestStore(t, "prune-recheck.db")
+	ts := "2026-09-20T00:00:00.000000000Z"
+	for _, fp := range []string{"a", "b"} {
+		if _, err := s.db.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen)
+VALUES(?,'n','x',3,0,'',0,3,?,?)`, fp, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruneAfterRead = func() {
+		if _, err := s.db.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES('s','a','1.2.3.4',?,?,?,?,'a')`, ts, ts, ts, ts); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { pruneAfterRead = nil })
+	if err := s.PruneOrphanScripts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	rows, _ := s.db.Query(`SELECT fingerprint FROM scripts ORDER BY fingerprint`)
+	for rows.Next() {
+		var fp string
+		rows.Scan(&fp)
+		left = append(left, fp)
+	}
+	rows.Close()
+	if len(left) != 1 || left[0] != "a" {
+		t.Fatalf("scripts left %v, want [a]: the re-settled candidate kept, the orphan gone", left)
+	}
+}
+
+// The chunked prune leaves exactly what the old single-transaction prune
+// left, on random families whose representatives and members lose their
+// sessions in every combination, with chunks small enough that a
+// representative and its members land in different transactions.
+func TestPruneOrphanScriptsChunkedMatchesSingleStatement(t *testing.T) {
+	old := pruneChunk
+	pruneChunk = 3
+	t.Cleanup(func() { pruneChunk = old })
+	for seed := uint64(1); seed <= 20; seed++ {
+		a := newTestStore(t, fmt.Sprintf("prune-a-%d.db", seed))
+		b := newTestStore(t, fmt.Sprintf("prune-b-%d.db", seed))
+		seedPruneFixture(t, a, rand.New(rand.NewPCG(seed, 7)), true)
+		seedPruneFixture(t, b, rand.New(rand.NewPCG(seed, 7)), true)
+		if err := a.PruneOrphanScripts(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.db.Exec(`UPDATE scripts SET family='', family_distance=0 WHERE family IN (
+  SELECT r.fingerprint FROM scripts r WHERE r.family=r.fingerprint
+    AND NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=r.fingerprint)
+    AND EXISTS (SELECT 1 FROM scripts m WHERE m.family=r.fingerprint AND m.fingerprint<>r.fingerprint))`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.db.Exec(`DELETE FROM scripts WHERE NOT EXISTS (SELECT 1 FROM session_scripts ss WHERE ss.fingerprint=scripts.fingerprint)
+  AND NOT EXISTS (SELECT 1 FROM scripts m WHERE m.family=scripts.fingerprint AND m.fingerprint<>scripts.fingerprint)`); err != nil {
+			t.Fatal(err)
+		}
+		dump := func(s *Store) string {
+			var out strings.Builder
+			rows, err := s.db.Query(`SELECT fingerprint, family, family_distance FROM scripts ORDER BY fingerprint`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var fp, fam string
+				var d float64
+				rows.Scan(&fp, &fam, &d)
+				fmt.Fprintf(&out, "%s/%s/%g ", fp, fam, d)
+			}
+			return out.String()
+		}
+		if got, want := dump(a), dump(b); got != want {
+			t.Fatalf("seed %d: chunked prune left\n%s\nsingle statement left\n%s", seed, got, want)
+		}
+	}
+}
+
+// seedPruneFixture files 40 scripts into random families (some unfiled) and
+// gives each a session unless orphans is set and the coin says otherwise.
+func seedPruneFixture(t *testing.T, s *Store, r *rand.Rand, orphans bool) {
+	t.Helper()
+	ts := "2026-09-20T00:00:00.000000000Z"
+	if err := s.WithTx(func(tx *sql.Tx) error {
+		for i := 0; i < 40; i++ {
+			fp, fam, dist := fmt.Sprintf("f%02d", i), "", 0.0
+			switch k := r.IntN(4); {
+			case k == 0 && i > 0: // a member of an earlier representative
+				fam, dist = fmt.Sprintf("f%02d", r.IntN(i)/5*5), 0.2
+			case i%5 == 0:
+				fam = fp // a representative
+			}
+			if _, err := tx.Exec(`INSERT INTO scripts(fingerprint,normalized,display,command_count,distinctive,family,family_distance,token_count,first_seen,last_seen)
+VALUES(?,'n','x',3,0,?,?,3,?,?)`, fp, fam, dist, ts, ts); err != nil {
+				return err
+			}
+			if orphans && r.IntN(2) == 0 {
+				continue
+			}
+			if _, err := tx.Exec(`INSERT INTO session_scripts(session_id,actor_id,src_ip,first_seen,last_seen,updated_at,settled_at,fingerprint) VALUES(?,'a','1.2.3.4',?,?,?,?,?)`,
+				"s"+fp, ts, ts, ts, ts, fp); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
