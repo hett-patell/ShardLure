@@ -51,9 +51,6 @@ func TestOnlyTheLeaseHolderRunsThePipeline(t *testing.T) {
 	if n := strings.Count(logs.String(), "holds the campaign worker lease"); n != 1 {
 		t.Fatalf("the other holder was logged %d times over 3 skipped ticks, want once:\n%s", n, logs.String())
 	}
-	if err := w2.Regroup(ctx); err != ErrLeaseHeldElsewhere {
-		t.Fatalf("Regroup without the lease = %v, want ErrLeaseHeldElsewhere", err)
-	}
 	// The holder alone built the campaign: a standalone web against an
 	// offline-ingested database is exactly a single worker.
 	list, err := st.ListCampaigns(ctx, 10)

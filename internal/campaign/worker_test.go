@@ -180,44 +180,10 @@ func TestWorkerClearsRetainedErrorOnSuccess(t *testing.T) {
 	}
 }
 
-// An edit appended after Regroup read the edit log but before it saved must
-// make the save refuse (ErrStaleGrouping), and the next regroup applies it.
-func TestStaleSaveIsRefusedAndNextRegroupIncludesEdit(t *testing.T) {
-	st := openStore(t)
-	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
-	ctx := context.Background()
-	w := NewWorker(st, 90, t.TempDir())
-	if err := w.Tick(ctx); err != nil {
-		t.Fatal(err)
-	}
-	list, err := st.ListCampaigns(ctx, 10)
-	if err != nil || len(list) != 1 {
-		t.Fatalf("campaigns %+v %v", list, err)
-	}
-	id := list[0].ID
-	beforeSave = func() {
-		beforeSave = nil
-		if err := st.AppendCampaignEdit(ctx, id, "rename", "Racing Rename", "test"); err != nil {
-			t.Error(err)
-		}
-	}
-	t.Cleanup(func() { beforeSave = nil })
-	if err := w.Regroup(ctx); !errors.Is(err, store.ErrStaleGrouping) {
-		t.Fatalf("Regroup = %v, want ErrStaleGrouping", err)
-	}
-	if list, _ := st.ListCampaigns(ctx, 10); len(list) != 1 || list[0].Name != "" {
-		t.Fatalf("stale grouping was saved: %+v", list)
-	}
-	if err := w.Regroup(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if list, _ := st.ListCampaigns(ctx, 10); len(list) != 1 || list[0].Name != "Racing Rename" {
-		t.Fatalf("edit not applied by the next regroup: %+v", list)
-	}
-}
-
-// Through Tick, a stale save is not a failure: no error, no backoff, and the
-// very next tick regroups.
+// An edit appended after a regroup read the edit log but before it saved
+// makes the save refuse (ErrStaleGrouping). Through Tick that is not a
+// failure: no error, no backoff, nothing saved, and the very next tick
+// regroups with the edit.
 func TestTickTreatsStaleSaveAsRetryNotFailure(t *testing.T) {
 	st := openStore(t)
 	insertSharedKey(t, st, "cowrie:a", "cowrie:b")
@@ -241,6 +207,9 @@ func TestTickTreatsStaleSaveAsRetryNotFailure(t *testing.T) {
 	}
 	if !w.retryAt.IsZero() && time.Now().Before(w.retryAt) {
 		t.Fatal("stale save started a backoff")
+	}
+	if list, _ := st.ListCampaigns(ctx, 10); len(list) != 1 || list[0].Name != "" {
+		t.Fatalf("stale grouping was saved: %+v", list)
 	}
 	if err := w.Tick(ctx); err != nil {
 		t.Fatal(err)

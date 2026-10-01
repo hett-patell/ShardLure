@@ -109,8 +109,10 @@ type Worker struct {
 
 	// mu serialises the whole pipeline. AssignScriptFamilies and
 	// PruneOrphanScripts assume one sequential caller (a concurrent prune can
-	// delete a representative an in-flight assign pass loaded), and it makes
-	// Regroup single-flight. Everything below is guarded by mu.
+	// delete a representative an in-flight assign pass loaded). Tick is the
+	// only entry point: an exported Regroup with no production caller skipped
+	// the version check Tick runs first and was removed (premerge store-write
+	// note). Everything below is guarded by mu.
 	mu       sync.Mutex
 	families map[string]string // sha256 -> lower-case family; successful reads only
 	// root is the evidence root, opened once (lazily, by familyOf) as a
@@ -158,13 +160,9 @@ type Worker struct {
 	editsSeen int64
 }
 
-// ErrRegroupHeld is Regroup's answer while a script rebuild holds regroups
-// (see store.ScriptRebuildHold). Tick keeps the regroup owed instead.
-var ErrRegroupHeld = errors.New("campaign: regroup held until rebuilt scripts settle")
-
 // ErrLeaseHeldElsewhere means another process holds the campaign worker
 // lease, so this one runs no part of the pipeline. Tick swallows it (a skipped
-// tick is not a failure and starts no backoff); Regroup returns it.
+// tick is not a failure and starts no backoff).
 var ErrLeaseHeldElsewhere = errors.New("campaign: another process holds the campaign worker lease")
 
 // ErrLeaseLapsed means the lease this process held ran out during a phase
@@ -513,28 +511,6 @@ func (w *Worker) tick(ctx context.Context) error {
 		return ErrLeaseLapsed
 	}
 	return w.st.PruneOrphanScripts(ctx)
-}
-
-// Regroup recomputes and saves the campaigns now. It shares Tick's lock, so
-// it never runs concurrently with a tick or another Regroup.
-func (w *Worker) Regroup(ctx context.Context) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if _, err := w.holdLease(ctx, w.clock()); err != nil {
-		return err
-	}
-	epoch, err := w.st.EvidenceResetEpoch(ctx) // before the hold check; see Tick
-	if err != nil {
-		return err
-	}
-	held, err := w.rebuildHeld(ctx)
-	if err != nil {
-		return err
-	}
-	if held {
-		return ErrRegroupHeld
-	}
-	return w.regroup(ctx, epoch)
 }
 
 // rebuildHeld reports whether a script rebuild still holds regroups. A
