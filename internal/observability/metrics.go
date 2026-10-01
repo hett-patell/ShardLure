@@ -68,6 +68,20 @@ func WritePrometheus(out io.Writer, s Snapshot) error {
 	write("shardlure_capture_discovery_lag{source=\"file\"} %d\nshardlure_capture_discovery_lag{source=\"command\"} %d\n", s.Aggregates.FileDiscoveryLag, s.Aggregates.CommandDiscoveryLag)
 	header("capture_protected_file_jobs", "gauge", "Live jobs retaining their required source names.")
 	write("shardlure_capture_protected_file_jobs %d\n", s.Aggregates.ProtectedFileJobs)
+	header("capture_paused", "gauge", "1 while capture writes are paused because the evidence filesystem is below its free-space floor.")
+	write("shardlure_capture_paused %d\n", flag(s.CapturePaused))
+	fAge := s.At.Sub(s.Funnel.At)
+	header("payload_funnel_available", "gauge", "Whether the payload funnel was computed within the last 15 minutes.")
+	write("shardlure_payload_funnel_available %d\n", flag(s.Funnel.Valid && !s.Funnel.At.IsZero() && fAge >= 0 && fAge <= funnelMaxAge))
+	header("payload_funnel", "gauge", "Cowrie sessions per stage, payloads captured/new, and ledger submissions, by fixed window.")
+	for _, w := range []struct {
+		name string
+		v    FunnelWindow
+	}{{"24h", s.Funnel.Day}, {"7d", s.Funnel.Week}} {
+		for _, st := range w.v.Stages() {
+			write("shardlure_payload_funnel{window=%q,stage=%q} %d\n", w.name, st.Name, st.N)
+		}
+	}
 	header("database_pool_connections", "gauge", "Last sampled SQL pool pressure.")
 	write("shardlure_database_pool_connections{state=\"open\"} %d\nshardlure_database_pool_connections{state=\"in_use\"} %d\n", s.Aggregates.PoolOpen, s.Aggregates.PoolInUse)
 	header("database_pool_waits", "gauge", "Sampled process SQL pool wait count; aggregate availability is separate.")
