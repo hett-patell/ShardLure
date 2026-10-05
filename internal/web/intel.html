@@ -797,6 +797,23 @@
     white-space: normal; word-break: break-all; line-height: 1.35;
   }
   #bazaar-table td.bz-sha a { color: var(--purple); text-decoration: none; }
+  /* MalwareBazaar candidates: every unshared pool sample with bazaar.Vet's
+     decision. The hash truncates (full value in the title) and the reason
+     wraps, so a long Vet reason never pushes the action column off-screen. */
+  #bazaar-cand-table { table-layout: fixed; width: 100%; }
+  #bazaar-cand-table td.bz-sha {
+    max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: var(--mono, monospace); color: var(--purple); cursor: pointer;
+  }
+  #bazaar-cand-table td.why { white-space: normal; }
+  #bazaar-cand-table .why-tag {
+    display: inline-block; font-size: 10px; color: var(--dim); margin: 1px 3px 1px 0;
+    padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px;
+  }
+  #bazaar-cand-table .why-tag.ok { color: var(--accent); border-color: var(--accent); }
+  #bazaar-cand-table tr.bz-rejected td { opacity: .62; }
+  #bazaar-cand-table .sg-disabled { color: var(--dim-2); }
+  #panel-bazaar .bz-sub { margin: 10px 0 6px; font-size: 11px; color: var(--dim); }
   #bazaar-table td.bz-sha a:hover { color: var(--accent); text-decoration: underline; }
 
   /* VirusTotal verdict badges in the payload library. Colour encodes the
@@ -1287,7 +1304,7 @@
     .stat .num { font-size: 18px; }
     .grid > .panel, .panel-body { overflow-x: auto; }
     #actors-table, #cmds-table, #capture-table, #abuse-suggest-table, #urlhaus-table, #urlhaus-log,
-    #threatfox-table, #threatfox-log, #ttp-table, #payloads-table, #pending-table, #bazaar-table,
+    #threatfox-table, #threatfox-log, #ttp-table, #payloads-table, #pending-table, #bazaar-table, #bazaar-cand-table,
     #ioc-table, #tunnels-table, #set-reports-table, #campaigns-table, #scripts-table { min-width: 620px; }
     .sess-head, .sess-row { min-width: 640px; }
     .cred-grid { grid-template-columns: 1fr; }
@@ -1921,6 +1938,7 @@
         <div class="panel-head">
           <h2>MalwareBazaar sharing</h2>
           <span class="meta" id="bazaar-meta">abuse.ch threat intel exchange</span>
+          <button type="button" class="bz-btn" id="bazaar-upload-all-btn" onclick="uploadAllBazaarCandidates(this)" style="margin-left:auto;display:none">▲ Upload all eligible</button>
         </div>
         <div class="stats tight" id="bazaar-stats">
           <div class="stat"><div class="num accent" id="bz-uploaded">0</div><div class="label">uploaded</div></div>
@@ -1928,6 +1946,24 @@
           <div class="stat"><div class="num" style="color:var(--purple)" id="bz-pending">0</div><div class="label">pending</div></div>
           <div class="stat"><div class="num" style="color:var(--dim)" id="bz-last">—</div><div class="label">last upload</div></div>
         </div>
+        <div id="bazaar-note" class="abuse-note" style="display:none"></div>
+        <div class="meta bz-sub" id="bazaar-cand-meta">candidates · MalwareBazaar vetting gate</div>
+        <div class="scroll" id="bazaar-cand-wrap">
+          <table class="dense" id="bazaar-cand-table">
+            <thead><tr>
+              <th>sha256</th>
+              <th class="num" style="width:70px">size</th>
+              <th style="width:110px">kind</th>
+              <th style="width:100px">family</th>
+              <th style="width:130px">origin</th>
+              <th style="width:90px" title="when our capture last fetched this payload successfully">fetched</th>
+              <th title="bazaar.Vet's decision, the same gate the upload endpoint and the CLI apply">gate</th>
+              <th style="width:92px">action</th>
+            </tr></thead>
+            <tbody><tr><td colspan="8"><div class="empty">loading…</div></td></tr></tbody>
+          </table>
+        </div>
+        <div class="meta bz-sub">recent uploads</div>
         <div class="scroll" id="bazaar-table-wrap">
           <table id="bazaar-table">
             <thead><tr>
@@ -5274,6 +5310,10 @@ function renderPayloads(data) {
         : ((p.status || '') !== 'fetched') ? (p.status || 'not fetched')
         : ((p.sizeBytes || 0) < 64) ? 'too small'
         : ((p.origin || '') === 'cowrie_tty') ? 'tty transcript'
+        // Vet's own reason from the bazaar panel's candidate list (same
+        // response cycle), cut to its leading clause ("benign content (SSH
+        // key)", "unconfirmed", "stale") so it fits the cell.
+        : _bazaarGate[sha] ? _bazaarGate[sha].split(':')[0]
         : 'ineligible';
       shareBtn = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar: ' + escHtml(why) + '">— ' + escHtml(why) + '</span>';
     }
@@ -5320,8 +5360,10 @@ function renderPayloads(data) {
 // on which sighting landed last — two family-identified droppers (Traffmonetizer,
 // Komari) lost it while `share bazaar` was selecting them.
 //
-// Shareable is computed over ALL rows for the sha against bazaar's own policy, so
-// there is one answer. Still only "may be considered": Vet decides at upload.
+// Shareable is computed over ALL rows for the sha and, since v2.10.1, is
+// bazaar.Vet's own verdict (eligible and not yet uploaded), not the share
+// pre-filter, which offered SSH keys and unconfirmed blobs the upload refused.
+// The upload endpoint still re-runs Vet.
 // Deliberately does NOT consider already-shared state — callers layer that on.
 function isUploadEligible(p) {
   var sha = p.sha256 || '';
@@ -5995,6 +6037,7 @@ async function refreshBazaar() {
 }
 
 function renderBazaar(d) {
+  renderBazaarCandidates(d);
   var st = d.stats || {};
   document.getElementById('bz-uploaded').textContent = fmt(st.totalUploaded || 0);
   document.getElementById('bz-dupes').textContent = fmt(st.duplicates || 0);
@@ -6024,12 +6067,166 @@ function renderBazaar(d) {
   }).join('');
 }
 
-// No poller or tab hook here: refreshPayloads (same red tab, 30s poll)
-// already fetches the full upload list and now renders the bazaar panel
-// from that response — running a second overlapping poller of the same
-// endpoint (limit=1000 there, limit=30 here) doubled the load for nothing.
+// No poller or tab hook here: refreshPayloads (same red tab, 30s poll, the
+// tab switch and the #tab=red deep link) already fetches the full upload list
+// and now renders the bazaar panel — candidates included — from that
+// response. Running a second overlapping poller of the same endpoint
+// (limit=1000 there, limit=30 here) doubled the load for nothing.
 // refreshBazaar remains as the cheap limit=30 refresh after manual upload
 // actions.
+
+// ---- MalwareBazaar candidates (bazaar.Vet's decision per sample) ----
+// The panel used to show only the ledger plus a "pending" count that was the
+// SharePolicy pre-filter: after everything shippable had gone, prod still read
+// "pending: 3" (two SSH keys and an unconfirmed blob), and the only Upload UI
+// was the payload library, whose default window hid three genuinely eligible
+// samples. The server now runs bazaar.Vet over the share pool and returns each
+// candidate with its decision and reason; this renders that verdict, the way
+// renderURLhaus does, and never re-derives policy. The upload endpoint re-runs
+// Vet, so a stale row in a long-open tab cannot push anything through.
+var _bazaarCands = [];
+var _bazaarGate = {};   // sha -> Vet's rejection reason, for the library's label
+
+function showBazaarBanner(msg, kind) {
+  var note = document.getElementById('bazaar-note');
+  if (!note) return;
+  var colors = { ok: 'var(--accent)', warn: 'var(--accent-2)', bad: 'var(--red-team)', pending: 'var(--dim)' };
+  note.style.display = 'block';
+  note.style.color = colors[kind] || 'var(--dim)';
+  note.textContent = msg;
+  note.dataset.sticky = kind === 'pending' ? '' : '1';
+}
+
+function bazaarEligibleNow() {
+  return _bazaarCands.filter(function(c) { return c.eligible && !_bazaarSharedSet[c.sha256]; });
+}
+
+function renderBazaarCandidates(d) {
+  var tb = document.querySelector('#bazaar-cand-table tbody');
+  if (!tb) return;
+  var meta = document.getElementById('bazaar-cand-meta');
+  var note = document.getElementById('bazaar-note');
+  var cands = d.candidates || [];
+  var total = d.candidatesTotal || cands.length;
+  _bazaarCands = cands;
+  _bazaarGate = {};
+  cands.forEach(function(c) { if (!c.eligible) _bazaarGate[c.sha256] = c.reason || 'rejected'; });
+  var eligible = bazaarEligibleNow();
+  meta.textContent = eligible.length + ' eligible of ' + cands.length + ' unshared candidate' + (cands.length === 1 ? '' : 's') +
+    (total > cands.length ? ' (showing ' + cands.length + ' of ' + total + ')' : '') +
+    ' \u00b7 decision from the MalwareBazaar vetting gate';
+
+  var allBtn = document.getElementById('bazaar-upload-all-btn');
+  if (allBtn && !_uploadAllRunning) allBtn.style.display = (d.configured && eligible.length) ? '' : 'none';
+  if (!d.configured) {
+    note.style.display = 'block';
+    note.dataset.sticky = '';
+    note.style.color = 'var(--dim)';
+    note.textContent = 'No abuse.ch Auth-Key configured \u2014 this list is advisory. Set the MalwareBazaar key in Settings.';
+  } else if (note.dataset.sticky !== '1') {
+    note.style.display = 'none';
+  }
+
+  if (!cands.length) {
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">no unshared payloads in the freshness window</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = cands.map(function(c) {
+    var sha = c.sha256 || '';
+    var gate = c.eligible
+      ? '<span class="why-tag ok">eligible</span>'
+      : '<span class="why-tag" title="' + esc(c.reason || '') + '">' + esc(c.reason || 'rejected') + '</span>';
+    var btn = c.eligible
+      ? (d.configured
+          ? (_bazaarSharedSet[sha] ? '<span class="bz-btn ok">\u2713 shared</span>'
+            : '<button type="button" class="bz-btn" data-sha="' + esc(sha) + '" onclick="uploadBazaarCandidate(this)">\u25b2 upload</button>')
+          : '<span class="sg-disabled" title="set an abuse.ch key to arm">\u2014</span>')
+      : '<span class="sg-disabled" title="' + esc(c.reason || 'held back by policy') + '">\u2014</span>';
+    var fam = c.family ? esc(c.family) : '\u2014';
+    return '<tr data-sha="' + esc(sha) + '"' + (c.eligible ? '' : ' class="bz-rejected"') + '>' +
+      '<td class="bz-sha" title="' + esc(c.sha256) + '">' + esc(c.sha256) + '</td>' +
+      '<td class="num">' + fmtBytesShort(c.sizeBytes) + '</td>' +
+      '<td>' + esc(c.fileKind || '\u2014') + '</td>' +
+      '<td>' + fam + '</td>' +
+      '<td>' + esc(c.origin || '\u2014') + '</td>' +
+      '<td class="range">' + (c.lastFetchAt ? esc(fmtShortTime(c.lastFetchAt)) : '\u2014') + '</td>' +
+      '<td class="why">' + gate + '</td>' +
+      '<td>' + btn + '</td>' +
+      '</tr>';
+  }).join('');
+  tb.querySelectorAll('tr[data-sha] td.bz-sha').forEach(function(td) {
+    td.addEventListener('click', function() { openPayload(td.parentNode.dataset.sha); });
+  });
+}
+
+// postBazaarUpload sends one sample through the existing endpoint (which
+// re-runs Vet) and records the outcome in the shared set.
+async function postBazaarUpload(sha) {
+  var r = await fetch('/api/intel/bazaar/upload?sha=' + encodeURIComponent(sha), {method: 'POST'});
+  var d = await r.json().catch(function() { return {}; });
+  if (d.status === 'inserted' || d.status === 'file_already_known' || d.status === 'already_shared') {
+    _bazaarSharedSet[sha] = d.mbUrl || true;
+  }
+  return d;
+}
+
+async function uploadBazaarCandidate(btn) {
+  var sha = btn.dataset.sha;
+  if (!sha || btn.disabled) return;
+  if (!window.confirm('Upload this sample to MalwareBazaar now?\n\n' + sha +
+      '\n\nThis is a LIVE, public submission to abuse.ch.')) return;
+  btn.disabled = true;
+  btn.textContent = 'uploading\u2026';
+  try {
+    var d = await postBazaarUpload(sha);
+    if (_bazaarSharedSet[sha]) {
+      btn.replaceWith(document.createTextNode('\u2713 ' + (d.status === 'already_shared' ? 'shared' : d.status)));
+      refreshPayloads();
+    } else {
+      btn.disabled = false;
+      btn.textContent = '\u25b2 upload';
+      btn.title = d.error || d.status || 'failed';
+      showBazaarBanner('\u2717 upload ' + (d.status === 'skipped' ? 'skipped' : 'failed') + ': ' + (d.error || d.status || 'unknown'),
+        d.status === 'skipped' ? 'warn' : 'bad');
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '\u25b2 upload';
+    btn.title = 'request failed';
+  }
+}
+
+// uploadAllBazaarCandidates uploads every row the gate marked eligible (and
+// not shared since), one at a time on the same 2.5 s cadence as the library's
+// batch, behind one confirm with the exact count.
+async function uploadAllBazaarCandidates(btn) {
+  if (_uploadAllRunning) return;
+  var shas = bazaarEligibleNow().map(function(c) { return c.sha256; });
+  if (!shas.length) { showBazaarBanner('nothing to upload \u2014 no sample currently passes the vetting gate.', 'warn'); return; }
+  if (!window.confirm('Upload ' + shas.length + ' sample' + (shas.length === 1 ? '' : 's') + ' to MalwareBazaar now?\n\n' +
+      'This is a LIVE, public submission to abuse.ch. Only samples the vetting gate marked eligible are sent, and the server re-checks each one.')) return;
+  _uploadAllRunning = true;
+  btn.disabled = true;
+  var orig = btn.textContent, ok = 0, policy = 0, fail = 0;
+  for (var j = 0; j < shas.length; j++) {
+    btn.textContent = (j + 1) + '/' + shas.length + ' uploading\u2026';
+    showBazaarBanner('uploading ' + (j + 1) + ' of ' + shas.length + '\u2026', 'pending');
+    try {
+      var d = await postBazaarUpload(shas[j]);
+      if (_bazaarSharedSet[shas[j]]) ok++;
+      else if (d.status === 'skipped') policy++;
+      else fail++;
+    } catch (e) { fail++; }
+    if (j < shas.length - 1) await new Promise(function(resolve) { setTimeout(resolve, 2500); });
+  }
+  _uploadAllRunning = false;
+  btn.disabled = false;
+  btn.textContent = orig;
+  showBazaarBanner('\u2713 uploaded ' + ok + (policy ? ' \u00b7 ' + policy + ' skipped by policy' : '') +
+    (fail ? ' \u00b7 ' + fail + ' failed \u2014 check server logs' : '') + ' \u00b7 at ' + new Date().toLocaleTimeString(),
+    fail ? 'bad' : (policy ? 'warn' : 'ok'));
+  refreshPayloads();
+}
 
 // ==== Widget functions ================================================
 

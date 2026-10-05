@@ -106,6 +106,7 @@ type bazaarRespJSON struct {
 	Uploads         []struct{ SHA256 string } `json:"uploads"`
 	Candidates      []bazaarCandJSON          `json:"candidates"`
 	CandidatesTotal int                       `json:"candidatesTotal"`
+	Configured      bool                      `json:"configured"`
 }
 
 func getBazaar(t *testing.T, s *Server) bazaarRespJSON {
@@ -130,6 +131,9 @@ func TestBazaarPanelShowsVetDecision(t *testing.T) {
 	fx := seedBazaarGateFixture(t, s.st)
 
 	out := getBazaar(t, s)
+	if out.Configured {
+		t.Error("configured=true with no abuse.ch key: the panel would arm Upload buttons that fail")
+	}
 	got := map[string]bazaarCandJSON{}
 	for _, c := range out.Candidates {
 		got[c.SHA256] = c
@@ -224,7 +228,11 @@ func TestBazaarEligibilityAgreesWithUploadHandler(t *testing.T) {
 	}
 	s := New(st, keys, "127.0.0.1:0", Options{BazaarAPIKey: "fixture-key", BazaarEndpoint: endpoint.URL})
 
-	cands := getBazaar(t, s).Candidates
+	first := getBazaar(t, s)
+	if !first.Configured {
+		t.Error("configured=false although an abuse.ch key is set")
+	}
+	cands := first.Candidates
 	if len(cands) == 0 {
 		t.Fatal("no candidates to compare")
 	}

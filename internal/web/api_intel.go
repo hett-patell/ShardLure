@@ -1265,12 +1265,17 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		// maxBazaarCandidates; CandidatesTotal is the uncapped pool size.
 		Candidates      []bazaarCandidateRow `json:"candidates"`
 		CandidatesTotal int                  `json:"candidatesTotal"`
+		// Configured reports whether an abuse.ch Auth-Key is set, so the panel
+		// arms its Upload buttons only when the endpoint can actually upload
+		// (mirrors the URLhaus panel).
+		Configured bool `json:"configured"`
 	}{
 		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
 		Stats:           sb,
 		Uploads:         rows,
 		Candidates:      cands.Rows,
 		CandidatesTotal: cands.Total,
+		Configured:      s.bazaarKeyLive() != "",
 	}
 	if resp.Candidates == nil {
 		resp.Candidates = []bazaarCandidateRow{}
