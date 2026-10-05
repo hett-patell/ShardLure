@@ -82,13 +82,56 @@ func validateOutboundLimit(n int) error {
 	return nil
 }
 
-func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
-	// intel.bazaar.freshness_days tightens both the default candidate-selection
-	// window and Vet. --since may widen local selection, but never Vet policy.
-	freshDays := cfg.Intel.Bazaar.FreshnessDays
-	if freshDays <= 0 {
-		freshDays = 10
+// bazaarSettings is the CLI's view of the MalwareBazaar knobs.
+type bazaarSettings struct {
+	Endpoint      string
+	Tags          []string
+	MaxBytes      int64
+	FreshnessDays int
+}
+
+// resolveBazaarSettings mirrors the server's bazaar*Live accessors one for
+// one: the keystore value (what the dashboard Settings panel saves) wins, then
+// config. These keys have no SHARDLURE_* environment variable, so the
+// keystore's env tier never applies to them. main seeds the keystore FROM
+// config, never the reverse, so reading config alone (as share bazaar did)
+// ignored every dashboard change: an operator who tightened freshness there
+// got a CLI that uploaded what the panel called stale. Non-positive numbers
+// are ignored exactly as bazaarMaxBytesLive/bazaarFreshnessDaysLive ignore
+// them; the built-in fallbacks are config's own defaults (32 MiB, 10 days).
+func resolveBazaarSettings(cfg config.Config, keys *settings.Keystore) bazaarSettings {
+	b := bazaarSettings{
+		Endpoint:      cfg.Intel.Bazaar.Endpoint,
+		Tags:          cfg.Intel.Bazaar.Tags,
+		MaxBytes:      cfg.Intel.Bazaar.MaxBytes,
+		FreshnessDays: cfg.Intel.Bazaar.FreshnessDays,
 	}
+	if keys != nil {
+		b.Endpoint = keys.GetOr(settings.KeyBazaarEndpoint, b.Endpoint)
+		b.Tags = keys.GetStringCSV(settings.KeyBazaarTags, b.Tags)
+		if v := keys.GetInt(settings.KeyBazaarMaxBytes, 0); v > 0 {
+			b.MaxBytes = int64(v)
+		}
+		if v := keys.GetInt(settings.KeyBazaarFreshnessDays, 0); v > 0 {
+			b.FreshnessDays = v
+		}
+	}
+	if b.MaxBytes <= 0 {
+		b.MaxBytes = 32 << 20
+	}
+	if b.FreshnessDays <= 0 {
+		b.FreshnessDays = 10
+	}
+	return b
+}
+
+func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore, args []string) {
+	// Flag defaults are seeded from the resolved (keystore-first) settings so
+	// the CLI matches the Settings panel; an explicit flag still wins.
+	set := resolveBazaarSettings(cfg, keys)
+	// bazaar.freshness_days tightens both the default candidate-selection
+	// window and Vet. --since may widen local selection, but never Vet policy.
+	freshDays := set.FreshnessDays
 	fs := flag.NewFlagSet("share bazaar", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would upload without contacting MalwareBazaar")
 	// Bounds UPLOADS, enforced inside bazaar.Share after Vet — not a truncation
@@ -101,7 +144,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	anonymous := fs.Bool("anonymous", false, "submit without attribution to your account")
 	statusOnly := fs.Bool("status", false, "list past uploads from bazaar_uploads instead of uploading")
 	comment := fs.String("comment", "", "extra comment appended to every sample's context.comment")
-	endpoint := fs.String("endpoint", "", "override MalwareBazaar endpoint (default from config or builtin)")
+	endpoint := fs.String("endpoint", set.Endpoint, "MalwareBazaar endpoint (default: dashboard setting, then config)")
 	_ = fs.Parse(args)
 	// flag stops at the first non-flag, so a stray positional would silently
 	// drop every flag after it — including --dry-run, turning a preview into a
@@ -132,15 +175,8 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 		return
 	}
 
-	maxBytes := cfg.Intel.Bazaar.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = 32 << 20
-	}
-
-	ep := cfg.Intel.Bazaar.Endpoint
-	if *endpoint != "" {
-		ep = *endpoint
-	}
+	maxBytes := set.MaxBytes
+	ep := *endpoint
 
 	limitLabel := "unbounded"
 	if *limit > 0 {
@@ -154,7 +190,7 @@ func cmdShareBazaar(st *store.Store, cfg config.Config, keys *settings.Keystore,
 	opts := bazaar.Options{
 		APIKey:        apiKey,
 		Endpoint:      ep,
-		ExtraTags:     cfg.Intel.Bazaar.Tags,
+		ExtraTags:     set.Tags,
 		MaxBytes:      maxBytes,
 		FreshnessDays: freshDays,
 		DryRun:        *dryRun,

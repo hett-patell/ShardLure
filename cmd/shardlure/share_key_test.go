@@ -180,3 +180,58 @@ func TestResolveAbuseSettingsKeystoreCanDisable(t *testing.T) {
 		t.Error("keystore 'off' must win over config 'on'")
 	}
 }
+
+// share bazaar must apply the bazaar knobs saved in the dashboard Settings
+// panel, exactly as the server's bazaar*Live accessors do (keystore first,
+// config second). It read config only, so an operator who tightened freshness
+// in the dashboard got a CLI that uploaded what the panel called stale.
+func TestResolveBazaarSettingsPrefersKeystore(t *testing.T) {
+	var cfg config.Config
+	cfg.Intel.Bazaar.Endpoint = "https://cfg.example/api/"
+	cfg.Intel.Bazaar.Tags = []string{"cfg"}
+	cfg.Intel.Bazaar.MaxBytes = 1 << 20
+	cfg.Intel.Bazaar.FreshnessDays = 9
+	keys := newKeystore(t, map[string]string{
+		settings.KeyBazaarEndpoint:      "https://db.example/api/",
+		settings.KeyBazaarTags:          "db1, db2",
+		settings.KeyBazaarMaxBytes:      "2048",
+		settings.KeyBazaarFreshnessDays: "3",
+	})
+	got := resolveBazaarSettings(cfg, keys)
+	if got.Endpoint != "https://db.example/api/" {
+		t.Errorf("Endpoint = %q, want the keystore value", got.Endpoint)
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "db1" || got.Tags[1] != "db2" {
+		t.Errorf("Tags = %v, want [db1 db2]", got.Tags)
+	}
+	if got.MaxBytes != 2048 {
+		t.Errorf("MaxBytes = %d, want 2048", got.MaxBytes)
+	}
+	if got.FreshnessDays != 3 {
+		t.Errorf("FreshnessDays = %d, want 3", got.FreshnessDays)
+	}
+}
+
+func TestResolveBazaarSettingsFallsBackToConfigAndDefaults(t *testing.T) {
+	var cfg config.Config
+	cfg.Intel.Bazaar.Endpoint = "https://cfg.example/api/"
+	cfg.Intel.Bazaar.Tags = []string{"cfg"}
+	cfg.Intel.Bazaar.FreshnessDays = 7
+	got := resolveBazaarSettings(cfg, newKeystore(t, nil))
+	if got.Endpoint != "https://cfg.example/api/" || len(got.Tags) != 1 || got.FreshnessDays != 7 {
+		t.Errorf("config values not honoured: %+v", got)
+	}
+	if got.MaxBytes != 32<<20 {
+		t.Errorf("MaxBytes = %d, want default 32 MiB", got.MaxBytes)
+	}
+	// Non-positive keystore values are ignored, as bazaarMaxBytesLive and
+	// bazaarFreshnessDaysLive ignore them.
+	bad := newKeystore(t, map[string]string{settings.KeyBazaarMaxBytes: "-5", settings.KeyBazaarFreshnessDays: "-1"})
+	if got := resolveBazaarSettings(cfg, bad); got.MaxBytes != 32<<20 || got.FreshnessDays != 7 {
+		t.Errorf("non-positive keystore values applied: %+v", got)
+	}
+	var empty config.Config
+	if got := resolveBazaarSettings(empty, nil); got.FreshnessDays != 10 || got.MaxBytes != 32<<20 {
+		t.Errorf("nil keystore / empty config: %+v, want 10 days and 32 MiB", got)
+	}
+}
