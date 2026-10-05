@@ -267,3 +267,37 @@ func TestBazaarEligibilityAgreesWithUploadHandler(t *testing.T) {
 		t.Errorf("pending after upload = %d, want 0", after.Stats.Pending)
 	}
 }
+
+// TestBazaarAlreadySharedReplyInvalidatesCandidates covers a ledger row written
+// by another process (a CLI share run): the handler's already_shared early
+// return must drop the cached evaluation too, or the panel keeps listing the
+// sample as eligible for up to a TTL while the button reports it shared.
+func TestBazaarAlreadySharedReplyInvalidatesCandidates(t *testing.T) {
+	t.Setenv("SHARDLURE_DASH_TOKEN", "")
+	st, err := store.Open(filepath.Join(t.TempDir(), "shared.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	fx := seedBazaarGateFixture(t, st)
+	keys, err := settings.Load(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, keys, "127.0.0.1:0", Options{BazaarAPIKey: "fixture-key", BazaarEndpoint: "http://127.0.0.1:1/unused"})
+	if getBazaar(t, s).Stats.Pending != 1 {
+		t.Fatal("fixture: want the ELF pending before the CLI run")
+	}
+	// The CLI uploads it from another process: only the ledger changes.
+	if err := st.RecordBazaarUpload(store.BazaarUpload{SHA256: fx.eligibleELF, UploadedAt: time.Now(), ResponseStatus: "inserted"}); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleBazaarUpload(w, httptest.NewRequest(http.MethodPost, "/api/intel/bazaar/upload?sha="+fx.eligibleELF, nil))
+	if !strings.Contains(w.Body.String(), "already_shared") {
+		t.Fatalf("want already_shared, got %s", w.Body.String())
+	}
+	if after := getBazaar(t, s); after.Stats.Pending != 0 {
+		t.Errorf("pending = %d after an already_shared reply, want 0 (cache not invalidated)", after.Stats.Pending)
+	}
+}

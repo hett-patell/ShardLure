@@ -1322,6 +1322,9 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 
 	already, _ := s.st.BazaarUploadRecorded(sha)
 	if already {
+		// Another process (a CLI share run) may have written this ledger row;
+		// drop the cached evaluation so the panel stops offering the sample now.
+		s.bazaarCands.invalidate()
 		json.NewEncoder(w).Encode(map[string]string{"status": "already_shared", "mbUrl": "https://bazaar.abuse.ch/sample/" + sha + "/"})
 		return
 	}
