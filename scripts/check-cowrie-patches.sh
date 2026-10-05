@@ -33,6 +33,7 @@ partial_exec="$tmp_root/cowrie-partial-exec"
 partial_capture="$tmp_root/cowrie-partial-capture"
 partial_sharedfs="$tmp_root/cowrie-partial-sharedfs"
 partial_scp="$tmp_root/cowrie-partial-scp"
+partial_ls="$tmp_root/cowrie-partial-ls"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -49,6 +50,7 @@ cp -a "$cowrie" "$partial_exec"
 cp -a "$cowrie" "$partial_capture"
 cp -a "$cowrie" "$partial_sharedfs"
 cp -a "$cowrie" "$partial_scp"
+cp -a "$cowrie" "$partial_ls"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
@@ -56,7 +58,8 @@ cp -a "$cowrie" "$partial_scp"
 # either; exec has its new branch but not the helper it calls (NEW + OLD_DEF);
 # capture has a chmod at the right location but the wrong permissions;
 # sharedfs has its session.py half but not its filetransfer.py half; scp
-# remembers the -t target but still names the file after the C-record.
+# remembers the -t target but still names the file after the C-record; ls
+# has the GNU recent form but keeps the ISO form for old files.
 # The grep fixture left with its patch (Task 4 restores a
 # grep-options one); the bashparse and honeypot fixtures went with the
 # patches upstream made redundant.
@@ -67,7 +70,8 @@ python3 - \
   "$partial_exec/src/cowrie/shell/script.py" \
   "$partial_capture/src/cowrie/shell/fs.py" \
   "$partial_sharedfs/src/cowrie/shell/session.py" \
-  "$partial_scp/src/cowrie/commands/scp.py" <<'PY'
+  "$partial_scp/src/cowrie/commands/scp.py" \
+  "$partial_ls/src/cowrie/commands/ls.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -102,6 +106,7 @@ exec_path = Path(sys.argv[4])
 capture_path = Path(sys.argv[5])
 sharedfs_path = Path(sys.argv[6])
 scp_path = Path(sys.argv[7])
+ls_path = Path(sys.argv[8])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -144,6 +149,15 @@ content = replace_once(scp_path, scp["OLD"], scp["NEW"], "scp partial")
 expected = {"OLD": 0, "NEW": 1, "OLD_NAME": 1, "NEW_NAME": 0}
 if any(content.count(scp[name]) != count for name, count in expected.items()):
     raise SystemExit(f"scp partial fixture has unexpected block counts in {scp_path}")
+
+ls = string_constants(root / "install/persona/patches/ls-date-format.py")
+old_form = '"%b %e  %Y"'
+if ls["NEW"].count(old_form) != 1:
+    raise SystemExit("ls NEW block does not contain the expected old-file format")
+partial = ls["NEW"].replace(old_form, '"%Y-%m-%d %H:%M"', 1)
+content = replace_once(ls_path, ls["OLD"], partial, "ls partial")
+if content.count(ls["OLD"]) != 0 or content.count(ls["NEW"]) != 0:
+    raise SystemExit(f"ls partial fixture unexpectedly contains a complete block in {ls_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -156,6 +170,7 @@ for patch in \
   "$ROOT/install/persona/patches/exec-emulation.py" \
   "$ROOT/install/persona/patches/connection-shared-fs.py" \
   "$ROOT/install/persona/patches/scp-sink-target.py" \
+  "$ROOT/install/persona/patches/ls-date-format.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -288,6 +303,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_scp" \
     "$ROOT/install/persona/patches/scp-sink-target.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "ls" \
+    "$partial_ls" \
+    "$ROOT/install/persona/patches/ls-date-format.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -309,6 +329,7 @@ fi
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
+  "src/cowrie/commands/ls.py"
   "src/cowrie/commands/scp.py"
   "src/cowrie/commands/which.py"
   "src/cowrie/shell/filetransfer.py"
@@ -427,4 +448,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 24 partial-state rejections, idempotence, install.sh standalone patches, capture and scp-target behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 28 partial-state rejections, idempotence, install.sh standalone patches, capture and scp-target behavior, and atomic preflight checks passed"

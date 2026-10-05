@@ -35,6 +35,9 @@ PATCHES = (
     # ...and v3.1.1 saved the upload under the C-record's name, ignoring the
     # `scp -t <path>` target the bot then runs.
     "scp-sink-target.py",
+    # GNU ls -l dates: v3.1.1 prints the --time-style=long-iso form, a tell on
+    # any `ls -l`, including a dropper listing the file it just uploaded.
+    "ls-date-format.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
