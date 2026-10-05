@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -639,6 +640,53 @@ class MainExitCodeTest(unittest.TestCase):
         self.assertIn("exit status 126, expected 0", out.getvalue())
 
 
+    def test_upload_channel_case_uploads_on_an_earlier_channel(self):
+        (self.root / "probes.txt").write_text("cross\tls -l /tmp/x; /tmp/x; echo rc=$?\n")
+        (self.root / "expected" / "cross.out").write_text(
+            "#harness: upload-channel=/tmp/x hw\n"
+            "-rwxr-xr-x 1 root root {{UPLOAD_SIZE}} {{LSDATE_RECENT}} /tmp/x\nrc=0\n")
+        elf = self.root / "elf"
+        elf.write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 57)
+        data = elf.read_bytes()
+        seen = []
+
+        def runner(command, timeout, stdin=None, before=None):
+            seen.append((command, stdin, before))
+            stamp = datetime.now(timezone.utc)
+            return cbt.RunResult(f"-rwxr-xr-x 1 root root {len(data)} {stamp:%b %e %H:%M}"
+                                 " /tmp/x\nrc=0\n", 0, False)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cbt.main(self.argv + ["--only", "probes", "--upload-source", str(elf)],
+                          runner=runner)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(seen, [(
+            "ls -l /tmp/x; /tmp/x; echo rc=$?", None,
+            [("scp -t /tmp/x", f"C0755 {len(data)} hw\n".encode() + data + b"\x00")],
+        )])
+
+    def test_upload_size_is_the_exact_source_size(self):
+        (self.root / "probes.txt").write_text("cross\tls -l /tmp/x\n")
+        (self.root / "expected" / "cross.out").write_text(
+            "#harness: upload-channel=/tmp/x hw\n"
+            "-rwxr-xr-x 1 root root {{UPLOAD_SIZE}} {{LSDATE_RECENT}} /tmp/x\n")
+        elf = self.root / "elf"
+        elf.write_bytes(b"\x7fELF" + b"\x00" * 60)
+
+        def runner(command, timeout, stdin=None, before=None):
+            stamp = datetime.now(timezone.utc)
+            return cbt.RunResult(f"-rwxr-xr-x 1 root root 63 {stamp:%b %e %H:%M} /tmp/x\n",
+                                 0, False)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cbt.main(self.argv + ["--only", "probes", "--upload-source", str(elf)],
+                          runner=runner)
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertIn("+-rwxr-xr-x 1 root root 63", out.getvalue())
+
+
 class FakeChannel:
     """Just enough of paramiko.Channel for exec_on_channel."""
 
@@ -724,6 +772,78 @@ class ScpStdinTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 cbt.parse_expected(f"#harness: scp-stdin={bad}\n")
 
+
+
+class UploadChannelTest(unittest.TestCase):
+    def test_directive(self):
+        exp = cbt.parse_expected("#harness: upload-channel=/tmp/x hw\n")
+        self.assertEqual(exp.upload_channel, ("/tmp/x", "hw"))
+        self.assertEqual(cbt.parse_expected("#harness: upload-channel=/tmp/ hw\n")
+                         .upload_channel, ("/tmp/", "hw"))
+        for bad in ("", "/tmp/x", "tmp/x hw", "/tmp/x a/b", "/tmp/x ..", "/tmp/x hw z",
+                    "/tmp/$(id) hw"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cbt.parse_expected(f"#harness: upload-channel={bad}\n")
+
+    def test_upload_size_needs_an_upload_directive(self):
+        with self.assertRaises(ValueError):
+            cbt.parse_expected("size {{UPLOAD_SIZE}}\n")
+        cbt.parse_expected("#harness: scp-stdin=x\nsize {{UPLOAD_SIZE}}\n")
+
+    def test_directives_are_exclusive(self):
+        with self.assertRaises(ValueError):
+            cbt.parse_expected("#harness: scp-stdin=x\n#harness: upload-channel=/tmp/x hw\n")
+
+    def test_sequence_runs_each_step_on_its_own_channel(self):
+        chans = [FakeChannel([b"\x00\x00"], 0), FakeChannel([b"rc=0\n"], 0)]
+        for c in chans:
+            c.sent, c.commands = b"", []
+            c.sendall = lambda data, c=c: setattr(c, "sent", c.sent + data)
+            c.shutdown_write = lambda: None
+        opened = iter(chans)
+        res = cbt.exec_sequence(lambda: next(opened),
+                                [("scp -t /tmp/x", b"C0755 1 hw\nA\x00"), ("/tmp/x", None)],
+                                time.monotonic() + 5, ClosedError)
+        self.assertEqual(res, cbt.RunResult("rc=0\n", 0, False))
+        self.assertEqual(chans[0].sent, b"C0755 1 hw\nA\x00")
+        self.assertEqual(chans[1].sent, b"")
+
+    def test_failed_earlier_step_fails_the_case_with_a_note(self):
+        chans = iter([FakeChannel([b"\x00-scp: /nope/x: No such file or directory\n"], 1)])
+        res = cbt.exec_sequence(lambda: next(chans),
+                                [("scp -t /nope/x", None), ("/nope/x", None)],
+                                time.monotonic() + 5, ClosedError)
+        self.assertIsNone(res.rc)
+        self.assertIn("channel 1 (`scp -t /nope/x`) failed: exit status 1", res.note)
+        self.assertEqual(res.output, "-scp: /nope/x: No such file or directory\n")
+
+    def test_ssh_transport_refuses_rather_than_running_one_connection_per_step(self):
+        with mock.patch.object(cbt.shutil, "which", return_value="/usr/bin/x"):
+            run = cbt.ssh_runner("127.0.0.1", 2299, "root", "pw")
+        with mock.patch.object(cbt.subprocess, "run") as sp:
+            res = run("/tmp/x", 5, before=[("scp -t /tmp/x", b"")])
+        sp.assert_not_called()
+        self.assertIsNone(res.rc)
+        self.assertIn("--transport paramiko", res.note)
+
+
+class LsDateRecentTest(unittest.TestCase):
+    TPL = "-rwxr-xr-x 1 root root 7 {{LSDATE_RECENT}} /tmp/x\n"
+
+    def test_written_during_the_run_passes(self):
+        res = check(self.TPL, f"-rwxr-xr-x 1 root root 7 {NOW:%b %e %H:%M} /tmp/x\n",
+                    clk=clock(run_seconds=30))
+        self.assertTrue(res.ok, res.diff + res.messages)
+
+    def test_old_or_future_stamp_is_rejected(self):
+        for when in (NOW - timedelta(hours=1), NOW + timedelta(hours=1)):
+            with self.subTest(when=when):
+                res = check(self.TPL, f"-rwxr-xr-x 1 root root 7 {when:%b %e %H:%M} /tmp/x\n")
+                self.assertFalse(res.ok)
+
+    def test_cowrie_iso_date_is_rejected(self):
+        res = check(self.TPL, f"-rwxr-xr-x 1 root root 7 {NOW:%Y-%m-%d %H:%M} x\n")
+        self.assertFalse(res.ok)
 
 class InputParsingTest(unittest.TestCase):
     def test_parse_probes(self):

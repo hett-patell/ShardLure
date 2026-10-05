@@ -32,10 +32,21 @@ line:
                             EOF, so a `scp -t ...` in the command receives an
                             upload. --upload-source defaults to /bin/true, a
                             harmless ELF; Cowrie only stores it. Upload and run
-                            share ONE exec channel because Cowrie v3.1.1 builds
-                            a fresh fake filesystem for every session channel
-                            (shell/session.py initFileSystem), so a file
-                            uploaded on one channel is gone on the next.
+                            share ONE exec channel.
+  #harness: upload-channel=TARGET NAME
+                            before the case, on an EARLIER exec channel of the
+                            SAME connection, run `scp -t TARGET` and feed it the
+                            same C-record (named NAME), then run the case on a
+                            second channel. This is how scp droppers (RedTail,
+                            Outlaw) deliver and then run a payload, and what
+                            stock Cowrie v3.1.1 gets wrong: it builds a fresh
+                            fake filesystem for every session channel and saves
+                            the upload under NAME instead of TARGET. Needs the
+                            paramiko transport (ssh+sshpass opens one
+                            connection per command; the case fails there with
+                            a note rather than passing on the wrong shape).
+  {{UPLOAD_SIZE}}           in a case with either upload directive: the byte
+                            size of --upload-source, substituted literally
 
 Volatile tokens. Only these fields vary between a real box and a correct
 honeypot, and each is checked against the persona clock, not just its shape.
@@ -58,6 +69,8 @@ anchor (+ slack).
   {{W_IDLE}}        w's 7-char IDLE cell, no longer than the session
   {{LSDATE}}        ls -l's date of a packaged binary: the year form, older
                     than six months (never a node stamped "now")
+  {{LSDATE_RECENT}} ls -l's date of a file written during the case (GNU's
+                    recent form "Oct  5 12:34"), within the run window
 All last rows (logins, then reboot) must be in non-increasing time order, and
 every weekday must match its date.
 
@@ -145,7 +158,10 @@ TOKENS = {
     # procps print_time_ival7: " %2ludays", " %2lu:%02um", " %2lu:%02u ", " %2lu.%02us"
     "W_IDLE": r" (?:[ \d]\ddays|[ \d]\d:[0-5]\dm|[ \d]\d:[0-5]\d |[ \d]\d\.\d\ds)",
     "LSDATE": _MON + r" [ 123]\d  \d{4}",
+    "LSDATE_RECENT": _MON + r" [ 123]\d " + _HM,
 }
+# Not volatile: replaced with a known value before the comparison.
+UPLOAD_SIZE = "{{UPLOAD_SIZE}}"
 _TOKEN_RE = re.compile(r"\{\{([A-Z_:]+)\}\}")
 _DIRECTIVE = "#harness:"
 
@@ -157,6 +173,7 @@ class Expected:
     skip: str | None = None
     advances: tuple[float, float] | None = None
     scp_stdin: str | None = None
+    upload_channel: tuple[str, str] | None = None
 
 
 @dataclass
@@ -222,11 +239,26 @@ def parse_expected(text: str) -> Expected:
             if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
                 raise ValueError(f"bad scp-stdin directive (want a plain file name): {lines[i]!r}")
             exp.scp_stdin = name
+        elif body.startswith("upload-channel="):
+            parts = body[15:].split()
+            if (len(parts) != 2 or not parts[0].startswith("/")
+                    or not re.fullmatch(r"[A-Za-z0-9._/-]+", parts[0])
+                    or not re.fullmatch(r"[A-Za-z0-9._-]+", parts[1])
+                    or parts[1] in (".", "..")):
+                raise ValueError("bad upload-channel directive (want an absolute"
+                                 f" TARGET and a plain file NAME): {lines[i]!r}")
+            exp.upload_channel = (parts[0], parts[1])
         else:
             raise ValueError(f"unknown harness directive: {lines[i]!r}")
         i += 1
     exp.content = "\n".join(lines[i:])
+    if exp.scp_stdin and exp.upload_channel:
+        raise ValueError("scp-stdin and upload-channel are exclusive")
     for tok in _TOKEN_RE.findall(exp.content):
+        if tok == UPLOAD_SIZE[2:-2]:
+            if not (exp.scp_stdin or exp.upload_channel):
+                raise ValueError(f"{UPLOAD_SIZE} needs an upload directive")
+            continue
         if tok not in TOKENS:
             raise ValueError(f"unknown volatile token {{{{{tok}}}}}")
     return exp
@@ -422,6 +454,20 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                 dt = datetime.strptime(val, "%b %d  %Y")
                 if (end - dt).total_seconds() < LS_MIN_AGE:
                     flag(i, f"ls date '{val}' is not an old package build date")
+            elif tok == "LSDATE_RECENT":
+                # GNU ls truncates to the minute; the file was written inside
+                # the run window, so its stamp must fall in it too.
+                try:
+                    dt = datetime.strptime(f"{val} {end.year}", "%b %d %H:%M %Y")
+                except ValueError:
+                    flag(i, f"ls date '{val}' is an invalid date")
+                    continue
+                if dt > end:  # a run across New Year
+                    dt = dt.replace(year=end.year - 1)
+                if not start.replace(second=0, microsecond=0) - timedelta(seconds=NOW_TOLERANCE) \
+                        <= dt <= end + timedelta(seconds=NOW_TOLERANCE):
+                    flag(i, f"ls date '{val}' is not the time the file was written"
+                            f" ({start:%b %e %H:%M}..{end:%b %e %H:%M})")
     for (_, a), (i, b) in zip(order, order[1:]):
         if b > a:
             flag(i, "last rows are out of order (each must be no later than the one above)")
@@ -579,6 +625,24 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception,
     return RunResult(_decode(bytes(out + err)), rc, False, note)
 
 
+def exec_sequence(open_channel, steps, deadline: float, closed_exc=Exception) -> RunResult:
+    """Run (command, stdin) steps on successive channels of one connection.
+
+    Each earlier step must finish cleanly (no hang, exit 0); only the last
+    step's output is the case's result. A failed earlier step is reported as
+    the case's result with a note, because what follows would test nothing.
+    """
+    for n, (command, stdin) in enumerate(steps[:-1], 1):
+        res = exec_on_channel(open_channel(), command, deadline, closed_exc, stdin)
+        if res.timed_out or res.rc != 0:
+            why = "hung" if res.timed_out else f"exit status {res.rc}"
+            visible = res.output.replace("\x00", "")
+            return RunResult(visible, None, res.timed_out,
+                             f"channel {n} (`{command}`) failed: {why}")
+    command, stdin = steps[-1]
+    return exec_on_channel(open_channel(), command, deadline, closed_exc, stdin)
+
+
 def scp_record(name: str, data: bytes) -> bytes:
     """One legacy scp upload as the client sends it to `scp -t`: a C-record
     header, the bytes, and the NUL that ends them."""
@@ -588,7 +652,8 @@ def scp_record(name: str, data: bytes) -> bytes:
 def paramiko_runner(host: str, port: int, user: str, password: str):
     import paramiko  # noqa: PLC0415 - optional dependency
 
-    def run(command: str, timeout: float, stdin: bytes | None = None) -> RunResult:
+    def run(command: str, timeout: float, stdin: bytes | None = None,
+            before: list[tuple[str, bytes | None]] | None = None) -> RunResult:
         deadline = time.monotonic() + timeout
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -596,8 +661,10 @@ def paramiko_runner(host: str, port: int, user: str, password: str):
             client.connect(host, port=port, username=user, password=password,
                            look_for_keys=False, allow_agent=False, timeout=timeout,
                            banner_timeout=timeout, auth_timeout=timeout)
-            chan = client.get_transport().open_session(timeout=timeout)
-            return exec_on_channel(chan, command, deadline, paramiko.SSHException, stdin)
+            transport = client.get_transport()
+            return exec_sequence(lambda: transport.open_session(timeout=timeout),
+                                 [*(before or []), (command, stdin)], deadline,
+                                 paramiko.SSHException)
         except Exception as exc:  # noqa: BLE001 - a broken session is a result
             timed = time.monotonic() > deadline
             return RunResult(f"<transport error: {type(exc).__name__}: {exc}>\n", None, timed)
@@ -619,7 +686,11 @@ def ssh_runner(host: str, port: int, user: str, password: str):
     ]
     env = dict(os.environ, SSHPASS=password)
 
-    def run(command: str, timeout: float, stdin: bytes | None = None) -> RunResult:
+    def run(command: str, timeout: float, stdin: bytes | None = None,
+            before: list[tuple[str, bytes | None]] | None = None) -> RunResult:
+        if before:
+            return RunResult("", None, False, "this case runs several channels on one"
+                             " connection and needs --transport paramiko")
         stdio = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
         try:
             p = subprocess.run(base + [command], env=env, capture_output=True,
@@ -717,7 +788,7 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             print(f"SKIP {name}: {exp.skip}")
             continue
         started = datetime.now(timezone.utc)
-        if exp.scp_stdin:
+        if exp.scp_stdin or exp.upload_channel:
             try:
                 payload = args.upload_source.read_bytes()
             except OSError as exc:
@@ -728,7 +799,13 @@ def main(argv: list[str] | None = None, runner=None) -> int:
                 failed += 1
                 print(f"FAIL {name}: --upload-source {args.upload_source} is not an ELF")
                 continue
+            exp.content = exp.content.replace(UPLOAD_SIZE, str(len(payload)))
+        if exp.scp_stdin:
             run = runner(command, args.timeout, stdin=scp_record(exp.scp_stdin, payload))
+        elif exp.upload_channel:
+            target, record = exp.upload_channel
+            run = runner(command, args.timeout,
+                         before=[(f"scp -t {target}", scp_record(record, payload))])
         else:
             run = runner(command, args.timeout)
         clock = Clock(start=started, end=datetime.now(timezone.utc),
