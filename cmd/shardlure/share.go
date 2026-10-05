@@ -233,16 +233,29 @@ func collectShareCandidates(st *store.Store, singleSHA string, since time.Durati
 	// Selection narrowing comes FROM the bazaar gate, so this query can't be
 	// stricter than the policy that judges the samples (it was, on both size
 	// and origin, and each drift hid real payloads — see ArtifactsForShare).
-	rows, err := st.ArtifactsForShare(cutoff, store.SharePolicy{
+	pol := store.SharePolicy{
 		MinBytes: bazaar.MinSampleBytes,
 		Origins:  bazaar.ShareableOrigins(),
-	})
+	}
+	rows, err := st.ArtifactsForShare(cutoff, pol)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]bazaar.Candidate, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, artifactToCandidate(r))
+		// The pool only decides WHICH shas to consider. The row judged for each
+		// is re-picked by GetArtifactForShareBySHA — the choice --sha, the
+		// dashboard upload handler and the bazaar panel make — which ranks rows
+		// with a file on disk first. The pooled row is simply the newest fetch
+		// and may have no local_path, so a bulk run skipped as "file gone" a
+		// sample the panel showed eligible and the handler uploaded: selection
+		// tighter than Vet. On a lookup failure keep the pooled row; Share then
+		// reports why it skips it.
+		best, err := st.GetArtifactForShareBySHA(r.SHA256, pol)
+		if err != nil || best == nil {
+			best = &r
+		}
+		out = append(out, artifactToCandidate(*best))
 	}
 	return out, nil
 }
