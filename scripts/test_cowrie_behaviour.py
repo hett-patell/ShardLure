@@ -666,6 +666,26 @@ class MainExitCodeTest(unittest.TestCase):
             [("scp -t /tmp/x", f"C0755 {len(data)} hw\n".encode() + data + b"\x00")],
         )])
 
+    def test_before_channels_follow_the_upload_channel(self):
+        (self.root / "probes.txt").write_text("redir\tcat /tmp/m\n")
+        (self.root / "expected" / "redir.out").write_text(
+            "#harness: upload-channel=/tmp/x hw\n#harness: before=echo m > /tmp/m\nm\n")
+        elf = self.root / "elf"
+        elf.write_bytes(b"\x7fELF")
+        seen = []
+
+        def runner(command, timeout, stdin=None, before=None):
+            seen.append(before)
+            return cbt.RunResult("m\n", 0, False)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cbt.main(self.argv + ["--only", "probes", "--upload-source", str(elf)],
+                          runner=runner)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(seen, [[("scp -t /tmp/x", b"C0755 4 hw\n\x7fELF\x00"),
+                                 ("echo m > /tmp/m", None)]])
+
     def test_upload_size_is_the_exact_source_size(self):
         (self.root / "probes.txt").write_text("cross\tls -l /tmp/x\n")
         (self.root / "expected" / "cross.out").write_text(
@@ -816,6 +836,13 @@ class UploadChannelTest(unittest.TestCase):
         self.assertIsNone(res.rc)
         self.assertIn("channel 1 (`scp -t /nope/x`) failed: exit status 1", res.note)
         self.assertEqual(res.output, "-scp: /nope/x: No such file or directory\n")
+
+    def test_before_directive_is_repeatable_and_ordered(self):
+        exp = cbt.parse_expected("#harness: before=echo a > /tmp/m\n"
+                                 "#harness: before=echo b >> /tmp/m\n")
+        self.assertEqual(exp.before, ["echo a > /tmp/m", "echo b >> /tmp/m"])
+        with self.assertRaises(ValueError):
+            cbt.parse_expected("#harness: before=\n")
 
     def test_ssh_transport_refuses_rather_than_running_one_connection_per_step(self):
         with mock.patch.object(cbt.shutil, "which", return_value="/usr/bin/x"):

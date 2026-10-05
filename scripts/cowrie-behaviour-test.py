@@ -46,6 +46,11 @@ line:
                             paramiko transport (ssh+sshpass opens one
                             connection per command; the case fails there with
                             a note rather than passing on the wrong shape).
+  #harness: before=COMMAND  run COMMAND on an earlier exec channel of the same
+                            connection (after any upload-channel; repeatable,
+                            in order), then the case on the next channel; same
+                            paramiko requirement. Pins state that must outlive
+                            a channel, e.g. a redirected file.
   {{UPLOAD_SIZE}}           in a case with either upload directive: the byte
                             size of --upload-source, substituted literally
 
@@ -175,6 +180,7 @@ class Expected:
     advances: tuple[float, float] | None = None
     scp_stdin: str | None = None
     upload_channel: tuple[str, str] | None = None
+    before: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -249,6 +255,11 @@ def parse_expected(text: str) -> Expected:
                 raise ValueError("bad upload-channel directive (want an absolute"
                                  f" TARGET and a plain file NAME): {lines[i]!r}")
             exp.upload_channel = (parts[0], parts[1])
+        elif body.startswith("before="):
+            command = body[7:].strip()
+            if not command:
+                raise ValueError(f"empty before directive: {lines[i]!r}")
+            exp.before.append(command)
         else:
             raise ValueError(f"unknown harness directive: {lines[i]!r}")
         i += 1
@@ -801,12 +812,15 @@ def main(argv: list[str] | None = None, runner=None) -> int:
                 print(f"FAIL {name}: --upload-source {args.upload_source} is not an ELF")
                 continue
             exp.content = exp.content.replace(UPLOAD_SIZE, str(len(payload)))
+        before = []
+        if exp.upload_channel:
+            target, record = exp.upload_channel
+            before.append((f"scp -t {target}", scp_record(record, payload)))
+        before.extend((cmd, None) for cmd in exp.before)
         if exp.scp_stdin:
             run = runner(command, args.timeout, stdin=scp_record(exp.scp_stdin, payload))
-        elif exp.upload_channel:
-            target, record = exp.upload_channel
-            run = runner(command, args.timeout,
-                         before=[(f"scp -t {target}", scp_record(record, payload))])
+        elif before:
+            run = runner(command, args.timeout, before=before)
         else:
             run = runner(command, args.timeout)
         clock = Clock(start=started, end=datetime.now(timezone.utc),

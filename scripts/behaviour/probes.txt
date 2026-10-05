@@ -59,3 +59,8 @@ passwd-stdin	echo -e "p\np" | passwd
 # exec-emulation answers the run (rc 0, no output).
 scp-cross-channel	ls -l /tmp/x; /tmp/x; echo rc=$?
 scp-cross-channel-dir	ls -l /tmp/hw; /tmp/hw; echo rc=$?
+# A file written by a redirection on one channel, read and appended on the
+# next. With one fake filesystem per connection, the channel close that
+# finalises the redirection must leave the node readable (connection-shared-fs
+# re-points it; it used to hang the session with FileNotFoundError).
+redirect-cross-channel	cat /tmp/m; echo more >> /tmp/m; cat /tmp/m

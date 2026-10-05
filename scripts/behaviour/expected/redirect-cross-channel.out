@@ -1,0 +1,4 @@
+#harness: before=echo marker > /tmp/m
+marker
+marker
+more
