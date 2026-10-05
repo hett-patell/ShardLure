@@ -16,15 +16,16 @@ PATCHES = (
     # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect).
     #
     # Temporarily out while they are re-anchored on v3.1.1 (payload-yield
-    # Phase B). Each fails --check on v3.1.1 except command-type-builtins,
-    # which applies cleanly but crashes at runtime: v3.1.1's getCommand() takes
-    # a cwd argument, so `command -v wget` raised TypeError and hung the session.
-    #   - Task 3 restores command-type-builtins.py, exec-emulation.py and
-    #     sftp-capture-permissions.py.
-    #   - Task 4 replaces grep-case-insensitive.py with grep-options.py.
+    # Phase B): Task 3 restores exec-emulation.py and
+    # sftp-capture-permissions.py, Task 4 replaces grep-case-insensitive.py
+    # with grep-options.py.
     #
     # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
     # live log analysis so bots proceed to payload delivery.
+    # command-type-builtins is re-anchored on v3.1.1's getCommand(cmd, paths,
+    # cwd): the pin-era text applied cleanly and then raised TypeError, hanging
+    # every `command -v` session (scripts/behaviour command-v-wget catches it).
+    "command-type-builtins.py",
     "passwd-stdin.py",
 )
 

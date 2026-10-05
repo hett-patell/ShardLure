@@ -28,6 +28,7 @@ cowrie="$tmp_root/cowrie"
 drifted="$tmp_root/cowrie-drifted"
 args_checkout="$tmp_root/cowrie-args"
 partial_passwd="$tmp_root/cowrie-partial-passwd"
+partial_builtins="$tmp_root/cowrie-partial-builtins"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -39,15 +40,18 @@ fi
 cp -a "$cowrie" "$drifted"
 cp -a "$cowrie" "$args_checkout"
 cp -a "$cowrie" "$partial_passwd"
+cp -a "$cowrie" "$partial_builtins"
 
-# Build an exact incomplete state from the patch script's literal blocks:
-# passwd has the piped-stdin branch without its early return, so neither OLD
-# nor NEW is present. The grep and capture fixtures left with their patches
-# (Task 4 restores a grep-options fixture, Task 3 the capture one); the
-# bashparse and honeypot fixtures went with the patches upstream made redundant.
+# Build exact incomplete states from the patch scripts' literal blocks:
+# passwd has the piped-stdin branch without its early return, and builtins
+# registers `command` but not `type`, so neither OLD nor NEW is present in
+# either. The grep fixture left with its patch (Task 4 restores a
+# grep-options one); the bashparse and honeypot fixtures went with the
+# patches upstream made redundant.
 python3 - \
   "$ROOT" \
-  "$partial_passwd/src/cowrie/commands/base.py" <<'PY'
+  "$partial_passwd/src/cowrie/commands/base.py" \
+  "$partial_builtins/src/cowrie/commands/which.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -77,6 +81,7 @@ def replace_once(path: Path, old: str, new: str, label: str) -> str:
 
 root = Path(sys.argv[1])
 passwd_path = Path(sys.argv[2])
+builtins_path = Path(sys.argv[3])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -86,6 +91,15 @@ partial = passwd["NEW"].replace(early_return, "", 1)
 content = replace_once(passwd_path, passwd["OLD"], partial, "passwd partial")
 if content.count(passwd["OLD"]) != 0 or content.count(passwd["NEW"]) != 0:
     raise SystemExit(f"passwd partial fixture unexpectedly contains a complete block in {passwd_path}")
+
+builtins = string_constants(root / "install/persona/patches/command-type-builtins.py")
+type_registration = 'commands["type"] = Command_type\n'
+if builtins["NEW"].count(type_registration) != 1:
+    raise SystemExit("builtins NEW block does not contain the expected type registration")
+partial = builtins["NEW"].replace(type_registration, "", 1)
+content = replace_once(builtins_path, builtins["OLD"], partial, "builtins partial")
+if content.count(builtins["OLD"]) != 0 or content.count(builtins["NEW"]) != 0:
+    raise SystemExit(f"builtins partial fixture unexpectedly contains a complete block in {builtins_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -93,6 +107,7 @@ PY
 # Only the patches active on the pin are listed (see PATCHES in
 # apply-patches.py); Tasks 3-4 of payload-yield Phase B add the ported ones back.
 for patch in \
+  "$ROOT/install/persona/patches/command-type-builtins.py" \
   "$ROOT/install/persona/patches/passwd-stdin.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -200,6 +215,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_passwd" \
     "$ROOT/install/persona/patches/passwd-stdin.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "builtins" \
+    "$partial_builtins" \
+    "$ROOT/install/persona/patches/command-type-builtins.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -214,13 +234,14 @@ fi
 
 # Apply, verify every expected target changed, then prove check mode and normal
 # reapplication leave the complete patch set byte-for-byte unchanged. The list is
-# git-diff --name-only order (alphabetical by path); keep it sorted. On v3.1.1
-# only passwd-stdin is active: Task 3 adds back commands/which.py, shell/fs.py
-# and shell/script.py, Task 4 commands/fs.py. shell/bashparse.py and
-# shell/honeypot.py left with the patches upstream made redundant.
+# git-diff --name-only order (alphabetical by path); keep it sorted. Task 3
+# adds back shell/fs.py and shell/script.py, Task 4 commands/fs.py.
+# shell/bashparse.py and shell/honeypot.py left with the patches upstream made
+# redundant.
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
+  "src/cowrie/commands/which.py"
 )
 mapfile -t actual_changed < <(git -C "$cowrie" diff --name-only --)
 if [[ "${actual_changed[*]}" != "${expected_changed[*]}" ]]; then
@@ -251,19 +272,52 @@ git -C "$cowrie" diff --check
 # Drift the final target so a sequential check/apply implementation would alter
 # earlier files before discovering incompatibility. The entire working tree
 # must remain identical after the orchestrator's failed all-patch preflight.
-# With passwd-stdin the only active patch the final target is its anchor; move
-# this back to the last patch in PATCHES when Tasks 3-4 restore the others.
-python3 - "$drifted/src/cowrie/commands/base.py" <<'PY'
+# The target is read from PATCHES[-1] (its OLD block), so the fixture follows
+# the chain as patches are added instead of falling behind it; it must live in
+# a different file from at least one earlier patch, or "earlier targets stay
+# untouched" would prove nothing.
+python3 - "$ORCHESTRATOR" "$drifted" <<'PY'
+import ast
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
+
+def assigned_constant(path: Path, name: str):
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name):
+            return ast.literal_eval(node.value)
+    raise SystemExit(f"{path}: no {name} constant")
+
+
+def target_of(old: str, root: Path) -> Path:
+    hits = [p for p in sorted((root / "src/cowrie").rglob("*.py"))
+            if p.read_text(encoding="utf-8").count(old) == 1]
+    if len(hits) != 1:
+        raise SystemExit(f"OLD block found in {len(hits)} files, want exactly 1")
+    return hits[0]
+
+
+orchestrator, root = Path(sys.argv[1]), Path(sys.argv[2])
+patches_dir = orchestrator.parent / "patches"
+patches = assigned_constant(orchestrator, "PATCHES")
+if len(patches) < 2:
+    raise SystemExit("atomic preflight needs at least two patches")
+olds = [assigned_constant(patches_dir / name, "OLD") for name in patches]
+path = target_of(olds[-1], root)
+if all(target_of(old, root) == path for old in olds[:-1]):
+    raise SystemExit(f"every earlier patch also targets {path}; drift proves nothing")
+
+# Suffix the first non-blank line that OLD itself terminates with a newline;
+# a suffix on an unterminated final line would leave OLD intact as a prefix.
+old = olds[-1]
+lines = old.split("\n")
+first = next(i for i, line in enumerate(lines[:-1]) if line.strip())
+lines[first] += "  # intentional compatibility drift"
 content = path.read_text(encoding="utf-8")
-old = '        self.write("Enter new UNIX password: ")\n        self.protocol.password_input = True'
-new = old + "  # intentional compatibility drift"
-if content.count(old) != 1:
-    raise SystemExit(f"cannot create deterministic drift in {path}")
-path.write_text(content.replace(old, new, 1), encoding="utf-8")
+path.write_text(content.replace(old, "\n".join(lines), 1), encoding="utf-8")
+print(f"[cowrie-patches] drifted {patches[-1]} target {path.relative_to(root)}")
 PY
 
 drifted_before="$(working_tree_hash "$drifted")"
@@ -277,4 +331,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 4 partial-state rejections, idempotence, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 8 partial-state rejections, idempotence, and atomic preflight checks passed"
