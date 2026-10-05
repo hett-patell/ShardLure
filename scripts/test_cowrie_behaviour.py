@@ -1113,6 +1113,10 @@ class ShippedCasesTest(unittest.TestCase):
         for name in ("free-m-awk", "free", "free-h"):
             with self.subTest(case=name):
                 self.assertTrue(cbt.parse_expected(exp(name)).no_host_memtotal)
+        # The shadowed free txtcmd is procps' own output for the persona.
+        self.assertEqual(
+            cbt.parse_expected(exp("free")).content,
+            (HERE.parent / "install" / "persona" / "txtcmds" / "usr" / "bin" / "free").read_text())
         # lspci answers with the persona's own Xen list, the txtcmd it shadows.
         self.assertEqual(
             exp("lspci"),

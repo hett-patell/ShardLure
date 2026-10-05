@@ -36,6 +36,7 @@ partial_scp="$tmp_root/cowrie-partial-scp"
 partial_ls="$tmp_root/cowrie-partial-ls"
 partial_grep="$tmp_root/cowrie-partial-grep"
 partial_lspci="$tmp_root/cowrie-partial-lspci"
+partial_free="$tmp_root/cowrie-partial-free"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -55,6 +56,7 @@ cp -a "$cowrie" "$partial_scp"
 cp -a "$cowrie" "$partial_ls"
 cp -a "$cowrie" "$partial_grep"
 cp -a "$cowrie" "$partial_lspci"
+cp -a "$cowrie" "$partial_free"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
@@ -65,7 +67,8 @@ cp -a "$cowrie" "$partial_lspci"
 # remembers the -t target but still names the file after the C-record; ls
 # has the GNU recent form but keeps the ISO form for old files; grep has the
 # new class but still ignores -i; lspci lists the persona with one device
-# misnamed and leaves busybox.py pristine. The bashparse and honeypot fixtures went
+# misnamed and leaves busybox.py pristine; free leaves SReclaimable out of
+# buff/cache, as stock Cowrie did. The bashparse and honeypot fixtures went
 # with the patches upstream made redundant.
 python3 - \
   "$ROOT" \
@@ -77,7 +80,8 @@ python3 - \
   "$partial_scp/src/cowrie/commands/scp.py" \
   "$partial_ls/src/cowrie/commands/ls.py" \
   "$partial_grep/src/cowrie/commands/fs.py" \
-  "$partial_lspci/src/cowrie/commands/lspci.py" <<'PY'
+  "$partial_lspci/src/cowrie/commands/lspci.py" \
+  "$partial_free/src/cowrie/commands/free.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -115,6 +119,7 @@ scp_path = Path(sys.argv[7])
 ls_path = Path(sys.argv[8])
 grep_path = Path(sys.argv[9])
 lspci_path = Path(sys.argv[10])
+free_path = Path(sys.argv[11])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -183,6 +188,14 @@ partial = lspci["NEW"].replace('Cirrus Logic GD 5446', 'Cirrus Logic GD 5430', 1
 content = replace_once(lspci_path, lspci["OLD"], partial, "lspci partial")
 if content.count(lspci["OLD"]) != 0 or content.count(lspci["NEW"]) != 0:
     raise SystemExit(f"lspci partial fixture unexpectedly contains a complete block in {lspci_path}")
+
+free = string_constants(root / "install/persona/patches/free-meminfo.py")
+if free["NEW"].count('raw["Cached"] + raw["SReclaimable"]') != 1:
+    raise SystemExit("free NEW block does not contain the expected fixture anchor")
+partial = free["NEW"].replace('raw["Cached"] + raw["SReclaimable"]', 'raw["Cached"]', 1)
+content = replace_once(free_path, free["OLD"], partial, "free partial")
+if content.count(free["OLD"]) != 0 or content.count(free["NEW"]) != 0:
+    raise SystemExit(f"free partial fixture unexpectedly contains a complete block in {free_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -198,6 +211,7 @@ for patch in \
   "$ROOT/install/persona/patches/ls-date-format.py" \
   "$ROOT/install/persona/patches/grep-options.py" \
   "$ROOT/install/persona/patches/lspci-persona.py" \
+  "$ROOT/install/persona/patches/free-meminfo.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -345,6 +359,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_lspci" \
     "$ROOT/install/persona/patches/lspci-persona.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "free" \
+    "$partial_free" \
+    "$ROOT/install/persona/patches/free-meminfo.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -366,6 +385,7 @@ python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
   "src/cowrie/commands/busybox.py"
+  "src/cowrie/commands/free.py"
   "src/cowrie/commands/fs.py"
   "src/cowrie/commands/ls.py"
   "src/cowrie/commands/lspci.py"
@@ -493,4 +513,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 36 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target and shared-fs backing behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 40 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target and shared-fs backing behavior, and atomic preflight checks passed"

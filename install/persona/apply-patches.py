@@ -43,6 +43,9 @@ PATCHES = (
     # desktop AMD/GeForce board; the profiler's GPU field reads it (and
     # `busybox lspci`, which BusyBox 1.20.2 has no applet for).
     "lspci-persona.py",
+    # free read the Cowrie host's real /proc/meminfo (arm's 24 GB behind an
+    # 8 GB persona); it now ports procps 3.3.17 over the fake filesystem's.
+    "free-meminfo.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
