@@ -301,6 +301,27 @@ if [[ "$reapplied_diff_hash" != "$patched_diff_hash" ]]; then
 fi
 git -C "$cowrie" diff --check
 
+# scripts/install.sh fetches some patches from the release tag and runs each
+# one ALONE against a fresh pin checkout. Prove each applies that way too, so a
+# tag can never ship a patch install.sh fetches but the pin rejects (Task 2 of
+# payload-yield Phase B parked one and nothing noticed). test_release_contracts
+# keeps this list equal to what install.sh fetches.
+install_sh_patches=(
+  "sftp-capture-permissions.py"
+)
+for name in "${install_sh_patches[@]}"; do
+  standalone="$tmp_root/standalone-${name%.py}"
+  cp -a "$cowrie" "$standalone"
+  git -C "$standalone" checkout -q -- .
+  python3 "$ROOT/install/persona/patches/$name" "$standalone" --check
+  python3 "$ROOT/install/persona/patches/$name" "$standalone"
+  python3 "$ROOT/install/persona/patches/$name" "$standalone"
+  if git -C "$standalone" diff --quiet --; then
+    echo "[cowrie-patches] install.sh patch $name changed nothing on the pin" >&2
+    exit 1
+  fi
+done
+
 # Run the real pinned, patched SFTP methods against inert local files, including
 # SHA-dedup destinations and publication-time permissions. No Twisted/network.
 python3 "$ROOT/install/persona/test_capture_permissions.py" "$cowrie" -v
@@ -367,4 +388,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 16 partial-state rejections, idempotence, capture behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 16 partial-state rejections, idempotence, install.sh standalone patches, capture behavior, and atomic preflight checks passed"

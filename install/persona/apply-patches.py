@@ -30,7 +30,8 @@ PATCHES = (
     "exec-emulation.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
-    # PATCHES and apply on the pin.
+    # PATCHES and apply on the pin (test_release_contracts and
+    # check-cowrie-patches.sh's install_sh_patches enforce both).
     "sftp-capture-permissions.py",
 )
 

@@ -107,6 +107,40 @@ class ReleaseContractTests(unittest.TestCase):
                     "install/persona/patches/sftp-capture-permissions.py", call["args"],
                 )
 
+    def test_every_patch_install_sh_fetches_is_an_active_pinned_patch(self) -> None:
+        # Task 2 of payload-yield Phase B moved the pin to Cowrie v3.1.1 and
+        # parked sftp-capture-permissions while it was re-anchored. install.sh
+        # kept fetching it from the release tag and running it standalone, so a
+        # tag cut in that window would have failed every fresh install after
+        # cloning Cowrie, and no test noticed. Every patch install.sh fetches
+        # must be in PATCHES (check-cowrie-patches.sh then proves the chain
+        # applies to the pin) and in the check script's install.sh list, which
+        # also applies each one alone to a pristine pin as install.sh does.
+        import ast  # noqa: PLC0415
+
+        installer = INSTALLER_PATH.read_text()
+        fetched = re.findall(r"install/persona/patches/([A-Za-z0-9_.-]+\.py)", installer)
+        self.assertTrue(fetched, "install.sh no longer fetches a persona patch; update this test")
+        orchestrator = ROOT / "install/persona/apply-patches.py"
+        tree = ast.parse(orchestrator.read_text())
+        patches = next(
+            ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "PATCHES"
+        )
+        check_script = (ROOT / "scripts/check-cowrie-patches.sh").read_text()
+        standalone = check_script[check_script.index("install_sh_patches=("):]
+        standalone = standalone[:standalone.index(")")]
+        for name in sorted(set(fetched)):
+            with self.subTest(patch=name):
+                self.assertTrue((ROOT / "install/persona/patches" / name).is_file())
+                self.assertIn(name, patches)
+                self.assertIn(f'"{name}"', standalone)
+        for name in patches:
+            with self.subTest(patch=name):
+                self.assertIn(f'"$ROOT/install/persona/patches/{name}"', check_script,
+                              "every active patch must be in check-cowrie-patches.sh's arg loop")
+
     def test_installer_rejects_incompatible_capture_code_without_modifying_it(self) -> None:
         patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
         with tempfile.TemporaryDirectory() as tmp:
