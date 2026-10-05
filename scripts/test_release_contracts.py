@@ -166,6 +166,18 @@ class ReleaseContractTests(unittest.TestCase):
                 self.assertIn("OLD", names)
                 self.assertIn("NEW", names)
 
+    def test_lspci_patch_emits_the_persona_txtcmd(self) -> None:
+        # One device list, two copies: the registered command (patched) and
+        # the txtcmd it shadows. They must never disagree.
+        import ast  # noqa: PLC0415
+
+        body = ast.parse((ROOT / "install/persona/patches/lspci-persona.py").read_text()).body
+        new = next(n.value.value for n in body if isinstance(n, ast.Assign)
+                   and getattr(n.targets[0], "id", "") == "NEW")
+        listing = new[new.index('return """') + len('return """'):new.rindex('\\n"""')] + "\n"
+        self.assertEqual(listing, (ROOT / "install/persona/txtcmds/usr/bin/lspci").read_text())
+        self.assertIn("00:02.0 VGA compatible controller: Cirrus Logic GD 5446\n", listing)
+
     def test_installer_rejects_incompatible_capture_code_without_modifying_it(self) -> None:
         patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
         with tempfile.TemporaryDirectory() as tmp:

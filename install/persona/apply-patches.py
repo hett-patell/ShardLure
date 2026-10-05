@@ -39,6 +39,10 @@ PATCHES = (
     # and GNU's exit status (supersedes grep-case-insensitive, whose anchor
     # v3.1.1 refactored away): the profiler's `lspci | grep -i vga` GPU probe.
     "grep-options.py",
+    # lspci is a registered command that shadows txtcmds/usr/bin/lspci with a
+    # desktop AMD/GeForce board; the profiler's GPU field reads it (and
+    # `busybox lspci`, which BusyBox 1.20.2 has no applet for).
+    "lspci-persona.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
