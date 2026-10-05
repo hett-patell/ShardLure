@@ -27,6 +27,15 @@ line:
                             closing without one is a failure)
   #harness: advances=LO..HI successive {{UPTIME_SECS}} must rise by LO..HI s
   #harness: skip=WHY        do not run; reported as SKIP (deferred probes)
+  #harness: scp-stdin=NAME  feed the case's stdin one legacy scp C-record
+                            ("C0755 <size> NAME", --upload-source, NUL), then
+                            EOF, so a `scp -t ...` in the command receives an
+                            upload. --upload-source defaults to /bin/true, a
+                            harmless ELF; Cowrie only stores it. Upload and run
+                            share ONE exec channel because Cowrie v3.1.1 builds
+                            a fresh fake filesystem for every session channel
+                            (shell/session.py initFileSystem), so a file
+                            uploaded on one channel is gone on the next.
 
 Volatile tokens. Only these fields vary between a real box and a correct
 honeypot, and each is checked against the persona clock, not just its shape.
@@ -147,6 +156,7 @@ class Expected:
     rc: int | None = 0
     skip: str | None = None
     advances: tuple[float, float] | None = None
+    scp_stdin: str | None = None
 
 
 @dataclass
@@ -207,6 +217,11 @@ def parse_expected(text: str) -> Expected:
             exp.advances = (float(m.group(1)), float(m.group(2)))
         elif body.startswith("skip="):
             exp.skip = body[5:].strip() or "skipped"
+        elif body.startswith("scp-stdin="):
+            name = body[10:].strip()
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
+                raise ValueError(f"bad scp-stdin directive (want a plain file name): {lines[i]!r}")
+            exp.scp_stdin = name
         else:
             raise ValueError(f"unknown harness directive: {lines[i]!r}")
         i += 1
@@ -525,7 +540,8 @@ def _decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception) -> RunResult:
+def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception,
+                    stdin: bytes | None = None) -> RunResult:
     """Run `command` on an open paramiko-style channel and drain it.
 
     Cowrie answers a short exec command and closes the channel before
@@ -540,6 +556,9 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception) -
         chan.exec_command(command)
     except closed_exc:
         unacked = True
+    if stdin is not None and not unacked:
+        chan.sendall(stdin)
+        chan.shutdown_write()
     out, err = bytearray(), bytearray()
     while True:
         while chan.recv_ready():
@@ -560,10 +579,16 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception) -
     return RunResult(_decode(bytes(out + err)), rc, False, note)
 
 
+def scp_record(name: str, data: bytes) -> bytes:
+    """One legacy scp upload as the client sends it to `scp -t`: a C-record
+    header, the bytes, and the NUL that ends them."""
+    return f"C0755 {len(data)} {name}\n".encode() + data + b"\x00"
+
+
 def paramiko_runner(host: str, port: int, user: str, password: str):
     import paramiko  # noqa: PLC0415 - optional dependency
 
-    def run(command: str, timeout: float) -> RunResult:
+    def run(command: str, timeout: float, stdin: bytes | None = None) -> RunResult:
         deadline = time.monotonic() + timeout
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -572,7 +597,7 @@ def paramiko_runner(host: str, port: int, user: str, password: str):
                            look_for_keys=False, allow_agent=False, timeout=timeout,
                            banner_timeout=timeout, auth_timeout=timeout)
             chan = client.get_transport().open_session(timeout=timeout)
-            return exec_on_channel(chan, command, deadline, paramiko.SSHException)
+            return exec_on_channel(chan, command, deadline, paramiko.SSHException, stdin)
         except Exception as exc:  # noqa: BLE001 - a broken session is a result
             timed = time.monotonic() > deadline
             return RunResult(f"<transport error: {type(exc).__name__}: {exc}>\n", None, timed)
@@ -594,10 +619,11 @@ def ssh_runner(host: str, port: int, user: str, password: str):
     ]
     env = dict(os.environ, SSHPASS=password)
 
-    def run(command: str, timeout: float) -> RunResult:
+    def run(command: str, timeout: float, stdin: bytes | None = None) -> RunResult:
+        stdio = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
         try:
             p = subprocess.run(base + [command], env=env, capture_output=True,
-                               timeout=timeout, stdin=subprocess.DEVNULL)
+                               timeout=timeout, **stdio)
         except subprocess.TimeoutExpired as exc:
             return RunResult(_decode((exc.stdout or b"") + (exc.stderr or b"")), None, True)
         return RunResult(_decode(p.stdout + p.stderr), p.returncode, False)
@@ -651,6 +677,9 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     ap.add_argument("--tz", default="UTC",
                     help="timezone Cowrie renders times in (persona cfg: UTC)")
     ap.add_argument("--cases-dir", type=Path, default=DEFAULT_CASES_DIR)
+    ap.add_argument("--upload-source", type=Path, default=Path("/bin/true"),
+                    help="ELF fed to '#harness: scp-stdin=' cases (default /bin/true;"
+                         " Cowrie never runs it, it only has to be a binary)")
     args = ap.parse_args(argv)
 
     if runner is None:
@@ -688,7 +717,20 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             print(f"SKIP {name}: {exp.skip}")
             continue
         started = datetime.now(timezone.utc)
-        run = runner(command, args.timeout)
+        if exp.scp_stdin:
+            try:
+                payload = args.upload_source.read_bytes()
+            except OSError as exc:
+                failed += 1
+                print(f"FAIL {name}: cannot read --upload-source: {exc}")
+                continue
+            if not payload.startswith(b"\x7fELF"):
+                failed += 1
+                print(f"FAIL {name}: --upload-source {args.upload_source} is not an ELF")
+                continue
+            run = runner(command, args.timeout, stdin=scp_record(exp.scp_stdin, payload))
+        else:
+            run = runner(command, args.timeout)
         clock = Clock(start=started, end=datetime.now(timezone.utc),
                       uptime_slack=args.uptime_slack, tz=tz,
                       cowrie_age=args.cowrie_age)

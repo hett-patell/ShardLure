@@ -591,6 +591,54 @@ class MainExitCodeTest(unittest.TestCase):
         self.assertIn("who-am-i", out)
 
 
+    def test_scp_stdin_case_feeds_the_elf_as_one_c_record(self):
+        (self.root / "probes.txt").write_text("run-own\tscp -t /root/x >/dev/null; ./x\n")
+        (self.root / "expected" / "run-own.out").write_text("#harness: scp-stdin=x\n")
+        elf = self.root / "elf"
+        elf.write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 57)
+        seen = []
+
+        def runner(command, timeout, stdin=None):
+            seen.append((command, stdin))
+            return cbt.RunResult("", 0, False)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cbt.main(self.argv + ["--only", "probes", "--upload-source", str(elf)],
+                          runner=runner)
+        self.assertEqual(rc, 0, out.getvalue())
+        data = elf.read_bytes()
+        self.assertEqual(seen, [("scp -t /root/x >/dev/null; ./x",
+                                 f"C0755 {len(data)} x\n".encode() + data + b"\x00")])
+
+    def test_upload_source_must_be_an_elf(self):
+        (self.root / "probes.txt").write_text("run-own\tscp -t /root/x >/dev/null; ./x\n")
+        (self.root / "expected" / "run-own.out").write_text("#harness: scp-stdin=x\n")
+        script = self.root / "not-elf"
+        script.write_text("#!/bin/sh\n")
+        rc, out, calls = self.run_main({}, ["--only", "probes", "--upload-source", str(script)])
+        self.assertEqual(rc, 1)
+        self.assertIn("not an ELF", out)
+        self.assertEqual(calls, [])
+
+    def test_failed_run_fails_the_case(self):
+        (self.root / "probes.txt").write_text("run-own\tscp -t /root/x >/dev/null; ./x\n")
+        (self.root / "expected" / "run-own.out").write_text("#harness: scp-stdin=x\n")
+        elf = self.root / "elf"
+        elf.write_bytes(b"\x7fELF")
+
+        def runner(command, timeout, stdin=None):
+            return cbt.RunResult("bash: line 1: ./x: cannot execute binary file: "
+                                 "Exec format error\n", 126, False)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cbt.main(self.argv + ["--only", "probes", "--upload-source", str(elf)],
+                          runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("exit status 126, expected 0", out.getvalue())
+
+
 class FakeChannel:
     """Just enough of paramiko.Channel for exec_on_channel."""
 
@@ -653,6 +701,28 @@ class ExecOnChannelTest(unittest.TestCase):
         res = cbt.exec_on_channel(chan, "passwd", time.monotonic() + 0.2, ClosedError)
         self.assertTrue(res.timed_out)
         self.assertEqual(res.output, "Enter new UNIX password: ")
+
+
+class ScpStdinTest(unittest.TestCase):
+    def test_record_is_the_legacy_c_record(self):
+        self.assertEqual(cbt.scp_record("x", b"\x7fELFab"), b"C0755 6 x\n\x7fELFab\x00")
+
+    def test_stdin_is_sent_then_closed_on_the_exec_channel(self):
+        chan = FakeChannel([b""], 0)
+        chan.sent, chan.write_shut = b"", False
+        chan.sendall = lambda data: setattr(chan, "sent", chan.sent + data)
+        chan.shutdown_write = lambda: setattr(chan, "write_shut", True)
+        res = cbt.exec_on_channel(chan, "scp -t /root/x", time.monotonic() + 5,
+                                  ClosedError, b"C0755 1 x\nA\x00")
+        self.assertEqual(chan.sent, b"C0755 1 x\nA\x00")
+        self.assertTrue(chan.write_shut)
+        self.assertEqual(res.rc, 0)
+
+    def test_scp_stdin_directive(self):
+        self.assertEqual(cbt.parse_expected("#harness: scp-stdin=x\n").scp_stdin, "x")
+        for bad in ("", "a/b", "a b", "..", "/root/x"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cbt.parse_expected(f"#harness: scp-stdin={bad}\n")
 
 
 class InputParsingTest(unittest.TestCase):

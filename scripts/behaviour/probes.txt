@@ -38,3 +38,17 @@ var-assign-echo	X_ABC=val987; echo $X_ABC
 os-release-pretty	cat /etc/os-release | grep 'PRETTY_NAME'
 cat-os-release	cat /etc/os-release
 proc-uptime-advances	cat /proc/uptime; sleep 2; cat /proc/uptime
+# Persona patches re-anchored on v3.1.1 (Phase B Task 3). command/type gate the
+# download stage (482 failed probes on prod); v3.1.1 ships neither, and the
+# pin-era patch hung the session on the new getCommand(cmd, paths, cwd).
+command-v-wget	command -v wget
+type-wget	type wget
+# The bot family that scp-uploads its own ELF and runs it as a liveness test
+# (exec-emulation). Cowrie must never run it: a real box runs the matching-arch
+# binary silently, rc 0. Upload and run share one channel ("#harness:
+# scp-stdin") because v3.1.1 gives each session channel a fresh fake
+# filesystem; the bot's real pattern (scp -t on one channel, run on the next)
+# never reaches this branch -- see the Task 3 report.
+scp-upload-run	scp -t /root/x >/dev/null; ./x
+# echo -e "new\nnew" | passwd: unpatched v3.1.1 waits on stdin forever.
+passwd-stdin	echo -e "p\np" | passwd
