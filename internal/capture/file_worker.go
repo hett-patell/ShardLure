@@ -25,6 +25,7 @@ type FileWorker struct {
 	downloadsRoot, evidenceRoot string
 	maxBytes                    int64
 	now                         func() time.Time
+	space                       *SpaceGate
 	mu                          sync.Mutex
 }
 
@@ -103,6 +104,11 @@ func (w *FileWorker) tick(ctx context.Context) (int, error) {
 	output := filepath.Join(w.evidenceRoot, "cowrie")
 	if captureRootsOverlap(w.downloadsRoot, output) {
 		return 0, safeCaptureError(nil, "file capture roots overlap")
+	}
+	// Before the claim: an ENOSPC after claiming would count as a failed
+	// attempt for a job that only needed to wait for space.
+	if !w.space.Allow() {
+		return 0, nil
 	}
 	now := w.now().UTC()
 	jobs, err := w.st.ClaimFileCaptures(ctx, now, 1, 2*time.Minute)

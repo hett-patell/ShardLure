@@ -740,6 +740,9 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             ("contents_path", f"{home}/honeyfs"),
             ("data_path", f"{home}/src/cowrie/data"),
             ("etc_path", f"{home}/etc"),
+            # Bounded downloads (== capture.max_bytes). Cowrie reads it only
+            # from [honeypot]; without it an attacker can fill the disk.
+            ("download_limit_size", "52428800"),
         ],
         "shell": [
             ("arch", "linux-x64-lsb"),

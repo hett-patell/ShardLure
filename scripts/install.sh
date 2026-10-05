@@ -634,6 +634,9 @@ $CFG_MARKER
 # Hand-edit freely, but remove the marker line above so re-running the
 # installer does not overwrite your changes.
 
+[honeypot]
+download_limit_size = 52428800
+
 [ssh]
 listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0
 
@@ -646,6 +649,7 @@ CFG
     log "cowrie.cfg exists and is not managed by this installer — leaving it alone."
     log "  ensure it contains: [ssh] listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0"
     log "  and [output_jsonlog] logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json"
+    log "  and [honeypot] download_limit_size = 52428800 (bounds attacker downloads)"
   fi
   if [[ "$FRESH_COWRIE" == 1 ]]; then
     installer_safety cowrie-permissions

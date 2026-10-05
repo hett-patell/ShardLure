@@ -20,6 +20,28 @@ func TestObservabilityMinimumFreeBytes(t *testing.T) {
 	}
 }
 
+func TestCaptureMinimumFreeBytes(t *testing.T) {
+	c := Default()
+	if c.Capture.MinFreeBytes != 2<<30 {
+		t.Fatalf("default capture.min_free_bytes = %d, want 2 GiB", c.Capture.MinFreeBytes)
+	}
+	c.Capture.MinFreeBytes = 0
+	if err := c.Validate(); err != nil {
+		t.Fatalf("0 (guard off) must be valid: %v", err)
+	}
+	c.Capture.MinFreeBytes = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative capture.min_free_bytes must be rejected")
+	}
+	parsed, err := Parse([]byte("capture:\n  min_free_bytes: 1048576\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Capture.MinFreeBytes != 1048576 {
+		t.Fatalf("parsed min_free_bytes = %d", parsed.Capture.MinFreeBytes)
+	}
+}
+
 func TestValidateRejectsBadValues(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -33,6 +55,7 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"negative retention", func(c *Config) { c.RetentionDays = -1 }},
 		{"negative capture max bytes", func(c *Config) { c.Capture.MaxBytes = -1 }},
 		{"negative capture timeout", func(c *Config) { c.Capture.TimeoutSec = -5 }},
+		{"negative capture min free bytes", func(c *Config) { c.Capture.MinFreeBytes = -1 }},
 		{"negative bazaar freshness", func(c *Config) { c.Intel.Bazaar.FreshnessDays = -1 }},
 		{"bazaar freshness above ceiling", func(c *Config) { c.Intel.Bazaar.FreshnessDays = 11 }},
 	}

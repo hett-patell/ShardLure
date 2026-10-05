@@ -157,6 +157,8 @@ type Snapshot struct {
 	DurableShares    [providerCount][outcomeCount]uint64
 	Ready            bool
 	Reason           Reason
+	Funnel           FunnelSample
+	CapturePaused    bool
 }
 type Monitor struct {
 	mu    sync.Mutex
