@@ -26,8 +26,9 @@ box; another connection still gets its own pristine tree. The new-file quota
 (fs.newcount) becomes per connection too, so opening more channels no longer
 resets it.
 
-Sharing the tree makes three backing-file lifetimes visible across channels,
-found on the Task 3b rehearsal (insults.py, pipe.py and fs.py blocks):
+Sharing the tree makes several per-channel lifetimes visible across channels,
+found on the Task 3b rehearsal and review (insults.py, pipe.py, fs.py and
+protocol.py blocks):
   - A redirection (`echo x > f`, sed -i) writes a temp file
     download_path/redir_<uuid> and points the node at it; when the CHANNEL
     closes, LoggingServerProtocol.connectionLost renames it to <sha256> (or
@@ -40,16 +41,23 @@ found on the Task 3b rehearsal (insults.py, pipe.py and fs.py blocks):
     finalised redirection) that rewrote the captured, possibly deduplicated,
     bytes under their old hash. Upstream already did this within one channel
     (`scp -t x; echo > x`); sharing would extend it to `> /tmp/x` on a later
-    channel. Such a file is now copied on write: a fresh redir backing (with
-    the old bytes first for `>>`, and the old mode), so a capture is never
-    modified.
+    channel, and to an SFTP upload still open on another channel, whose temp
+    file was truncated and then renamed at the redirecting channel's close,
+    so the upload itself was never captured (review I-1). Now only a redir_
+    temp this channel created is written in place; every other backing is
+    copied on write: a fresh redir backing (with the old bytes first for
+    `>>`, and the old mode). The new node takes the writer's owner and ctime
+    (bash keeps the owner; it is root over root's file in practice). With
+    each channel owning its backing, concurrent channels redirecting into
+    one file no longer split it across captures.
   - An SFTP upload's node kept naming the temp file close() had just renamed
     or removed (update_realfile() never replaces a set path), so reading it
     on a later channel raised FileNotFoundError too. close() now names the
     finished capture (fs.py block).
-Concurrent channels writing one redirected file can still record its last
-bytes as a separate capture while the node shows the first; bots use
-channels one after another.
+  - /proc/uptime was registered as a bound method of the last channel to
+    open; once that channel closed, reading it on a channel still open
+    printed nothing (review I-2). It is now a function of the factory's
+    start time and the shared fs (protocol.py block).
 
 Capture is otherwise unchanged: uploads still land in download_path(_uniq)
 under their sha256 and the upload events are untouched; only the fake-FS view
@@ -191,12 +199,16 @@ NEW_REDIR_END = """\
                         elif node[A_REALFILE] in moved:
                             node[A_REALFILE] = moved[node[A_REALFILE]]
                 except Exception:
-                    pass
+                    # Logged, not raised: a failure here brings back the
+                    # cross-channel FileNotFoundError hang, so leave a trace.
+                    self._log.failure(
+                        "connection-shared-fs: re-pointing redirected files failed"
+                    )
             self.redirFiles.clear()
 """
 
-# shell/pipe.py, PipeProtocol._prepare_output_file: copy a finished capture on
-# write instead of truncating or appending to it in place.
+# shell/pipe.py, PipeProtocol._prepare_output_file: write in place only into
+# this channel's own redirection temp; copy anything else on write.
 OLD_PIPE = """\
         start_size = p[fs.A_SIZE] if p and append else 0
 
@@ -210,22 +222,27 @@ OLD_PIPE = """\
 NEW_PIPE = """\
         start_size = p[fs.A_SIZE] if p and append else 0
 
-        # ShardLure (install/persona/patches/connection-shared-fs.py): never
-        # write into a finished capture (download_path*/<sha256>); give the
-        # file a fresh backing, with the old bytes first for >>.
-        captured = _shardlure_capture_backing(p)
-        if captured or self._needs_new_backing(p):
+        # ShardLure (install/persona/patches/connection-shared-fs.py): write
+        # in place only into a redir_ temp this channel created; anything
+        # else (a finished <sha256> capture, another channel's in-flight SFTP
+        # or redirection temp, a honeyfs file) gets a fresh backing, with the
+        # old bytes first for >>.
+        terminal = getattr(self.protocol, "terminal", None)
+        owned = {real for real, _ in getattr(terminal, "redirFiles", None) or ()}
+        owned.update(real for real, _ in self.redirect_real_files)
+        foreign = _shardlure_foreign_backing(p, owned)
+        if foreign or self._needs_new_backing(p):
             safeoutfile = self._create_redirect_target(outfile)
             if safeoutfile is None:
                 return None
-            if captured:
+            if foreign:
                 # bash keeps an existing file's mode; >> keeps its bytes too.
                 import shutil
 
                 try:
                     self.protocol.fs.chmod(outfile, stat.S_IMODE(p[fs.A_MODE]))
                     if append:
-                        shutil.copyfile(captured, safeoutfile)
+                        shutil.copyfile(foreign, safeoutfile)
                         self.protocol.fs.update_size(outfile, start_size)
                 except OSError:
                     start_size = 0
@@ -242,20 +259,21 @@ NEW_PIPE_DEF = """\
     from twisted.python import failure
 
 
-def _shardlure_capture_backing(p: Any) -> str | None:
-    \"\"\"The node's backing file if it is a finished capture, else None.
+def _shardlure_foreign_backing(p: Any, owned: set[str]) -> str | None:
+    \"\"\"The node's backing file unless a redirection may write it in place.
 
-    Cowrie names every finished capture by its sha256 (scp/SFTP uploads,
-    downloads, redirections finalised at channel close); in-progress
-    redirections are redir_<uuid>. See connection-shared-fs.py.
+    Only a redir_<uuid> temp this channel created (in `owned`) is written in
+    place. Every other backing is someone else's: a finished capture named by
+    its sha256, an SFTP upload still open on another channel (sftp_<uuid>:
+    truncating it lost the capture), another channel's redirection temp, a
+    honeyfs file. See connection-shared-fs.py.
     \"\"\"
     real = p[fs.A_REALFILE] if p else None
     if not isinstance(real, str):
         return None
-    name = real.rsplit("/", 1)[-1]
-    if len(name) == 64 and all(c in "0123456789abcdef" for c in name):
-        return real
-    return None
+    if real.rsplit("/", 1)[-1].startswith("redir_") and real in owned:
+        return None
+    return real
 
 
 # FD target type constants
@@ -283,6 +301,35 @@ NEW_SFTP_CLOSE = """\
         self.events.dispatch(
 """
 
+# shell/protocol.py, HoneyPotBaseProtocol.connectionMade: /proc/uptime must not
+# be bound to whichever channel opened last.
+OLD_UPTIME = """\
+        self.fs.generated_files["/proc/uptime"] = self.proc_uptime
+"""
+
+NEW_UPTIME = """\
+        # ShardLure (install/persona/patches/connection-shared-fs.py): the fs
+        # is shared by every channel of the connection, and a bound method of
+        # this protocol stopped working once this channel closed (terminal and
+        # fs are dropped), so /proc/uptime read nothing on channels still
+        # open. The same values, bound to no channel: the factory's start time
+        # and the shared fs.
+        starttime = float(self.factory.starttime)
+        shared_fs = self.fs
+
+        def _shardlure_proc_uptime() -> bytes:
+            uptime = time.time() - (starttime - boot_offset())
+            try:
+                cpuinfo = shared_fs.file_contents("/proc/cpuinfo")
+            except (fs.FileNotFound, IsADirectoryError):
+                cpuinfo = b""
+            processors = [x for x in cpuinfo.splitlines() if x.startswith(b"processor")]
+            cpus = max(1, len(processors))
+            return f"{uptime:.2f} {uptime * cpus * 0.97:.2f}\\n".encode()
+
+        self.fs.generated_files["/proc/uptime"] = _shardlure_proc_uptime
+"""
+
 # (file, OLD, NEW); a file may carry several blocks, applied in order.
 TARGETS = (
     ("src/cowrie/shell/session.py", OLD, NEW),
@@ -292,6 +339,7 @@ TARGETS = (
     ("src/cowrie/shell/pipe.py", OLD_PIPE, NEW_PIPE),
     ("src/cowrie/shell/pipe.py", OLD_PIPE_DEF, NEW_PIPE_DEF),
     ("src/cowrie/shell/fs.py", OLD_SFTP_CLOSE, NEW_SFTP_CLOSE),
+    ("src/cowrie/shell/protocol.py", OLD_UPTIME, NEW_UPTIME),
 )
 
 

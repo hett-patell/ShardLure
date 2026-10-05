@@ -39,7 +39,7 @@ class CapturePermissionsTests(unittest.TestCase):
         # temp_download_path (a uuid in download_path) and close() logs the
         # basename through posixpath; both are supplied here as the module has.
         scope = dict(os=os, re=re, stat=stat, time=time, hashlib=hashlib,
-                     posixpath=posixpath,
+                     posixpath=posixpath, A_REALFILE=9,
                      temp_download_path=lambda prefix: str(
                          self.downloads / f"{prefix}_{uuid.uuid4().hex}"),
                      CowrieConfig=SimpleNamespace(get=lambda *args: str(self.downloads)))
@@ -47,9 +47,20 @@ class CapturePermissionsTests(unittest.TestCase):
         self.open = scope["sftp_open"]
         self.close = scope["sftp_close"]
         self.events = []
+        # One fake node, as HoneyPotFilesystem keeps it: mkfile() replaces it
+        # and update_realfile() only fills an empty A_REALFILE (index 9).
+        self.nodes = {}
+
+        def mkfile(path, *args):
+            self.nodes[path] = [path, 2, 0, 0, 0, 0, 0, [], None, None]
+
+        def update_realfile(node, realfile):
+            if node is not None and not node[9]:
+                node[9] = realfile
+
         self.fs = SimpleNamespace(
-            tempfiles={}, filenames={}, mkfile=lambda *args: None,
-            update_realfile=lambda *args: None, getfile=lambda *args: None,
+            tempfiles={}, filenames={}, mkfile=mkfile,
+            update_realfile=update_realfile, getfile=self.nodes.get,
             events=SimpleNamespace(dispatch=lambda *args, **event: self.events.append(
                 (event, stat.S_IMODE(Path(event["outfile"]).stat().st_mode))))
         )
@@ -72,6 +83,10 @@ class CapturePermissionsTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o640)
         self.assertEqual(self.events[-1][1], 0o640, "mode must be set before the upload event")
         self.assertEqual(self.events[-1][0]["shasum"], saved.name)
+        # connection-shared-fs.py: the node names the finished capture, not
+        # the temp file close() just renamed or removed, so a later channel
+        # of the connection can read the upload.
+        self.assertEqual(self.nodes["/inert-upload"][9], str(saved))
         self.assertEqual(self.fs.tempfiles, {})
         self.assertEqual(self.fs.filenames, {})
         self.assertEqual(list(self.downloads.iterdir()), [saved])

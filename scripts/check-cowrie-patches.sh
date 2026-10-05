@@ -336,6 +336,7 @@ expected_changed=(
   "src/cowrie/shell/filetransfer.py"
   "src/cowrie/shell/fs.py"
   "src/cowrie/shell/pipe.py"
+  "src/cowrie/shell/protocol.py"
   "src/cowrie/shell/script.py"
   "src/cowrie/shell/session.py"
 )
@@ -387,6 +388,9 @@ done
 python3 "$ROOT/install/persona/test_capture_permissions.py" "$cowrie" -v
 # Same approach for the scp sink: -t targets and unchanged capture.
 python3 "$ROOT/install/persona/test_scp_sink_target.py" "$cowrie" -v
+# And for connection-shared-fs's redirection backing rule: a redirection never
+# writes into another channel's in-flight upload or a finished capture.
+python3 "$ROOT/install/persona/test_shared_fs_backing.py" "$cowrie" -v
 
 # Drift the final target so a sequential check/apply implementation would alter
 # earlier files before discovering incompatibility. The entire working tree
@@ -450,4 +454,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 28 partial-state rejections, idempotence, install.sh standalone patches, capture and scp-target behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 28 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target and shared-fs backing behavior, and atomic preflight checks passed"
