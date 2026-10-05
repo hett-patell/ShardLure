@@ -1166,11 +1166,11 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Uploaded/duplicate/last-upload come from the ledger. Its Pending field
-	// is the SharePolicy pre-filter and is deliberately NOT used: it counted
-	// SSH keys and unconfirmed blobs Vet refuses (prod read "pending: 3" with
-	// nothing left to upload). Pending is the Vet-eligible count below.
-	stats, err := s.st.BazaarUploadStats(time.Now(), store.SharePolicy{})
+	// Uploaded/duplicate/last-upload come from the ledger. Pending is the
+	// Vet-eligible count below, never a pre-filter count: the pre-filter
+	// counted SSH keys and unconfirmed blobs Vet refuses (prod read
+	// "pending: 3" with nothing left to upload).
+	stats, err := s.st.BazaarUploadStats()
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
