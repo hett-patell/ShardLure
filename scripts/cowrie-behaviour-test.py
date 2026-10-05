@@ -69,6 +69,15 @@ line:
                             sleeps before it reads.
                             sftp-during and overlap combine with no other
                             channel directive; both need paramiko.
+  #harness: no-host-memtotal
+                            the output must not contain the MemTotal of the
+                            machine the harness runs on (--host-meminfo,
+                            default /proc/meminfo), in any unit free(1) or
+                            v3.1.1's free.py renders it. Stock Cowrie's free
+                            reads the host's real /proc/meminfo (factsheet 3
+                            #11: arm's 24 GB on a persona claiming 8 GB);
+                            meaningful because the harness runs on the Cowrie
+                            host (loopback rehearsal or production).
   {{UPLOAD_SIZE}}           in a case with either upload directive: the byte
                             size of --upload-source, substituted literally
 
@@ -202,6 +211,7 @@ class Expected:
     before: list[str] = field(default_factory=list)
     sftp_during: str | None = None
     overlap: str | None = None
+    no_host_memtotal: bool = False
 
 
 @dataclass
@@ -291,6 +301,8 @@ def parse_expected(text: str) -> Expected:
             if not command:
                 raise ValueError(f"empty overlap directive: {lines[i]!r}")
             exp.overlap = command
+        elif body == "no-host-memtotal":
+            exp.no_host_memtotal = True
         else:
             raise ValueError(f"unknown harness directive: {lines[i]!r}")
         i += 1
@@ -588,6 +600,37 @@ def compare(name: str, exp: Expected, output: str, rc: int | None,
     return res
 
 
+def host_memtotal_tokens(meminfo: str) -> set[str]:
+    """Every rendering of a MemTotal (kB) that would betray it in free output.
+
+    procps prints kB, bytes and truncated KiB multiples (-m, -g) and human
+    "7.7Gi"/"7.8G" forms; v3.1.1's free.py divides by 1000 instead. Plain
+    integers under 100 are left out: "7" or "23" match too much innocent
+    output to be evidence.
+    """
+    m = re.search(r"^MemTotal:\s+(\d+)\s*kB", meminfo, re.M)
+    if not m:
+        raise ValueError("no MemTotal line")
+    kb = int(m.group(1))
+    ints = {kb, kb * 1024, kb // 1024, kb // 1000, kb // 1024 ** 2, kb // 1000 ** 2,
+            kb * 1024 // 1000 ** 2, kb * 1024 // 1000 ** 3}
+    tokens = {str(n) for n in ints if n >= 100}
+    for div, unit in ((1024 ** 2, "Gi"), (1024, "Mi")):
+        tokens.add(f"{kb / div:.1f}{unit}")
+        tokens.add(f"{kb // div}{unit}")
+    for div, unit in ((1000 ** 3 / 1024, "G"), (1000 ** 2 / 1024, "M")):
+        tokens.add(f"{kb / div:.1f}{unit}")
+        tokens.add(f"{int(kb / div)}{unit}")
+    # v3.1.1's -h: kB floored by 1000 per step, labelled one unit up.
+    tokens.update({f"{kb // 1000}M", f"{kb // 1000 ** 2}G"})
+    return tokens
+
+
+def leaked_host_tokens(output: str, tokens: set[str]) -> list[str]:
+    """The tokens of `tokens` that appear as whole words in `output`."""
+    return sorted(t for t in set(re.split(r"\s+", output)) if t in tokens)
+
+
 def parse_probes(text: str) -> list[tuple[str, str]]:
     probes, seen = [], {"profiler"}
     for n, raw in enumerate(text.split("\n"), 1):
@@ -875,6 +918,9 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     ap.add_argument("--downloads-dir", type=Path, metavar="DIR",
                     help="Cowrie's download_path, readable by this user; the"
                          " '#harness: sftp-during=' cases verify the capture there")
+    ap.add_argument("--host-meminfo", type=Path, default=Path("/proc/meminfo"),
+                    help="this machine's meminfo, for '#harness: no-host-memtotal'"
+                         " cases (default /proc/meminfo)")
     ap.add_argument("--upload-source", type=Path, default=Path("/bin/true"),
                     help="ELF fed to '#harness: scp-stdin=' cases (default /bin/true;"
                          " Cowrie never runs it, it only has to be a binary)")
@@ -953,6 +999,20 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             if problem:
                 res.ok = False
                 res.messages.append(problem)
+        if exp.no_host_memtotal:
+            # Fail closed: an unreadable host meminfo proves nothing.
+            try:
+                tokens = host_memtotal_tokens(args.host_meminfo.read_text())
+            except (OSError, ValueError) as exc:
+                tokens = None
+                res.ok = False
+                res.messages.append(f"cannot read host MemTotal from {args.host_meminfo}: {exc}")
+            if tokens is not None:
+                leaked = leaked_host_tokens(run.output, tokens)
+                if leaked:
+                    res.ok = False
+                    res.messages.append("host memory leaked (this machine's MemTotal"
+                                        f" rendered as {', '.join(leaked)})")
         if res.ok:
             passed += 1
             print(f"PASS {name}")

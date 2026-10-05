@@ -1,0 +1,4 @@
+#harness: no-host-memtotal
+               total        used        free      shared  buff/cache   available
+Mem:         8039340     1564336     4192784         528     2282220     6258412
+Swap:              0           0           0

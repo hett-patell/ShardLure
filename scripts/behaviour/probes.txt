@@ -72,3 +72,24 @@ redirect-cross-channel	cat /tmp/m; echo more >> /tmp/m; cat /tmp/m
 # is proc-uptime-advances' job).
 sftp-inflight-redirect	echo X > /tmp/up; echo rc=$?
 proc-uptime-overlap	sleep 2; cat /proc/uptime | wc -w
+# grep options (Phase B Task 4). v3.1.1's grep parses -i -q -c -v -l -o and
+# ignores them: the profiler's `lspci | grep -i vga` never matches (GPU field
+# empty), its `grep -q lm` arch fallback prints every flags line, and its
+# `grep -c ^processor` cpus fallback prints lines instead of a count.
+grep-i-vga	printf 'VGA x\n' | grep -i vga
+grep-q-lm	grep -q "lm" /proc/cpuinfo && echo x86_64
+grep-q-no-match	grep -q zzz_no_match /proc/cpuinfo
+grep-c-processor	grep -c "^processor" /proc/cpuinfo
+grep-c-no-match	printf 'a\n' | grep -c zzz
+grep-v	printf 'a\nb\nc\n' | grep -v b
+grep-l	grep -l processor /proc/cpuinfo /etc/hostname
+grep-o	printf 'model E5-2676 v3\n' | grep -o 'E5-[0-9]*'
+grep-no-match	printf 'a\n' | grep zzz
+# Hardware realism (Phase B Task 6). v3.1.1's lspci is a registered command
+# that shadows the persona txtcmd with a desktop AMD/GeForce list; its free
+# reads the Cowrie host's real /proc/meminfo (arm's 24 GB on an 8 GB persona);
+# its uname prints the platform once where -a, -m -p -i print it three times.
+lspci	lspci
+free	free
+free-h	free -h
+uname-mpi	uname -m -p -i

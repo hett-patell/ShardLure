@@ -501,6 +501,79 @@ class ExactComparisonTest(unittest.TestCase):
         self.assertEqual(exp.skip, "deferred (factsheet 5 #17)")
 
 
+class HostMemtotalTest(unittest.TestCase):
+    """free must never render the Cowrie host's own memory (factsheet 3 #11)."""
+
+    ARM = "MemTotal:       24548180 kB\nMemFree:  1 kB\n"
+
+    def tokens(self):
+        return cbt.host_memtotal_tokens(self.ARM)
+
+    def test_v311_leak_shapes_are_caught(self):
+        # What stock v3.1.1 printed on arm: free -m (/1000) and free (kB).
+        for leak in ("Mem:          24548   2645", "Mem:       24548180     1",
+                     "Mem: 23972 1", "Mem: 23Gi 1", "Mem: 23.4Gi", "Mem: 24G"):
+            with self.subTest(leak=leak):
+                self.assertTrue(cbt.leaked_host_tokens(leak, self.tokens()))
+
+    def test_persona_output_is_clean(self):
+        persona_free = (
+            "               total        used        free      shared  buff/cache   available\n"
+            "Mem:         8039340     1564336     4192784         528     2282220     6258412\n"
+            "Swap:              0           0           0\n"
+            "Mem:           7.7Gi       1.5Gi       4.0Gi       0.0Ki       2.2Gi       6.0Gi\n"
+            "7850 1527 4094 0 2228 6111\n"
+        )
+        self.assertEqual(cbt.leaked_host_tokens(persona_free, self.tokens()), [])
+
+    def test_tokens_are_whole_words(self):
+        self.assertEqual(cbt.leaked_host_tokens("x245481800 1245480", self.tokens()), [])
+
+    def test_missing_memtotal_is_an_error(self):
+        with self.assertRaises(ValueError):
+            cbt.host_memtotal_tokens("MemFree: 1 kB\n")
+
+    def test_directive_parses(self):
+        exp = cbt.parse_expected("#harness: no-host-memtotal\nx\n")
+        self.assertTrue(exp.no_host_memtotal)
+        self.assertEqual(exp.content, "x\n")
+
+    def run_free(self, output, meminfo):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "expected").mkdir()
+            (root / "profiler.sh").write_text("echo hi")
+            (root / "expected" / "profiler.out").write_text("#harness: skip=x\n")
+            (root / "probes.txt").write_text("free\tfree\n")
+            (root / "expected" / "free.out").write_text(
+                "#harness: no-host-memtotal\n" + output)
+            (root / "userdb.txt").write_text("root:x:pw\n")
+            argv = ["--host", "127.0.0.1", "--port", "2299", "--cases-dir", str(root),
+                    "--password-from", str(root / "userdb.txt"),
+                    "--host-meminfo", str(root / "meminfo")]
+            if meminfo is not None:
+                (root / "meminfo").write_text(meminfo)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cbt.main(argv, runner=lambda c, t: cbt.RunResult(output, 0, False))
+            return rc, out.getvalue()
+
+    def test_main_fails_a_leak_even_when_the_text_matches(self):
+        # The expected text is the output itself; only the directive objects.
+        rc, out = self.run_free("Mem: 24548180\n", self.ARM)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("host memory leaked", out)
+
+    def test_main_passes_clean_output(self):
+        rc, out = self.run_free("Mem: 8039340\n", self.ARM)
+        self.assertEqual(rc, 0, out)
+
+    def test_unreadable_host_meminfo_fails_closed(self):
+        rc, out = self.run_free("Mem: 8039340\n", None)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("cannot read host MemTotal", out)
+
+
 class MainExitCodeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1033,8 +1106,17 @@ class ShippedCasesTest(unittest.TestCase):
         exp = lambda n: (CASES_DIR / "expected" / f"{n}.out").read_text()  # noqa: E731
         # Review I-3: persona df blocks 99014048 K -> 94.43 GiB -> df -h "95G".
         self.assertEqual(exp("df-h-awk"), "95G\n")
-        # procps 3.3.17 on the persona meminfo (truncates, does not round).
-        self.assertEqual(exp("free-m-awk"), "7850 1527 4094 0 2228 6111\n")
+        # procps 3.3.17 on the persona meminfo (truncates, does not round),
+        # and no free case may render the Cowrie host's own memory.
+        free_m = cbt.parse_expected(exp("free-m-awk"))
+        self.assertEqual(free_m.content, "7850 1527 4094 0 2228 6111\n")
+        for name in ("free-m-awk", "free", "free-h"):
+            with self.subTest(case=name):
+                self.assertTrue(cbt.parse_expected(exp(name)).no_host_memtotal)
+        # lspci answers with the persona's own Xen list, the txtcmd it shadows.
+        self.assertEqual(
+            exp("lspci"),
+            (HERE.parent / "install" / "persona" / "txtcmds" / "usr" / "bin" / "lspci").read_text())
         # Review I-4: the ubuntu row runs its login shell, idle is volatile.
         self.assertTrue(exp("w").rstrip("\n").endswith("{{W_IDLE}}  0.04s  0.01s -bash"))
         self.assertIn("{{LSDATE}}", exp("ls-which-ls"))
