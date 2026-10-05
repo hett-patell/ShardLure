@@ -205,6 +205,12 @@ type Server struct {
 	// the 5s ingest tick — so they share its TTL.
 	extraCache swrCache[*dashExtra]
 
+	// bazaarCands is the MalwareBazaar pool evaluated through bazaar.Vet
+	// (bazaar_gate.go). It opens files to classify them, so the Red tab's poll
+	// and the payload library share one evaluation per bazaarCandidatesTTL; an
+	// upload invalidates it.
+	bazaarCands swrCache[*bazaarCandidateSet]
+
 	// Threat-gauge window aggregate. Same reasoning as the caches above: one
 	// indexed pass over the 24h window (~16ms cold on 670k rows), memoized so a
 	// 5s poll from several open tabs does not repeat it.

@@ -40,6 +40,9 @@ type swrCache[T any] struct {
 	ok         bool
 	at         time.Time
 	refreshing bool
+	// gen counts invalidations, so a background refresh that started before
+	// one cannot publish the value it computed from pre-invalidation state.
+	gen uint64
 }
 
 func (c *swrCache[T]) get(bg *handlerDrain, ttl time.Duration, compute func(context.Context) (T, time.Time, error)) (T, error) {
@@ -56,13 +59,14 @@ func (c *swrCache[T]) get(bg *handlerDrain, ttl time.Duration, compute func(cont
 	}
 	if time.Since(c.at) >= ttl && !c.refreshing && bg.enter() {
 		c.refreshing = true
+		gen := c.gen
 		go func() {
 			defer bg.leave()
 			v, at, err := compute(ctx)
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			c.refreshing = false
-			if err == nil && ctx.Err() == nil {
+			if err == nil && ctx.Err() == nil && gen == c.gen {
 				c.val, c.at = v, at
 			}
 		}()
@@ -76,6 +80,18 @@ func (c *swrCache[T]) peek() (T, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.val, c.ok
+}
+
+// invalidate drops the cached value so the next get recomputes synchronously.
+// It is for state changes this process itself makes and must show at once
+// (a MalwareBazaar upload removing a sample from the candidate pool), where
+// serving one more stale read would advertise an action the server now
+// refuses. A refresh already in flight is discarded rather than published.
+func (c *swrCache[T]) invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ok = false
+	c.gen++
 }
 
 // expire backdates the stamp so the next get refreshes; tests use it.
