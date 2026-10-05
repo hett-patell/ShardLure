@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Patch Cowrie for one fake filesystem per connection, not per channel.
 
-Touches shell/session.py, shell/filetransfer.py, insults/insults.py and
-shell/pipe.py.
+Touches shell/session.py, shell/filetransfer.py, insults/insults.py,
+shell/pipe.py and shell/fs.py.
 
 WHY (measured on the arm deployment): scp droppers (RedTail, Outlaw) deliver a
 payload on one SSH channel and run it on the next channel of the same
@@ -26,8 +26,8 @@ box; another connection still gets its own pristine tree. The new-file quota
 (fs.newcount) becomes per connection too, so opening more channels no longer
 resets it.
 
-Sharing the tree makes two backing-file lifetimes visible across channels,
-found on the Task 3b rehearsal (insults.py and pipe.py blocks):
+Sharing the tree makes three backing-file lifetimes visible across channels,
+found on the Task 3b rehearsal (insults.py, pipe.py and fs.py blocks):
   - A redirection (`echo x > f`, sed -i) writes a temp file
     download_path/redir_<uuid> and points the node at it; when the CHANNEL
     closes, LoggingServerProtocol.connectionLost renames it to <sha256> (or
@@ -41,7 +41,12 @@ found on the Task 3b rehearsal (insults.py and pipe.py blocks):
     bytes under their old hash. Upstream already did this within one channel
     (`scp -t x; echo > x`); sharing would extend it to `> /tmp/x` on a later
     channel. Such a file is now copied on write: a fresh redir backing (with
-    the old bytes first for `>>`), so a capture is never modified.
+    the old bytes first for `>>`, and the old mode), so a capture is never
+    modified.
+  - An SFTP upload's node kept naming the temp file close() had just renamed
+    or removed (update_realfile() never replaces a set path), so reading it
+    on a later channel raised FileNotFoundError too. close() now names the
+    finished capture (fs.py block).
 Concurrent channels writing one redirected file can still record its last
 bytes as a separate capture while the node shows the first; bots use
 channels one after another.
@@ -213,12 +218,15 @@ NEW_PIPE = """\
             safeoutfile = self._create_redirect_target(outfile)
             if safeoutfile is None:
                 return None
-            if captured and append:
+            if captured:
+                # bash keeps an existing file's mode; >> keeps its bytes too.
                 import shutil
 
                 try:
-                    shutil.copyfile(captured, safeoutfile)
-                    self.protocol.fs.update_size(outfile, start_size)
+                    self.protocol.fs.chmod(outfile, stat.S_IMODE(p[fs.A_MODE]))
+                    if append:
+                        shutil.copyfile(captured, safeoutfile)
+                        self.protocol.fs.update_size(outfile, start_size)
                 except OSError:
                     start_size = 0
         else:
@@ -253,6 +261,28 @@ def _shardlure_capture_backing(p: Any) -> str | None:
 # FD target type constants
 """
 
+# shell/fs.py, HoneyPotFilesystem.close (SFTP): name the finished capture.
+# The anchor is the last line of sftp-capture-permissions.py's block (in its
+# OLD and NEW alike) plus the line after it, and nothing is inserted inside
+# that block, so either patch applies with or without the other
+# (scripts/install.sh fetches sftp-capture-permissions.py standalone).
+OLD_SFTP_CLOSE = """\
+        self.update_realfile(self.getfile(self.filenames[fd]), shasumfile)
+        self.events.dispatch(
+"""
+
+NEW_SFTP_CLOSE = """\
+        self.update_realfile(self.getfile(self.filenames[fd]), shasumfile)
+        # ShardLure (install/persona/patches/connection-shared-fs.py): open()
+        # pointed the node at the temp file just renamed or removed, and
+        # update_realfile() never replaces a set path; name the capture so a
+        # later channel of this connection can read and run the upload.
+        node = self.getfile(self.filenames[fd])
+        if node is not None and node[A_REALFILE] == self.tempfiles[fd]:
+            node[A_REALFILE] = shasumfile
+        self.events.dispatch(
+"""
+
 # (file, OLD, NEW); a file may carry several blocks, applied in order.
 TARGETS = (
     ("src/cowrie/shell/session.py", OLD, NEW),
@@ -261,6 +291,7 @@ TARGETS = (
     ("src/cowrie/insults/insults.py", OLD_REDIR_END, NEW_REDIR_END),
     ("src/cowrie/shell/pipe.py", OLD_PIPE, NEW_PIPE),
     ("src/cowrie/shell/pipe.py", OLD_PIPE_DEF, NEW_PIPE_DEF),
+    ("src/cowrie/shell/fs.py", OLD_SFTP_CLOSE, NEW_SFTP_CLOSE),
 )
 
 
