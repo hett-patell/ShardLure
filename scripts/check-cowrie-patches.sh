@@ -37,6 +37,7 @@ partial_ls="$tmp_root/cowrie-partial-ls"
 partial_grep="$tmp_root/cowrie-partial-grep"
 partial_lspci="$tmp_root/cowrie-partial-lspci"
 partial_free="$tmp_root/cowrie-partial-free"
+partial_uname="$tmp_root/cowrie-partial-uname"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -57,6 +58,7 @@ cp -a "$cowrie" "$partial_ls"
 cp -a "$cowrie" "$partial_grep"
 cp -a "$cowrie" "$partial_lspci"
 cp -a "$cowrie" "$partial_free"
+cp -a "$cowrie" "$partial_uname"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
@@ -68,7 +70,8 @@ cp -a "$cowrie" "$partial_free"
 # has the GNU recent form but keeps the ISO form for old files; grep has the
 # new class but still ignores -i; lspci lists the persona with one device
 # misnamed and leaves busybox.py pristine; free leaves SReclaimable out of
-# buff/cache, as stock Cowrie did. The bashparse and honeypot fixtures went
+# buff/cache, as stock Cowrie did; uname has its new flags dict (platform
+# preset to True) beside the old flag row and output. The bashparse and honeypot fixtures went
 # with the patches upstream made redundant.
 python3 - \
   "$ROOT" \
@@ -81,7 +84,8 @@ python3 - \
   "$partial_ls/src/cowrie/commands/ls.py" \
   "$partial_grep/src/cowrie/commands/fs.py" \
   "$partial_lspci/src/cowrie/commands/lspci.py" \
-  "$partial_free/src/cowrie/commands/free.py" <<'PY'
+  "$partial_free/src/cowrie/commands/free.py" \
+  "$partial_uname/src/cowrie/commands/uname.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -120,6 +124,7 @@ ls_path = Path(sys.argv[8])
 grep_path = Path(sys.argv[9])
 lspci_path = Path(sys.argv[10])
 free_path = Path(sys.argv[11])
+uname_path = Path(sys.argv[12])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -196,6 +201,14 @@ partial = free["NEW"].replace('raw["Cached"] + raw["SReclaimable"]', 'raw["Cache
 content = replace_once(free_path, free["OLD"], partial, "free partial")
 if content.count(free["OLD"]) != 0 or content.count(free["NEW"]) != 0:
     raise SystemExit(f"free partial fixture unexpectedly contains a complete block in {free_path}")
+
+uname = string_constants(root / "install/persona/patches/uname-a.py")
+if uname["NEW"].count('"platform": False,') != 1:
+    raise SystemExit("uname NEW block does not contain the expected fixture anchor")
+partial = uname["NEW"].replace('"platform": False,', '"platform": True,', 1)
+content = replace_once(uname_path, uname["OLD"], partial, "uname partial")
+if content.count(uname["OLD"]) != 0 or content.count(uname["NEW"]) != 0:
+    raise SystemExit(f"uname partial fixture unexpectedly contains a complete block in {uname_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -212,6 +225,7 @@ for patch in \
   "$ROOT/install/persona/patches/grep-options.py" \
   "$ROOT/install/persona/patches/lspci-persona.py" \
   "$ROOT/install/persona/patches/free-meminfo.py" \
+  "$ROOT/install/persona/patches/uname-a.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -364,6 +378,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_free" \
     "$ROOT/install/persona/patches/free-meminfo.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "uname" \
+    "$partial_uname" \
+    "$ROOT/install/persona/patches/uname-a.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -390,6 +409,7 @@ expected_changed=(
   "src/cowrie/commands/ls.py"
   "src/cowrie/commands/lspci.py"
   "src/cowrie/commands/scp.py"
+  "src/cowrie/commands/uname.py"
   "src/cowrie/commands/which.py"
   "src/cowrie/insults/insults.py"
   "src/cowrie/shell/filetransfer.py"
@@ -513,4 +533,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 40 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target and shared-fs backing behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 44 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target and shared-fs backing behavior, and atomic preflight checks passed"

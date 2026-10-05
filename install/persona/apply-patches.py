@@ -46,6 +46,9 @@ PATCHES = (
     # free read the Cowrie host's real /proc/meminfo (arm's 24 GB behind an
     # 8 GB persona); it now ports procps 3.3.17 over the fake filesystem's.
     "free-meminfo.py",
+    # uname folded -m -p -i into one flag; GNU prints three fields, so a real
+    # `uname -a` ends "x86_64 x86_64 x86_64 GNU/Linux" (~720 sessions/30d).
+    "uname-a.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
