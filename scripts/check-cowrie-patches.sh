@@ -332,8 +332,10 @@ expected_changed=(
   "src/cowrie/commands/ls.py"
   "src/cowrie/commands/scp.py"
   "src/cowrie/commands/which.py"
+  "src/cowrie/insults/insults.py"
   "src/cowrie/shell/filetransfer.py"
   "src/cowrie/shell/fs.py"
+  "src/cowrie/shell/pipe.py"
   "src/cowrie/shell/script.py"
   "src/cowrie/shell/session.py"
 )
