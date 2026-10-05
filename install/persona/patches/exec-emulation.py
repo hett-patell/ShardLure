@@ -25,86 +25,134 @@ Cowrie's scp mode modelling is unreliable. Any binary WITHOUT download_path
 provenance (a honeyfs system binary, contents-backed file) keeps the real bash
 "Exec format error", so we do not blanket-fake every binary — which would be its
 own tell.
+
+v3.1.1 port (payload-yield Phase B Task 3). v3.1.1 folds two refusals into one
+branch (shell/script.py): a file past max_input_size() and a binary both get
+binary_message and exit 126. Only the binary half is faked: an oversized TEXT
+file is not something a matching-arch box would "run", so it keeps the real
+error. Three tightenings over the pin-era patch:
+  - direct execution only (`./x`, `/bin/x`: protocol.py's Command_scriptcmd).
+    `sh x` / `bash x` on an ELF is "cannot execute binary file" on a real box
+    too, so faking success there would be a new tell;
+  - the backing file must sit directly in download_path (or
+    download_path_uniq, where scp.py stores uploads), compared as resolved
+    directories, not a string prefix that `downloads-old/` would also match;
+  - the result is plain old/new text, so --check and reapply follow the same
+    pristine / patched / partial contract as every other persona patch.
+Note that Cowrie v3.1.1 gives every session channel a fresh fake filesystem,
+so an upload on one channel and a run on the next (the observed bot pattern)
+never reaches this branch; scripts/behaviour's scp-upload-run case uploads
+and runs on one channel.
 """
 import sys
 from pathlib import Path
 
-args = sys.argv[1:]
-if (
-    len(args) not in (1, 2)
-    or not args[0]
-    or args[0] == "--check"
-    or (len(args) == 2 and args[1] != "--check")
-):
-    print(f"usage: {Path(sys.argv[0]).name} COWRIE_HOME [--check]", file=sys.stderr)
-    sys.exit(2)
-check_only = len(args) == 2
-cowrie_home = Path(args[0])
-path = str(cowrie_home / "src/cowrie/shell/script.py")
-with open(path) as f:
-    content = f.read()
 
-OLD = '''    if is_executable_binary(contents):
+OLD = """\
+    if len(contents) > max_input_size() or is_executable_binary(contents):
         command.errorWrite(binary_message)
-        return'''
+        command.exit_code = 126
+        return
+"""
 
-NEW = '''    if is_executable_binary(contents):
-        # ShardLure stealth: if this is the ATTACKER'S OWN uploaded/downloaded
-        # binary (fake-FS node backed by a real file under download_path), a
-        # matching-arch dropper would just run on a real box, so emit the
+NEW = """\
+    if len(contents) > max_input_size() or is_executable_binary(contents):
+        # ShardLure stealth (install/persona/patches/exec-emulation.py): a
+        # binary the attacker uploaded or downloaded this session, run
+        # directly, would just run on a matching-arch box, so answer the
         # plausible "it ran" (exit 0, no output) instead of the Exec-format
-        # tell. The payload was already captured at upload/download; nothing is
-        # executed here. Any other binary keeps the real error.
-        if _is_attacker_binary(command, path):
+        # tell. Nothing is executed: the payload was captured at upload. An
+        # oversized text file, `sh x`, and any other binary keep the error.
+        if (
+            type(command).__name__ == "Command_scriptcmd"
+            and is_executable_binary(contents)
+            and _shardlure_attacker_binary(command, path)
+        ):
             command.exit_code = 0
             return
         command.errorWrite(binary_message)
-        return'''
+        command.exit_code = 126
+        return
+"""
 
-HELPER = '''
+# The helper goes between is_executable_binary and run_script_file; its
+# imports are lazy so module load gains no new dependencies.
+OLD_DEF = """\
+    except UnicodeDecodeError:
+        return True
+    return False
 
-def _is_attacker_binary(command, path: str) -> bool:
-    """True if `path` resolves to a fake-FS file backed by a real file under
-    Cowrie's download_path — i.e. something the attacker uploaded/downloaded
-    this session, not a honeyfs system binary. See exec-emulation.py."""
+
+def run_script_file(
+"""
+
+NEW_DEF = """\
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _shardlure_attacker_binary(command, path: str) -> bool:
+    \"\"\"True if `path` is a fake-FS file backed by a real file directly in
+    Cowrie's download_path or download_path_uniq: something the attacker
+    uploaded or downloaded, not a honeyfs system binary. See exec-emulation.py.
+    \"\"\"
     try:
+        import os
+
         from cowrie.core.config import CowrieConfig
         from cowrie.shell.fs import A_REALFILE
 
         node = command.fs.getfile(path)
         if not node or not node[A_REALFILE]:
             return False
-        real = str(node[A_REALFILE])
-        dl = CowrieConfig.get("honeypot", "download_path", fallback="")
-        return bool(dl) and real.startswith(str(dl))
+        roots = set()
+        for key in ("download_path", "download_path_uniq"):
+            value = CowrieConfig.get("honeypot", key, fallback="")
+            if value:
+                roots.add(os.path.realpath(value))
+        real_dir = os.path.dirname(os.path.realpath(str(node[A_REALFILE])))
+        return real_dir in roots
     except Exception:
-        # Any uncertainty -> not an attacker binary -> real error path. Fail
+        # Any uncertainty -> not an attacker binary -> the real error. Fail
         # toward the truthful bash message, never toward a spurious success.
         return False
-'''
 
-already = "_is_attacker_binary(command, path)" in content
 
-if already:
-    print(f"  [skip] {path}: already patched")
-    sys.exit(0)
+def run_script_file(
+"""
 
-if content.count(OLD) != 1:
-    print(
-        f"  [FAIL] {path}: is_executable_binary branch not found exactly once "
-        f"(count={content.count(OLD)}) — upstream script.py changed",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+BLOCKS = ((OLD, NEW), (OLD_DEF, NEW_DEF))
 
-if check_only:
-    print(f"  [check] {path}: compatible")
-    sys.exit(0)
 
-content = content.replace(OLD, NEW, 1)
-# Append the helper at module end (after run_script_file); it is imported lazily
-# inside so module load stays free of new top-level deps.
-content = content.rstrip("\n") + "\n" + HELPER
-with open(path, "w") as f:
-    f.write(content)
-print(f"  [ok] {path}: patched (scoped attacker-binary fake-success)")
+def main() -> int:
+    args = sys.argv[1:]
+    if (len(args) not in (1, 2) or not args[0] or args[0] == "--check"
+            or (len(args) == 2 and args[1] != "--check")):
+        print(f"usage: {Path(sys.argv[0]).name} COWRIE_HOME [--check]", file=sys.stderr)
+        return 2
+    path = Path(args[0]) / "src/cowrie/shell/script.py"
+    content = path.read_text(encoding="utf-8")
+    counts = [(content.count(old), content.count(new)) for old, new in BLOCKS]
+    if all(c == (0, 1) for c in counts):
+        print(f"  [skip] {path}: already patched")
+        return 0
+    if not all(c == (1, 0) for c in counts):
+        print(
+            f"  [FAIL] {path}: target is neither pristine nor fully patched "
+            f"(old/new counts {counts}) — upstream script.py changed",
+            file=sys.stderr,
+        )
+        return 1
+    if len(args) == 2:
+        print(f"  [check] {path}: compatible")
+        return 0
+    for old, new in BLOCKS:
+        content = content.replace(old, new, 1)
+    path.write_text(content, encoding="utf-8")
+    print(f"  [ok] {path}: patched (scoped attacker-binary fake-success)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

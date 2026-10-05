@@ -16,9 +16,8 @@ PATCHES = (
     # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect).
     #
     # Temporarily out while they are re-anchored on v3.1.1 (payload-yield
-    # Phase B): Task 3 restores exec-emulation.py and
-    # sftp-capture-permissions.py, Task 4 replaces grep-case-insensitive.py
-    # with grep-options.py.
+    # Phase B): Task 3 restores sftp-capture-permissions.py, Task 4 replaces
+    # grep-case-insensitive.py with grep-options.py.
     #
     # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
     # live log analysis so bots proceed to payload delivery.
@@ -27,6 +26,9 @@ PATCHES = (
     # every `command -v` session (scripts/behaviour command-v-wget catches it).
     "command-type-builtins.py",
     "passwd-stdin.py",
+    # v3.1.1 folds "too large" and "binary" into one refusal; only an
+    # attacker's own binary, run directly, is answered with a silent exit 0.
+    "exec-emulation.py",
 )
 
 

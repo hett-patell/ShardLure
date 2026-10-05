@@ -29,6 +29,7 @@ drifted="$tmp_root/cowrie-drifted"
 args_checkout="$tmp_root/cowrie-args"
 partial_passwd="$tmp_root/cowrie-partial-passwd"
 partial_builtins="$tmp_root/cowrie-partial-builtins"
+partial_exec="$tmp_root/cowrie-partial-exec"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -41,17 +42,20 @@ cp -a "$cowrie" "$drifted"
 cp -a "$cowrie" "$args_checkout"
 cp -a "$cowrie" "$partial_passwd"
 cp -a "$cowrie" "$partial_builtins"
+cp -a "$cowrie" "$partial_exec"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
 # registers `command` but not `type`, so neither OLD nor NEW is present in
-# either. The grep fixture left with its patch (Task 4 restores a
+# either; exec has its new branch but not the helper it calls (NEW + OLD_DEF).
+# The grep fixture left with its patch (Task 4 restores a
 # grep-options one); the bashparse and honeypot fixtures went with the
 # patches upstream made redundant.
 python3 - \
   "$ROOT" \
   "$partial_passwd/src/cowrie/commands/base.py" \
-  "$partial_builtins/src/cowrie/commands/which.py" <<'PY'
+  "$partial_builtins/src/cowrie/commands/which.py" \
+  "$partial_exec/src/cowrie/shell/script.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -82,6 +86,7 @@ def replace_once(path: Path, old: str, new: str, label: str) -> str:
 root = Path(sys.argv[1])
 passwd_path = Path(sys.argv[2])
 builtins_path = Path(sys.argv[3])
+exec_path = Path(sys.argv[4])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -100,6 +105,12 @@ partial = builtins["NEW"].replace(type_registration, "", 1)
 content = replace_once(builtins_path, builtins["OLD"], partial, "builtins partial")
 if content.count(builtins["OLD"]) != 0 or content.count(builtins["NEW"]) != 0:
     raise SystemExit(f"builtins partial fixture unexpectedly contains a complete block in {builtins_path}")
+
+exec_emulation = string_constants(root / "install/persona/patches/exec-emulation.py")
+content = replace_once(exec_path, exec_emulation["OLD"], exec_emulation["NEW"], "exec partial")
+expected = {"OLD": 0, "NEW": 1, "OLD_DEF": 1, "NEW_DEF": 0}
+if any(content.count(exec_emulation[name]) != count for name, count in expected.items()):
+    raise SystemExit(f"exec partial fixture has unexpected block counts in {exec_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -108,7 +119,8 @@ PY
 # apply-patches.py); Tasks 3-4 of payload-yield Phase B add the ported ones back.
 for patch in \
   "$ROOT/install/persona/patches/command-type-builtins.py" \
-  "$ROOT/install/persona/patches/passwd-stdin.py"; do
+  "$ROOT/install/persona/patches/passwd-stdin.py" \
+  "$ROOT/install/persona/patches/exec-emulation.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
     exit 1
@@ -220,6 +232,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_builtins" \
     "$ROOT/install/persona/patches/command-type-builtins.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "exec" \
+    "$partial_exec" \
+    "$ROOT/install/persona/patches/exec-emulation.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -235,13 +252,14 @@ fi
 # Apply, verify every expected target changed, then prove check mode and normal
 # reapplication leave the complete patch set byte-for-byte unchanged. The list is
 # git-diff --name-only order (alphabetical by path); keep it sorted. Task 3
-# adds back shell/fs.py and shell/script.py, Task 4 commands/fs.py.
+# adds back shell/fs.py, Task 4 commands/fs.py.
 # shell/bashparse.py and shell/honeypot.py left with the patches upstream made
 # redundant.
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
   "src/cowrie/commands/which.py"
+  "src/cowrie/shell/script.py"
 )
 mapfile -t actual_changed < <(git -C "$cowrie" diff --name-only --)
 if [[ "${actual_changed[*]}" != "${expected_changed[*]}" ]]; then
@@ -331,4 +349,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 8 partial-state rejections, idempotence, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 12 partial-state rejections, idempotence, and atomic preflight checks passed"
