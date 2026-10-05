@@ -31,6 +31,7 @@ partial_passwd="$tmp_root/cowrie-partial-passwd"
 partial_builtins="$tmp_root/cowrie-partial-builtins"
 partial_exec="$tmp_root/cowrie-partial-exec"
 partial_capture="$tmp_root/cowrie-partial-capture"
+partial_sharedfs="$tmp_root/cowrie-partial-sharedfs"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -45,12 +46,14 @@ cp -a "$cowrie" "$partial_passwd"
 cp -a "$cowrie" "$partial_builtins"
 cp -a "$cowrie" "$partial_exec"
 cp -a "$cowrie" "$partial_capture"
+cp -a "$cowrie" "$partial_sharedfs"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
 # registers `command` but not `type`, so neither OLD nor NEW is present in
 # either; exec has its new branch but not the helper it calls (NEW + OLD_DEF);
-# capture has a chmod at the right location but the wrong permissions.
+# capture has a chmod at the right location but the wrong permissions;
+# sharedfs has its session.py half but not its filetransfer.py half.
 # The grep fixture left with its patch (Task 4 restores a
 # grep-options one); the bashparse and honeypot fixtures went with the
 # patches upstream made redundant.
@@ -59,7 +62,8 @@ python3 - \
   "$partial_passwd/src/cowrie/commands/base.py" \
   "$partial_builtins/src/cowrie/commands/which.py" \
   "$partial_exec/src/cowrie/shell/script.py" \
-  "$partial_capture/src/cowrie/shell/fs.py" <<'PY'
+  "$partial_capture/src/cowrie/shell/fs.py" \
+  "$partial_sharedfs/src/cowrie/shell/session.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -92,6 +96,7 @@ passwd_path = Path(sys.argv[2])
 builtins_path = Path(sys.argv[3])
 exec_path = Path(sys.argv[4])
 capture_path = Path(sys.argv[5])
+sharedfs_path = Path(sys.argv[6])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -122,6 +127,12 @@ partial = capture["NEW"].replace("os.chmod(shasumfile, 0o640)", "os.chmod(shasum
 content = replace_once(capture_path, capture["OLD"], partial, "capture partial")
 if content.count(capture["OLD"]) != 0 or content.count(capture["NEW"]) != 0:
     raise SystemExit(f"capture partial fixture unexpectedly contains a complete block in {capture_path}")
+
+sharedfs = string_constants(root / "install/persona/patches/connection-shared-fs.py")
+replace_once(sharedfs_path, sharedfs["OLD"], sharedfs["NEW"], "sharedfs partial")
+sftp = sharedfs_path.parent / "filetransfer.py"
+if sftp.read_text(encoding="utf-8").count(sharedfs["OLD_SFTP"]) != 1:
+    raise SystemExit(f"sharedfs partial fixture lost its pristine half in {sftp}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -132,6 +143,7 @@ for patch in \
   "$ROOT/install/persona/patches/command-type-builtins.py" \
   "$ROOT/install/persona/patches/passwd-stdin.py" \
   "$ROOT/install/persona/patches/exec-emulation.py" \
+  "$ROOT/install/persona/patches/connection-shared-fs.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -254,6 +266,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_capture" \
     "$ROOT/install/persona/patches/sftp-capture-permissions.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "sharedfs" \
+    "$partial_sharedfs" \
+    "$ROOT/install/persona/patches/connection-shared-fs.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -276,8 +293,10 @@ python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
   "src/cowrie/commands/which.py"
+  "src/cowrie/shell/filetransfer.py"
   "src/cowrie/shell/fs.py"
   "src/cowrie/shell/script.py"
+  "src/cowrie/shell/session.py"
 )
 mapfile -t actual_changed < <(git -C "$cowrie" diff --name-only --)
 if [[ "${actual_changed[*]}" != "${expected_changed[*]}" ]]; then
@@ -388,4 +407,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 16 partial-state rejections, idempotence, install.sh standalone patches, capture behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 20 partial-state rejections, idempotence, install.sh standalone patches, capture behavior, and atomic preflight checks passed"

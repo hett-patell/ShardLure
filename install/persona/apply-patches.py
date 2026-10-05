@@ -28,6 +28,10 @@ PATCHES = (
     # v3.1.1 folds "too large" and "binary" into one refusal; only an
     # attacker's own binary, run directly, is answered with a silent exit 0.
     "exec-emulation.py",
+    # scp droppers upload on one channel and run on the next; v3.1.1 rebuilt
+    # the fake filesystem per channel, so the run found nothing (26 of 26 prod
+    # scp sessions).
+    "connection-shared-fs.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
