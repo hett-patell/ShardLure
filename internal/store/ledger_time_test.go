@@ -539,7 +539,7 @@ func ledgerFixtures() []ledgerFixture {
 				return ids, err
 			},
 			func(s *Store) (int, time.Time, error) {
-				r, err := s.BazaarUploadStats(time.Time{}, SharePolicy{})
+				r, err := s.BazaarUploadStats()
 				return r.TotalUploaded, r.LastUploadAt, err
 			},
 			(*Store).BazaarUploadRecorded},

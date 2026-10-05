@@ -46,8 +46,4 @@ func TestBazaarRedeliveryDoesNotRefreshEvidence(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatalf("stale payload selected for sharing: %+v", rows)
 	}
-	stats, err := s.BazaarUploadStats(time.Now().Add(-10*24*time.Hour), pol)
-	if err != nil || stats.Pending != 0 {
-		t.Fatalf("pending=%d error=%v", stats.Pending, err)
-	}
 }

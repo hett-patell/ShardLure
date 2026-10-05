@@ -820,12 +820,14 @@ type payloadRow struct {
 	ActorCount   int    `json:"actorCount"`        // distinct actors
 	SessionCount int    `json:"sessionCount"`      // distinct sessions
 	HasLocal     bool   `json:"hasLocal"`
-	// Shareable is the server's verdict on whether this payload can reach the
-	// MalwareBazaar path at all, computed over ALL rows for the sha against the
-	// same policy the CLI uses. The client must not re-derive this from Origin:
-	// Origin is the newest row only, and a payload seen by both the cowrie hook
-	// and our quarantine fetch would lose its share button on the coin-flip of
-	// which sighting landed last. Vet still has the final say at upload time.
+	// Shareable is the server's verdict: bazaar.Vet-eligible and not yet
+	// uploaded (bazaar_gate.go), judged for the whole sha group. The client must
+	// not re-derive this from Origin: Origin is the newest row only, and a
+	// payload seen by both the cowrie hook and our quarantine fetch would lose
+	// its share button on the coin-flip of which sighting landed last. It is
+	// no longer the SharePolicy pre-filter, which offered SSH keys and
+	// unconfirmed blobs the upload handler refused. The handler's own Vet run
+	// still has the final say.
 	Shareable bool `json:"shareable"`
 }
 
@@ -850,13 +852,21 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 	// can't disagree about which payloads exist (they did: two droppers the CLI
 	// selected had no button, because the client re-derived eligibility from the
 	// newest row's origin).
-	arts, err := s.st.ListArtifactsAggregatedSince(since, limit, store.SharePolicy{
-		MinBytes: bazaar.MinSampleBytes,
-		Origins:  bazaar.ShareableOrigins(),
-	})
+	arts, err := s.st.ListArtifactsAggregatedSince(since, limit, s.bazaarSharePolicy())
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
+	}
+	// The policy above only says a payload MAY be considered. The flag the
+	// library's Upload buttons act on is Vet's verdict on the same pool the
+	// MalwareBazaar panel shows: the pre-filter alone offered SSH keys and
+	// unconfirmed blobs the upload handler then refused. If the evaluation
+	// fails, nothing is offered (fail closed) rather than failing the library.
+	eligible := map[string]bool{}
+	if set, cerr := s.bazaarCandidatesCached(); cerr != nil {
+		logOperationError("bazaar candidates", cerr)
+	} else {
+		eligible = set.Eligible
 	}
 	rows := make([]payloadRow, 0, len(arts))
 	for _, a := range arts {
@@ -877,7 +887,7 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 			ActorCount:   a.ActorCount,
 			SessionCount: a.SessionCount,
 			HasLocal:     a.HasLocal,
-			Shareable:    a.Shareable,
+			Shareable:    a.Shareable && eligible[a.SHA256],
 		})
 	}
 	// Total = true distinct-payload count for the window (not len(arts), which
@@ -968,13 +978,15 @@ func (s *Server) handleIntelPayload(w http.ResponseWriter, r *http.Request) {
 	// quarantine fetch. A share-button gate reading a.Origin is a coin flip on
 	// which sighting landed last. A lookup failure degrades to "not shareable"
 	// (no button) rather than failing the whole modal.
-	if ok, serr := s.st.PayloadShareable(a.SHA256, store.SharePolicy{
-		MinBytes: bazaar.MinSampleBytes,
-		Origins:  bazaar.ShareableOrigins(),
-	}); serr != nil {
+	//
+	// And, like the library row, the modal's button needs Vet's verdict, not
+	// just the pre-filter: otherwise it offers an SSH key the upload refuses.
+	if ok, serr := s.st.PayloadShareable(a.SHA256, s.bazaarSharePolicy()); serr != nil {
 		logOperationError("payload shareable lookup", serr)
+	} else if set, cerr := s.bazaarCandidatesCached(); cerr != nil {
+		logOperationError("bazaar candidates", cerr)
 	} else {
-		resp.Shareable = ok
+		resp.Shareable = ok && set.Eligible[a.SHA256]
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -1154,13 +1166,16 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Pending is counted under the SAME policy + window the CLI's candidate
-	// selection uses, so the tile can never again claim a different backlog
-	// than `share bazaar` would offer (it said 148 while the pool was 30).
-	stats, err := s.st.BazaarUploadStats(
-		time.Now().Add(-time.Duration(s.bazaarFreshnessDaysLive())*24*time.Hour),
-		store.SharePolicy{MinBytes: bazaar.MinSampleBytes, Origins: bazaar.ShareableOrigins()},
-	)
+	// Uploaded/duplicate/last-upload come from the ledger. Pending is the
+	// Vet-eligible count below, never a pre-filter count: the pre-filter
+	// counted SSH keys and unconfirmed blobs Vet refuses (prod read
+	// "pending: 3" with nothing left to upload).
+	stats, err := s.st.BazaarUploadStats()
+	if err != nil {
+		httpError(w, "api_intel", err, http.StatusInternalServerError)
+		return
+	}
+	cands, err := s.bazaarCandidatesCached()
 	if err != nil {
 		httpError(w, "api_intel", err, http.StatusInternalServerError)
 		return
@@ -1235,7 +1250,7 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 	sb := statsBlock{
 		TotalUploaded: stats.TotalUploaded,
 		Duplicates:    stats.Duplicates,
-		Pending:       stats.Pending,
+		Pending:       len(cands.Eligible),
 	}
 	if !stats.LastUploadAt.IsZero() {
 		sb.LastUploadAt = stats.LastUploadAt.UTC().Format(time.RFC3339)
@@ -1245,10 +1260,25 @@ func (s *Server) handleIntelBazaar(w http.ResponseWriter, r *http.Request) {
 		GeneratedAt string            `json:"generatedAt"`
 		Stats       statsBlock        `json:"stats"`
 		Uploads     []bazaarUploadRow `json:"uploads"`
+		// Candidates is every unshared pool sample with bazaar.Vet's decision
+		// and reason (eligible and rejected), newest first and capped at
+		// maxBazaarCandidates; CandidatesTotal is the uncapped pool size.
+		Candidates      []bazaarCandidateRow `json:"candidates"`
+		CandidatesTotal int                  `json:"candidatesTotal"`
+		// Configured reports whether an abuse.ch Auth-Key is set, so the panel
+		// arms its Upload buttons only when the endpoint can actually upload
+		// (mirrors the URLhaus panel).
+		Configured bool `json:"configured"`
 	}{
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Stats:       sb,
-		Uploads:     rows,
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		Stats:           sb,
+		Uploads:         rows,
+		Candidates:      cands.Rows,
+		CandidatesTotal: cands.Total,
+		Configured:      s.bazaarKeyLive() != "",
+	}
+	if resp.Candidates == nil {
+		resp.Candidates = []bazaarCandidateRow{}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -1292,24 +1322,21 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 
 	already, _ := s.st.BazaarUploadRecorded(sha)
 	if already {
+		// Another process (a CLI share run) may have written this ledger row;
+		// drop the cached evaluation so the panel stops offering the sample now.
+		s.bazaarCands.invalidate()
 		json.NewEncoder(w).Encode(map[string]string{"status": "already_shared", "mbUrl": "https://bazaar.abuse.ch/sample/" + sha + "/"})
 		return
 	}
 
-	art, err := s.st.GetArtifactForShareBySHA(sha, store.SharePolicy{
-		MinBytes: bazaar.MinSampleBytes, Origins: bazaar.ShareableOrigins(),
-	})
-	if err != nil || art == nil {
+	// Same builder the panel's eligibility uses (bazaar_gate.go), so the row
+	// the panel judged is the row submitted here. Share below still re-runs
+	// Vet: the panel is advisory, this is the gate.
+	cand, err := s.bazaarShareCandidate(sha)
+	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "artifact not found"})
 		return
-	}
-
-	observed := art.LastSuccessfulFetchAt
-	cand := bazaar.Candidate{
-		SHA256: art.SHA256, LocalPath: art.LocalPath, SizeBytes: art.SizeBytes,
-		URL: art.URL, CreatedAt: art.CreatedAt,
-		Origin: art.Origin, ObservedAt: observed,
 	}
 	rec := &bazaarRecorderAdapter{st: s.st}
 	var result *bazaar.Result
@@ -1341,6 +1368,9 @@ func (s *Server) handleBazaarUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, _, shareErr := bazaar.Share(r.Context(), rec, []bazaar.Candidate{cand}, opts)
+	// A sample just shipped (or newly found in the ledger) leaves the pool; drop
+	// the cached evaluation so the panel stops offering it now, not one TTL on.
+	s.bazaarCands.invalidate()
 
 	resp := struct {
 		Status string `json:"status"`

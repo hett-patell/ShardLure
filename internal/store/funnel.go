@@ -56,7 +56,7 @@ func funnelLedgerCountSQL(ledger submissionLedger, extra string) string {
 // Captured is the distinct sha256s with a shareable row (the MalwareBazaar
 // candidate predicate: status fetched, sha256 set, size and origin from pol)
 // whose last successful fetch falls in the window — the same pool
-// BazaarUploadStats/ArtifactsForShare see, so the funnel never claims payloads
+// ArtifactsForShare sees, so the funnel never claims payloads
 // the share path would refuse. A zero SharePolicy selects nothing, failing
 // closed like ArtifactsForShare.
 //

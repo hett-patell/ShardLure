@@ -192,3 +192,39 @@ func TestSWRCacheRefreshIsCancelledByStop(t *testing.T) {
 		}
 	}
 }
+
+// invalidate makes the next read recompute synchronously, and a refresh that
+// was already in flight is discarded instead of overwriting the newer value.
+// The MalwareBazaar candidate cache needs both: after an upload the shipped
+// sample must leave the pool on the very next read, and a refresh computed
+// before the upload must not put it back.
+func TestSWRCacheInvalidateDiscardsInFlightRefresh(t *testing.T) {
+	var bg handlerDrain
+	var c swrCache[int]
+	var calls atomic.Int32
+	release := make(chan struct{})
+	compute := func(context.Context) (int, time.Time, error) {
+		n := calls.Add(1)
+		if n == 2 { // the background refresh, computed from pre-invalidation state
+			<-release
+		}
+		return int(n), time.Now(), nil
+	}
+	if v, _ := c.get(&bg, time.Minute, compute); v != 1 {
+		t.Fatalf("first get = %d", v)
+	}
+	c.expire(time.Hour)
+	c.get(&bg, time.Minute, compute) // starts refresh #2, which blocks
+	for deadline := time.Now().Add(time.Second); calls.Load() < 2 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.invalidate()
+	if v, err := c.get(&bg, time.Minute, compute); err != nil || v != 3 {
+		t.Fatalf("get after invalidate = %d, %v; want a synchronous recompute (3)", v, err)
+	}
+	close(release)
+	bg.wait()
+	if v, _ := c.peek(); v != 3 {
+		t.Fatalf("stale in-flight refresh published over the invalidated value: %d", v)
+	}
+}

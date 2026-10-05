@@ -609,7 +609,7 @@ Before anything is sent, every candidate passes a **submission-policy gate** (`i
 
 Re-running is safe: every sha256 we successfully submit (including `file_already_known` responses) is recorded in `bazaar_uploads` and skipped on the next run.
 
-You can also share payloads from the web dashboard: open the payload inspector modal on any captured artifact and click **Share to MalwareBazaar**. Set `SHARDLURE_BAZAAR_KEY` in your environment or systemd unit for this to work. The Red Team tab's MalwareBazaar panel shows upload history, family classification, and pending counts.
+You can also share payloads from the web dashboard: open the payload inspector modal on any captured artifact and click **Share to MalwareBazaar**. Set `SHARDLURE_BAZAAR_KEY` in your environment or systemd unit for this to work. The Red Team tab's MalwareBazaar panel shows upload history and every unshared candidate in the freshness window with the vetting gate's decision, including *why* a sample was held back (SSH key, unconfirmed, …); its **pending** count is the number of samples the gate would actually accept, and its Upload / Upload all eligible buttons act only on those (the server re-checks each one).
 
 **Flags**
 
@@ -619,12 +619,13 @@ You can also share payloads from the web dashboard: open the payload inspector m
 | `--limit N` | 10 | cap per-run uploads (0 = unbounded; a negative value is refused) |
 | `--sha SHA` | – | select only this sample; dedup and `Vet` still apply |
 | `--since DUR` | `freshness_days` (10d by default) | local candidate-selection window only |
+| `--endpoint URL` | dashboard setting, then config | MalwareBazaar endpoint override |
 | `--anonymous` | false | submit without attribution to your account |
 | `--status` | – | list past uploads from `bazaar_uploads` instead of uploading |
 
 Neither `--since` nor `--sha` bypasses `Vet`; they only choose which local artifacts enter the sharing pipeline.
 
-**Why MalwareBazaar?** It's the de-facto sharing hub for honeypot-captured Linux malware. Their submission policy (confirmed malware only, no PUPs/adware, no file infectors, samples must not be older than 10 days) is enforced by the vetting gate described above before any upload, and again server-side by abuse.ch. Repeated violations get accounts banned — see `internal/intel/bazaar/vet.go` for the policy gate and `internal/intel/bazaar/client.go` for the fatal-status handling that halts the run on `user_blacklisted`. `--since` defaults from `intel.bazaar.freshness_days`.
+**Why MalwareBazaar?** It's the de-facto sharing hub for honeypot-captured Linux malware. Their submission policy (confirmed malware only, no PUPs/adware, no file infectors, samples must not be older than 10 days) is enforced by the vetting gate described above before any upload, and again server-side by abuse.ch. Repeated violations get accounts banned — see `internal/intel/bazaar/vet.go` for the policy gate and `internal/intel/bazaar/client.go` for the fatal-status handling that halts the run on `user_blacklisted`. `--since`, the size cap, tags and endpoint default from the dashboard Settings panel (MalwareBazaar section) when set there, otherwise from `intel.bazaar.*` in the config — the same values the dashboard upload button uses. Each sample is judged from its freshest fetched row that has a file on disk, as the dashboard does.
 
 ## URLhaus URL Submission
 
