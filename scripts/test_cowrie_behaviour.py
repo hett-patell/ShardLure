@@ -1,9 +1,10 @@
 """Unit tests for the Cowrie behavioural harness's own comparison logic.
 
 These need no network and no Cowrie: the harness's transport is replaced by a
-fake runner. They pin the normaliser (which fields are volatile and how each is
-accepted), the diff/exit-code contract every later Phase B task relies on, and
-the consistency of the shipped case files.
+fake runner and the clock is fixed. They pin the normaliser (which fields are
+volatile and how each is tied to the persona clock), the diff/exit-code
+contract every later Phase B task relies on, and the consistency of the
+shipped case files.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -25,106 +27,337 @@ cbt = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = cbt
 _spec.loader.exec_module(cbt)
 
+_gspec = importlib.util.spec_from_file_location(
+    "gen_time_persona", HERE.parent / "install" / "persona" / "gen-time-persona.py"
+)
+gtp = importlib.util.module_from_spec(_gspec)
+_gspec.loader.exec_module(gtp)
+
 CASES_DIR = HERE / "behaviour"
-
-PERSONA_LAST = (
-    "ubuntu   pts/0        10.0.0.8         Mon Oct  5 02:22   still logged in\n"
-    "ubuntu   pts/0        10.0.0.8         Sun Oct  4 00:43   - 03:26  (02:43)\n"
-    "reboot   system boot  5.15.0-94-generi Mon Aug 24 05:52   still running\n"
-    "\n"
-    "wtmp begins Mon Aug 24 05:52:26 2026\n"
-)
-LAST_TEMPLATE = (
-    "ubuntu   pts/0        10.0.0.8         {{WDATE}} {{HH:MM}}   still logged in\n"
-    "ubuntu   pts/0        10.0.0.8         {{WDATE}} {{HH:MM}}   - {{HH:MM}}  (02:43)\n"
-    "reboot   system boot  5.15.0-94-generi {{WDATE}} {{HH:MM}}   still running\n"
-    "\n"
-    "wtmp begins {{WDATE}} {{HH:MM:SS}} {{YEAR}}\n"
-)
+ANCHOR = 3640620
+# The instant the ubuntu:22.04 reference run in ShippedCasesTest was taken.
+REF_NOW = datetime(2026, 10, 5, 9, 9, 26, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 5, 9, 0, 0, tzinfo=timezone.utc)
 
 
-def check(template: str, actual: str, rc: int = 0, timed_out: bool = False):
-    return cbt.compare("case", cbt.parse_expected(template), actual, rc, timed_out)
+def clock(now=NOW, run_seconds=0.0, slack=cbt.DEFAULT_UPTIME_SLACK):
+    return cbt.Clock(start=now, end=now + timedelta(seconds=run_seconds),
+                     uptime_slack=slack)
 
 
-class UptimeNormaliserTest(unittest.TestCase):
-    TEMPLATE = "UPTIME:{{UPTIME_SECS}} {{IDLE_SECS}}\n"
+def check(template: str, actual: str, rc: int = 0, timed_out: bool = False, clk=None):
+    return cbt.compare("case", cbt.parse_expected(template), actual, rc, timed_out,
+                       clk or clock())
 
+
+def persona(now=NOW) -> dict:
+    """The persona's own time files, generated for `now` (naive UTC)."""
+    return gtp.build(now.replace(tzinfo=None))
+
+
+def profiler_output(now=NOW, uptime=ANCHOR + 12.34, last=None) -> str:
+    idle = uptime * 3.88
+    if last is None:
+        last = persona(now - timedelta(seconds=uptime - ANCHOR))["share/cowrie/txtcmds/usr/bin/last"]
+    return (
+        "UNAME:Linux prod-app-server-01 #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024 x86_64\n"
+        "ARCH:x86_64\n"
+        f"UPTIME:{uptime:.2f} {idle:.2f}\n"
+        "CPUS:4\n"
+        "CPU_MODEL:Intel(R) Xeon(R) CPU E5-2676 v3 @ 2.40GHz\n"
+        "GPU:00:02.0 VGA compatible controller: Cirrus Logic GD 5446\n"
+        f"LAST:{last.rstrip(chr(10))}\n"
+        "FILTER:===SHELL_BEHAVIOR===\n"
+        "path_err=bash: line 9: ./xxxxxx: No such file or directory\n"
+        "cmd_err=bash: line 9: xxxxxx: command not found\n"
+        "execute_err=xxxxxx\n"
+        "===DONE===\n"
+    )
+
+
+def profiler_check(output, clk=None):
+    exp = cbt.parse_expected((CASES_DIR / "expected" / "profiler.out").read_text())
+    return cbt.compare("profiler", exp, output, 0, False, clk or clock())
+
+
+UPTIME_TPL = "UPTIME:{{UPTIME_SECS}} {{IDLE_SECS}}\n"
+HUMAN_TPL = " {{NOW_HMS}} {{UPTIME_HUMAN}},  1 user,  load average: 0.38, 0.42, 0.45\n"
+
+
+def uptime_line(now=NOW, human="up 42 days,  3:17", sep=" "):
+    return f" {now:%H:%M:%S}{sep}{human},  1 user,  load average: 0.38, 0.42, 0.45\n"
+
+
+class UptimeBoundsTest(unittest.TestCase):
     def test_anchor_itself_is_accepted(self):
-        self.assertTrue(check(self.TEMPLATE, "UPTIME:3640620.00 13979980.80\n").ok)
+        self.assertTrue(check(UPTIME_TPL, "UPTIME:3640620.00 13979980.80\n").ok)
 
-    def test_value_past_the_anchor_is_accepted(self):
+    def test_value_just_past_the_anchor_is_accepted(self):
         # v3.1.1 with boot_offset = 3640620, a few seconds after start.
-        self.assertTrue(check(self.TEMPLATE, "UPTIME:3640632.78 14125655.18\n").ok)
+        self.assertTrue(check(UPTIME_TPL, "UPTIME:3640632.78 14125655.18\n").ok)
 
-    def test_zero_is_rejected(self):
-        res = check(self.TEMPLATE, "UPTIME:0.00 0.00\n")
-        self.assertFalse(res.ok)
-        self.assertTrue(any("anchor" in m for m in res.messages), res.messages)
+    def test_zero_and_below_anchor_are_rejected(self):
+        for val in ("0.00", "3640619.99"):
+            with self.subTest(val=val):
+                res = check(UPTIME_TPL, f"UPTIME:{val} 1.00\n")
+                self.assertFalse(res.ok)
+                self.assertTrue(any("anchor" in m for m in res.messages), res.messages)
 
-    def test_below_anchor_is_rejected(self):
-        # v3.1.1's random boot_offset (23 days) - disagrees with the persona.
-        self.assertFalse(check(self.TEMPLATE, "UPTIME:2031659.57 7882839.14\n").ok)
+    def test_far_past_the_anchor_is_rejected(self):
+        # I-2: 1000 days, or any v3.1.1 random boot_offset draw above 42d,
+        # disagrees with the persona's "up 42 days" motd/last.
+        for val in ("86400000.00", "999999999999.00", "5000000.00"):
+            with self.subTest(val=val):
+                self.assertFalse(check(UPTIME_TPL, f"UPTIME:{val} 1.00\n").ok)
+
+    def test_slack_is_the_upper_bound(self):
+        inside = ANCHOR + cbt.DEFAULT_UPTIME_SLACK
+        self.assertTrue(check(UPTIME_TPL, f"UPTIME:{inside:.2f} 1.00\n").ok)
+        self.assertFalse(check(UPTIME_TPL, f"UPTIME:{inside + 1:.2f} 1.00\n").ok)
+        # An operator checking a long-running prod Cowrie widens it explicitly.
+        wide = clock(slack=30 * 86400)
+        self.assertTrue(check(UPTIME_TPL, f"UPTIME:{ANCHOR + 20 * 86400:.2f} 1.00\n", clk=wide).ok)
 
     def test_empty_field_is_rejected(self):
         # The pin's headline failure: every field after UNAME is empty.
-        res = check(self.TEMPLATE, "UPTIME:\n")
+        res = check(UPTIME_TPL, "UPTIME:\n")
         self.assertFalse(res.ok)
         self.assertTrue(res.diff)
 
-    def test_human_uptime_at_or_past_anchor(self):
-        tpl = " {{HH:MM:SS}} {{UPTIME_HUMAN}},  1 user,  load average: 0.38, 0.42, 0.45\n"
-        ok = " 07:16:27 up 42 days,  3:17,  1 user,  load average: 0.38, 0.42, 0.45\n"
-        later = " 07:16:27 up 43 days, 11:02,  1 user,  load average: 0.38, 0.42, 0.45\n"
-        self.assertTrue(check(tpl, ok).ok)
-        self.assertTrue(check(tpl, later).ok)
+    def test_advances_requires_a_plausible_step(self):
+        tpl = ("#harness: advances=1.5..6\n"
+               "{{UPTIME_SECS}} {{IDLE_SECS}}\n{{UPTIME_SECS}} {{IDLE_SECS}}\n")
+        clk = clock(run_seconds=2.3)
+        self.assertTrue(check(tpl, "3640620.00 1.00\n3640622.01 9.00\n", clk=clk).ok)
+        for second in ("3640620.00", "3640619.00", "3640720.00", "3640621.00"):
+            with self.subTest(second=second):
+                res = check(tpl, f"3640620.00 1.00\n{second} 9.00\n", clk=clk)
+                self.assertFalse(res.ok)
+                self.assertTrue(any("advance" in m for m in res.messages), res.messages)
 
-    def test_human_uptime_below_anchor_or_wrong_shape_is_rejected(self):
-        tpl = " {{HH:MM:SS}} {{UPTIME_HUMAN}},  1 user,  load average: 0.38, 0.42, 0.45\n"
-        for bad in (
-            " 07:16:27 up 41 days, 23:59,  1 user,  load average: 0.38, 0.42, 0.45\n",
-            # The pin: Cowrie's own process uptime.
-            " 07:16:27 up 11 min,  1 user,  load average: 0.38, 0.42, 0.45\n",
-            # v3.1.1: double space before "up".
-            " 07:16:27  up 42 days,  3:17,  1 user,  load average: 0.38, 0.42, 0.45\n",
-        ):
-            with self.subTest(bad=bad):
-                self.assertFalse(check(tpl, bad).ok)
+    def test_bad_advances_directive(self):
+        with self.assertRaises(ValueError):
+            cbt.parse_expected("#harness: advances=6..1\nx\n")
 
-    def test_advances_requires_strict_increase(self):
-        tpl = "#harness: advances\n{{UPTIME_SECS}} {{IDLE_SECS}}\n{{UPTIME_SECS}} {{IDLE_SECS}}\n"
-        moving = "3640620.00 13979980.80\n3640622.01 13979988.10\n"
-        static = "3640620.00 13979980.80\n3640620.00 13979980.80\n"
-        self.assertTrue(check(tpl, moving).ok)
-        res = check(tpl, static)
+
+class HumanUptimeTest(unittest.TestCase):
+    def test_anchor_and_later_hours_pass(self):
+        self.assertTrue(check(HUMAN_TPL, uptime_line()).ok)
+        self.assertTrue(check(HUMAN_TPL, uptime_line(human="up 42 days,  8:59")).ok)
+
+    def test_minute_only_form_passes(self):
+        # M-1: procps prints "up 42 days, 17 min" when the hour field is 0.
+        # With a 6 h slack that form is reachable only under a wider slack.
+        wide = clock(slack=86400)
+        self.assertTrue(check(HUMAN_TPL, uptime_line(human="up 43 days, 17 min"), clk=wide).ok)
+
+    def test_double_digit_hours_pass(self):
+        wide = clock(slack=86400)
+        self.assertTrue(check(HUMAN_TPL, uptime_line(human="up 42 days, 13:05"), clk=wide).ok)
+
+    def test_wrong_spacing_is_rejected(self):
+        # M-1: procps pads the hour with %2d.
+        self.assertFalse(check(HUMAN_TPL, uptime_line(human="up 42 days, 3:17")).ok)
+        self.assertFalse(check(HUMAN_TPL, uptime_line(human="up 42 days,   3:17")).ok)
+
+    def test_below_or_far_past_anchor_is_rejected(self):
+        for human in ("up 41 days, 23:59", "up 11 min", "up 1000 days,  3:17",
+                      "up 43 days,  3:17"):
+            with self.subTest(human=human):
+                self.assertFalse(check(HUMAN_TPL, uptime_line(human=human)).ok)
+
+    def test_v311_double_space_before_up_is_rejected(self):
+        self.assertFalse(check(HUMAN_TPL, uptime_line(sep="  ")).ok)
+
+    def test_clock_must_be_now(self):
+        # I-1: the HH:MM:SS of uptime/w is the current time, within 2 min.
+        self.assertTrue(check(HUMAN_TPL, uptime_line(now=NOW + timedelta(seconds=90))).ok)
+        res = check(HUMAN_TPL, uptime_line(now=NOW - timedelta(hours=3)))
         self.assertFalse(res.ok)
-        self.assertTrue(any("advance" in m for m in res.messages), res.messages)
+        self.assertTrue(any("clock" in m for m in res.messages), res.messages)
+
+    def test_clock_just_before_a_midnight_start(self):
+        clk = clock(now=datetime(2026, 10, 6, 0, 0, 30, tzinfo=timezone.utc))
+        line = uptime_line(now=datetime(2026, 10, 5, 23, 59, 50, tzinfo=timezone.utc))
+        self.assertTrue(check(HUMAN_TPL, line, clk=clk).ok)
+
+    def test_clock_wraps_midnight(self):
+        clk = clock(now=datetime(2026, 10, 5, 23, 59, 30, tzinfo=timezone.utc), run_seconds=60)
+        line = uptime_line(now=datetime(2026, 10, 6, 0, 0, 10, tzinfo=timezone.utc))
+        self.assertTrue(check(HUMAN_TPL, line, clk=clk).ok)
 
 
-class LastShapeTest(unittest.TestCase):
-    def test_persona_history_matches_by_shape(self):
-        self.assertTrue(check(LAST_TEMPLATE, PERSONA_LAST).ok)
+# Column offsets of last(1) rows as gen-time-persona writes them:
+# "%-8s %-12s %-16s " then the 16-char "%a %b %e %H:%M", 3 spaces, "- HH:MM".
+WHEN = 8 + 1 + 12 + 1 + 16 + 1
+LOGOUT = WHEN + 16 + 3 + 2
 
-    def test_other_dates_match_too(self):
-        shifted = PERSONA_LAST.replace("Mon Oct  5 02:22", "Sat Dec 19 23:59")
-        self.assertTrue(check(LAST_TEMPLATE, shifted).ok)
+
+class LastAgainstPersonaClockTest(unittest.TestCase):
+    def test_session_before_boot_is_rejected_without_a_reboot_row(self):
+        # With no reboot row to order against, boot comes from the anchor.
+        tpl = "{{LAST_LOGIN}}\n"
+        ok = NOW - timedelta(days=3)
+        old = NOW - timedelta(days=50)
+        self.assertTrue(check(tpl, f"{ok:%a %b %e %H:%M}\n").ok)
+        res = check(tpl, f"{old:%a %b %e %H:%M}\n")
+        self.assertFalse(res.ok)
+        self.assertTrue(any("between boot and now" in m for m in res.messages), res.messages)
+
+    def test_reference_output_passes(self):
+        res = profiler_check(profiler_output())
+        self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
+
+    def test_reference_passes_on_another_day(self):
+        now = datetime(2027, 3, 1, 0, 30, tzinfo=timezone.utc)
+        res = profiler_check(profiler_output(now=now), clock(now=now))
+        self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
+
+    def test_cowrie_pin_wtmp_begins_today_is_rejected(self):
+        # I-1: the pin's last.py prints logintime//86400*86400+63.
+        last = persona()["share/cowrie/txtcmds/usr/bin/last"]
+        head, _, _ = last.rpartition("wtmp begins ")
+        bad = head + "wtmp begins Mon Oct  5 00:01:03 2026\n"
+        res = profiler_check(profiler_output(last=bad))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("wtmp" in m for m in res.messages), res.messages)
+
+    def test_all_today_history_is_rejected(self):
+        # I-1: every session stamped today (a patch that drops the caller but
+        # keeps today-relative dates) must not pass.
+        rows = [
+            "ubuntu   pts/0        10.0.0.8         Mon Oct  5 02:22   still logged in",
+            "ubuntu   pts/0        10.0.0.8         Mon Oct  5 01:43   - 04:26  (02:43)",
+            "ubuntu   pts/1        10.0.0.12        Mon Oct  5 01:12   - 01:55  (00:43)",
+            "ubuntu   pts/0        10.0.0.8         Mon Oct  5 01:00   - 02:48  (01:48)",
+            "ubuntu   pts/0        10.0.0.8         Mon Oct  5 00:40   - 02:06  (01:26)",
+            "ubuntu   pts/0        10.0.0.8         Mon Oct  5 00:20   - 01:43  (01:23)",
+        ]
+        boot = NOW - timedelta(seconds=ANCHOR + 12.34)
+        last = ("\n".join(rows)
+                + f"\nreboot   system boot  5.15.0-94-generi {boot:%a %b %e %H:%M}   still running\n"
+                + f"\nwtmp begins {boot:%a %b %e %H:%M:%S %Y}\n")
+        res = profiler_check(profiler_output(last=last))
+        self.assertFalse(res.ok)
+
+    def test_reboot_not_at_now_minus_uptime_is_rejected(self):
+        last = persona(NOW - timedelta(days=3))["share/cowrie/txtcmds/usr/bin/last"]
+        res = profiler_check(profiler_output(last=last))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("boot" in m for m in res.messages), res.messages)
+
+    def test_history_out_of_order_is_rejected(self):
+        rows = persona()["share/cowrie/txtcmds/usr/bin/last"].split("\n")
+        # Swap only the login dates of two completed rows (same tty/ip text).
+        a, b = rows[3], rows[4]
+        rows[3] = a[:WHEN] + b[WHEN:WHEN + 16] + a[WHEN + 16:]
+        rows[4] = b[:WHEN] + a[WHEN:WHEN + 16] + b[WHEN + 16:]
+        res = profiler_check(profiler_output(last="\n".join(rows)))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("order" in m for m in res.messages), res.messages)
+
+    def test_weekday_must_match_date(self):
+        last = persona()["share/cowrie/txtcmds/usr/bin/last"]
+        first = last.split("\n")[0]
+        day = first[WHEN:WHEN + 3]
+        wrong = first[:WHEN] + ("Sun" if day != "Sun" else "Mon") + first[WHEN + 3:]
+        res = profiler_check(profiler_output(last=last.replace(first, wrong)))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("weekday" in m for m in res.messages), res.messages)
+
+    def test_logout_must_equal_login_plus_duration(self):
+        last = persona()["share/cowrie/txtcmds/usr/bin/last"]
+        row = last.split("\n")[1]
+        hhmm = row[LOGOUT:LOGOUT + 5]
+        h, m = int(hhmm[:2]), int(hhmm[3:])
+        wrong = row[:LOGOUT] + f"{(h + 1) % 24:02d}:{m:02d}" + row[LOGOUT + 5:]
+        res = profiler_check(profiler_output(last=last.replace(row, wrong)))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("logout" in m for m in res.messages), res.messages)
+
+    def test_current_session_must_be_recent(self):
+        last = persona()["share/cowrie/txtcmds/usr/bin/last"]
+        first = last.split("\n")[0]
+        old = NOW - timedelta(hours=20)
+        wrong = first[:WHEN] + f"{old:%a %b %e %H:%M}" + first[WHEN + 16:]
+        res = profiler_check(profiler_output(last=last.replace(first, wrong)))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("12 h" in m for m in res.messages), res.messages)
 
     def test_the_callers_own_session_is_rejected(self):
         # v3.1.1 lists the attacker's own exec session.
-        own = (
-            "root     pts/0        127.0.0.1        Mon Oct  5 07:11   still logged in\n"
-            "\n"
-            "wtmp begins Mon Aug 24 05:52:26 2026\n"
-        )
-        self.assertFalse(check(LAST_TEMPLATE, own).ok)
-
-    def test_wrong_date_shape_is_rejected(self):
-        bad = PERSONA_LAST.replace("Mon Oct  5 02:22", "2026-10-05 02:22")
-        self.assertFalse(check(LAST_TEMPLATE, bad).ok)
+        last = persona()["share/cowrie/txtcmds/usr/bin/last"]
+        own = "root     pts/0        127.0.0.1        Mon Oct  5 08:59   still logged in\n" + last
+        self.assertFalse(profiler_check(profiler_output(last=own)).ok)
 
     def test_fixed_session_lengths_are_not_volatile(self):
-        bad = PERSONA_LAST.replace("(02:43)", "(02:44)")
-        self.assertFalse(check(LAST_TEMPLATE, bad).ok)
+        last = persona()["share/cowrie/txtcmds/usr/bin/last"].replace("(02:43)", "(02:44)")
+        self.assertFalse(profiler_check(profiler_output(last=last)).ok)
+
+
+W_TPL_PATH = CASES_DIR / "expected" / "w.out"
+
+
+def w_output(now=NOW, login=None, idle="  6:47m", what="-bash", uptime_human="up 42 days,  3:17"):
+    login = login or (now - timedelta(hours=6, minutes=47))
+    return (
+        uptime_line(now=now, human=uptime_human)
+        + "USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n"
+        + f"ubuntu   pts/0    10.0.0.8         {login:%H:%M}  {idle}  0.04s  0.01s {what}\n"
+    )
+
+
+def w_check(output, clk=None):
+    return cbt.compare("w", cbt.parse_expected(W_TPL_PATH.read_text()), output, 0, False,
+                       clk or clock())
+
+
+class WRowTest(unittest.TestCase):
+    def test_login_shell_row_passes_with_any_procps_idle(self):
+        for idle in ("  6:47m", "  0.00s", " 12:05 ", "  1:02m", " 59.99s"):
+            with self.subTest(idle=idle):
+                res = w_check(w_output(idle=idle))
+                self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
+
+    def test_persona_quirk_of_ubuntu_running_w_is_rejected(self):
+        self.assertFalse(w_check(w_output(idle="  0.00s", what="w")).ok)
+
+    def test_idle_longer_than_the_session_is_rejected(self):
+        res = w_check(w_output(idle="  9:00m"))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("idle" in m for m in res.messages), res.messages)
+
+    def test_login_more_than_12h_ago_is_rejected(self):
+        res = w_check(w_output(login=NOW - timedelta(hours=13), idle="  0.00s"))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("12 h" in m for m in res.messages), res.messages)
+
+    def test_login_in_the_future_is_rejected(self):
+        # HH:MM later today than now reads as yesterday: >12 h ago.
+        res = w_check(w_output(login=NOW + timedelta(minutes=30), idle="  0.00s"))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("12 h" in m for m in res.messages), res.messages)
+
+    def test_the_pins_own_w_is_rejected(self):
+        pin = (" 09:00:00 up 6 min,  1 user,  load average: 0.00, 0.00, 0.00\n"
+               "USER     TTY      FROM              LOGIN@   IDLE   JCPU   PCPU WHAT\n"
+               "root     pts/0    127.0.0.1         09:00    0.00s  0.00s  0.00s w\n")
+        self.assertFalse(w_check(pin).ok)
+
+
+LS_TPL = "-rwxr-xr-x 1 root root 135K {{LSDATE}} /usr/bin/ls\n"
+
+
+class LsDateTest(unittest.TestCase):
+    def test_old_package_date_passes(self):
+        self.assertTrue(check(LS_TPL, "-rwxr-xr-x 1 root root 135K Feb  7  2022 /usr/bin/ls\n").ok)
+
+    def test_todays_date_is_rejected(self):
+        # M-2: a node stamped with Cowrie's start time.
+        self.assertFalse(check(LS_TPL, f"-rwxr-xr-x 1 root root 135K {NOW:%b %e %H:%M} /usr/bin/ls\n").ok)
+
+    def test_recent_year_form_is_rejected(self):
+        self.assertFalse(check(LS_TPL, f"-rwxr-xr-x 1 root root 135K {NOW:%b %e  %Y} /usr/bin/ls\n").ok)
 
 
 class ExactComparisonTest(unittest.TestCase):
@@ -164,8 +397,21 @@ class ExactComparisonTest(unittest.TestCase):
         self.assertFalse(res.ok)
         self.assertTrue(any("exit status" in m for m in res.messages), res.messages)
 
-    def test_rc_is_ignored_without_directive(self):
-        self.assertTrue(check("x\n", "x\n", rc=7).ok)
+    def test_rc_defaults_to_zero(self):
+        # M-3: every case has a known real exit status; 0 unless declared.
+        self.assertTrue(check("x\n", "x\n", rc=0).ok)
+        for rc in (7, None):
+            with self.subTest(rc=rc):
+                res = check("x\n", "x\n", rc=rc)
+                self.assertFalse(res.ok)
+                self.assertTrue(any("exit status" in m for m in res.messages), res.messages)
+
+    def test_unacknowledged_exec_is_explained(self):
+        # M-4: a refused exec request must not read as plain empty output.
+        exp = cbt.parse_expected("x\n")
+        run = cbt.RunResult("", None, False, note="exec request not acknowledged")
+        res = cbt.compare("case", exp, run.output, run.rc, run.timed_out, clock(), run.note)
+        self.assertTrue(any("not acknowledged" in m for m in res.messages), res.messages)
 
     def test_timeout_fails(self):
         res = check("x\n", "x\n", timed_out=True)
@@ -256,6 +502,15 @@ class MainExitCodeTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("echo hi", calls)
 
+    def test_uptime_slack_flag_reaches_the_comparison(self):
+        (self.root / "probes.txt").write_text("up\tcat /proc/uptime\n")
+        (self.root / "expected" / "up.out").write_text("{{UPTIME_SECS}} {{IDLE_SECS}}\n")
+        answers = {"cat /proc/uptime": cbt.RunResult(f"{ANCHOR + 86400:.2f} 1.00\n", 0, False)}
+        rc, out, _ = self.run_main(answers, ["--only", "probes"])
+        self.assertEqual(rc, 1, out)
+        rc, out, _ = self.run_main(answers, ["--only", "probes", "--uptime-slack", "100000"])
+        self.assertEqual(rc, 0, out)
+
     def test_missing_expected_file_fails(self):
         (self.root / "expected" / "who-am-i.out").unlink()
         rc, out, _ = self.run_main(self.good())
@@ -307,6 +562,18 @@ class ExecOnChannelTest(unittest.TestCase):
         chan = FakeChannel([b"root\n"], 0, raise_on_exec=True)
         res = cbt.exec_on_channel(chan, "whoami", time.monotonic() + 5, ClosedError)
         self.assertEqual(res, cbt.RunResult("root\n", 0, False))
+
+    def test_unacknowledged_exec_with_no_output_is_noted(self):
+        # M-4: a refused exec request reads as empty output; say why.
+        chan = FakeChannel([], None, raise_on_exec=True)
+        chan.closed = chan.eof_received = True
+        res = cbt.exec_on_channel(chan, "x", time.monotonic() + 5, ClosedError)
+        self.assertIn("not acknowledged", res.note)
+
+    def test_acknowledged_race_with_output_has_no_note(self):
+        chan = FakeChannel([b"root\n"], 0, raise_on_exec=True)
+        res = cbt.exec_on_channel(chan, "whoami", time.monotonic() + 5, ClosedError)
+        self.assertEqual(res.note, "")
 
     def test_hung_session_times_out(self):
         chan = FakeChannel([b"Enter new UNIX password: "], None, never_close=True)
@@ -367,6 +634,23 @@ class ShippedCasesTest(unittest.TestCase):
             with self.subTest(case=name):
                 cbt.parse_expected((CASES_DIR / "expected" / f"{name}.out").read_text())
 
+    def test_expected_file_rulings(self):
+        exp = lambda n: (CASES_DIR / "expected" / f"{n}.out").read_text()  # noqa: E731
+        # Review I-3: persona df blocks 99014048 K -> 94.43 GiB -> df -h "95G".
+        self.assertEqual(exp("df-h-awk"), "95G\n")
+        # procps 3.3.17 on the persona meminfo (truncates, does not round).
+        self.assertEqual(exp("free-m-awk"), "7850 1527 4094 0 2228 6111\n")
+        # Review I-4: the ubuntu row runs its login shell, idle is volatile.
+        self.assertTrue(exp("w").rstrip("\n").endswith("{{W_IDLE}}  0.04s  0.01s -bash"))
+        self.assertIn("{{LSDATE}}", exp("ls-which-ls"))
+
+    def test_motd_disk_size_agrees_with_df(self):
+        # landscape-sysinfo's "GB" is KiB/1024/1024 of the root fs: 94.43.
+        motd = persona()["honeyfs/etc/motd"]
+        self.assertIn("61.2% of 94.43GB", motd)
+        self.assertIn("61.2% of 94.43GB",
+                      (HERE.parent / "install" / "persona" / "honeyfs" / "etc" / "motd").read_text())
+
     def test_profiler_expected_is_the_real_column(self):
         exp = cbt.parse_expected((CASES_DIR / "expected" / "profiler.out").read_text())
         self.assertIsNone(exp.skip)
@@ -394,7 +678,7 @@ class ShippedCasesTest(unittest.TestCase):
         )
         # Captured from ubuntu:22.04 bash 5.1.16 with the persona's uname,
         # nproc, lscpu, lspci, last and /proc files substituted (factsheet 0).
-        res = cbt.compare("profiler", exp, real, 0, False)
+        res = cbt.compare("profiler", exp, real, 0, False, clock(now=REF_NOW))
         self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
 
 

@@ -22,18 +22,34 @@ anyway (factsheet 2, FILTER "exec-channel stderr").
 
 Expected files may start with directive lines, consumed until the first other
 line:
-  #harness: rc=N        the exit status must be N (otherwise it is not checked)
-  #harness: advances    successive {{UPTIME_SECS}} values must strictly rise
-  #harness: skip=WHY    do not run; reported as SKIP (deferred probes)
+  #harness: rc=N            exit status must be N (default 0: real bash's
+                            status is known for every case, and a session
+                            closing without one is a failure)
+  #harness: advances=LO..HI successive {{UPTIME_SECS}} must rise by LO..HI s
+  #harness: skip=WHY        do not run; reported as SKIP (deferred probes)
 
 Volatile tokens. Only these fields vary between a real box and a correct
-honeypot, so nothing else is normalised:
-  {{UPTIME_SECS}}   /proc/uptime seconds, must be >= the persona's 42d 3h17m
+honeypot, and each is checked against the persona clock, not just its shape.
+"now" is the case's run window in --tz (Cowrie's persona cfg sets UTC); boot
+is now minus {{UPTIME_SECS}} when the case prints it, else now minus the
+anchor (+ slack).
+  {{UPTIME_SECS}}   /proc/uptime seconds, anchor <= v <= anchor + slack
   {{IDLE_SECS}}     /proc/uptime idle seconds (shape only)
-  {{UPTIME_HUMAN}}  "up N days, H:MM" (uptime/w), must be >= the same anchor
-  {{WDATE}}         last's weekday-date, e.g. "Mon Oct  5"
-  {{HH:MM}} {{HH:MM:SS}} {{YEAR}}   clock fields in last/w/uptime
-  {{LSDATE}}        ls -l's date column ("Aug 25 15:12" or "Aug 25  2025")
+  {{UPTIME_HUMAN}}  procps "up N days,  H:MM" / "up N days, M min", same bound
+  {{NOW_HMS}}       uptime/w clock, within 2 min of now
+  {{LAST_LOGIN_CURRENT}}  last's "still logged in" row: after boot, <= 12 h old
+  {{LAST_LOGIN}}    a completed session: after boot, before today (the
+                    persona's completed sessions are all >= 1d8h old)
+  {{LOGOUT_HM}}     its "- HH:MM", equal to login + the row's "(HH:MM)"
+  {{BOOT_HM}}       last's reboot row, boot to the minute (+-1 min)
+  {{BOOT_FULL}}     "wtmp begins", boot to the second (+-60 s), never today
+  {{LOGIN_HM}}      w's LOGIN@, <= 12 h before now (procps prints HH:MM
+                    only then)
+  {{W_IDLE}}        w's 7-char IDLE cell, no longer than the session
+  {{LSDATE}}        ls -l's date of a packaged binary: the year form, older
+                    than six months (never a node stamped "now")
+All last rows (logins, then reboot) must be in non-increasing time order, and
+every weekday must match its date.
 
 Transport: paramiko when importable (exec_command, no pty - like the
 profiler's Go client), otherwise `sshpass -e ssh`. Each case gets a 10 s
@@ -57,12 +73,27 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # The persona advertises 42d 3h17m of uptime (install/persona/gen-time-persona.py
 # UPTIME; Phase B sets Cowrie's boot_offset to the same value). Anything below
 # it disagrees with the persona's own `uptime`, `last` and motd.
 UPTIME_ANCHOR = 42 * 86400 + 3 * 3600 + 17 * 60  # 3640620
+
+# Upper bound on uptime past the anchor. With a fixed boot_offset, Cowrie's
+# uptime is the anchor plus its own process age, so a rehearsal started for a
+# harness run reads anchor + minutes. 6 h covers a rehearsal left running for
+# an afternoon and still rejects v3.1.1's default random 1-90 day boot_offset
+# (review I-2: without a bound, ~54% of random draws passed). Checking a
+# long-running production Cowrie needs an explicit --uptime-slack.
+DEFAULT_UPTIME_SLACK = 6 * 3600
+
+NOW_TOLERANCE = 120        # uptime/w HH:MM:SS vs the run window
+BOOT_TOLERANCE = 60        # last's boot stamps vs now - uptime
+CURRENT_SESSION_MAX = 12 * 3600
+LS_MIN_AGE = 183 * 86400   # ls prints the year form only for files > ~6 months
 
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_CASES_DIR = Path(__file__).resolve().parent / "behaviour"
@@ -70,18 +101,24 @@ DEFAULT_CASES_DIR = Path(__file__).resolve().parent / "behaviour"
 _WDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 _MON = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
 _HM = r"(?:[01]\d|2[0-3]):[0-5]\d"
+_WDATE_HM = _WDAY + " " + _MON + r" [ 123]\d " + _HM
 
-# token -> regex. Group names are generated per occurrence; the checks below
-# key on the token name.
+# token -> regex. The checks in _check_values give each its meaning.
 TOKENS = {
     "UPTIME_SECS": r"\d+\.\d{2}",
     "IDLE_SECS": r"\d+\.\d{2}",
-    "UPTIME_HUMAN": r"up \d+ days?, +\d{1,2}:[0-5]\d",
-    "WDATE": _WDAY + " " + _MON + r" [ 123]\d",
-    "HH:MM": _HM,
-    "HH:MM:SS": _HM + r":[0-5]\d",
-    "YEAR": r"\d{4}",
-    "LSDATE": _MON + r" [ 123]\d (?: \d{4}|" + _HM + ")",
+    # procps 3.3.17 sprint_uptime: "%d days, " then "%2d:%02d" or "%d min".
+    "UPTIME_HUMAN": r"up \d+ days?, (?:(?: \d|[1-9]\d):[0-5]\d|\d+ min)",
+    "NOW_HMS": _HM + r":[0-5]\d",
+    "LAST_LOGIN_CURRENT": _WDATE_HM,
+    "LAST_LOGIN": _WDATE_HM,
+    "LOGOUT_HM": _HM,
+    "BOOT_HM": _WDATE_HM,
+    "BOOT_FULL": _WDATE_HM + r":[0-5]\d \d{4}",
+    "LOGIN_HM": _HM,
+    # procps print_time_ival7: " %2ludays", " %2lu:%02um", " %2lu:%02u ", " %2lu.%02us"
+    "W_IDLE": r" (?:[ \d]\ddays|[ \d]\d:[0-5]\dm|[ \d]\d:[0-5]\d |[ \d]\d\.\d\ds)",
+    "LSDATE": _MON + r" [ 123]\d  \d{4}",
 }
 _TOKEN_RE = re.compile(r"\{\{([A-Z_:]+)\}\}")
 _DIRECTIVE = "#harness:"
@@ -90,9 +127,9 @@ _DIRECTIVE = "#harness:"
 @dataclass
 class Expected:
     content: str
-    rc: int | None = None
+    rc: int | None = 0
     skip: str | None = None
-    advances: bool = False
+    advances: tuple[float, float] | None = None
 
 
 @dataclass
@@ -100,6 +137,19 @@ class RunResult:
     output: str
     rc: int | None
     timed_out: bool
+    note: str = ""
+
+
+@dataclass
+class Clock:
+    """When a case ran (aware datetimes) and how its times are judged."""
+    start: datetime
+    end: datetime
+    uptime_slack: float = DEFAULT_UPTIME_SLACK
+    tz: tzinfo = timezone.utc
+
+    def local(self, dt: datetime) -> datetime:
+        return dt.astimezone(self.tz).replace(tzinfo=None)
 
 
 @dataclass
@@ -118,8 +168,11 @@ def parse_expected(text: str) -> Expected:
         body = lines[i][len(_DIRECTIVE):].strip()
         if body.startswith("rc="):
             exp.rc = int(body[3:])
-        elif body == "advances":
-            exp.advances = True
+        elif body.startswith("advances="):
+            m = re.fullmatch(r"advances=(\d+(?:\.\d+)?)\.\.(\d+(?:\.\d+)?)", body)
+            if not m or float(m.group(1)) >= float(m.group(2)):
+                raise ValueError(f"bad advances directive (want LO..HI): {lines[i]!r}")
+            exp.advances = (float(m.group(1)), float(m.group(2)))
         elif body.startswith("skip="):
             exp.skip = body[5:].strip() or "skipped"
         else:
@@ -143,32 +196,189 @@ def _line_regex(template: str) -> tuple[re.Pattern, list[str]]:
     return re.compile("".join(parts)), names
 
 
-def _human_seconds(text: str) -> int:
-    m = re.match(r"up (\d+) days?, +(\d{1,2}):(\d\d)", text)
-    return int(m.group(1)) * 86400 + int(m.group(2)) * 3600 + int(m.group(3)) * 60
-
-
-def _match_line(template: str, actual: str) -> tuple[bool, list[float], list[str]]:
-    """Does `actual` fit `template`? Returns (ok, uptime values, problems)."""
+def _match_line(template: str, actual: str) -> list[tuple[str, str]] | None:
+    """(token, value) pairs if `actual` has the template's shape, else None."""
     if "{{" not in template:
-        return template == actual, [], []
+        return [] if template == actual else None
     rx, names = _line_regex(template)
     m = rx.fullmatch(actual)
     if not m:
-        return False, [], []
-    uptimes, problems = [], []
-    for idx, name in enumerate(names):
-        val = m.group(f"t{idx}")
-        if name == "UPTIME_SECS":
-            secs = float(val)
-            uptimes.append(secs)
-            if secs < UPTIME_ANCHOR:
-                problems.append(
-                    f"uptime {val}s is below the persona anchor {UPTIME_ANCHOR}s (42d 3h17m)"
-                )
-        elif name == "UPTIME_HUMAN" and _human_seconds(val) < UPTIME_ANCHOR:
-            problems.append(f"'{val}' is below the persona anchor (up 42 days,  3:17)")
-    return not problems, uptimes, problems
+        return None
+    return [(name, m.group(f"t{idx}")) for idx, name in enumerate(names)]
+
+
+# --- value checks against the persona clock ---------------------------------
+
+def _human_seconds(text: str) -> int:
+    m = re.fullmatch(r"up (\d+) days?, (?:\s*(\d+):(\d\d)|(\d+) min)", text)
+    days = int(m.group(1)) * 86400
+    if m.group(4) is not None:
+        return days + int(m.group(4)) * 60
+    return days + int(m.group(2)) * 3600 + int(m.group(3)) * 60
+
+
+def _resolve_date(text: str, fmt: str, now: datetime) -> tuple[datetime | None, str | None]:
+    """Parse a yearless last(1) stamp as its latest occurrence not after now.
+
+    Returns (datetime, problem). The weekday is checked against the date, which
+    a yearless stamp cannot otherwise prove.
+    """
+    for year in (now.year, now.year - 1):
+        try:
+            dt = datetime.strptime(f"{text} {year}", fmt + " %Y")
+        except ValueError:  # Feb 29 in a non-leap year
+            continue
+        if dt <= now + timedelta(days=1):
+            if dt.strftime("%a") != text[:3]:
+                return dt, f"weekday in '{text}' does not match its date ({dt:%a})"
+            return dt, None
+    return None, f"'{text}' is not a date before now"
+
+
+def _idle_seconds(cell: str) -> int:
+    c = cell.strip()
+    if c.endswith("days"):
+        return int(c[:-4]) * 86400
+    if c.endswith("m"):
+        h, m = c[:-1].split(":")
+        return int(h) * 3600 + int(m) * 60
+    if c.endswith("s"):
+        return int(float(c[:-1]))
+    m, s = c.split(":")
+    return int(m) * 60 + int(s)
+
+
+def _tod_distance(a: datetime, b: datetime) -> float:
+    """Seconds between two times of day, wrapping at midnight."""
+    d = abs((a.hour * 3600 + a.minute * 60 + a.second)
+            - (b.hour * 3600 + b.minute * 60 + b.second))
+    return min(d, 86400 - d)
+
+
+def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
+                  exp: Expected, clock: Clock) -> dict[int, list[str]]:
+    """Relational checks over every matched token. Returns {line: problems}."""
+    start, end = clock.local(clock.start), clock.local(clock.end)
+    anchor, slack = UPTIME_ANCHOR, clock.uptime_slack
+    bad: dict[int, list[str]] = {}
+
+    def flag(i: int, msg: str) -> None:
+        bad.setdefault(i, []).append(msg)
+
+    uptimes = [(i, float(v)) for i, _, vals in lines for t, v in vals if t == "UPTIME_SECS"]
+    for i, u in uptimes:
+        if not anchor <= u <= anchor + slack:
+            flag(i, f"uptime {u:.2f}s is not on the persona anchor: want {anchor}"
+                    f"..{anchor + slack:.0f}s (42d 3h17m + {slack:.0f}s slack)")
+    if exp.advances and len(uptimes) > 1:
+        lo, hi = exp.advances
+        for (_, a), (i, b) in zip(uptimes, uptimes[1:]):
+            if not lo <= b - a <= hi:
+                flag(i, f"uptime did not advance by {lo:g}..{hi:g}s between reads"
+                        f" ({a:.2f} -> {b:.2f})")
+    # Boot as an interval: the stamps were produced somewhere in the run.
+    if uptimes and uptimes[0][1] < 100 * 365 * 86400:  # timedelta overflows past ~2.7e9 days
+        u = uptimes[0][1]
+        boot_lo, boot_hi = start - timedelta(seconds=u), end - timedelta(seconds=u)
+    else:
+        boot_lo = start - timedelta(seconds=anchor + slack)
+        boot_hi = end - timedelta(seconds=anchor)
+
+    order: list[tuple[int, datetime]] = []
+    for i, text, vals in lines:
+        login = login_hm = None
+        for tok, val in vals:
+            if tok == "UPTIME_HUMAN":
+                h = _human_seconds(val)
+                if not anchor <= h <= anchor + slack:
+                    flag(i, f"'{val}' is not on the persona anchor (up 42 days,  3:17"
+                            f" + {slack:.0f}s slack)")
+            elif tok == "NOW_HMS":
+                t = datetime.strptime(val, "%H:%M:%S")
+                d = min(_tod_distance(t, start), _tod_distance(t, end))
+                if d > NOW_TOLERANCE and not _tod_between(t, start, end):
+                    flag(i, f"clock {val} is not now ({start:%H:%M:%S}..{end:%H:%M:%S}"
+                            f" +-{NOW_TOLERANCE}s)")
+            elif tok in ("LAST_LOGIN", "LAST_LOGIN_CURRENT", "BOOT_HM"):
+                dt, problem = _resolve_date(val, "%a %b %d %H:%M", end)
+                if problem:
+                    flag(i, problem)
+                if dt is None:
+                    continue
+                order.append((i, dt))
+                if tok == "BOOT_HM":
+                    if not boot_lo - timedelta(seconds=2 * BOOT_TOLERANCE) <= dt <= \
+                            boot_hi + timedelta(seconds=BOOT_TOLERANCE):
+                        flag(i, f"reboot '{val}' is not boot (now - uptime ="
+                                f" {boot_hi:%a %b %e %H:%M})")
+                    continue
+                login = dt
+                if dt < boot_lo - timedelta(seconds=2 * BOOT_TOLERANCE) or dt > end:
+                    flag(i, f"session '{val}' is not between boot and now")
+                if tok == "LAST_LOGIN_CURRENT":
+                    if (end - dt).total_seconds() > CURRENT_SESSION_MAX:
+                        flag(i, f"still-logged-in session '{val}' is more than 12 h old")
+                elif dt.date() >= end.date():
+                    flag(i, f"completed session '{val}' is today; the persona's"
+                            " history is in the past")
+            elif tok == "LOGOUT_HM":
+                dur = re.search(r"\((\d\d):(\d\d)\)", text)
+                if login is None or dur is None:
+                    flag(i, "logout time without a login and (duration) on its row")
+                    continue
+                out = login + timedelta(hours=int(dur.group(1)), minutes=int(dur.group(2)))
+                if val != f"{out:%H:%M}":
+                    flag(i, f"logout {val} is not login + duration ({out:%H:%M})")
+                if out > end:
+                    flag(i, f"logout {out:%H:%M} is after now")
+            elif tok == "BOOT_FULL":
+                dt, problem = _resolve_date(val[:-5].rstrip(), "%a %b %d %H:%M:%S", end)
+                if dt is not None:
+                    dt = dt.replace(year=int(val[-4:]))
+                    if dt.strftime("%a") != val[:3]:
+                        problem = f"weekday in '{val}' does not match its date ({dt:%a})"
+                if problem:
+                    flag(i, problem)
+                if dt is None:
+                    continue
+                if not boot_lo - timedelta(seconds=BOOT_TOLERANCE) <= dt <= \
+                        boot_hi + timedelta(seconds=BOOT_TOLERANCE):
+                    flag(i, f"wtmp begins '{val}' is not boot (now - uptime ="
+                            f" {boot_hi:%a %b %e %H:%M:%S %Y})")
+                # Implied by the boot check while uptime >= the 42 d anchor; kept
+                # so the message names Cowrie's own tell (pin last.py prints
+                # wtmp begins <today> 00:01:03) if the bounds ever loosen.
+                if dt.date() == end.date():
+                    flag(i, f"wtmp begins '{val}' is today (Cowrie's own last.py tell)")
+            elif tok == "LOGIN_HM":
+                t = datetime.strptime(val, "%H:%M")
+                login_hm = end.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+                if login_hm > end:
+                    login_hm -= timedelta(days=1)
+                if (end - login_hm).total_seconds() > CURRENT_SESSION_MAX:
+                    flag(i, f"LOGIN@ {val} is more than 12 h before now (procps would"
+                            " print a weekday)")
+            elif tok == "W_IDLE":
+                idle = _idle_seconds(val)
+                if login_hm is not None and idle > (end - login_hm).total_seconds() + 60:
+                    flag(i, f"idle '{val.strip()}' is longer than the session")
+            elif tok == "LSDATE":
+                dt = datetime.strptime(val, "%b %d  %Y")
+                if (end - dt).total_seconds() < LS_MIN_AGE:
+                    flag(i, f"ls date '{val}' is not an old package build date")
+    for (_, a), (i, b) in zip(order, order[1:]):
+        if b > a:
+            flag(i, "last rows are out of order (each must be no later than the one above)")
+    return bad
+
+
+def _tod_between(t: datetime, start: datetime, end: datetime) -> bool:
+    if (end - start).total_seconds() >= 86400:
+        return True
+    s = start.hour * 3600 + start.minute * 60 + start.second
+    e = end.hour * 3600 + end.minute * 60 + end.second
+    x = t.hour * 3600 + t.minute * 60 + t.second
+    return s <= x <= e if s <= e else (x >= s or x <= e)
 
 
 def _visible(line: str) -> str:
@@ -181,49 +391,52 @@ def _visible(line: str) -> str:
 
 
 def compare(name: str, exp: Expected, output: str, rc: int | None,
-            timed_out: bool) -> CaseResult:
+            timed_out: bool, clock: Clock | None = None, note: str = "") -> CaseResult:
+    if clock is None:
+        now = datetime.now(timezone.utc)
+        clock = Clock(start=now, end=now)
     res = CaseResult(name=name, ok=True)
     want = exp.content.split("\n")
     got = output.split("\n")
 
+    # Pass 1: shape. A line matching its template is rendered as the template
+    # so the diff only carries real differences; a line matching another
+    # template (an inserted or dropped row) is rendered as that template.
     rendered: list[str] = []
-    uptimes: list[float] = []
+    matched: list[tuple[int, str, list[tuple[str, str]]]] = []
     for i, line in enumerate(got):
-        # Prefer the template at the same index, then any other: a matched
-        # volatile line is shown as its template so the diff only carries
-        # real differences.
         order = ([i] if i < len(want) else []) + [j for j in range(len(want)) if j != i]
         chosen = None
         for j in order:
-            ok, ups, problems = _match_line(want[j], line)
-            if ok:
+            vals = _match_line(want[j], line)
+            if vals is not None:
                 chosen = want[j]
                 if j == i:
-                    uptimes.extend(ups)
+                    matched.append((i, line, vals))
                 break
-            if j == i and problems:
-                res.messages.extend(problems)
         rendered.append(chosen if chosen is not None else _visible(line))
+
+    # Pass 2: values against the persona clock. Only meaningful once every
+    # line sits on its own template; an offending line is shown as itself.
+    if rendered == want:
+        bad = _check_values(matched, exp, clock)
+        for i in sorted(bad):
+            rendered[i] = _visible(got[i])
+            res.messages.extend(f"line {i + 1}: {m}" for m in bad[i])
 
     if rendered != want:
         res.ok = False
         res.diff = list(difflib.unified_diff(
             want, rendered, fromfile=f"expected/{name}.out", tofile="actual", lineterm=""
         ))
-    elif exp.advances and any(b <= a for a, b in zip(uptimes, uptimes[1:])):
-        res.ok = False
-        res.messages.append(
-            "uptime did not advance between reads: "
-            + ", ".join(f"{u:.2f}" for u in uptimes)
-        )
+    if note:
+        res.messages.append(note)
     if timed_out:
         res.ok = False
         res.messages.append("timed out (session hung or never closed)")
     elif exp.rc is not None and rc != exp.rc:
         res.ok = False
         res.messages.append(f"exit status {rc}, expected {exp.rc}")
-    if res.messages and not res.diff:
-        res.ok = False
     return res
 
 
@@ -281,10 +494,11 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception) -
     exception is therefore not a failure; whatever the channel buffered is
     the result.
     """
+    unacked = False
     try:
         chan.exec_command(command)
     except closed_exc:
-        pass
+        unacked = True
     out, err = bytearray(), bytearray()
     while True:
         while chan.recv_ready():
@@ -298,7 +512,11 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception) -
             return RunResult(_decode(bytes(out + err)), None, True)
         time.sleep(0.05)
     rc = chan.recv_exit_status() if chan.exit_status_ready() else None
-    return RunResult(_decode(bytes(out + err)), rc, False)
+    # The race above delivers output or an exit status; a refused exec request
+    # delivers neither and would otherwise read as plain empty output.
+    note = "exec request not acknowledged (no output, no exit status)" \
+        if unacked and not out and not err and rc is None else ""
+    return RunResult(_decode(bytes(out + err)), rc, False, note)
 
 
 def paramiko_runner(host: str, port: int, user: str, password: str):
@@ -381,6 +599,12 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                     help="per-case deadline in seconds (default 10)")
     ap.add_argument("--transport", choices=("auto", "paramiko", "ssh"), default="auto")
+    ap.add_argument("--uptime-slack", type=float, default=DEFAULT_UPTIME_SLACK,
+                    metavar="SECONDS",
+                    help="allowed uptime past the 42d 3h17m anchor (default 6 h, for a"
+                         " freshly started rehearsal; a long-running Cowrie needs more)")
+    ap.add_argument("--tz", default="UTC",
+                    help="timezone Cowrie renders times in (persona cfg: UTC)")
     ap.add_argument("--cases-dir", type=Path, default=DEFAULT_CASES_DIR)
     args = ap.parse_args(argv)
 
@@ -388,6 +612,13 @@ def main(argv: list[str] | None = None, runner=None) -> int:
         password = password_from_userdb(Path(args.password_from).read_text(), args.user)
         kind, runner = make_runner(args.transport, args.host, args.port, args.user, password)
         print(f"transport: {kind}; target {args.user}@{args.host}:{args.port}")
+
+    if args.uptime_slack < 0:
+        raise SystemExit("--uptime-slack must be >= 0")
+    try:
+        tz = timezone.utc if args.tz == "UTC" else ZoneInfo(args.tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise SystemExit(f"unknown --tz {args.tz!r}")
 
     cases = load_cases(args.cases_dir, args.only)
     if args.case:
@@ -409,8 +640,11 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             skipped += 1
             print(f"SKIP {name}: {exp.skip}")
             continue
+        started = datetime.now(timezone.utc)
         run = runner(command, args.timeout)
-        res = compare(name, exp, run.output, run.rc, run.timed_out)
+        clock = Clock(start=started, end=datetime.now(timezone.utc),
+                      uptime_slack=args.uptime_slack, tz=tz)
+        res = compare(name, exp, run.output, run.rc, run.timed_out, clock, run.note)
         if res.ok:
             passed += 1
             print(f"PASS {name}")

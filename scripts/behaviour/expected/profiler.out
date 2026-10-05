@@ -4,15 +4,15 @@ UPTIME:{{UPTIME_SECS}} {{IDLE_SECS}}
 CPUS:4
 CPU_MODEL:Intel(R) Xeon(R) CPU E5-2676 v3 @ 2.40GHz
 GPU:00:02.0 VGA compatible controller: Cirrus Logic GD 5446
-LAST:ubuntu   pts/0        10.0.0.8         {{WDATE}} {{HH:MM}}   still logged in
-ubuntu   pts/0        10.0.0.8         {{WDATE}} {{HH:MM}}   - {{HH:MM}}  (02:43)
-ubuntu   pts/1        10.0.0.12        {{WDATE}} {{HH:MM}}   - {{HH:MM}}  (00:43)
-ubuntu   pts/0        10.0.0.8         {{WDATE}} {{HH:MM}}   - {{HH:MM}}  (01:48)
-ubuntu   pts/0        10.0.0.8         {{WDATE}} {{HH:MM}}   - {{HH:MM}}  (01:26)
-ubuntu   pts/0        10.0.0.8         {{WDATE}} {{HH:MM}}   - {{HH:MM}}  (01:23)
-reboot   system boot  5.15.0-94-generi {{WDATE}} {{HH:MM}}   still running
+LAST:ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN_CURRENT}}   still logged in
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (02:43)
+ubuntu   pts/1        10.0.0.12        {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (00:43)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:48)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:26)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:23)
+reboot   system boot  5.15.0-94-generi {{BOOT_HM}}   still running
 
-wtmp begins {{WDATE}} {{HH:MM:SS}} {{YEAR}}
+wtmp begins {{BOOT_FULL}}
 FILTER:===SHELL_BEHAVIOR===
 path_err=bash: line 9: ./xxxxxx: No such file or directory
 cmd_err=bash: line 9: xxxxxx: command not found
