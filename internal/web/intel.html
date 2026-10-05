@@ -801,17 +801,25 @@
      decision. The hash truncates (full value in the title) and the reason
      wraps, so a long Vet reason never pushes the action column off-screen. */
   #bazaar-cand-table { table-layout: fixed; width: 100%; }
-  #bazaar-cand-table td.bz-sha {
-    max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-family: var(--mono, monospace); color: var(--purple); cursor: pointer;
+  #bazaar-cand-table td.bz-sha { max-width: 0; }
+  /* The hash opens the payload inspector, so it is a real <button> (keyboard
+     reachable, named by its text), styled as text. */
+  #bazaar-cand-table .bz-sha-btn {
+    display: block; width: 100%; padding: 0; border: 0; background: none; text-align: left;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+    font: inherit; font-family: var(--mono, monospace); color: var(--purple);
   }
+  #bazaar-cand-table .bz-sha-btn:hover { color: var(--accent); text-decoration: underline; }
   #bazaar-cand-table td.why { white-space: normal; }
   #bazaar-cand-table .why-tag {
     display: inline-block; font-size: 10px; color: var(--dim); margin: 1px 3px 1px 0;
     padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px;
   }
   #bazaar-cand-table .why-tag.ok { color: var(--accent); border-color: var(--accent); }
-  #bazaar-cand-table tr.bz-rejected td { opacity: .62; }
+  /* Rejected rows are muted with the --dim token, never with opacity: --dim is
+     sized to clear 4.5:1 on every surface (TestDimTokensMeetContrast), and
+     opacity would scale it below the floor. */
+  #bazaar-cand-table tr.bz-rejected td { color: var(--dim); }
   #bazaar-cand-table .sg-disabled { color: var(--dim-2); }
   #panel-bazaar .bz-sub { margin: 10px 0 6px; font-size: 11px; color: var(--dim); }
   #bazaar-table td.bz-sha a:hover { color: var(--accent); text-decoration: underline; }
@@ -1304,9 +1312,13 @@
     .stat .num { font-size: 18px; }
     .grid > .panel, .panel-body { overflow-x: auto; }
     #actors-table, #cmds-table, #capture-table, #abuse-suggest-table, #urlhaus-table, #urlhaus-log,
-    #threatfox-table, #threatfox-log, #ttp-table, #payloads-table, #pending-table, #bazaar-table, #bazaar-cand-table,
+    #threatfox-table, #threatfox-log, #ttp-table, #payloads-table, #pending-table, #bazaar-table,
     #ioc-table, #tunnels-table, #set-reports-table, #campaigns-table, #scripts-table { min-width: 620px; }
     .sess-head, .sess-row { min-width: 640px; }
+    /* Six fixed-width columns take 592px, so at the shared 620px the hash and
+       the gate reason got ~28px between them and the reason wrapped a word per
+       line. Wider here; the table scrolls inside its panel. */
+    #bazaar-cand-table { min-width: 860px; }
     .cred-grid { grid-template-columns: 1fr; }
     .set-row { grid-template-columns: 1fr; gap: 6px; }
     .set-actions { flex-wrap: wrap; }
@@ -5364,7 +5376,8 @@ function renderPayloads(data) {
 // bazaar.Vet's own verdict (eligible and not yet uploaded), not the share
 // pre-filter, which offered SSH keys and unconfirmed blobs the upload refused.
 // The upload endpoint still re-runs Vet.
-// Deliberately does NOT consider already-shared state — callers layer that on.
+// Already-shared samples are excluded server-side; _bazaarSharedSet (layered
+// on by callers) covers uploads made since the last fetch.
 function isUploadEligible(p) {
   var sha = p.sha256 || '';
   if (!sha || sha === '—') return false;
@@ -6041,7 +6054,7 @@ function renderBazaar(d) {
   var st = d.stats || {};
   document.getElementById('bz-uploaded').textContent = fmt(st.totalUploaded || 0);
   document.getElementById('bz-dupes').textContent = fmt(st.duplicates || 0);
-  document.getElementById('bz-pending').textContent = fmt(st.pending || 0);
+  document.getElementById('bz-pending').textContent = bazaarPendingLabel(d);
   document.getElementById('bz-last').textContent = st.lastUploadAt ? rel(st.lastUploadAt) : '—';
 
   var rows = d.uploads || [];
@@ -6097,6 +6110,15 @@ function showBazaarBanner(msg, kind) {
   note.dataset.sticky = kind === 'pending' ? '' : '1';
 }
 
+// bazaarPendingLabel is the pending tile's text. Pending counts eligible
+// samples among the classified (capped) candidates, so when the pool was
+// truncated the true number may be higher: say so with a "+".
+function bazaarPendingLabel(d) {
+  var st = d.stats || {};
+  var shown = (d.candidates || []).length;
+  return fmt(st.pending || 0) + ((d.candidatesTotal || 0) > shown ? '+' : '');
+}
+
 function bazaarEligibleNow() {
   return _bazaarCands.filter(function(c) { return c.eligible && !_bazaarSharedSet[c.sha256]; });
 }
@@ -6144,7 +6166,7 @@ function renderBazaarCandidates(d) {
       : '<span class="sg-disabled" title="' + esc(c.reason || 'held back by policy') + '">\u2014</span>';
     var fam = c.family ? esc(c.family) : '\u2014';
     return '<tr data-sha="' + esc(sha) + '"' + (c.eligible ? '' : ' class="bz-rejected"') + '>' +
-      '<td class="bz-sha" title="' + esc(c.sha256) + '">' + esc(c.sha256) + '</td>' +
+      '<td class="bz-sha"><button type="button" class="bz-sha-btn" data-sha="' + esc(sha) + '" title="' + esc(sha) + '">' + esc(sha) + '</button></td>' +
       '<td class="num">' + fmtBytesShort(c.sizeBytes) + '</td>' +
       '<td>' + esc(c.fileKind || '\u2014') + '</td>' +
       '<td>' + fam + '</td>' +
@@ -6154,8 +6176,8 @@ function renderBazaarCandidates(d) {
       '<td>' + btn + '</td>' +
       '</tr>';
   }).join('');
-  tb.querySelectorAll('tr[data-sha] td.bz-sha').forEach(function(td) {
-    td.addEventListener('click', function() { openPayload(td.parentNode.dataset.sha); });
+  tb.querySelectorAll('button.bz-sha-btn').forEach(function(b) {
+    b.addEventListener('click', function() { openPayload(b.dataset.sha); });
   });
 }
 

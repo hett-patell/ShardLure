@@ -109,6 +109,10 @@ func TestBazaarCandidatesRenderVetDecision(t *testing.T) {
 	if len(rows) >= 2 && strings.Contains(rows[1], "uploadBazaarCandidate") {
 		t.Errorf("rejected row got an Upload button:\n%s", rows[1])
 	}
+	// The hash opens the inspector, so it must be keyboard-reachable.
+	if n := strings.Count(out.Armed, `<button type="button" class="bz-sha-btn"`); n != 2 {
+		t.Errorf("%d hash buttons, want one per row (a click-only <td> is not keyboard operable)", n)
+	}
 	if n := strings.Count(out.Armed, "uploadBazaarCandidate"); n != 1 {
 		t.Errorf("%d Upload buttons, want 1 (the eligible row only)", n)
 	}
@@ -126,6 +130,22 @@ func TestBazaarCandidatesRenderVetDecision(t *testing.T) {
 	}
 	if out.Gate["bb"] == "" || len(out.Gate) != 1 {
 		t.Errorf("_bazaarGate (the library's reason label) = %v, want only the rejected sha", out.Gate)
+	}
+}
+
+// TestBazaarPendingLabelDisclosesTruncation: pending counts eligible samples
+// among the capped candidates only, so a truncated pool reads "N+".
+func TestBazaarPendingLabelDisclosesTruncation(t *testing.T) {
+	var out []string
+	decodeJS(t, runBazaarJS(t, hostileCandidates+`
+  console.log(JSON.stringify([
+    bazaarPendingLabel({ stats: { pending: 1 }, candidates: cands, candidatesTotal: 2 }),
+    bazaarPendingLabel({ stats: { pending: 1 }, candidates: cands, candidatesTotal: 250 }),
+    bazaarPendingLabel({}),
+  ]));
+`), &out)
+	if len(out) != 3 || out[0] != "1" || out[1] != "1+" || out[2] != "0" {
+		t.Errorf("pending labels = %v, want [1 1+ 0]", out)
 	}
 }
 
@@ -157,8 +177,15 @@ func TestBazaarCandidatesPanelContract(t *testing.T) {
 		t.Fatal("intel.html: #panel-bazaar has no candidates table")
 	}
 	phone := strings.Join(mediaBlocks(styleBlock(t, intelHTML), "(max-width: 760px)"), "\n")
-	if !strings.Contains(phone, "#bazaar-cand-table") {
-		t.Error("candidates table has no min-width in the 760px layout")
+	if !strings.Contains(phone, "#bazaar-cand-table { min-width: 860px; }") {
+		t.Error("candidates table needs its own wider min-width in the 760px layout (six fixed columns take 592px)")
+	}
+	// Muting by opacity scales --dim below the 4.5:1 floor the tokens are sized to.
+	if regexp.MustCompile(`#bazaar-cand-table[^{]*\{[^}]*opacity`).MatchString(styleBlock(t, intelHTML)) {
+		t.Error("candidates table mutes rows with opacity; use the --dim token")
+	}
+	if !strings.Contains(inlineScripts(intelHTML), "textContent = bazaarPendingLabel(d)") {
+		t.Error("the pending tile does not use bazaarPendingLabel")
 	}
 	js := inlineScripts(intelHTML)
 	render := regexp.MustCompile(`(?s)\nfunction renderBazaar\(d\) \{.*?\n\}`).FindString(js)
