@@ -45,17 +45,16 @@ command-v-wget	command -v wget
 type-wget	type wget
 # The bot family that scp-uploads its own ELF and runs it as a liveness test
 # (exec-emulation). Cowrie must never run it: a real box runs the matching-arch
-# binary silently, rc 0. Upload and run share one channel ("#harness:
-# scp-stdin") because v3.1.1 gives each session channel a fresh fake
-# filesystem; the bot's real pattern (scp -t on one channel, run on the next)
-# never reaches this branch -- see the Task 3 report.
+# binary silently, rc 0. Upload and run share one channel here ("#harness:
+# scp-stdin"); the cross-channel cases below are the bot's real shape.
 scp-upload-run	scp -t /root/x >/dev/null; ./x
 # echo -e "new\nnew" | passwd: unpatched v3.1.1 waits on stdin forever.
 passwd-stdin	echo -e "p\np" | passwd
 # The same bot's real shape (Task 3b): `scp -t <path>` on one channel, then run
 # <path> on the next channel of the same connection. Stock v3.1.1 fails both
-# halves: each channel gets a fresh fake filesystem, and the upload is saved
-# under the C-record's name (hw) instead of the -t path. A directory target
+# halves: each channel gets a fresh fake filesystem (connection-shared-fs.py),
+# and the upload is saved under the C-record's name (hw) instead of the -t
+# path (scp-sink-target.py). A directory target
 # keeps the record's name, as OpenSSH's sink does. Nothing is ever executed:
 # exec-emulation answers the run (rc 0, no output).
 scp-cross-channel	ls -l /tmp/x; /tmp/x; echo rc=$?

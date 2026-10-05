@@ -32,6 +32,7 @@ partial_builtins="$tmp_root/cowrie-partial-builtins"
 partial_exec="$tmp_root/cowrie-partial-exec"
 partial_capture="$tmp_root/cowrie-partial-capture"
 partial_sharedfs="$tmp_root/cowrie-partial-sharedfs"
+partial_scp="$tmp_root/cowrie-partial-scp"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -47,13 +48,15 @@ cp -a "$cowrie" "$partial_builtins"
 cp -a "$cowrie" "$partial_exec"
 cp -a "$cowrie" "$partial_capture"
 cp -a "$cowrie" "$partial_sharedfs"
+cp -a "$cowrie" "$partial_scp"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
 # registers `command` but not `type`, so neither OLD nor NEW is present in
 # either; exec has its new branch but not the helper it calls (NEW + OLD_DEF);
 # capture has a chmod at the right location but the wrong permissions;
-# sharedfs has its session.py half but not its filetransfer.py half.
+# sharedfs has its session.py half but not its filetransfer.py half; scp
+# remembers the -t target but still names the file after the C-record.
 # The grep fixture left with its patch (Task 4 restores a
 # grep-options one); the bashparse and honeypot fixtures went with the
 # patches upstream made redundant.
@@ -63,7 +66,8 @@ python3 - \
   "$partial_builtins/src/cowrie/commands/which.py" \
   "$partial_exec/src/cowrie/shell/script.py" \
   "$partial_capture/src/cowrie/shell/fs.py" \
-  "$partial_sharedfs/src/cowrie/shell/session.py" <<'PY'
+  "$partial_sharedfs/src/cowrie/shell/session.py" \
+  "$partial_scp/src/cowrie/commands/scp.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -97,6 +101,7 @@ builtins_path = Path(sys.argv[3])
 exec_path = Path(sys.argv[4])
 capture_path = Path(sys.argv[5])
 sharedfs_path = Path(sys.argv[6])
+scp_path = Path(sys.argv[7])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -133,6 +138,12 @@ replace_once(sharedfs_path, sharedfs["OLD"], sharedfs["NEW"], "sharedfs partial"
 sftp = sharedfs_path.parent / "filetransfer.py"
 if sftp.read_text(encoding="utf-8").count(sharedfs["OLD_SFTP"]) != 1:
     raise SystemExit(f"sharedfs partial fixture lost its pristine half in {sftp}")
+
+scp = string_constants(root / "install/persona/patches/scp-sink-target.py")
+content = replace_once(scp_path, scp["OLD"], scp["NEW"], "scp partial")
+expected = {"OLD": 0, "NEW": 1, "OLD_NAME": 1, "NEW_NAME": 0}
+if any(content.count(scp[name]) != count for name, count in expected.items()):
+    raise SystemExit(f"scp partial fixture has unexpected block counts in {scp_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -144,6 +155,7 @@ for patch in \
   "$ROOT/install/persona/patches/passwd-stdin.py" \
   "$ROOT/install/persona/patches/exec-emulation.py" \
   "$ROOT/install/persona/patches/connection-shared-fs.py" \
+  "$ROOT/install/persona/patches/scp-sink-target.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -271,6 +283,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_sharedfs" \
     "$ROOT/install/persona/patches/connection-shared-fs.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "scp" \
+    "$partial_scp" \
+    "$ROOT/install/persona/patches/scp-sink-target.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -292,6 +309,7 @@ fi
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
+  "src/cowrie/commands/scp.py"
   "src/cowrie/commands/which.py"
   "src/cowrie/shell/filetransfer.py"
   "src/cowrie/shell/fs.py"
@@ -344,6 +362,8 @@ done
 # Run the real pinned, patched SFTP methods against inert local files, including
 # SHA-dedup destinations and publication-time permissions. No Twisted/network.
 python3 "$ROOT/install/persona/test_capture_permissions.py" "$cowrie" -v
+# Same approach for the scp sink: -t targets and unchanged capture.
+python3 "$ROOT/install/persona/test_scp_sink_target.py" "$cowrie" -v
 
 # Drift the final target so a sequential check/apply implementation would alter
 # earlier files before discovering incompatibility. The entire working tree
@@ -407,4 +427,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 20 partial-state rejections, idempotence, install.sh standalone patches, capture behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 24 partial-state rejections, idempotence, install.sh standalone patches, capture and scp-target behavior, and atomic preflight checks passed"

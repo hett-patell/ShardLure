@@ -32,6 +32,9 @@ PATCHES = (
     # the fake filesystem per channel, so the run found nothing (26 of 26 prod
     # scp sessions).
     "connection-shared-fs.py",
+    # ...and v3.1.1 saved the upload under the C-record's name, ignoring the
+    # `scp -t <path>` target the bot then runs.
+    "scp-sink-target.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and

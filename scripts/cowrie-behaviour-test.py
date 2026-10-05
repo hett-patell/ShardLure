@@ -41,7 +41,8 @@ line:
                             Outlaw) deliver and then run a payload, and what
                             stock Cowrie v3.1.1 gets wrong: it builds a fresh
                             fake filesystem for every session channel and saves
-                            the upload under NAME instead of TARGET. Needs the
+                            the upload under NAME instead of TARGET (fixed by
+                            connection-shared-fs.py, scp-sink-target.py). Needs the
                             paramiko transport (ssh+sshpass opens one
                             connection per command; the case fails there with
                             a note rather than passing on the wrong shape).

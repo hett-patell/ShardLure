@@ -39,10 +39,12 @@ error. Three tightenings over the pin-era patch:
     directories, not a string prefix that `downloads-old/` would also match;
   - the result is plain old/new text, so --check and reapply follow the same
     pristine / patched / partial contract as every other persona patch.
-Note that Cowrie v3.1.1 gives every session channel a fresh fake filesystem,
-so an upload on one channel and a run on the next (the observed bot pattern)
-never reaches this branch; scripts/behaviour's scp-upload-run case uploads
-and runs on one channel.
+Stock Cowrie v3.1.1 gives every session channel a fresh fake filesystem and
+saves an scp upload under its C-record name, so the observed bot pattern
+(upload on one channel, run the -t path on the next) never reached this
+branch; connection-shared-fs.py and scp-sink-target.py fix both halves.
+scripts/behaviour covers both shapes: scp-upload-run (one channel) and
+scp-cross-channel(-dir) (two channels of one connection).
 """
 import sys
 from pathlib import Path
