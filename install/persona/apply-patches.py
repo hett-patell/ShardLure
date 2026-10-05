@@ -15,9 +15,8 @@ PATCHES = (
     # f6f5f9fb routes command-not-found through the shell's stderr, so
     # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect).
     #
-    # Temporarily out while they are re-anchored on v3.1.1 (payload-yield
-    # Phase B): Task 3 restores sftp-capture-permissions.py, Task 4 replaces
-    # grep-case-insensitive.py with grep-options.py.
+    # Temporarily out while it is re-anchored on v3.1.1 (payload-yield
+    # Phase B): Task 4 replaces grep-case-insensitive.py with grep-options.py.
     #
     # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
     # live log analysis so bots proceed to payload delivery.
@@ -29,6 +28,10 @@ PATCHES = (
     # v3.1.1 folds "too large" and "binary" into one refusal; only an
     # attacker's own binary, run directly, is answered with a silent exit 0.
     "exec-emulation.py",
+    # The live daemon uses a separate account with read access via this group.
+    # scripts/install.sh fetches this one file standalone, so it must stay in
+    # PATCHES and apply on the pin.
+    "sftp-capture-permissions.py",
 )
 
 

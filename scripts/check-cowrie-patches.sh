@@ -30,6 +30,7 @@ args_checkout="$tmp_root/cowrie-args"
 partial_passwd="$tmp_root/cowrie-partial-passwd"
 partial_builtins="$tmp_root/cowrie-partial-builtins"
 partial_exec="$tmp_root/cowrie-partial-exec"
+partial_capture="$tmp_root/cowrie-partial-capture"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -43,11 +44,13 @@ cp -a "$cowrie" "$args_checkout"
 cp -a "$cowrie" "$partial_passwd"
 cp -a "$cowrie" "$partial_builtins"
 cp -a "$cowrie" "$partial_exec"
+cp -a "$cowrie" "$partial_capture"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
 # registers `command` but not `type`, so neither OLD nor NEW is present in
-# either; exec has its new branch but not the helper it calls (NEW + OLD_DEF).
+# either; exec has its new branch but not the helper it calls (NEW + OLD_DEF);
+# capture has a chmod at the right location but the wrong permissions.
 # The grep fixture left with its patch (Task 4 restores a
 # grep-options one); the bashparse and honeypot fixtures went with the
 # patches upstream made redundant.
@@ -55,7 +58,8 @@ python3 - \
   "$ROOT" \
   "$partial_passwd/src/cowrie/commands/base.py" \
   "$partial_builtins/src/cowrie/commands/which.py" \
-  "$partial_exec/src/cowrie/shell/script.py" <<'PY'
+  "$partial_exec/src/cowrie/shell/script.py" \
+  "$partial_capture/src/cowrie/shell/fs.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -87,6 +91,7 @@ root = Path(sys.argv[1])
 passwd_path = Path(sys.argv[2])
 builtins_path = Path(sys.argv[3])
 exec_path = Path(sys.argv[4])
+capture_path = Path(sys.argv[5])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -111,6 +116,12 @@ content = replace_once(exec_path, exec_emulation["OLD"], exec_emulation["NEW"], 
 expected = {"OLD": 0, "NEW": 1, "OLD_DEF": 1, "NEW_DEF": 0}
 if any(content.count(exec_emulation[name]) != count for name, count in expected.items()):
     raise SystemExit(f"exec partial fixture has unexpected block counts in {exec_path}")
+
+capture = string_constants(root / "install/persona/patches/sftp-capture-permissions.py")
+partial = capture["NEW"].replace("os.chmod(shasumfile, 0o640)", "os.chmod(shasumfile, 0o600)")
+content = replace_once(capture_path, capture["OLD"], partial, "capture partial")
+if content.count(capture["OLD"]) != 0 or content.count(capture["NEW"]) != 0:
+    raise SystemExit(f"capture partial fixture unexpectedly contains a complete block in {capture_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -120,7 +131,8 @@ PY
 for patch in \
   "$ROOT/install/persona/patches/command-type-builtins.py" \
   "$ROOT/install/persona/patches/passwd-stdin.py" \
-  "$ROOT/install/persona/patches/exec-emulation.py"; do
+  "$ROOT/install/persona/patches/exec-emulation.py" \
+  "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
     exit 1
@@ -237,6 +249,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_exec" \
     "$ROOT/install/persona/patches/exec-emulation.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "capture" \
+    "$partial_capture" \
+    "$ROOT/install/persona/patches/sftp-capture-permissions.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -251,14 +268,15 @@ fi
 
 # Apply, verify every expected target changed, then prove check mode and normal
 # reapplication leave the complete patch set byte-for-byte unchanged. The list is
-# git-diff --name-only order (alphabetical by path); keep it sorted. Task 3
-# adds back shell/fs.py, Task 4 commands/fs.py.
+# git-diff --name-only order (alphabetical by path); keep it sorted. Task 4
+# adds back commands/fs.py.
 # shell/bashparse.py and shell/honeypot.py left with the patches upstream made
 # redundant.
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
   "src/cowrie/commands/which.py"
+  "src/cowrie/shell/fs.py"
   "src/cowrie/shell/script.py"
 )
 mapfile -t actual_changed < <(git -C "$cowrie" diff --name-only --)
@@ -283,9 +301,9 @@ if [[ "$reapplied_diff_hash" != "$patched_diff_hash" ]]; then
 fi
 git -C "$cowrie" diff --check
 
-# The SFTP capture-permission behaviour test
-# (install/persona/test_capture_permissions.py) runs against the patched
-# shell/fs.py, so it returns with sftp-capture-permissions in Task 3.
+# Run the real pinned, patched SFTP methods against inert local files, including
+# SHA-dedup destinations and publication-time permissions. No Twisted/network.
+python3 "$ROOT/install/persona/test_capture_permissions.py" "$cowrie" -v
 
 # Drift the final target so a sequential check/apply implementation would alter
 # earlier files before discovering incompatibility. The entire working tree
@@ -349,4 +367,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 12 partial-state rejections, idempotence, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 16 partial-state rejections, idempotence, capture behavior, and atomic preflight checks passed"

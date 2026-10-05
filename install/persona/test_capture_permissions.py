@@ -4,12 +4,14 @@
 import ast
 import hashlib
 import os
+import posixpath
 import re
 import stat
 import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,7 +35,13 @@ class CapturePermissionsTests(unittest.TestCase):
                    and node.name in ("open", "close")]
         for method in methods:
             method.name = "sftp_" + method.name
+        # v3.1.1's open() names its temp file with core.artifact's
+        # temp_download_path (a uuid in download_path) and close() logs the
+        # basename through posixpath; both are supplied here as the module has.
         scope = dict(os=os, re=re, stat=stat, time=time, hashlib=hashlib,
+                     posixpath=posixpath,
+                     temp_download_path=lambda prefix: str(
+                         self.downloads / f"{prefix}_{uuid.uuid4().hex}"),
                      CowrieConfig=SimpleNamespace(get=lambda *args: str(self.downloads)))
         exec(compile(ast.Module(body=methods, type_ignores=[]), "cowrie_sftp", "exec"), scope)
         self.open = scope["sftp_open"]
