@@ -9,16 +9,23 @@ from pathlib import Path
 
 
 PATCHES = (
-    "bashparse-subshell-pipe.py",
-    "grep-case-insensitive.py",
-    "honeypot-capture-redirect.py",
+    # Pinned Cowrie is v3.1.1 (install/cowrie.commit). Two former patches are
+    # gone for good because upstream fixed the same faults: the grammar rewrite
+    # in #40611 gave real subshell pipelines (bashparse-subshell-pipe), and
+    # f6f5f9fb routes command-not-found through the shell's stderr, so
+    # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect).
+    #
+    # Temporarily out while they are re-anchored on v3.1.1 (payload-yield
+    # Phase B). Each fails --check on v3.1.1 except command-type-builtins,
+    # which applies cleanly but crashes at runtime: v3.1.1's getCommand() takes
+    # a cwd argument, so `command -v wget` raised TypeError and hung the session.
+    #   - Task 3 restores command-type-builtins.py, exec-emulation.py and
+    #     sftp-capture-permissions.py.
+    #   - Task 4 replaces grep-case-insensitive.py with grep-options.py.
+    #
     # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
     # live log analysis so bots proceed to payload delivery.
-    "command-type-builtins.py",
     "passwd-stdin.py",
-    "exec-emulation.py",
-    # The live daemon uses a separate account with read access via this group.
-    "sftp-capture-permissions.py",
 )
 
 

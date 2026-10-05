@@ -20,7 +20,7 @@ from unittest import mock
 from scripts import shardlure
 
 
-EXPECTED_PIN = "65ded95b2d2b6555be8e4eb95315036a4db361f9"
+EXPECTED_PIN = "c17c9b73d6af0972334ea1e90b20d974cb24eeca"
 
 
 def tailscale_fixture(root: Path) -> tuple[Path, dict[str, str]]:
@@ -117,6 +117,12 @@ class CowriePinTests(unittest.TestCase):
             path = Path(tmp) / "cowrie.commit"
             path.write_text(EXPECTED_PIN + "\n", encoding="utf-8")
             self.assertEqual(read_cowrie_pin(path), EXPECTED_PIN)
+
+    def test_repository_pin_is_the_tested_cowrie_commit(self) -> None:
+        # The persona patches are anchored on exact upstream text, so the
+        # shipped pin must be the commit the patch set was validated against
+        # (v3.1.1). check-cowrie-patches.sh asserts the same value.
+        self.assertEqual(read_cowrie_pin(shardlure.COWRIE_PIN_FILE), EXPECTED_PIN)
 
     def test_read_cowrie_pin_rejects_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

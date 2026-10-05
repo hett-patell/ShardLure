@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXPECTED_PIN="65ded95b2d2b6555be8e4eb95315036a4db361f9"
+# Cowrie v3.1.1 (lightweight tag; `git ls-remote ... refs/tags/v3.1.1`).
+EXPECTED_PIN="c17c9b73d6af0972334ea1e90b20d974cb24eeca"
 PIN_FILE="$ROOT/install/cowrie.commit"
 ORCHESTRATOR="$ROOT/install/persona/apply-patches.py"
 
@@ -26,10 +27,7 @@ fi
 cowrie="$tmp_root/cowrie"
 drifted="$tmp_root/cowrie-drifted"
 args_checkout="$tmp_root/cowrie-args"
-partial_bashparse="$tmp_root/cowrie-partial-bashparse"
-partial_grep="$tmp_root/cowrie-partial-grep"
-partial_honeypot="$tmp_root/cowrie-partial-honeypot"
-partial_capture="$tmp_root/cowrie-partial-capture"
+partial_passwd="$tmp_root/cowrie-partial-passwd"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -40,21 +38,16 @@ if [[ "$(git -C "$cowrie" rev-parse HEAD)" != "$EXPECTED_PIN" ]]; then
 fi
 cp -a "$cowrie" "$drifted"
 cp -a "$cowrie" "$args_checkout"
-cp -a "$cowrie" "$partial_bashparse"
-cp -a "$cowrie" "$partial_grep"
-cp -a "$cowrie" "$partial_honeypot"
-cp -a "$cowrie" "$partial_capture"
+cp -a "$cowrie" "$partial_passwd"
 
-# Build exact incomplete states from the patch scripts' literal blocks:
-# bashparse has NEW1 + OLD2, grep has only its first NEW hunk, and honeypot
-# has the assignment without the complete guarded NEW block. Capture has a
-# chmod at the right location but the wrong permissions.
+# Build an exact incomplete state from the patch script's literal blocks:
+# passwd has the piped-stdin branch without its early return, so neither OLD
+# nor NEW is present. The grep and capture fixtures left with their patches
+# (Task 4 restores a grep-options fixture, Task 3 the capture one); the
+# bashparse and honeypot fixtures went with the patches upstream made redundant.
 python3 - \
   "$ROOT" \
-  "$partial_bashparse/src/cowrie/shell/bashparse.py" \
-  "$partial_grep/src/cowrie/commands/fs.py" \
-  "$partial_honeypot/src/cowrie/shell/honeypot.py" \
-  "$partial_capture/src/cowrie/shell/fs.py" <<'PY'
+  "$partial_passwd/src/cowrie/commands/base.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -83,70 +76,24 @@ def replace_once(path: Path, old: str, new: str, label: str) -> str:
 
 
 root = Path(sys.argv[1])
-bashparse_path = Path(sys.argv[2])
-grep_path = Path(sys.argv[3])
-honeypot_path = Path(sys.argv[4])
-capture_path = Path(sys.argv[5])
+passwd_path = Path(sys.argv[2])
 
-bashparse = string_constants(
-    root / "install/persona/patches/bashparse-subshell-pipe.py"
-)
-content = replace_once(
-    bashparse_path, bashparse["OLD1"], bashparse["NEW1"], "bashparse partial"
-)
-expected = {
-    "OLD1": 0,
-    "NEW1": 1,
-    "OLD2": 1,
-    "NEW2": 0,
-}
-if any(content.count(bashparse[name]) != count for name, count in expected.items()):
-    raise SystemExit(f"bashparse partial fixture has unexpected block counts in {bashparse_path}")
-
-grep = string_constants(root / "install/persona/patches/grep-case-insensitive.py")
-content = replace_once(
-    grep_path, grep["OLD_GREP_APP"], grep["NEW_GREP_APP"], "grep partial"
-)
-expected = {
-    "OLD_GREP_APP": 0,
-    "NEW_GREP_APP": 1,
-    "OLD_START_OPTS": 1,
-    "NEW_START_OPTS": 0,
-    "OLD_START_BEGIN": 1,
-    "NEW_START_BEGIN": 0,
-}
-if any(content.count(grep[name]) != count for name, count in expected.items()):
-    raise SystemExit(f"grep partial fixture has unexpected block counts in {grep_path}")
-
-honeypot = string_constants(
-    root / "install/persona/patches/honeypot-capture-redirect.py"
-)
-guarded_assignment = """\
-                    if self.redirect:
-                        self.protocol.pp = temp_pp
-"""
-unguarded_assignment = "                    self.protocol.pp = temp_pp\n"
-if honeypot["NEW"].count(guarded_assignment) != 1:
-    raise SystemExit("honeypot NEW block does not contain the expected guarded assignment")
-partial = honeypot["NEW"].replace(guarded_assignment, unguarded_assignment, 1)
-content = replace_once(honeypot_path, honeypot["OLD"], partial, "honeypot partial")
-if content.count(honeypot["OLD"]) != 0 or content.count(honeypot["NEW"]) != 0:
-    raise SystemExit(f"honeypot partial fixture unexpectedly contains a complete block in {honeypot_path}")
-
-capture = string_constants(root / "install/persona/patches/sftp-capture-permissions.py")
-partial = capture["NEW"].replace("os.chmod(shasumfile, 0o640)", "os.chmod(shasumfile, 0o600)")
-content = replace_once(capture_path, capture["OLD"], partial, "capture partial")
-if content.count(capture["OLD"]) != 0 or content.count(capture["NEW"]) != 0:
-    raise SystemExit(f"capture partial fixture unexpectedly contains a complete block in {capture_path}")
+passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
+early_return = "            return\n"
+if passwd["NEW"].count(early_return) != 1:
+    raise SystemExit("passwd NEW block does not contain the expected early return")
+partial = passwd["NEW"].replace(early_return, "", 1)
+content = replace_once(passwd_path, passwd["OLD"], partial, "passwd partial")
+if content.count(passwd["OLD"]) != 0 or content.count(passwd["NEW"]) != 0:
+    raise SystemExit(f"passwd partial fixture unexpectedly contains a complete block in {passwd_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
 # silently applying a patch under a misspelled mode flag.
+# Only the patches active on the pin are listed (see PATCHES in
+# apply-patches.py); Tasks 3-4 of payload-yield Phase B add the ported ones back.
 for patch in \
-  "$ROOT/install/persona/patches/bashparse-subshell-pipe.py" \
-  "$ROOT/install/persona/patches/grep-case-insensitive.py" \
-  "$ROOT/install/persona/patches/honeypot-capture-redirect.py" \
-  "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
+  "$ROOT/install/persona/patches/passwd-stdin.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
     exit 1
@@ -158,8 +105,8 @@ if python3 "$ORCHESTRATOR" "$cowrie" --unexpected; then
 fi
 
 # Every partial state must fail both the individual script and the orchestrator
-# in check and apply modes. Each invocation gets its own checkout so all sixteen
-# paths run even if a broken apply path mutates its fixture.
+# in check and apply modes. Each invocation gets its own checkout so every
+# path runs even if a broken apply path mutates its fixture.
 working_tree_hash() {
   python3 - "$1" <<'PY'
 import hashlib
@@ -249,24 +196,9 @@ assert_partial_rejected_unchanged() {
 
 for mode in individual-check individual-apply orchestrator-check orchestrator-apply; do
   assert_partial_rejected_unchanged \
-    "bashparse" \
-    "$partial_bashparse" \
-    "$ROOT/install/persona/patches/bashparse-subshell-pipe.py" \
-    "$mode"
-  assert_partial_rejected_unchanged \
-    "grep" \
-    "$partial_grep" \
-    "$ROOT/install/persona/patches/grep-case-insensitive.py" \
-    "$mode"
-  assert_partial_rejected_unchanged \
-    "honeypot" \
-    "$partial_honeypot" \
-    "$ROOT/install/persona/patches/honeypot-capture-redirect.py" \
-    "$mode"
-  assert_partial_rejected_unchanged \
-    "capture" \
-    "$partial_capture" \
-    "$ROOT/install/persona/patches/sftp-capture-permissions.py" \
+    "passwd" \
+    "$partial_passwd" \
+    "$ROOT/install/persona/patches/passwd-stdin.py" \
     "$mode"
 done
 if ((partial_failures != 0)); then
@@ -282,17 +214,13 @@ fi
 
 # Apply, verify every expected target changed, then prove check mode and normal
 # reapplication leave the complete patch set byte-for-byte unchanged. The list is
-# git-diff --name-only order (alphabetical by path); keep it sorted. The stealth
-# patches (2026-08-13) added base.py/which.py/script.py to the original three.
+# git-diff --name-only order (alphabetical by path); keep it sorted. On v3.1.1
+# only passwd-stdin is active: Task 3 adds back commands/which.py, shell/fs.py
+# and shell/script.py, Task 4 commands/fs.py. shell/bashparse.py and
+# shell/honeypot.py left with the patches upstream made redundant.
 python3 "$ORCHESTRATOR" "$cowrie"
 expected_changed=(
   "src/cowrie/commands/base.py"
-  "src/cowrie/commands/fs.py"
-  "src/cowrie/commands/which.py"
-  "src/cowrie/shell/bashparse.py"
-  "src/cowrie/shell/fs.py"
-  "src/cowrie/shell/honeypot.py"
-  "src/cowrie/shell/script.py"
 )
 mapfile -t actual_changed < <(git -C "$cowrie" diff --name-only --)
 if [[ "${actual_changed[*]}" != "${expected_changed[*]}" ]]; then
@@ -316,20 +244,22 @@ if [[ "$reapplied_diff_hash" != "$patched_diff_hash" ]]; then
 fi
 git -C "$cowrie" diff --check
 
-# Run the real pinned, patched SFTP methods against inert local files, including
-# SHA-dedup destinations and publication-time permissions. No Twisted/network.
-python3 "$ROOT/install/persona/test_capture_permissions.py" "$cowrie" -v
+# The SFTP capture-permission behaviour test
+# (install/persona/test_capture_permissions.py) runs against the patched
+# shell/fs.py, so it returns with sftp-capture-permissions in Task 3.
 
 # Drift the final target so a sequential check/apply implementation would alter
 # earlier files before discovering incompatibility. The entire working tree
 # must remain identical after the orchestrator's failed all-patch preflight.
-python3 - "$drifted/src/cowrie/shell/fs.py" <<'PY'
+# With passwd-stdin the only active patch the final target is its anchor; move
+# this back to the last patch in PATCHES when Tasks 3-4 restore the others.
+python3 - "$drifted/src/cowrie/commands/base.py" <<'PY'
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 content = path.read_text(encoding="utf-8")
-old = "                os.rename(self.tempfiles[fd], shasumfile)"
+old = '        self.write("Enter new UNIX password: ")\n        self.protocol.password_input = True'
 new = old + "  # intentional compatibility drift"
 if content.count(old) != 1:
     raise SystemExit(f"cannot create deterministic drift in {path}")
@@ -347,4 +277,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 16 partial-state rejections, idempotence, capture behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 4 partial-state rejections, idempotence, and atomic preflight checks passed"
