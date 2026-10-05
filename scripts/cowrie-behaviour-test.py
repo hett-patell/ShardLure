@@ -33,7 +33,8 @@ honeypot, and each is checked against the persona clock, not just its shape.
 "now" is the case's run window in --tz (Cowrie's persona cfg sets UTC); boot
 is now minus {{UPTIME_SECS}} when the case prints it, else now minus the
 anchor (+ slack).
-  {{UPTIME_SECS}}   /proc/uptime seconds, anchor <= v <= anchor + slack
+  {{UPTIME_SECS}}   /proc/uptime seconds, anchor <= v <= anchor + slack, or
+                    anchor + age +- 900 s with --cowrie-age
   {{IDLE_SECS}}     /proc/uptime idle seconds (shape only)
   {{UPTIME_HUMAN}}  procps "up N days,  H:MM" / "up N days, M min", same bound
   {{NOW_HMS}}       uptime/w clock, within 2 min of now
@@ -60,6 +61,15 @@ this CLI needs a live Cowrie.
 Usage:
   cowrie-behaviour-test.py --host 127.0.0.1 --port 2299 \\
       --password-from etc/userdb.txt [--only profiler|probes]
+
+A freshly started rehearsal uses the default one-sided window (anchor + 6 h).
+Against a long-running Cowrie (production, loopback only) pass its process age,
+read timezone-free from ps (systemd timestamps print in the host's local zone):
+  pid=$(systemctl show -P MainPID cowrie)    # confirm it is twistd, not authbind
+  age=$(ps -o etimes= -p "$pid" | tr -d ' ')
+  cowrie-behaviour-test.py --host 127.0.0.1 --port 22 \\
+      --password-from /var/lib/shardlure/cowrie/etc/userdb.txt \\
+      --cowrie-age "$age" --tz UTC
 Exit 0 when every case matches, else 1 with a unified diff per failing case.
 """
 from __future__ import annotations
@@ -89,6 +99,13 @@ UPTIME_ANCHOR = 42 * 86400 + 3 * 3600 + 17 * 60  # 3640620
 # (review I-2: without a bound, ~54% of random draws passed). Checking a
 # long-running production Cowrie needs an explicit --uptime-slack.
 DEFAULT_UPTIME_SLACK = 6 * 3600
+
+# Production: uptime = boot_offset + the Cowrie process age, so with
+# --cowrie-age the window is two-sided, anchor + age +- this margin. A one-sided
+# [anchor, anchor + age] let a forgotten (random 1-90 d) boot_offset pass ~34%
+# of the time at a 30 d process age. 900 s covers the run itself (35 cases at
+# up to 10-20 s each) plus the delay between reading the age and connecting.
+COWRIE_AGE_MARGIN = 900
 
 NOW_TOLERANCE = 120        # uptime/w HH:MM:SS vs the run window
 BOOT_TOLERANCE = 60        # last's boot stamps vs now - uptime
@@ -147,6 +164,21 @@ class Clock:
     end: datetime
     uptime_slack: float = DEFAULT_UPTIME_SLACK
     tz: tzinfo = timezone.utc
+    cowrie_age: float | None = None
+
+    def uptime_window(self) -> tuple[float, float]:
+        """Allowed /proc/uptime seconds: rehearsal one-sided, production two-sided."""
+        if self.cowrie_age is None:
+            return UPTIME_ANCHOR, UPTIME_ANCHOR + self.uptime_slack
+        mid = UPTIME_ANCHOR + self.cowrie_age
+        return mid - COWRIE_AGE_MARGIN, mid + COWRIE_AGE_MARGIN
+
+    def describe_window(self) -> str:
+        lo, hi = self.uptime_window()
+        if self.cowrie_age is None:
+            return f"{lo:.0f}..{hi:.0f}s (42d 3h17m + {self.uptime_slack:.0f}s slack)"
+        return (f"{lo:.0f}..{hi:.0f}s (42d 3h17m + cowrie age {self.cowrie_age:.0f}s"
+                f" +-{COWRIE_AGE_MARGIN}s)")
 
     def local(self, dt: datetime) -> datetime:
         return dt.astimezone(self.tz).replace(tzinfo=None)
@@ -217,6 +249,14 @@ def _human_seconds(text: str) -> int:
     return days + int(m.group(2)) * 3600 + int(m.group(3)) * 60
 
 
+def _format_human(seconds: float) -> str:
+    """procps 3.3.17's "up ..." for an uptime (days > 0)."""
+    s = int(seconds)
+    days, hours, mins = s // 86400, s % 86400 // 3600, s % 3600 // 60
+    tail = f"{hours:2d}:{mins:02d}" if hours else f"{mins} min"
+    return f"up {days} day{'s' if days != 1 else ''}, {tail}"
+
+
 def _resolve_date(text: str, fmt: str, now: datetime) -> tuple[datetime | None, str | None]:
     """Parse a yearless last(1) stamp as its latest occurrence not after now.
 
@@ -259,7 +299,7 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                   exp: Expected, clock: Clock) -> dict[int, list[str]]:
     """Relational checks over every matched token. Returns {line: problems}."""
     start, end = clock.local(clock.start), clock.local(clock.end)
-    anchor, slack = UPTIME_ANCHOR, clock.uptime_slack
+    up_lo, up_hi = clock.uptime_window()
     bad: dict[int, list[str]] = {}
 
     def flag(i: int, msg: str) -> None:
@@ -267,9 +307,9 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
 
     uptimes = [(i, float(v)) for i, _, vals in lines for t, v in vals if t == "UPTIME_SECS"]
     for i, u in uptimes:
-        if not anchor <= u <= anchor + slack:
-            flag(i, f"uptime {u:.2f}s is not on the persona anchor: want {anchor}"
-                    f"..{anchor + slack:.0f}s (42d 3h17m + {slack:.0f}s slack)")
+        if not up_lo <= u <= up_hi:
+            flag(i, f"uptime {u:.2f}s is not on the persona anchor: want"
+                    f" {clock.describe_window()}")
     if exp.advances and len(uptimes) > 1:
         lo, hi = exp.advances
         for (_, a), (i, b) in zip(uptimes, uptimes[1:]):
@@ -281,8 +321,8 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
         u = uptimes[0][1]
         boot_lo, boot_hi = start - timedelta(seconds=u), end - timedelta(seconds=u)
     else:
-        boot_lo = start - timedelta(seconds=anchor + slack)
-        boot_hi = end - timedelta(seconds=anchor)
+        boot_lo = start - timedelta(seconds=up_hi)
+        boot_hi = end - timedelta(seconds=up_lo)
 
     order: list[tuple[int, datetime]] = []
     for i, text, vals in lines:
@@ -290,9 +330,10 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
         for tok, val in vals:
             if tok == "UPTIME_HUMAN":
                 h = _human_seconds(val)
-                if not anchor <= h <= anchor + slack:
-                    flag(i, f"'{val}' is not on the persona anchor (up 42 days,  3:17"
-                            f" + {slack:.0f}s slack)")
+                # procps truncates to the minute.
+                if not up_lo - 60 < h <= up_hi:
+                    flag(i, f"'{val}' is not on the persona anchor: want"
+                            f" {clock.describe_window()}")
             elif tok == "NOW_HMS":
                 t = datetime.strptime(val, "%H:%M:%S")
                 d = min(_tod_distance(t, start), _tod_distance(t, end))
@@ -332,15 +373,15 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                 if out > end:
                     flag(i, f"logout {out:%H:%M} is after now")
             elif tok == "BOOT_FULL":
-                dt, problem = _resolve_date(val[:-5].rstrip(), "%a %b %d %H:%M:%S", end)
-                if dt is not None:
-                    dt = dt.replace(year=int(val[-4:]))
-                    if dt.strftime("%a") != val[:3]:
-                        problem = f"weekday in '{val}' does not match its date ({dt:%a})"
-                if problem:
-                    flag(i, problem)
-                if dt is None:
+                # The stamp carries its year: parse it whole. A malformed one
+                # (Feb 29 of a non-leap year) fails this case, not the run.
+                try:
+                    dt = datetime.strptime(val, "%a %b %d %H:%M:%S %Y")
+                except ValueError:
+                    flag(i, f"wtmp begins '{val}' is an invalid date")
                     continue
+                if dt.strftime("%a") != val[:3]:
+                    flag(i, f"weekday in '{val}' does not match its date ({dt:%a})")
                 if not boot_lo - timedelta(seconds=BOOT_TOLERANCE) <= dt <= \
                         boot_hi + timedelta(seconds=BOOT_TOLERANCE):
                     flag(i, f"wtmp begins '{val}' is not boot (now - uptime ="
@@ -603,6 +644,10 @@ def main(argv: list[str] | None = None, runner=None) -> int:
                     metavar="SECONDS",
                     help="allowed uptime past the 42d 3h17m anchor (default 6 h, for a"
                          " freshly started rehearsal; a long-running Cowrie needs more)")
+    ap.add_argument("--cowrie-age", type=float, metavar="SECONDS",
+                    help="the Cowrie process age; makes the uptime window two-sided"
+                         f" (anchor + age +-{COWRIE_AGE_MARGIN}s). Use it against a"
+                         " long-running Cowrie, e.g. production (see the docstring)")
     ap.add_argument("--tz", default="UTC",
                     help="timezone Cowrie renders times in (persona cfg: UTC)")
     ap.add_argument("--cases-dir", type=Path, default=DEFAULT_CASES_DIR)
@@ -615,6 +660,8 @@ def main(argv: list[str] | None = None, runner=None) -> int:
 
     if args.uptime_slack < 0:
         raise SystemExit("--uptime-slack must be >= 0")
+    if args.cowrie_age is not None and args.cowrie_age < 0:
+        raise SystemExit("--cowrie-age must be >= 0")
     try:
         tz = timezone.utc if args.tz == "UTC" else ZoneInfo(args.tz)
     except (ZoneInfoNotFoundError, ValueError):
@@ -643,7 +690,8 @@ def main(argv: list[str] | None = None, runner=None) -> int:
         started = datetime.now(timezone.utc)
         run = runner(command, args.timeout)
         clock = Clock(start=started, end=datetime.now(timezone.utc),
-                      uptime_slack=args.uptime_slack, tz=tz)
+                      uptime_slack=args.uptime_slack, tz=tz,
+                      cowrie_age=args.cowrie_age)
         res = compare(name, exp, run.output, run.rc, run.timed_out, clock, run.note)
         if res.ok:
             passed += 1

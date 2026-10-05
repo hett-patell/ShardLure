@@ -40,9 +40,9 @@ REF_NOW = datetime(2026, 10, 5, 9, 9, 26, tzinfo=timezone.utc)
 NOW = datetime(2026, 10, 5, 9, 0, 0, tzinfo=timezone.utc)
 
 
-def clock(now=NOW, run_seconds=0.0, slack=cbt.DEFAULT_UPTIME_SLACK):
+def clock(now=NOW, run_seconds=0.0, slack=cbt.DEFAULT_UPTIME_SLACK, age=None):
     return cbt.Clock(start=now, end=now + timedelta(seconds=run_seconds),
-                     uptime_slack=slack)
+                     uptime_slack=slack, cowrie_age=age)
 
 
 def check(template: str, actual: str, rc: int = 0, timed_out: bool = False, clk=None):
@@ -55,10 +55,25 @@ def persona(now=NOW) -> dict:
     return gtp.build(now.replace(tzinfo=None))
 
 
+def persona_last(now=NOW, uptime=ANCHOR) -> str:
+    """last(1) as a correct honeypot prints it: sessions anchored to now (the
+    persona's offsets), the reboot row and "wtmp begins" at now - uptime."""
+    rows = persona(now)["share/cowrie/txtcmds/usr/bin/last"].split("\n")
+    boot = now - timedelta(seconds=uptime)
+    out = []
+    for row in rows:
+        if row.startswith("reboot"):
+            row = row[:39] + f"{boot:%a %b %e %H:%M}" + row[55:]
+        elif row.startswith("wtmp begins"):
+            row = f"wtmp begins {boot:%a %b %e %H:%M:%S %Y}"
+        out.append(row)
+    return "\n".join(out)
+
+
 def profiler_output(now=NOW, uptime=ANCHOR + 12.34, last=None) -> str:
     idle = uptime * 3.88
     if last is None:
-        last = persona(now - timedelta(seconds=uptime - ANCHOR))["share/cowrie/txtcmds/usr/bin/last"]
+        last = persona_last(now, uptime)
     return (
         "UNAME:Linux prod-app-server-01 #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024 x86_64\n"
         "ARCH:x86_64\n"
@@ -138,6 +153,46 @@ class UptimeBoundsTest(unittest.TestCase):
     def test_bad_advances_directive(self):
         with self.assertRaises(ValueError):
             cbt.parse_expected("#harness: advances=6..1\nx\n")
+
+
+class CowrieAgeWindowTest(unittest.TestCase):
+    """--cowrie-age: production uptime = boot_offset + process age, two-sided."""
+    AGE = 30 * 86400
+
+    def test_correct_age_passes(self):
+        clk = clock(age=self.AGE)
+        for u in (ANCHOR + self.AGE, ANCHOR + self.AGE + 600, ANCHOR + self.AGE - 600):
+            with self.subTest(u=u):
+                self.assertTrue(check(UPTIME_TPL, f"UPTIME:{u:.2f} 1.00\n", clk=clk).ok)
+
+    def test_random_boot_offset_fails(self):
+        # Review re-round: a forgotten boot_offset (random 1-90 d) plus a 30 d
+        # process age used to fit [anchor, anchor + age] about 34% of the time.
+        clk = clock(age=self.AGE)
+        for offset_days in (12, 20, 41, 42.2, 60, 89):
+            u = offset_days * 86400 + self.AGE
+            with self.subTest(offset_days=offset_days):
+                res = check(UPTIME_TPL, f"UPTIME:{u:.2f} 1.00\n", clk=clk)
+                self.assertFalse(res.ok)
+                self.assertTrue(any("anchor" in m for m in res.messages), res.messages)
+
+    def test_margin_is_900_seconds_each_side(self):
+        clk = clock(age=self.AGE)
+        base = ANCHOR + self.AGE
+        self.assertTrue(check(UPTIME_TPL, f"UPTIME:{base + 900:.2f} 1.00\n", clk=clk).ok)
+        self.assertFalse(check(UPTIME_TPL, f"UPTIME:{base + 901:.2f} 1.00\n", clk=clk).ok)
+        self.assertFalse(check(UPTIME_TPL, f"UPTIME:{base - 901:.2f} 1.00\n", clk=clk).ok)
+
+    def test_human_uptime_uses_the_same_window(self):
+        clk = clock(age=self.AGE)
+        good = cbt._format_human(ANCHOR + self.AGE)
+        self.assertTrue(check(HUMAN_TPL, uptime_line(human=good), clk=clk).ok)
+        self.assertFalse(check(HUMAN_TPL, uptime_line(), clk=clk).ok)
+
+    def test_profiler_with_age_passes(self):
+        u = ANCHOR + self.AGE + 12.34
+        res = profiler_check(profiler_output(uptime=u), clock(age=self.AGE))
+        self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
 
 
 class HumanUptimeTest(unittest.TestCase):
@@ -239,6 +294,15 @@ class LastAgainstPersonaClockTest(unittest.TestCase):
                 + f"\nwtmp begins {boot:%a %b %e %H:%M:%S %Y}\n")
         res = profiler_check(profiler_output(last=last))
         self.assertFalse(res.ok)
+
+    def test_malformed_feb_29_fails_the_case_without_crashing(self):
+        # Review m-1: "Feb 29" in a non-leap year raised from dt.replace().
+        last = persona()["share/cowrie/txtcmds/usr/bin/last"]
+        head, _, _ = last.rpartition("wtmp begins ")
+        bad = head + "wtmp begins Tue Feb 29 05:43:00 2027\n"
+        res = profiler_check(profiler_output(last=bad))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("invalid date" in m for m in res.messages), res.messages)
 
     def test_reboot_not_at_now_minus_uptime_is_rejected(self):
         last = persona(NOW - timedelta(days=3))["share/cowrie/txtcmds/usr/bin/last"]
@@ -510,6 +574,15 @@ class MainExitCodeTest(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         rc, out, _ = self.run_main(answers, ["--only", "probes", "--uptime-slack", "100000"])
         self.assertEqual(rc, 0, out)
+
+    def test_cowrie_age_flag_reaches_the_comparison(self):
+        (self.root / "probes.txt").write_text("up\tcat /proc/uptime\n")
+        (self.root / "expected" / "up.out").write_text("{{UPTIME_SECS}} {{IDLE_SECS}}\n")
+        answers = {"cat /proc/uptime": cbt.RunResult(f"{ANCHOR + 86400:.2f} 1.00\n", 0, False)}
+        rc, out, _ = self.run_main(answers, ["--only", "probes", "--cowrie-age", "86400"])
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.run_main(answers, ["--only", "probes", "--cowrie-age", "3600"])
+        self.assertEqual(rc, 1, out)
 
     def test_missing_expected_file_fails(self):
         (self.root / "expected" / "who-am-i.out").unlink()
