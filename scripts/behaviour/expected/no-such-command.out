@@ -1,0 +1,2 @@
+#harness: rc=127
+bash: line 1: xyzabc987_no_such_command: command not found

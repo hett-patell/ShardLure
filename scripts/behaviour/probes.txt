@@ -1,0 +1,40 @@
+# Detection probes seen on prod (factsheet-phaseB 3, last 30 days, ranked by
+# sessions), verbatim. Format: <case-name><TAB><command>; the expected
+# stdout+stderr lives in expected/<case-name>.out ("real 22.04 + persona").
+# Each runs on its own exec channel, as sshd would hand it to "bash -c".
+# Probes with no planned Phase B fix carry a "#harness: skip=" directive in
+# their expected file rather than being dropped, so the gap stays visible.
+uname-srvm	uname -s -v -n -r -m
+uname-a	uname -a
+uname-a-vt	uname -a ; echo 'vT'
+bin-dot-uname	/bin/./uname -s -v -n -r -m
+hostname	hostname
+hostname-id-whoami	hostname; id; whoami
+echo-shell-test	echo SHELL_TEST
+command-v-curl-gate	if ! command -v curl &> /dev/null; then apt-get update -y && apt-get install -y curl || yum install -y curl; fi
+command-v-python3-gate	command -v python3 >/dev/null 2>&1 || (apt-get update -y && apt-get install -y python3) || yum install -y python3
+which-or-command-v	which wget curl 2>/dev/null || command -v wget curl 2>/dev/null
+echo-e-auth-ok	echo -e "\x61\x75\x74\x68\x5F\x6F\x6B\x0A"
+whoami	whoami
+id	id
+cpuinfo-name-count	cat /proc/cpuinfo | grep name | wc -l
+cpuinfo-model-name-count	cat /proc/cpuinfo | grep model | grep name | wc -l
+free-m-awk	free -m | grep Mem | awk '{print $2 ,$3, $4, $5, $6, $7}'
+cpuinfo-name-awk	cat /proc/cpuinfo | grep name | head -n 1 | awk '{print $4,$5,$6,$7,$8,$9;}'
+ls-which-ls	ls -lh $(which ls)
+crontab-l	crontab -l
+w	w
+uptime	uptime
+lscpu-model	lscpu | grep Model
+df-h-awk	df -h | head -n 2 | awk 'FNR == 2 {print $2;}'
+ifconfig	ifconfig
+ps-grep-miner	ps | grep '[Mm]iner'
+ps-ef-grep-miner	ps -ef | grep '[Mm]iner'
+mikrotik-ip-cloud	/ip cloud print
+echo-cat-n	echo Hi | cat -n
+param-expansion-c1	c1=$(uname -s -v -n -r 2>/dev/null); c1=${c1:-Unknown}; c2=$(grep "model name" /proc/cpuinfo 2>/dev/null | cut -d ' ' -f3- | awk '{print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10}' | head -1); c2=${c2:-Unknown}; c3=$(nproc --all 2>/dev/null); c3=${c3:-Unknown}; echo "$c1|$c2|$c3"
+no-such-command	xyzabc987_no_such_command
+var-assign-echo	X_ABC=val987; echo $X_ABC
+os-release-pretty	cat /etc/os-release | grep 'PRETTY_NAME'
+cat-os-release	cat /etc/os-release
+proc-uptime-advances	cat /proc/uptime; sleep 2; cat /proc/uptime

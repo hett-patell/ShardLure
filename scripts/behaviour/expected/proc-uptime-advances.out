@@ -1,0 +1,3 @@
+#harness: advances
+{{UPTIME_SECS}} {{IDLE_SECS}}
+{{UPTIME_SECS}} {{IDLE_SECS}}

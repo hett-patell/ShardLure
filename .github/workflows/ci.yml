@@ -34,6 +34,9 @@ jobs:
       - name: Test installer filesystem and SSH transactions
         run: python3 -m unittest scripts/test_installer_safety.py scripts/test_ssh_transition.py -v
 
+      - name: Test Cowrie behavioural harness logic
+        run: python3 -m unittest scripts/test_cowrie_behaviour.py -v
+
       - name: Test Cowrie patch compatibility
         run: bash scripts/check-cowrie-patches.sh
 

@@ -1,0 +1,3 @@
+ {{HH:MM:SS}} {{UPTIME_HUMAN}},  1 user,  load average: 0.38, 0.42, 0.45
+USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT
+ubuntu   pts/0    10.0.0.8         {{HH:MM}}    0.00s  0.04s  0.00s w
