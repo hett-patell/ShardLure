@@ -141,6 +141,31 @@ class ReleaseContractTests(unittest.TestCase):
                 self.assertIn(f'"$ROOT/install/persona/patches/{name}"', check_script,
                               "every active patch must be in check-cowrie-patches.sh's arg loop")
 
+    def test_every_shipped_patch_is_active(self) -> None:
+        # A patch file left out of PATCHES is never applied, yet it still ships
+        # and reads as live hardening (grep-case-insensitive sat parked like
+        # that from Task 2 until Task 4 replaced it with grep-options). Each
+        # active patch also needs the OLD constant check-cowrie-patches.sh's
+        # drift fixture reads.
+        import ast  # noqa: PLC0415
+
+        tree = ast.parse((ROOT / "install/persona/apply-patches.py").read_text())
+        patches = next(
+            ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "PATCHES"
+        )
+        shipped = sorted(p.name for p in (ROOT / "install/persona/patches").glob("*.py"))
+        self.assertEqual(sorted(patches), shipped)
+        self.assertEqual(len(set(patches)), len(patches))
+        for name in patches:
+            with self.subTest(patch=name):
+                body = ast.parse((ROOT / "install/persona/patches" / name).read_text()).body
+                names = {n.targets[0].id for n in body if isinstance(n, ast.Assign)
+                         and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+                self.assertIn("OLD", names)
+                self.assertIn("NEW", names)
+
     def test_installer_rejects_incompatible_capture_code_without_modifying_it(self) -> None:
         patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,9 +15,6 @@ PATCHES = (
     # f6f5f9fb routes command-not-found through the shell's stderr, so
     # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect).
     #
-    # Temporarily out while it is re-anchored on v3.1.1 (payload-yield
-    # Phase B): Task 4 replaces grep-case-insensitive.py with grep-options.py.
-    #
     # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
     # live log analysis so bots proceed to payload delivery.
     # command-type-builtins is re-anchored on v3.1.1's getCommand(cmd, paths,
@@ -38,6 +35,10 @@ PATCHES = (
     # GNU ls -l dates: v3.1.1 prints the --time-style=long-iso form, a tell on
     # any `ls -l`, including a dropper listing the file it just uploaded.
     "ls-date-format.py",
+    # Persona commands (payload-yield Phase B). grep honours -i -q -c -v -l -o
+    # and GNU's exit status (supersedes grep-case-insensitive, whose anchor
+    # v3.1.1 refactored away): the profiler's `lspci | grep -i vga` GPU probe.
+    "grep-options.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
