@@ -64,3 +64,11 @@ scp-cross-channel-dir	ls -l /tmp/hw; /tmp/hw; echo rc=$?
 # finalises the redirection must leave the node readable (connection-shared-fs
 # re-points it; it used to hang the session with FileNotFoundError).
 redirect-cross-channel	cat /tmp/m; echo more >> /tmp/m; cat /tmp/m
+# Concurrent channels on one connection (Task 3b review). I-1: a redirection
+# into a file whose SFTP upload is still open must neither truncate nor
+# rename the upload's temp file; the upload must still close and be captured
+# byte for byte (needs --downloads-dir). I-2: /proc/uptime must keep working
+# on a channel after a later-opened channel closes (the persona value itself
+# is proc-uptime-advances' job).
+sftp-inflight-redirect	echo X > /tmp/up; echo rc=$?
+proc-uptime-overlap	sleep 2; cat /proc/uptime | wc -w

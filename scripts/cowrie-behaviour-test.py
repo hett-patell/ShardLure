@@ -51,6 +51,24 @@ line:
                             in order), then the case on the next channel; same
                             paramiko requirement. Pins state that must outlive
                             a channel, e.g. a redirected file.
+  #harness: sftp-during=PATH
+                            open an SFTP upload of --upload-source (plus 16
+                            random bytes, so its sha256 is new) to PATH on the
+                            same connection, write half, run the case on an
+                            exec channel, then finish and close the upload.
+                            The close must succeed and, with --downloads-dir
+                            (required), Cowrie's download dir must hold
+                            <sha256> with exactly the uploaded bytes: a shell
+                            redirection into an in-flight upload must not
+                            truncate or rename its temp file (Task 3b I-1).
+  #harness: overlap=COMMAND run the case on channel A; while A runs, open
+                            channel B on the same connection, run COMMAND to
+                            completion and close it, then drain A. State
+                            bound to the last-opened channel shows up here
+                            (Task 3b I-2: /proc/uptime). Use a case that
+                            sleeps before it reads.
+                            sftp-during and overlap combine with no other
+                            channel directive; both need paramiko.
   {{UPLOAD_SIZE}}           in a case with either upload directive: the byte
                             size of --upload-source, substituted literally
 
@@ -104,6 +122,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import os
 import re
 import shutil
@@ -181,6 +200,8 @@ class Expected:
     scp_stdin: str | None = None
     upload_channel: tuple[str, str] | None = None
     before: list[str] = field(default_factory=list)
+    sftp_during: str | None = None
+    overlap: str | None = None
 
 
 @dataclass
@@ -260,12 +281,25 @@ def parse_expected(text: str) -> Expected:
             if not command:
                 raise ValueError(f"empty before directive: {lines[i]!r}")
             exp.before.append(command)
+        elif body.startswith("sftp-during="):
+            path = body[12:].strip()
+            if not path.startswith("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", path):
+                raise ValueError(f"bad sftp-during directive (want an absolute path): {lines[i]!r}")
+            exp.sftp_during = path
+        elif body.startswith("overlap="):
+            command = body[8:].strip()
+            if not command:
+                raise ValueError(f"empty overlap directive: {lines[i]!r}")
+            exp.overlap = command
         else:
             raise ValueError(f"unknown harness directive: {lines[i]!r}")
         i += 1
     exp.content = "\n".join(lines[i:])
     if exp.scp_stdin and exp.upload_channel:
         raise ValueError("scp-stdin and upload-channel are exclusive")
+    others = bool(exp.scp_stdin or exp.upload_channel or exp.before)
+    if (exp.sftp_during or exp.overlap) and (others or (exp.sftp_during and exp.overlap)):
+        raise ValueError("sftp-during and overlap combine with no other channel directive")
     for tok in _TOKEN_RE.findall(exp.content):
         if tok == UPLOAD_SIZE[2:-2]:
             if not (exp.scp_stdin or exp.upload_channel):
@@ -609,6 +643,11 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception,
     exception is therefore not a failure; whatever the channel buffered is
     the result.
     """
+    return drain_channel(chan, deadline, start_exec(chan, command, closed_exc, stdin))
+
+
+def start_exec(chan, command: str, closed_exc=Exception, stdin: bytes | None = None) -> bool:
+    """Send the exec request (and stdin, then EOF). True if it went unacked."""
     unacked = False
     try:
         chan.exec_command(command)
@@ -617,6 +656,11 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception,
     if stdin is not None and not unacked:
         chan.sendall(stdin)
         chan.shutdown_write()
+    return unacked
+
+
+def drain_channel(chan, deadline: float, unacked: bool = False) -> RunResult:
+    """Collect a started channel's output and exit status (see exec_on_channel)."""
     out, err = bytearray(), bytearray()
     while True:
         while chan.recv_ready():
@@ -655,6 +699,58 @@ def exec_sequence(open_channel, steps, deadline: float, closed_exc=Exception) ->
     return exec_on_channel(open_channel(), command, deadline, closed_exc, stdin)
 
 
+def exec_overlapped(open_channel, command: str, overlap: str, deadline: float,
+                    closed_exc=Exception) -> RunResult:
+    """The case on channel A, with channel B opened, run and closed meanwhile."""
+    chan_a = open_channel()
+    unacked = start_exec(chan_a, command, closed_exc)
+    res_b = exec_on_channel(open_channel(), overlap, deadline, closed_exc)
+    if res_b.timed_out or res_b.rc != 0:
+        why = "hung" if res_b.timed_out else f"exit status {res_b.rc}"
+        return RunResult(res_b.output, None, res_b.timed_out,
+                         f"overlapping channel (`{overlap}`) failed: {why}")
+    return drain_channel(chan_a, deadline, unacked)
+
+
+def exec_during_sftp(open_sftp, path: str, data: bytes, run_case) -> RunResult:
+    """Run the case while an SFTP upload of `data` to `path` is half written."""
+    sftp = open_sftp()
+    try:
+        handle = sftp.open(path, "wb")
+        half = len(data) // 2
+        handle.write(data[:half])
+        handle.flush()
+        res = run_case()
+        try:
+            handle.write(data[half:])
+            handle.close()
+        except Exception as exc:  # noqa: BLE001 - a failed upload is the result
+            return RunResult(res.output, None, res.timed_out,
+                             f"SFTP upload to {path} failed after the case ran:"
+                             f" {type(exc).__name__}: {exc}")
+        return res
+    finally:
+        try:
+            sftp.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def check_capture(downloads_dir: Path | None, data: bytes) -> str:
+    """'' if Cowrie's download dir holds <sha256(data)> with exactly `data`."""
+    if downloads_dir is None:
+        return "this case checks the capture and needs --downloads-dir"
+    sha = hashlib.sha256(data).hexdigest()
+    path = downloads_dir / sha
+    try:
+        got = path.read_bytes()
+    except OSError as exc:
+        return f"upload not captured as {path}: {exc.strerror or exc}"
+    if hashlib.sha256(got).hexdigest() != sha:
+        return f"capture {path} does not hash to its name ({len(got)} bytes)"
+    return ""
+
+
 def scp_record(name: str, data: bytes) -> bytes:
     """One legacy scp upload as the client sends it to `scp -t`: a C-record
     header, the bytes, and the NUL that ends them."""
@@ -665,7 +761,9 @@ def paramiko_runner(host: str, port: int, user: str, password: str):
     import paramiko  # noqa: PLC0415 - optional dependency
 
     def run(command: str, timeout: float, stdin: bytes | None = None,
-            before: list[tuple[str, bytes | None]] | None = None) -> RunResult:
+            before: list[tuple[str, bytes | None]] | None = None,
+            sftp_during: tuple[str, bytes] | None = None,
+            overlap: str | None = None) -> RunResult:
         deadline = time.monotonic() + timeout
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -674,9 +772,21 @@ def paramiko_runner(host: str, port: int, user: str, password: str):
                            look_for_keys=False, allow_agent=False, timeout=timeout,
                            banner_timeout=timeout, auth_timeout=timeout)
             transport = client.get_transport()
-            return exec_sequence(lambda: transport.open_session(timeout=timeout),
-                                 [*(before or []), (command, stdin)], deadline,
-                                 paramiko.SSHException)
+
+            def open_channel():
+                return transport.open_session(timeout=timeout)
+
+            if overlap:
+                return exec_overlapped(open_channel, command, overlap, deadline,
+                                       paramiko.SSHException)
+            steps = [*(before or []), (command, stdin)]
+            if sftp_during:
+                path, data = sftp_during
+                return exec_during_sftp(
+                    client.open_sftp, path, data,
+                    lambda: exec_sequence(open_channel, steps, deadline,
+                                          paramiko.SSHException))
+            return exec_sequence(open_channel, steps, deadline, paramiko.SSHException)
         except Exception as exc:  # noqa: BLE001 - a broken session is a result
             timed = time.monotonic() > deadline
             return RunResult(f"<transport error: {type(exc).__name__}: {exc}>\n", None, timed)
@@ -699,8 +809,10 @@ def ssh_runner(host: str, port: int, user: str, password: str):
     env = dict(os.environ, SSHPASS=password)
 
     def run(command: str, timeout: float, stdin: bytes | None = None,
-            before: list[tuple[str, bytes | None]] | None = None) -> RunResult:
-        if before:
+            before: list[tuple[str, bytes | None]] | None = None,
+            sftp_during: tuple[str, bytes] | None = None,
+            overlap: str | None = None) -> RunResult:
+        if before or sftp_during or overlap:
             return RunResult("", None, False, "this case runs several channels on one"
                              " connection and needs --transport paramiko")
         stdio = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
@@ -760,6 +872,9 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     ap.add_argument("--tz", default="UTC",
                     help="timezone Cowrie renders times in (persona cfg: UTC)")
     ap.add_argument("--cases-dir", type=Path, default=DEFAULT_CASES_DIR)
+    ap.add_argument("--downloads-dir", type=Path, metavar="DIR",
+                    help="Cowrie's download_path, readable by this user; the"
+                         " '#harness: sftp-during=' cases verify the capture there")
     ap.add_argument("--upload-source", type=Path, default=Path("/bin/true"),
                     help="ELF fed to '#harness: scp-stdin=' cases (default /bin/true;"
                          " Cowrie never runs it, it only has to be a binary)")
@@ -800,7 +915,7 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             print(f"SKIP {name}: {exp.skip}")
             continue
         started = datetime.now(timezone.utc)
-        if exp.scp_stdin or exp.upload_channel:
+        if exp.scp_stdin or exp.upload_channel or exp.sftp_during:
             try:
                 payload = args.upload_source.read_bytes()
             except OSError as exc:
@@ -817,7 +932,13 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             target, record = exp.upload_channel
             before.append((f"scp -t {target}", scp_record(record, payload)))
         before.extend((cmd, None) for cmd in exp.before)
-        if exp.scp_stdin:
+        sftp_data = None
+        if exp.sftp_during:
+            sftp_data = payload + os.urandom(16)
+            run = runner(command, args.timeout, sftp_during=(exp.sftp_during, sftp_data))
+        elif exp.overlap:
+            run = runner(command, args.timeout, overlap=exp.overlap)
+        elif exp.scp_stdin:
             run = runner(command, args.timeout, stdin=scp_record(exp.scp_stdin, payload))
         elif before:
             run = runner(command, args.timeout, before=before)
@@ -827,6 +948,11 @@ def main(argv: list[str] | None = None, runner=None) -> int:
                       uptime_slack=args.uptime_slack, tz=tz,
                       cowrie_age=args.cowrie_age)
         res = compare(name, exp, run.output, run.rc, run.timed_out, clock, run.note)
+        if sftp_data is not None and run.rc is not None:
+            problem = check_capture(args.downloads_dir, sftp_data)
+            if problem:
+                res.ok = False
+                res.messages.append(problem)
         if res.ok:
             passed += 1
             print(f"PASS {name}")

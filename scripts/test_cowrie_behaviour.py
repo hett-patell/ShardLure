@@ -686,6 +686,31 @@ class MainExitCodeTest(unittest.TestCase):
         self.assertEqual(seen, [[("scp -t /tmp/x", b"C0755 4 hw\n\x7fELF\x00"),
                                  ("echo m > /tmp/m", None)]])
 
+    def test_sftp_during_case_checks_the_capture(self):
+        (self.root / "probes.txt").write_text("inflight\techo X > /tmp/up; echo rc=$?\n")
+        (self.root / "expected" / "inflight.out").write_text(
+            "#harness: sftp-during=/tmp/up\nrc=0\n")
+        elf = self.root / "elf"
+        elf.write_bytes(b"\x7fELF")
+        dl = self.root / "dl"
+        dl.mkdir()
+
+        def runner(command, timeout, stdin=None, before=None, sftp_during=None, overlap=None):
+            path, data = sftp_during
+            self.assertEqual(path, "/tmp/up")
+            self.assertTrue(data.startswith(b"\x7fELF") and len(data) == 20)
+            if capture:
+                (dl / cbt.hashlib.sha256(data).hexdigest()).write_bytes(data)
+            return cbt.RunResult("rc=0\n", 0, False)
+
+        for capture, want in ((True, 0), (False, 1)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cbt.main(self.argv + ["--only", "probes", "--upload-source", str(elf),
+                                           "--downloads-dir", str(dl)], runner=runner)
+            self.assertEqual(rc, want, out.getvalue())
+        self.assertIn("upload not captured", out.getvalue())
+
     def test_upload_size_is_the_exact_source_size(self):
         (self.root / "probes.txt").write_text("cross\tls -l /tmp/x\n")
         (self.root / "expected" / "cross.out").write_text(
@@ -853,6 +878,86 @@ class UploadChannelTest(unittest.TestCase):
         self.assertIsNone(res.rc)
         self.assertIn("--transport paramiko", res.note)
 
+
+
+class ConcurrentChannelTest(unittest.TestCase):
+    def test_directives(self):
+        exp = cbt.parse_expected("#harness: sftp-during=/tmp/up\nrc=0\n")
+        self.assertEqual(exp.sftp_during, "/tmp/up")
+        self.assertEqual(cbt.parse_expected("#harness: overlap=true\n").overlap, "true")
+        for bad in ("#harness: sftp-during=tmp/up\n", "#harness: overlap=\n",
+                    "#harness: sftp-during=/tmp/up\n#harness: overlap=true\n",
+                    "#harness: overlap=true\n#harness: before=true\n",
+                    "#harness: sftp-during=/tmp/up\n#harness: scp-stdin=x\n"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cbt.parse_expected(bad)
+
+    def test_overlap_runs_b_to_completion_inside_a(self):
+        order = []
+
+        class Chan(FakeChannel):
+            def __init__(self, name, chunks, rc):
+                super().__init__(chunks, rc)
+                self.name = name
+
+            def exec_command(self, command):
+                order.append(f"exec {self.name}")
+
+            def recv(self, n):
+                order.append(f"read {self.name}")
+                return super().recv(n)
+
+        chans = iter([Chan("A", [b"2\n"], 0), Chan("B", [b""], 0)])
+        res = cbt.exec_overlapped(lambda: next(chans), "sleep 2; cat /proc/uptime | wc -w",
+                                  "true", time.monotonic() + 5, ClosedError)
+        self.assertEqual(res, cbt.RunResult("2\n", 0, False))
+        self.assertEqual(order, ["exec A", "exec B", "read B", "read A"])
+
+    def test_sftp_upload_is_split_around_the_case_and_failure_fails(self):
+        events = []
+
+        class Handle:
+            def __init__(self, fail):
+                self.fail = fail
+
+            def write(self, data):
+                events.append(("write", data))
+
+            def flush(self):
+                events.append(("flush",))
+
+            def close(self):
+                if self.fail:
+                    raise OSError("Failure")
+                events.append(("close",))
+
+        for fail in (False, True):
+            events.clear()
+            sftp = mock.Mock()
+            sftp.open.return_value = Handle(fail)
+            res = cbt.exec_during_sftp(lambda: sftp, "/tmp/up", b"abcd",
+                                       lambda: (events.append(("case",)),
+                                                cbt.RunResult("rc=0\n", 0, False))[1])
+            self.assertEqual(events[:4], [("write", b"ab"), ("flush",), ("case",),
+                                          ("write", b"cd")])
+            if fail:
+                self.assertIsNone(res.rc)
+                self.assertIn("SFTP upload to /tmp/up failed", res.note)
+            else:
+                self.assertEqual(res.rc, 0)
+            sftp.close.assert_called_once()
+
+    def test_capture_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            data = b"\x7fELF payload"
+            self.assertIn("needs --downloads-dir", cbt.check_capture(None, data))
+            self.assertIn("not captured", cbt.check_capture(d, data))
+            sha = cbt.hashlib.sha256(data).hexdigest()
+            (d / sha).write_bytes(b"X\n")
+            self.assertIn("does not hash to its name", cbt.check_capture(d, data))
+            (d / sha).write_bytes(data)
+            self.assertEqual(cbt.check_capture(d, data), "")
 
 class LsDateRecentTest(unittest.TestCase):
     TPL = "-rwxr-xr-x 1 root root 7 {{LSDATE_RECENT}} /tmp/x\n"
