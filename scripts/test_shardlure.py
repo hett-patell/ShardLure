@@ -1475,6 +1475,70 @@ class FsPickleLoaderTests(unittest.TestCase):
                 self.assertEqual(shardlure.cmd_persona_fs(home), 1)
             self.assertFalse(marker.exists(), "the pickle's payload ran")
 
+    def test_type_valid_but_malformed_tree_is_refused_by_name(self):
+        # Task 8 review I-2: only allowed types, broken node layout. It used
+        # to load, then persona_fs_edit died with an IndexError traceback,
+        # aborting a root installer run instead of refusing.
+        import pickle
+        looped = persona_fs_tree()
+        home = fs_lookup(looped, "/home")
+        home[shardlure._FS_CONTENTS].append(home)
+        shared = persona_fs_tree()
+        fs_lookup(shared, "/root")[shardlure._FS_CONTENTS].append(fs_lookup(shared, "/etc"))
+        dangling = persona_fs_tree()
+        next(c for c in dangling[shardlure._FS_CONTENTS]
+             if c[shardlure._FS_NAME] == "bin")[shardlure._FS_TARGET] = None
+        bad_kind = persona_fs_tree()
+        fs_lookup(bad_kind, "/usr/bin/ls")[shardlure._FS_TYPE] = 9
+        file_children = persona_fs_tree()
+        fs_lookup(file_children, "/usr/bin/ls")[shardlure._FS_CONTENTS] = [["x"]]
+        cases = {
+            "review": ["/", 1, 0, 0, 0, 0, 0, [["etc"]], None, None],
+            "nine-fields": ["/", 1, 0, 0, 4096, 0o40755, 0, [], None],
+            "string-uid": ["/", 1, "0", 0, 4096, 0o40755, 0, [], None, None],
+            "root-file": ["/", 2, 0, 0, 0, 0o100644, 0, [], None, None],
+            "loop": looped, "shared-node": shared, "link-without-target": dangling,
+            "unknown-type": bad_kind, "file-with-children": file_children,
+        }
+        for label, tree in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                data = pickle.dumps(tree)
+                with self.assertRaises(shardlure.FsPickleRefused) as caught:
+                    shardlure.load_fs_pickle(data)
+                self.assertIn("not a Cowrie filesystem tree", str(caught.exception))
+                path = Path(tmp) / "fs.pickle"
+                path.write_bytes(data)
+                with mock.patch.object(shardlure, "log") as log:
+                    self.assertFalse(shardlure.apply_persona_fs(path))
+                self.assertIn("not a Cowrie filesystem tree", log.call_args[0][0])
+                self.assertEqual(path.read_bytes(), data)
+                self.assertEqual(os.listdir(tmp), ["fs.pickle"])
+        # The review's tree through the CLI root runs: a named refusal, rc 1,
+        # no traceback.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie"
+            (home / "src/cowrie/data").mkdir(parents=True)
+            (home / "src/cowrie/data/fs.pickle").write_bytes(pickle.dumps(cases["review"]))
+            proc = subprocess.run([sys.executable, str(Path(shardlure.ROOT) / "scripts/shardlure.py"),
+                                   "persona-fs", str(home)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertNotIn("Traceback", proc.stdout + proc.stderr)
+            self.assertIn("not a Cowrie filesystem tree", proc.stdout + proc.stderr)
+
+    def test_an_edit_failure_is_a_named_refusal(self):
+        # Defence in depth behind the layout check: an edit that still trips
+        # over the tree refuses by name and writes nothing.
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            data = pickle.dumps(persona_fs_tree())
+            path.write_bytes(data)
+            with (mock.patch.object(shardlure, "persona_fs_edit", side_effect=IndexError("x")),
+                  mock.patch.object(shardlure, "log") as log):
+                self.assertFalse(shardlure.apply_persona_fs(path))
+            self.assertIn("not a Cowrie filesystem tree: IndexError", log.call_args[0][0])
+            self.assertEqual(path.read_bytes(), data)
+
     def test_every_global_and_persistent_id_is_refused(self):
         import pickle
         for data in (pickle.dumps(Path("/x")), pickle.dumps(len),

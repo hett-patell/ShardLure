@@ -913,11 +913,66 @@ class FsPickleRefused(ValueError):
     """A file named fs.pickle that is not a plain Cowrie filesystem tree."""
 
 
-# Everything the pinned Cowrie's fs.pickle holds (v3.1.1, inspected with
-# pickletools: lists, str, int, None, a few bytes nodes, one float ctime) and
-# what persona_fs_edit adds (embedded honeyfs bytes, float times). Exact
-# types: a bool or a subclass is not a filesystem node.
-_FS_PICKLE_TYPES = (list, str, int, float, bytes, type(None))
+# Cowrie's node layout (cowrie/shell/fs.py, v3.1.1): exactly ten fields,
+# A_NAME..A_REALFILE, and node types T_LINK..T_FIFO (0..6). The pinned
+# pickle, inspected: 28,966 nodes, every one of length 10; name str; type,
+# uid, gid, size, mode int; ctime int (one float); contents a list of child
+# nodes for a directory and otherwise an empty list or, for a file, the
+# bytes fsctl `load` embedded; target a str for a link and None otherwise;
+# realfile None (Cowrie sets it in memory, a str when it is kept). What
+# persona_fs_edit writes is the same shape with float times. Exact types: a
+# bool or a subclass is not a filesystem field.
+_FS_NODE_FIELDS = 10
+_FS_NODE_TYPES = range(7)
+
+
+def _fs_tree_problem(tree: object) -> str | None:
+    """Why `tree` is not a Cowrie filesystem tree, or None when it is.
+
+    A pickle of allowed types can still be shaped wrong (["/",1,0,0,0,0,0,
+    [["etc"]],None,None] passed the type check, and persona_fs_edit then
+    died with an IndexError traceback, aborting a root installer run instead
+    of refusing; Task 8 review I-2). Every node is checked against the
+    layout above before anything indexes into it, and a node reachable twice
+    (a loop, or one node shared by two directories, which the pickle memo
+    can express) is refused too: the edits walk the tree and would never end
+    or would edit two places at once."""
+    if type(tree) is not list:
+        return "the top level is not a node"
+    seen: set[int] = set()
+    stack: list[tuple[object, str]] = [(tree, "/")]
+    while stack:
+        node, where = stack.pop()
+        if type(node) is not list or len(node) != _FS_NODE_FIELDS:
+            return f"{where}: a node is a list of {_FS_NODE_FIELDS} fields"
+        if id(node) in seen:
+            return f"{where}: a node is reachable twice"
+        seen.add(id(node))
+        name, kind, uid, gid, size, mode, ctime, contents, target, realfile = node
+        if type(name) is not str:
+            return f"{where}: the name is not a str"
+        if type(kind) is not int or kind not in _FS_NODE_TYPES:
+            return f"{where}: the type is not one of Cowrie's node types"
+        if any(type(v) is not int for v in (uid, gid, size, mode)):
+            return f"{where}: uid, gid, size and mode must be int"
+        if type(ctime) not in (int, float):
+            return f"{where}: the ctime is not a number"
+        if not (type(target) is str if kind == _FS_LINK else target is None or type(target) is str):
+            return f"{where}: the link target is malformed"
+        if realfile is not None and type(realfile) is not str:
+            return f"{where}: the real file is not a str"
+        if kind == _FS_DIR:
+            if type(contents) is not list or id(contents) in seen:
+                return f"{where}: a directory's contents must be its own list of nodes"
+            seen.add(id(contents))
+            for child in contents:
+                child_name = child[_FS_NAME] if type(child) is list and child and type(child[_FS_NAME]) is str else "?"
+                stack.append((child, where.rstrip("/") + "/" + ascii(child_name)[1:-1][:64]))
+        elif not ((type(contents) is bytes and kind == _FS_FILE) or (type(contents) is list and not contents)):
+            return f"{where}: a non-directory's contents must be empty or a file's bytes"
+    if tree[_FS_TYPE] != _FS_DIR:
+        return "the root is not a directory"
+    return None
 
 
 def load_fs_pickle(data: bytes) -> list:
@@ -929,8 +984,9 @@ def load_fs_pickle(data: bytes) -> list:
     (`__reduce__` -> os.system) as root. Cowrie's tree needs no global at all,
     so find_class refuses every one (that is what GLOBAL, STACK_GLOBAL, INST,
     OBJ and EXT* resolve through; without a callable REDUCE/NEWOBJ/BUILD have
-    nothing to call), persistent ids are refused, and the result must be made
-    of the node types alone."""
+    nothing to call), persistent ids are refused, and the result must have
+    Cowrie's node layout exactly (_fs_tree_problem), so the edits that follow
+    can index any node without failing."""
     import io  # noqa: PLC0415
     import pickle  # noqa: PLC0415
 
@@ -949,19 +1005,9 @@ def load_fs_pickle(data: bytes) -> list:
         raise
     except Exception as exc:  # noqa: BLE001 - any parse failure is "not a tree"
         raise FsPickleRefused(f"not a Cowrie filesystem pickle ({type(exc).__name__}: {exc})") from None
-    seen: set[int] = set()
-    stack = [tree]
-    while stack:
-        obj = stack.pop()
-        if type(obj) not in _FS_PICKLE_TYPES:
-            raise FsPickleRefused(
-                f"refusing a pickle containing {type(obj).__name__}: a Cowrie fs.pickle "
-                "holds only lists, str, int, float, bytes and None")
-        if type(obj) is list and id(obj) not in seen:
-            seen.add(id(obj))
-            stack.extend(obj)
-    if not isinstance(tree, list) or len(tree) < 9 or tree[_FS_TYPE] != _FS_DIR:
-        raise FsPickleRefused("not a Cowrie filesystem tree")
+    problem = _fs_tree_problem(tree)
+    if problem is not None:
+        raise FsPickleRefused(f"not a Cowrie filesystem tree ({problem})")
     return tree
 
 
@@ -982,7 +1028,15 @@ def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> bool:
             "persona filesystem nodes not applied (fingerprintable)")
         return False
     files = honeyfs_files(honeyfs) if honeyfs is not None else {}
-    skipped = persona_fs_edit(tree, files, time.time())
+    try:
+        skipped = persona_fs_edit(tree, files, time.time())
+    except (IndexError, KeyError, TypeError, ValueError, RecursionError) as exc:
+        # load_fs_pickle validated the layout, so this is a gap in that
+        # check, never an expected path: still refuse by name, not by
+        # traceback, and write nothing.
+        log(f"warning: cannot edit {pickle_path} for the persona (not a Cowrie filesystem tree: "
+            f"{type(exc).__name__}); persona filesystem nodes not applied (fingerprintable)")
+        return False
     if skipped:
         log(f"warning: persona filesystem nodes without a parent directory: {', '.join(skipped)}")
     # The directory belongs to the Cowrie account and this runs as root: a
