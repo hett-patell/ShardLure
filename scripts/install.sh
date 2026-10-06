@@ -327,7 +327,19 @@ preflight_installation() {
     [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || err "ports must be integers from 1 to 65535"
   done
   command -v python3 >/dev/null || err "python3 is required for safe ownership preflight (no third-party packages needed)"
+  require_cowrie_python
   validate_existing_accounts
+}
+
+# The pinned Cowrie (v3.1.1) declares requires-python >=3.11 (v3.1 dropped
+# 3.10, which Ubuntu 22.04 ships), and its venv is built from python3. Refuse
+# here, before any package, account or checkout is touched, rather than fail
+# in pip halfway through. --no-cowrie needs no such interpreter.
+require_cowrie_python() {
+  [[ "$COWRIE" == 1 ]] || return 0
+  local version status=0
+  version="$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3]); sys.exit(sys.version_info < (3, 11))')" || status=$?
+  [[ "$status" == 0 ]] || err "the pinned Cowrie (v3.1.1) needs Python 3.11 or newer, but python3 is ${version:-unknown}; Ubuntu 22.04 ships 3.10. Use Ubuntu 24.04 or newer, make python3 a 3.11+ interpreter with its venv module, or pass --no-cowrie. Nothing was changed."
 }
 
 # Per-start persona regeneration: the same two ExecStartPre= lines as

@@ -1646,6 +1646,86 @@ class PersonaRegenTests(unittest.TestCase):
                                  ["systemctl", "restart", "cowrie.service"]])
 
 
+class CowriePythonPreflightTests(unittest.TestCase):
+    """Task 8: v3.1.1 needs Python >= 3.11 (22.04 ships 3.10); both installers
+    refuse an older interpreter before changing anything."""
+
+    def test_shardlure_refuses_python_3_10(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+            shardlure.require_cowrie_python((3, 10, 12), "/usr/bin/python3")
+        self.assertEqual(caught.exception.code, 1)
+        message = err.getvalue()
+        for part in ("needs Python 3.11 or newer", "Python 3.10.12 (/usr/bin/python3)",
+                     "Ubuntu 22.04 ships 3.10", "Nothing was changed"):
+            self.assertIn(part, message)
+
+    def test_shardlure_accepts_python_3_11_and_newer(self):
+        for version in ((3, 11, 0), (3, 12, 3), (3, 14, 0), (4, 0, 0)):
+            with self.subTest(version=version):
+                shardlure.require_cowrie_python(version, "/usr/bin/python3")
+        shardlure.require_cowrie_python()  # the interpreter running these tests
+
+    def test_run_checks_python_before_changing_anything(self):
+        calls = []
+        def refuse():
+            calls.append("python")
+            raise SystemExit(1)
+        with (mock.patch.object(shardlure, "need_root", side_effect=lambda: calls.append("root")),
+              mock.patch.object(shardlure, "require_cowrie_python", side_effect=refuse),
+              mock.patch.object(shardlure, "install_deps", side_effect=lambda: calls.append("deps")),
+              mock.patch.object(shardlure, "validate_existing_accounts", side_effect=lambda: calls.append("accounts")),
+              mock.patch.object(shardlure, "validate_installation", side_effect=lambda: calls.append("install"))):
+            with self.assertRaises(SystemExit):
+                shardlure.cmd_run()
+        self.assertEqual(calls, ["root", "python"])
+        with mock.patch.object(shardlure, "require_cowrie_python", side_effect=refuse), \
+                mock.patch.object(shardlure, "ensure_cowrie_checkout") as checkout:
+            with self.assertRaises(SystemExit):
+                shardlure.install_cowrie(2222)
+        checkout.assert_not_called()
+
+    def run_install_sh(self, python_stub: str | None, cowrie: str = "1"):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.environ["PATH"]
+            if python_stub is not None:
+                stub = Path(tmp) / "python3"
+                stub.write_text(python_stub)
+                stub.chmod(0o755)
+                path = f"{tmp}:{path}"
+            return subprocess.run(
+                ["bash", "-c", f'source "$INSTALLER"; COWRIE={cowrie}; require_cowrie_python; echo passed'],
+                env=dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", PATH=path,
+                         INSTALLER=str(Path(shardlure.ROOT) / "scripts/install.sh")),
+                capture_output=True, text=True, timeout=30)
+
+    def test_install_sh_refuses_python_3_10(self):
+        # The stub answers as 22.04's python3 does to the preflight's program:
+        # its version, then exit 1 (sys.exit(True)).
+        proc = self.run_install_sh("#!/bin/sh\necho 3.10.12\nexit 1\n")
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("passed", proc.stdout)
+        for part in ("needs Python 3.11 or newer", "python3 is 3.10.12", "Ubuntu 22.04 ships 3.10",
+                     "--no-cowrie", "Nothing was changed"):
+            self.assertIn(part, proc.stderr)
+
+    def test_install_sh_accepts_python_3_11_and_skips_without_cowrie(self):
+        proc = self.run_install_sh(None)  # the real python3 (>= 3.11 here)
+        self.assertEqual((proc.returncode, proc.stdout), (0, "passed\n"), proc.stderr)
+        proc = self.run_install_sh("#!/bin/sh\necho 3.11.0\nexit 0\n")
+        self.assertEqual((proc.returncode, proc.stdout), (0, "passed\n"), proc.stderr)
+        proc = self.run_install_sh("#!/bin/sh\nexit 99\n", cowrie="0")
+        self.assertEqual((proc.returncode, proc.stdout), (0, "passed\n"), proc.stderr)
+
+    def test_install_sh_preflight_runs_the_check_before_any_change(self):
+        script = (Path(shardlure.ROOT) / "scripts/install.sh").read_text()
+        body = script[script.index("preflight_installation() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("\n  require_cowrie_python\n", body)
+        main = script[script.index("# -- parse CLI overrides"):]
+        self.assertLess(main.index("\npreflight_installation\n"), main.index("apt-get"))
+
+
 class ApplyStealthPersonaFsTests(unittest.TestCase):
     """Task 7 review I-1: the existing-box path (apply-stealth.sh) applies the
     same pickle edits as a fresh install."""

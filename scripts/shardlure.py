@@ -113,6 +113,27 @@ def ensure_cowrie_checkout(
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
+# The pinned Cowrie (install/cowrie.commit, v3.1.1) declares requires-python
+# >=3.11: v3.1 dropped 3.10, which is what Ubuntu 22.04 ships. Its venv is
+# built from the interpreter running this installer, so an older one gives a
+# pip failure halfway through the install, after the SSH migration.
+COWRIE_MIN_PYTHON = (3, 11)
+
+
+def require_cowrie_python(version: tuple = tuple(sys.version_info[:3]),
+                          executable: str = sys.executable) -> None:
+    """Refuse, before anything is changed, to install the pinned Cowrie with a
+    Python it does not support."""
+    if tuple(version[:2]) >= COWRIE_MIN_PYTHON:
+        return
+    have = ".".join(str(part) for part in version)
+    want = ".".join(str(part) for part in COWRIE_MIN_PYTHON)
+    die(f"the pinned Cowrie (v3.1.1) needs Python {want} or newer, but this installer runs "
+        f"under Python {have} ({executable}); Ubuntu 22.04 ships 3.10. Use Ubuntu 24.04 or "
+        f"newer, or install python{want} with its venv module and rerun with it "
+        f"(sudo python{want} scripts/shardlure.py run). Nothing was changed")
+
+
 def need_root() -> None:
     if os.geteuid() != 0:
         die("run as root: sudo python3 scripts/shardlure.py run")
@@ -382,6 +403,7 @@ def setup_authbind(honeypot_port: int) -> None:
 
 
 def install_cowrie(honeypot_port: int) -> None:
+    require_cowrie_python()
     try:
         pin = read_cowrie_pin(COWRIE_PIN_FILE)
     except (OSError, ValueError) as exc:
@@ -1813,6 +1835,7 @@ def verify_admin_ssh_gate(admin_port: int, *, key_only: bool = True) -> None:
 
 def cmd_run() -> None:
     need_root()
+    require_cowrie_python()
     validate_existing_accounts()
     validate_installation()
     intro()
