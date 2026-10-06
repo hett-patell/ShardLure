@@ -37,7 +37,7 @@ Usage: gen-time-persona.py COWRIE_HOME
 """
 import configparser
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 STEALTH_CFG = Path(__file__).resolve().parent / "cowrie-stealth.cfg"
@@ -222,7 +222,10 @@ def main() -> int:
     deployed = deployed_boot_offset(cowrie_home)
     if deployed is not None and deployed >= 0:
         UPTIME = timedelta(seconds=deployed)
-    files = build(datetime.now())
+    # The persona's clock is UTC ([honeypot] timezone = UTC; the motd says
+    # "UTC"). datetime.now() is the host's local time: on the arm box (IST) the
+    # motd's "Last login" sat 5h30m off the session Cowrie's last prints.
+    files = build(datetime.now(timezone.utc).replace(tzinfo=None))
     written = 0
     for rel, text in files.items():
         dst = cowrie_home / rel

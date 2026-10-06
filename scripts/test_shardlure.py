@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -736,8 +737,16 @@ class ServiceSafetyTests(unittest.TestCase):
             (home / "etc").mkdir()
             (home / "honeyfs/etc").mkdir(parents=True)
             (home / "etc/cowrie.cfg").write_text("[honeypot]\nboot_offset = 864000\nlog_path = $$x\n")
-            subprocess.run([sys.executable, str(gen), str(home)], check=True, capture_output=True)
+            # A non-UTC host (arm is IST) must still get a UTC persona clock.
+            env = dict(os.environ, TZ="Asia/Kolkata")
+            subprocess.run([sys.executable, str(gen), str(home)], check=True,
+                           capture_output=True, env=env)
             motd = (home / "honeyfs/etc/motd").read_text()
+            stamp = re.search(r"System information as of (.+) UTC (\d{4})", motd)
+            when = datetime.datetime.strptime(f"{stamp.group(1)} {stamp.group(2)}",
+                                              "%a %b %d %H:%M:%S %Y")
+            utcnow = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            self.assertLess(abs((utcnow - when).total_seconds()), 120)
             self.assertIn("Uptime:              10 days", motd)
             self.assertIn("Users logged in:     1", motd)
             (home / "etc/cowrie.cfg").write_text("[honeypot]\nhostname = x\n")
