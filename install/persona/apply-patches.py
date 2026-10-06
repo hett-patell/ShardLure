@@ -49,6 +49,10 @@ PATCHES = (
     # uname folded -m -p -i into one flag; GNU prints three fields, so a real
     # `uname -a` ends "x86_64 x86_64 x86_64 GNU/Linux" (~720 sessions/30d).
     "uname-a.py",
+    # Persona time (Phase B Task 5): last printed the caller's own exec
+    # session and none of the box's history; it now prints the persona's wtmp,
+    # sessions anchored to now, reboot and wtmp begins at boot_time().
+    "last-persona.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and

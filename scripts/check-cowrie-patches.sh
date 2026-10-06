@@ -38,6 +38,7 @@ partial_grep="$tmp_root/cowrie-partial-grep"
 partial_lspci="$tmp_root/cowrie-partial-lspci"
 partial_free="$tmp_root/cowrie-partial-free"
 partial_uname="$tmp_root/cowrie-partial-uname"
+partial_last="$tmp_root/cowrie-partial-last"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -59,6 +60,7 @@ cp -a "$cowrie" "$partial_grep"
 cp -a "$cowrie" "$partial_lspci"
 cp -a "$cowrie" "$partial_free"
 cp -a "$cowrie" "$partial_uname"
+cp -a "$cowrie" "$partial_last"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
@@ -71,7 +73,8 @@ cp -a "$cowrie" "$partial_uname"
 # new class but still ignores -i; lspci lists the persona with one device
 # misnamed and leaves busybox.py pristine; free leaves SReclaimable out of
 # buff/cache, as stock Cowrie did; uname has its new flags dict (platform
-# preset to True) beside the old flag row and output. The bashparse and honeypot fixtures went
+# preset to True) beside the old flag row and output; last puts a pty caller
+# on the admin's own pts/0. The bashparse and honeypot fixtures went
 # with the patches upstream made redundant.
 python3 - \
   "$ROOT" \
@@ -85,7 +88,8 @@ python3 - \
   "$partial_grep/src/cowrie/commands/fs.py" \
   "$partial_lspci/src/cowrie/commands/lspci.py" \
   "$partial_free/src/cowrie/commands/free.py" \
-  "$partial_uname/src/cowrie/commands/uname.py" <<'PY'
+  "$partial_uname/src/cowrie/commands/uname.py" \
+  "$partial_last/src/cowrie/commands/last.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -125,6 +129,7 @@ grep_path = Path(sys.argv[9])
 lspci_path = Path(sys.argv[10])
 free_path = Path(sys.argv[11])
 uname_path = Path(sys.argv[12])
+last_path = Path(sys.argv[13])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -209,6 +214,14 @@ partial = uname["NEW"].replace('"platform": False,', '"platform": True,', 1)
 content = replace_once(uname_path, uname["OLD"], partial, "uname partial")
 if content.count(uname["OLD"]) != 0 or content.count(uname["NEW"]) != 0:
     raise SystemExit(f"uname partial fixture unexpectedly contains a complete block in {uname_path}")
+
+last = string_constants(root / "install/persona/patches/last-persona.py")
+if last["NEW"].count('CALLER_TTY = "pts/1"') != 1:
+    raise SystemExit("last NEW block does not contain the expected fixture anchor")
+partial = last["NEW"].replace('CALLER_TTY = "pts/1"', 'CALLER_TTY = "pts/0"', 1)
+content = replace_once(last_path, last["OLD"], partial, "last partial")
+if content.count(last["OLD"]) != 0 or content.count(last["NEW"]) != 0:
+    raise SystemExit(f"last partial fixture unexpectedly contains a complete block in {last_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -226,6 +239,7 @@ for patch in \
   "$ROOT/install/persona/patches/lspci-persona.py" \
   "$ROOT/install/persona/patches/free-meminfo.py" \
   "$ROOT/install/persona/patches/uname-a.py" \
+  "$ROOT/install/persona/patches/last-persona.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -383,6 +397,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_uname" \
     "$ROOT/install/persona/patches/uname-a.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "last" \
+    "$partial_last" \
+    "$ROOT/install/persona/patches/last-persona.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -406,6 +425,7 @@ expected_changed=(
   "src/cowrie/commands/busybox.py"
   "src/cowrie/commands/free.py"
   "src/cowrie/commands/fs.py"
+  "src/cowrie/commands/last.py"
   "src/cowrie/commands/ls.py"
   "src/cowrie/commands/lspci.py"
   "src/cowrie/commands/scp.py"
@@ -470,6 +490,9 @@ python3 "$ROOT/install/persona/test_scp_sink_target.py" "$cowrie" -v
 # And for connection-shared-fs's redirection backing rule: a redirection never
 # writes into another channel's in-flight upload or a finished capture.
 python3 "$ROOT/install/persona/test_shared_fs_backing.py" "$cowrie" -v
+# And the persona time commands (last, then uptime/w), judged by the
+# behavioural harness's own comparison over days of simulated Cowrie age.
+python3 "$ROOT/install/persona/test_time_persona.py" "$cowrie" -v
 
 # Drift the final target so a sequential check/apply implementation would alter
 # earlier files before discovering incompatibility. The entire working tree
@@ -533,4 +556,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 44 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target and shared-fs backing behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 48 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona behavior, and atomic preflight checks passed"
