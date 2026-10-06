@@ -79,6 +79,17 @@ A complete walkthrough for standing up ShardLure on a fresh Ubuntu/Debian VPS
 (it also supports dnf/yum and pacman hosts). Budget ~10 minutes, most of it
 Cowrie's pip install.
 
+### Requirements
+
+- **Python 3.11 or newer** as `python3` on the honeypot host. The pinned Cowrie
+  (v3.1.1, `install/cowrie.commit`) declares `requires-python >=3.11` and its
+  venv is built from the interpreter running the installer. Ubuntu 22.04 ships
+  3.10, so use **Ubuntu 24.04 or newer** (or install `python3.11` with its venv
+  module and run the installer with it: `sudo python3.11 scripts/shardlure.py run`).
+  Both installers check this first and refuse with "Nothing was changed" rather
+  than fail in pip after SSH has moved; `install.sh --no-cowrie` skips the check
+  because it installs no Cowrie.
+
 ### Supported data filesystems
 
 The data directory (database, evidence, backups) must live on **ext4, XFS, Btrfs, tmpfs or overlayfs**. ShardLure writes evidence and backups through pinned file descriptors with no-replace renames and directory `fsync`, and it refuses filesystems whose behavior for those operations has not been verified, rather than risk an overwrite or a lost write. On anything else (ZFS, F2FS, network filesystems) capture, backups and readiness report an unsupported-filesystem error, and retention stops at the first evidence file it cannot delete safely. Put the data directory on a supported volume.
@@ -897,7 +908,11 @@ What it does, in order (SSH first, on purpose):
    **aborts the reload** rather than risk your running sshd.
 2. **Remove services** — stop, disable, and delete `cowrie.service` and
    `shardlure-live.service`; `daemon-reload`.
-3. **Remove the binary** — `/usr/local/bin/shardlure`.
+3. **Remove the binary** — `/usr/local/bin/shardlure` — and the persona
+   regeneration scripts `cowrie.service` ran before every start
+   (`/usr/local/lib/shardlure/persona`, plus its `shardlure` parent if that
+   leaves it empty). Only files the installer wrote are deleted; anything else
+   found there is kept and logged.
 4. **Remove the authbind byport file** (only created when the honeypot port is
    < 1024).
 5. **Firewall** — delete the honeypot and dashboard `ufw allow` rules. The
