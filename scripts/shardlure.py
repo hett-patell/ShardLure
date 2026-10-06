@@ -612,7 +612,7 @@ def plant_bait_files() -> None:
         dst = honeyfs / rel
         if dst.is_file():
             fs(f"load {vpath} {dst}")
-    apply_persona_fs(pickle_path)
+    apply_persona_fs(pickle_path, honeyfs)
     dst_pickle = COWRIE_HOME / "var/lib/cowrie/fs.pickle"
     if pickle_path.exists():
         shutil.copy2(pickle_path, dst_pickle)
@@ -665,6 +665,12 @@ PERSONA_FS_LINKS = (
     ("/usr/sbin/reboot", "/bin/systemctl"),
     ("/usr/sbin/shutdown", "/bin/systemctl"),
 )
+# Real 22.04 sizes for binaries whose pickle node carries another build's:
+# `ls -lh $(which ls)` (35 sessions in 30 days) prints this one, `135K` on
+# coreutils 8.32-4.1ubuntu1 (the pickle's Debian ls is 151344, `148K`).
+PERSONA_FS_SIZES = (
+    ("/usr/bin/ls", 138216),
+)
 
 
 def _fs_dir(tree: list, path: str) -> list | None:
@@ -691,14 +697,51 @@ def _fs_put(tree: list, path: str, node: list) -> bool:
     return True
 
 
-def persona_fs_edit(tree: list) -> list[str]:
+def _fs_entry(tree: list, path: str) -> list | None:
+    """The node at an absolute path itself (a final symlink is not followed;
+    nor is any on the way, the persona's paths cross none)."""
+    parent_path, _, name = path.rpartition("/")
+    parent = _fs_dir(tree, parent_path or "/")
+    if parent is None:
+        return None
+    return next((c for c in parent[_FS_CONTENTS] if c[_FS_NAME] == name), None)
+
+
+def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
+                    now: float = PERSONA_IMAGE_TIME) -> list[str]:
     """Apply the persona's node changes to an unpickled fs tree in place.
+
+    honeyfs_sizes maps each file the persona serves from honeyfs (bait and
+    persona overlays, "/etc/hostname" -> bytes) to its size: Cowrie reads such
+    a file's contents from disk but lists the node's own size, so `ls -l
+    /etc/hostname` said 13 bytes beside 19 bytes of content, and fsctl's
+    bait nodes all said 4096. Each node takes its file's size; a file with no
+    node gets one (Cowrie serves honeyfs only onto an existing node, so the
+    persona's /home/ubuntu/.bash_history was never visible), stamped `now`.
 
     Idempotent: every change replaces a node by name or sets attributes, so a
     second `plant-bait` run leaves the tree as the first left it. Returns the
     paths it could not place (a missing parent directory).
     """
     skipped = []
+    for path, size in sorted((honeyfs_sizes or {}).items()):
+        node = _fs_entry(tree, path)
+        if node is None:
+            parent = _fs_dir(tree, path.rpartition("/")[0] or "/")
+            if parent is None:
+                skipped.append(path)
+                continue
+            node = [None, _FS_FILE, parent[_FS_UID], parent[_FS_GID], size, 0o100644, now,
+                    [], None, None]
+            _fs_put(tree, path, node)
+        elif node[_FS_TYPE] == _FS_FILE:
+            node[_FS_SIZE] = size
+    for path, size in PERSONA_FS_SIZES:
+        node = _fs_entry(tree, path)
+        if node is None or node[_FS_TYPE] != _FS_FILE:
+            skipped.append(path)
+            continue
+        node[_FS_SIZE] = size
     for path, size, mode, gid, ctime in PERSONA_FS_FILES:
         node = [None, _FS_FILE, 0, gid, size, mode, ctime, [], None, None]
         if not _fs_put(tree, path, node):
@@ -710,12 +753,25 @@ def persona_fs_edit(tree: list) -> list[str]:
     return skipped
 
 
-def apply_persona_fs(pickle_path: Path) -> None:
+def honeyfs_file_sizes(honeyfs: Path) -> dict[str, int]:
+    """Virtual path -> size of every regular file under honeyfs, except /proc:
+    a real /proc lists every file as 0 bytes, and so does the pickle."""
+    sizes = {}
+    if honeyfs.is_dir():
+        for f in honeyfs.rglob("*"):
+            rel = f.relative_to(honeyfs).as_posix()
+            if f.is_file() and not f.is_symlink() and rel.split("/")[0] != "proc":
+                sizes["/" + rel] = f.stat().st_size
+    return sizes
+
+
+def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> None:
     """Edit Cowrie's fs.pickle for the persona: what fsctl cannot express
     (setuid modes, symlinks, real sizes). The pickle is the pinned Cowrie
     checkout's own file, the one Cowrie itself unpickles; it is rewritten via
     a temporary file and an atomic rename."""
     import pickle  # noqa: PLC0415 - only the installer's bait step needs it
+    import time  # noqa: PLC0415
 
     try:
         with pickle_path.open("rb") as f:
@@ -726,7 +782,8 @@ def apply_persona_fs(pickle_path: Path) -> None:
         log(f"warning: cannot edit {pickle_path} for the persona ({type(exc).__name__}); "
             "persona filesystem nodes not applied (fingerprintable)")
         return
-    skipped = persona_fs_edit(tree)
+    sizes = honeyfs_file_sizes(honeyfs) if honeyfs is not None else {}
+    skipped = persona_fs_edit(tree, sizes, time.time())
     if skipped:
         log(f"warning: persona filesystem nodes without a parent directory: {', '.join(skipped)}")
     tmp = pickle_path.with_name(pickle_path.name + ".persona-tmp")

@@ -1302,6 +1302,46 @@ class PersonaFsTests(unittest.TestCase):
             self.assertIsNotNone(fs_lookup(tree, "/usr/bin/sudo"))
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["fs.pickle"])
 
+    def test_honeyfs_files_list_their_own_size(self):
+        tree = persona_fs_tree()
+        sizes = {"/usr/lib/os-release": 386, "/home/phil/notes": 5}
+        self.assertEqual(shardlure.persona_fs_edit(tree, sizes, now=1234.0), [])
+        self.assertEqual(fs_lookup(tree, "/usr/lib/os-release")[shardlure._FS_SIZE], 386)
+        created = fs_lookup(tree, "/home/phil/notes")
+        self.assertEqual((created[shardlure._FS_TYPE], created[shardlure._FS_SIZE],
+                          created[shardlure._FS_CTIME]), (shardlure._FS_FILE, 5, 1234.0))
+        self.assertEqual(shardlure.persona_fs_edit(tree, {"/nope/x": 1}), ["/nope/x"])
+
+    def test_ls_is_the_22_04_build(self):
+        # `ls -lh $(which ls)`: 135K on a real 22.04 box (Task 1 ruling).
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree)
+        self.assertEqual(fs_lookup(tree, "/bin/ls")[shardlure._FS_SIZE], 138216)
+
+    def test_honeyfs_sizes_skip_proc_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "proc").mkdir()
+            (root / "proc/uptime").write_text("1.00 2.00\n")
+            (root / "etc").mkdir()
+            (root / "etc/hostname").write_text("prod-app-server-01\n")
+            (root / "etc/link").symlink_to("hostname")
+            self.assertEqual(shardlure.honeyfs_file_sizes(root), {"/etc/hostname": 19})
+
+    def test_os_release_lives_behind_its_usr_lib_symlink(self):
+        # 22.04's /etc/os-release is a symlink to ../usr/lib/os-release, and
+        # the pickle keeps that link; an overlay at etc/os-release was never
+        # served (Cowrie overlays only regular-file nodes). The file goes
+        # where the link points, with the pickle's node sized to match.
+        honeyfs = Path(shardlure.ROOT) / "install/persona/honeyfs"
+        expected = Path(shardlure.ROOT) / "scripts/behaviour/expected"
+        self.assertFalse((honeyfs / "etc/os-release").exists())
+        text = (honeyfs / "usr/lib/os-release").read_text()
+        self.assertEqual(text, (expected / "cat-os-release.out").read_text())
+        self.assertEqual(len(text.encode()), 386)
+        self.assertEqual((expected / "os-release-size.out").read_text(), "-rw-r--r-- 386\n386\n")
+        self.assertIn((expected / "os-release-pretty.out").read_text(), text)
+
 
 class PersonaTxtcmdTests(unittest.TestCase):
     """txtcmds (payload-yield Phase B Task 7)."""
