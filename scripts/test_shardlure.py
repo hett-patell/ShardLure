@@ -1201,7 +1201,9 @@ def persona_fs_tree():
     return d("/", [
         d("usr", [d("bin", [f("ls", 151344), f("echo")]), d("sbin"), d("lib", [f("os-release", 267)])]),
         d("etc", [d("alternatives")]),
-        d("home", [d("phil")]),
+        d("home", [d("phil"), d("ubuntu", [d(".aws", [f("credentials")])]),
+                   d("deploy", [d(".ssh", [f("id_rsa")])])]),
+        d("root"),
         _fs_node("bin", shardlure._FS_LINK, target="usr/bin", mode=0o120777),
         _fs_node("sbin", shardlure._FS_LINK, target="usr/sbin", mode=0o120777),
     ])
@@ -1304,10 +1306,10 @@ class PersonaFsTests(unittest.TestCase):
 
     def test_honeyfs_files_list_their_own_size(self):
         tree = persona_fs_tree()
-        sizes = {"/usr/lib/os-release": 386, "/home/phil/notes": 5}
+        sizes = {"/usr/lib/os-release": 386, "/root/notes": 5}
         self.assertEqual(shardlure.persona_fs_edit(tree, sizes, now=1234.0), [])
         self.assertEqual(fs_lookup(tree, "/usr/lib/os-release")[shardlure._FS_SIZE], 386)
-        created = fs_lookup(tree, "/home/phil/notes")
+        created = fs_lookup(tree, "/root/notes")
         self.assertEqual((created[shardlure._FS_TYPE], created[shardlure._FS_SIZE],
                           created[shardlure._FS_CTIME]), (shardlure._FS_FILE, 5, 1234.0))
         self.assertEqual(shardlure.persona_fs_edit(tree, {"/nope/x": 1}), ["/nope/x"])
@@ -1341,6 +1343,75 @@ class PersonaFsTests(unittest.TestCase):
         self.assertEqual(len(text.encode()), 386)
         self.assertEqual((expected / "os-release-size.out").read_text(), "-rw-r--r-- 386\n386\n")
         self.assertIn((expected / "os-release-pretty.out").read_text(), text)
+
+    def test_phil_is_gone_and_the_persona_users_own_their_homes(self):
+        tree = persona_fs_tree()
+        sizes = {"/home/ubuntu/.bash_history": 355, "/home/deploy/.ssh/id_rsa": 615,
+                 "/home/ubuntu/.aws/credentials": 170}
+        self.assertEqual(shardlure.persona_fs_edit(tree, sizes), [])
+        self.assertIsNone(fs_lookup(tree, "/home/phil"))
+        F = shardlure  # noqa: N806
+        for home, uid in (("/home/ubuntu", 1000), ("/home/deploy", 1001)):
+            with self.subTest(home=home):
+                node = fs_lookup(tree, home)
+                self.assertEqual((node[F._FS_UID], node[F._FS_GID], node[F._FS_MODE]),
+                                 (uid, uid, 0o40750))
+        hist = fs_lookup(tree, "/home/ubuntu/.bash_history")
+        self.assertEqual((hist[F._FS_UID], hist[F._FS_MODE], hist[F._FS_SIZE]), (1000, 0o100600, 355))
+        self.assertEqual(fs_lookup(tree, "/home/deploy/.ssh")[F._FS_MODE], 0o40700)
+        key = fs_lookup(tree, "/home/deploy/.ssh/id_rsa")
+        self.assertEqual((key[F._FS_UID], key[F._FS_MODE]), (1001, 0o100600))
+        self.assertEqual(fs_lookup(tree, "/home/ubuntu/.aws/credentials")[F._FS_MODE], 0o100600)
+
+    def test_bait_data_files_are_not_executable(self):
+        # fsctl gives a touched file its parent directory's mode (0755).
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree, {"/usr/lib/os-release": 386, "/root/.env": 9})
+        self.assertEqual(fs_lookup(tree, "/usr/lib/os-release")[shardlure._FS_MODE], 0o100644)
+        self.assertEqual(fs_lookup(tree, "/root/.env")[shardlure._FS_MODE], 0o100644)
+
+
+class PersonaUsersTests(unittest.TestCase):
+    """honeyfs/etc/{passwd,group,shadow,gshadow}: the 22.04 cloud image's
+    accounts, cloud-init's ubuntu and the persona's deploy, no phil."""
+
+    ETC = Path(shardlure.ROOT) / "install/persona/honeyfs/etc"
+
+    def rows(self, name):
+        text = (self.ETC / name).read_text(encoding="ascii")  # Cowrie reads ASCII
+        return [line.split(":") for line in text.splitlines()]
+
+    def test_no_stock_cowrie_user(self):
+        for name in ("passwd", "group", "shadow", "gshadow"):
+            with self.subTest(file=name):
+                self.assertNotIn("phil", (self.ETC / name).read_text())
+
+    def test_persona_users_match_their_homes(self):
+        users = {r[0]: r for r in self.rows("passwd")}
+        for home, uid, gid in shardlure.PERSONA_HOMES:
+            name = home.rsplit("/", 1)[1]
+            with self.subTest(user=name):
+                self.assertEqual(users[name][2:4], [str(uid), str(gid)])
+                self.assertEqual(users[name][5:], [home, "/bin/bash"])
+        expected = (Path(shardlure.ROOT) / "scripts/behaviour/expected/home-users.out").read_text()
+        for name in ("ubuntu", "deploy"):
+            self.assertIn(":".join(users[name]) + "\n", expected)
+
+    def test_files_agree_with_each_other(self):
+        passwd, shadow = self.rows("passwd"), self.rows("shadow")
+        group, gshadow = self.rows("group"), self.rows("gshadow")
+        self.assertTrue(all(len(r) == 7 for r in passwd))
+        self.assertEqual([r[0] for r in passwd], [r[0] for r in shadow])
+        self.assertEqual([r[0] for r in group], [r[0] for r in gshadow])
+        self.assertEqual({r[0]: r[3] for r in group}, {r[0]: r[3] for r in gshadow})
+        gids = {r[0]: int(r[2]) for r in group}
+        self.assertTrue({int(r[3]) for r in passwd} <= set(gids.values()))
+        crontab = next(gid for path, _, _, gid, _ in shardlure.PERSONA_FS_FILES
+                       if path == "/usr/bin/crontab")
+        self.assertEqual(gids["crontab"], crontab)
+        # cloud-init's default_user groups.
+        for g in ("adm", "sudo", "lxd", "netdev"):
+            self.assertIn("ubuntu", {r[0]: r[3] for r in group}[g].split(","))
 
 
 class PersonaTxtcmdTests(unittest.TestCase):

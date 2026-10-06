@@ -671,6 +671,27 @@ PERSONA_FS_LINKS = (
 PERSONA_FS_SIZES = (
     ("/usr/bin/ls", 138216),
 )
+# Stock Cowrie's demo user: phil (uid 1000) is in the pickle's passwd, group
+# and shadow with a /home/phil, a known Cowrie fingerprint (the IMC 2025
+# study saw >90% of phil logins disconnect at once). The persona's honeyfs
+# passwd/group/shadow drop him; this drops his home.
+PERSONA_FS_REMOVE = ("/home/phil",)
+# The persona's users own their homes (honeyfs/etc/passwd: cloud-init's ubuntu
+# 1000, the operator's deploy 1001); fsctl made them root's. 22.04's
+# login.defs HOME_MODE is 0750.
+PERSONA_HOMES = (
+    ("/home/ubuntu", 1000, 1000),
+    ("/home/deploy", 1001, 1001),
+)
+# Modes the owning tool would have set; fsctl gives a node its parent's mode,
+# so the bait key was -rwxr-xr-x inside a world-readable .ssh.
+PERSONA_FS_MODES = (
+    ("/root/.bash_history", 0o100600),
+    ("/home/ubuntu/.bash_history", 0o100600),
+    ("/home/ubuntu/.aws/credentials", 0o100600),
+    ("/home/deploy/.ssh", 0o40700),
+    ("/home/deploy/.ssh/id_rsa", 0o100600),
+)
 
 
 def _fs_dir(tree: list, path: str) -> list | None:
@@ -718,6 +739,8 @@ def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
     bait nodes all said 4096. Each node takes its file's size; a file with no
     node gets one (Cowrie serves honeyfs only onto an existing node, so the
     persona's /home/ubuntu/.bash_history was never visible), stamped `now`.
+    These are data files: a node fsctl created with its parent's x bits
+    loses them (every bait file was -rwxr-xr-x).
 
     Idempotent: every change replaces a node by name or sets attributes, so a
     second `plant-bait` run leaves the tree as the first left it. Returns the
@@ -736,12 +759,35 @@ def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
             _fs_put(tree, path, node)
         elif node[_FS_TYPE] == _FS_FILE:
             node[_FS_SIZE] = size
+        if node[_FS_TYPE] == _FS_FILE:
+            node[_FS_MODE] &= ~0o111
     for path, size in PERSONA_FS_SIZES:
         node = _fs_entry(tree, path)
         if node is None or node[_FS_TYPE] != _FS_FILE:
             skipped.append(path)
             continue
         node[_FS_SIZE] = size
+    for path in PERSONA_FS_REMOVE:
+        parent_path, _, name = path.rpartition("/")
+        parent = _fs_dir(tree, parent_path or "/")
+        if parent is not None:
+            parent[_FS_CONTENTS][:] = [c for c in parent[_FS_CONTENTS] if c[_FS_NAME] != name]
+    for path, uid, gid in PERSONA_HOMES:
+        home = _fs_dir(tree, path)
+        if home is None:
+            skipped.append(path)
+            continue
+        home[_FS_MODE] = 0o40750
+        stack = [home]
+        while stack:
+            node = stack.pop()
+            node[_FS_UID], node[_FS_GID] = uid, gid
+            if node[_FS_TYPE] == _FS_DIR:
+                stack.extend(node[_FS_CONTENTS])
+    for path, mode in PERSONA_FS_MODES:
+        node = _fs_entry(tree, path)
+        if node is not None and node[_FS_TYPE] in (_FS_FILE, _FS_DIR):
+            node[_FS_MODE] = mode
     for path, size, mode, gid, ctime in PERSONA_FS_FILES:
         node = [None, _FS_FILE, 0, gid, size, mode, ctime, [], None, None]
         if not _fs_put(tree, path, node):
