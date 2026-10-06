@@ -146,6 +146,7 @@ class LastTest(unittest.TestCase):
         self.assertEqual(self.last.PERSONA_SESSIONS, want)
         self.assertEqual(self.last.PERSONA_USER, gtp.ADMIN_USER)
         self.assertEqual(self.last.PERSONA_KERNEL, gtp.KERNEL)
+        self.assertEqual(self.last.PERSONA_ACTIVE_FOR, int(gtp.ACTIVE_FOR.total_seconds()))
 
     def test_exec_last_is_the_persona_at_every_cowrie_age(self):
         for age in AGES:
@@ -202,6 +203,131 @@ class LastTest(unittest.TestCase):
         out, err, rc = run(self.last.Command_last, proto, ["-z"], now=T0)
         self.assertEqual((out, rc), ("", 1))
         self.assertEqual(err, "last: invalid option -- 'z'\nTry 'last --help' for more information.\n")
+
+
+def load_w():
+    """Command_w alone: base.py imports Twisted, so exec just its class."""
+    import ast  # noqa: PLC0415
+
+    source = (COWRIE_HOME / "src/cowrie/commands/base.py").read_text()
+    node = next(n for n in ast.parse(source).body
+                if isinstance(n, ast.ClassDef) and n.name == "Command_w")
+    ns = {"time": time, "HoneyPotCommand": HoneyPotCommand}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "base.py", "exec"), ns)
+    return ns["Command_w"]
+
+
+def proc_uptime(proto):
+    """v3.1.1 HoneyPotBaseProtocol.proc_uptime over the persona's 4 CPUs."""
+    up = proto.uptime()
+    return f"{up:.2f} {up * 4 * 0.97:.2f}\n"
+
+
+class UptimeWTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.last = load_module("src/cowrie/commands/last.py", "cowrie.commands.last")
+        cls.uptime = load_module("src/cowrie/commands/uptime.py", "cowrie.commands.uptime")
+        cls.w = load_w()
+
+    def test_uptime_and_w_are_the_persona_at_every_cowrie_age(self):
+        for age in AGES:
+            for now in SAMPLES[::3]:
+                proto = HoneyPotExecProtocol(start=now - age)
+                for case, cls in (("uptime", self.uptime.Command_uptime), ("w", self.w)):
+                    out, err, rc = run(cls, proto, now=now)
+                    res = harness(case, out + err, now, age, rc)
+                    if not res.ok:
+                        self.fail(f"{case} age {age}s at "
+                                  f"{datetime.fromtimestamp(now, timezone.utc)}:\n"
+                                  + "\n".join(res.diff + res.messages))
+
+    def test_every_time_source_agrees_on_one_channel(self):
+        # time-persona-consistent: cat /proc/uptime; uptime; w; last.
+        for age in AGES:
+            for now in SAMPLES[::5]:
+                proto = HoneyPotExecProtocol(start=now - age)
+                with mock.patch("time.time", return_value=now):
+                    out = proc_uptime(proto)
+                out += run(self.uptime.Command_uptime, proto, now=now)[0]
+                out += run(self.w, proto, now=now)[0]
+                out += run(self.last.Command_last, proto, now=now)[0]
+                res = harness("time-persona-consistent", out, now, age)
+                if not res.ok:
+                    self.fail(f"age {age}s at {datetime.fromtimestamp(now, timezone.utc)}:\n"
+                              + "\n".join(res.diff + res.messages))
+
+    def test_w_at_a_grid_instant_is_gen_time_personas_txtcmd(self):
+        # Cowrie's w shadows txtcmds/usr/bin/w; at a grid instant, with the
+        # persona's anchor uptime, the two are byte-identical.
+        now = self.last.persona_reference(T0)
+        out, _, _ = run(self.w, HoneyPotExecProtocol(start=now), now=now)
+        txt = gtp.build(datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None))
+        self.assertEqual(out, txt["share/cowrie/txtcmds/usr/bin/w"])
+        out, _, _ = run(self.uptime.Command_uptime, HoneyPotExecProtocol(start=now), now=now)
+        self.assertEqual(out, txt["share/cowrie/txtcmds/usr/bin/uptime"])
+
+    def test_load_average_is_the_fake_proc_loadavg(self):
+        proto = HoneyPotExecProtocol(T0 - 60)
+        out, _, _ = run(self.uptime.Command_uptime, proto, now=T0, loadavg=b"1.5 0.25 2 3/9 1\n")
+        self.assertTrue(out.endswith("load average: 1.50, 0.25, 2.00\n"), out)
+        out, _, _ = run(self.w, proto, now=T0, loadavg=None)
+        self.assertIn("load average: 0.00, 0.00, 0.00\n", out)
+
+    def test_procps_uptime_forms(self):
+        line = self.uptime.procps_uptime_line
+        fs = types.SimpleNamespace(file_contents=lambda p: b"0.38 0.42 0.45 1/287 18234\n")
+        self.assertEqual(line(fs, T0, BOOT_OFFSET + 5, 1),
+                         " 06:15:52 up 42 days,  3:17,  1 user,  load average: 0.38, 0.42, 0.45\n")
+        self.assertEqual(line(fs, T0, 42 * 86400 + 300, 2),
+                         " 06:15:52 up 42 days, 5 min,  2 users,  load average: 0.38, 0.42, 0.45\n")
+        self.assertEqual(line(fs, T0, 86400 + 11 * 3600, 1)[10:28], "up 1 day, 11:00,  ")
+        self.assertEqual(line(fs, T0, 3 * 3600 + 60, 1)[10:22], "up  3:01,  1")
+        self.assertEqual(self.uptime.procps_pretty(BOOT_OFFSET),
+                         "up 6 weeks, 3 hours, 17 minutes\n")
+        self.assertEqual(self.uptime.procps_pretty(8 * 86400 + 60), "up 1 week, 1 day, 1 minute\n")
+
+    def test_uptime_options(self):
+        proto = HoneyPotExecProtocol(T0 - 60)
+        out, _, rc = run(self.uptime.Command_uptime, proto, ["-s"], now=T0)
+        boot = datetime.fromtimestamp(T0 - 60 - BOOT_OFFSET, timezone.utc)
+        self.assertEqual((out, rc), (f"{boot:%Y-%m-%d %H:%M:%S}\n", 0))
+        out, _, _ = run(self.uptime.Command_uptime, proto, ["-p"], now=T0)
+        self.assertEqual(out, "up 6 weeks, 3 hours, 18 minutes\n")
+        out, _, _ = run(self.uptime.Command_uptime, proto, ["-V"], now=T0)
+        self.assertEqual(out, "uptime from procps-ng 3.3.17\n")
+        out, err, rc = run(self.uptime.Command_uptime, proto, ["-z"], now=T0)
+        self.assertEqual((out, rc), ("", 1))
+        self.assertTrue(err.startswith("uptime: invalid option -- 'z'\n\nUsage:\n uptime [options]\n"))
+        out, err, rc = run(self.uptime.Command_uptime, proto, ["now"], now=T0)
+        self.assertEqual((out, rc), ("", 1))
+
+    def test_pty_caller_is_a_second_user(self):
+        proto = HoneyPotInteractiveProtocol(T0 - 60, "203.0.113.9", login=T0 - 30)
+        out, _, _ = run(self.uptime.Command_uptime, proto, now=T0)
+        self.assertIn(",  2 users,  load average", out)
+        out, _, _ = run(self.w, proto, now=T0)
+        rows = out.split("\n")
+        self.assertIn(",  2 users,  load average", rows[0])
+        self.assertTrue(rows[2].startswith("ubuntu   pts/0    10.0.0.8         "))
+        self.assertEqual(rows[3], "root     pts/1    203.0.113.9      06:15    0.00s  0.00s  0.00s w")
+
+    def test_w_options(self):
+        proto = HoneyPotExecProtocol(T0 - 60)
+        full, _, _ = run(self.w, proto, now=T0)
+        out, _, _ = run(self.w, proto, ["-h"], now=T0)
+        self.assertEqual(out, full.split("\n", 2)[2])
+        out, _, _ = run(self.w, proto, ["-s"], now=T0)
+        head, row = out.split("\n")[1:3]
+        self.assertEqual(head, "USER     TTY      FROM              IDLE WHAT")
+        self.assertRegex(row, r"^ubuntu   pts/0    10\.0\.0\.8         [ \d]\d:\d\dm -bash$")
+        out, _, _ = run(self.w, proto, ["-f"], now=T0)
+        self.assertEqual(out.split("\n")[1], "USER     TTY        LOGIN@   IDLE   JCPU   PCPU WHAT")
+        out, _, _ = run(self.w, proto, ["root"], now=T0)
+        self.assertEqual(len(out.split("\n")), 3)
+        out, err, rc = run(self.w, proto, ["-z"], now=T0)
+        self.assertEqual((out, rc), ("", 1))
+        self.assertTrue(err.startswith("w: invalid option -- 'z'\n\nUsage:\n w [options] [user]\n"))
 
 
 if __name__ == "__main__":

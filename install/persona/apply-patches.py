@@ -53,6 +53,10 @@ PATCHES = (
     # session and none of the box's history; it now prints the persona's wtmp,
     # sessions anchored to now, reboot and wtmp begins at boot_time().
     "last-persona.py",
+    # uptime and w: procps format, the fake /proc/loadavg, and w's rows from
+    # last-persona's admin_session (so it must come after last-persona).
+    # Command_w shares commands/base.py with passwd-stdin; disjoint anchors.
+    "uptime-loadavg.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and

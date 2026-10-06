@@ -166,6 +166,37 @@ class ReleaseContractTests(unittest.TestCase):
                 self.assertIn("OLD", names)
                 self.assertIn("NEW", names)
 
+    def test_w_reads_its_admin_session_from_last_persona(self) -> None:
+        # uptime-loadavg's w imports last-persona's helpers at run time, so w
+        # and last name one login. Nothing checks that import until a session
+        # runs w: pin the names and the order here.
+        import ast  # noqa: PLC0415
+        import re  # noqa: PLC0415
+
+        def constants(name):
+            body = ast.parse((ROOT / "install/persona/patches" / name).read_text()).body
+            return {n.targets[0].id: n.value.value for n in body if isinstance(n, ast.Assign)
+                    and isinstance(getattr(n.targets[0], "id", None), str)
+                    and isinstance(n.value, ast.Constant)}
+
+        last = constants("last-persona.py")["NEW"]
+        uptime = constants("uptime-loadavg.py")
+        imported = set()
+        for block in (uptime["NEW_UPTIME"], uptime["NEW"]):
+            for names in re.findall(r"from cowrie\.commands\.last import ([\w, ]+)", block):
+                imported |= {n.strip() for n in names.split(",")}
+        self.assertEqual(imported, {"CALLER_TTY", "PERSONA_USER", "admin_session", "caller_has_utmp"})
+        for name in imported:
+            self.assertRegex(last, rf"(?m)^(def {name}\(|{name} = )")
+        self.assertIn("from cowrie.commands.uptime import procps_uptime_line", uptime["NEW"])
+        self.assertIn("def procps_uptime_line(", uptime["NEW_UPTIME"])
+        tree = ast.parse((ROOT / "install/persona/apply-patches.py").read_text())
+        patches = next(
+            ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "PATCHES"
+        )
+        self.assertLess(patches.index("last-persona.py"), patches.index("uptime-loadavg.py"))
+
     def test_lspci_patch_emits_the_persona_txtcmd(self) -> None:
         # One device list, two copies: the registered command (patched) and
         # the txtcmd it shadows. They must never disagree.

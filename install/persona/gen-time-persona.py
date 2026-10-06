@@ -73,6 +73,24 @@ SESSIONS = [
     (timedelta(days=4, hours=22, minutes=43), timedelta(hours=1, minutes=23), "pts/0", "10.0.0.8"),
 ]
 
+# The still-logged-in admin's last keystroke, after its login: w shows that
+# session idle in its login shell (-bash), not running `w` at 0.00s idle, which
+# only the caller's own row could (Task 1 review I-4). Cowrie's patched w
+# (uptime-loadavg.py) uses the same constant via last-persona.py.
+ACTIVE_FOR = timedelta(minutes=41)
+
+
+def _ival7(delta: timedelta) -> str:
+    """procps print_time_ival7, w's 7-column IDLE cell."""
+    t = int(delta.total_seconds())
+    if t >= 48 * 3600:
+        return f" {t // 86400:2d}days"
+    if t >= 3600:
+        return f" {t // 3600:2d}:{t // 60 % 60:02d}m"
+    if t > 60:
+        return f" {t // 60:2d}:{t % 60:02d} "
+    return f" {t:2d}.00s"
+
 
 def _hm(delta: timedelta) -> str:
     """H:MM for a duration under a day (last's parenthesised session length)."""
@@ -106,7 +124,7 @@ def build(now: datetime) -> dict[str, str]:
         uptime_line + "\n"
         "USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n"
         f"{ADMIN_USER:<8} {SESSIONS[0][2]:<8} {SESSIONS[0][3]:<16} "
-        f"{cur_login:%H:%M}    0.00s  0.04s  0.00s w\n"
+        f"{cur_login:%H:%M}  {_ival7(SESSIONS[0][0] - ACTIVE_FOR)}  0.04s  0.01s -bash\n"
     )
 
     # --- who ---
