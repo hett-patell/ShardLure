@@ -61,7 +61,8 @@ Run locally after building:
 - `${v:-default}` parameter expansion is unsupported (`param-expansion-c1` is a documented skip).
 - `ifconfig` still prints Cowrie's net-tools `eth0 10.0.0.210` with a random MAC, not the persona's address (documented skip).
 - **`install.sh` deployments do not get the Phase B patches**: it fetches and applies only `sftp-capture-permissions.py` (which is why that patch must keep applying standalone on the pin); the persona prestart lines are a silent no-op there until `apply-stealth.sh` is run from a checkout, which also runs the full orchestrator.
-- **An existing box at the old pin is not moved by `apply-stealth.sh`**: it now preflights the patch set read-only first and refuses before touching the persona (it used to apply the new persona, stop at the orchestrator, and let the next restart serve it over unpatched Cowrie). Moving to v3.1.1 means a Cowrie checkout at `install/cowrie.commit` first (`install_cowrie` leaves an existing checkout alone).
+- **An existing box at the old pin is not moved by `apply-stealth.sh`**: it now preflights the patch set read-only first and refuses before touching the persona (it used to apply the new persona, stop at the orchestrator, and let the next restart serve it over unpatched Cowrie). Moving to v3.1.1 means a Cowrie checkout at `install/cowrie.commit` first (`install_cowrie` refuses an existing checkout at another pin).
+- `plant-bait` (manual, pre-existing) still copies the bait into `honeyfs` as root (`rmtree`/`copytree` in the account's tree); its pickle edits now run as the account.
 - `apply-stealth.sh` (manual, pre-existing) still writes into the cowrie-owned tree as root (`rsync` of honeyfs/txtcmds, `tee`, `cp userdb.txt`, `ssh-keygen`, then the patch orchestrator after its `chown -R` hand-back); only the persona generators were moved to run as the account.
 
 ## Architecture

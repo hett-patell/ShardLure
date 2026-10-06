@@ -673,9 +673,10 @@ def plant_bait_files() -> None:
         # redirect root's writes. cmd_persona_fs re-runs itself as the
         # account and covers the var/lib copy too (cowrie_fs_pickles).
         prefix = persona_tree_prefix(COWRIE_HOME)
-        if pickle_path.exists():
-            run([*prefix, "cp", "--", str(pickle_path), str(dst_pickle)])
-        cmd_persona_fs(COWRIE_HOME)
+        if pickle_path.exists() and run([*prefix, "cp", "--", str(pickle_path), str(dst_pickle)]).returncode != 0:
+            log(f"warning: copying {pickle_path} to {dst_pickle} failed; Cowrie may load a pickle without the bait")
+        if cmd_persona_fs(COWRIE_HOME) != 0:
+            log("warning: persona filesystem nodes not applied after planting bait (fingerprintable)")
         return
     apply_persona_fs(pickle_path, honeyfs)
     if pickle_path.exists():

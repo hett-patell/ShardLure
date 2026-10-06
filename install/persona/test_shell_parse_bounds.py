@@ -231,6 +231,7 @@ class ParseTests(unittest.TestCase):
         p.parse(big)
         p.parse(big)
         self.assertEqual(grammar.calls.count(big), 2)  # never remembered
+        self.assertNotIn(big, p._connection_state()["memo"])
         for i in range(200):
             p.parse(f"echo {i} " + "y" * 300)
         state = p._connection_state()
@@ -244,6 +245,14 @@ class ParseTests(unittest.TestCase):
         p.parse("slow")
         p.parse("slow")
         self.assertEqual(grammar.calls, ["slow", "slow"])
+
+    def test_recursion_limit_fails_one_parse_and_is_not_remembered(self):
+        grammar = self.use(Grammar(fail=RecursionError()))
+        p = Connection().parser()
+        first = p.parse("deep")
+        self.assertIsInstance(first[0], BP.SyntaxError_)
+        p.parse("deep")
+        self.assertEqual(grammar.calls, ["deep", "deep"])
 
     def test_syntax_errors_are_remembered(self):
         grammar = self.use(Grammar(fail=BP.LarkError()))
