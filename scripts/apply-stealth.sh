@@ -63,22 +63,20 @@ fi
 
 # --- per-start persona regeneration (cowrie.service ExecStartPre) ---
 # The unit re-runs gen-time-persona and persona-fs as the cowrie account before
-# every start, from this copy inside the Cowrie tree (the account cannot read
-# the checkout; shardlure.py PERSONA_REGEN_FILES is the same list). Without it
-# a restart leaves the motd's "Last login" naming a session last no longer
-# shows. Inert under a unit rendered before Task 8 until the unit is.
-REGEN_DST="$COWRIE_HOME/shardlure-persona"
-SCRIPTS_SRC="$(dirname "$SHARDLURE_PY")"
-regen_src=("$PERSONA/gen-time-persona.py" "$PERSONA/cowrie-stealth.cfg" "$SHARDLURE_PY"
-           "$SCRIPTS_SRC/installer_safety.py" "$SCRIPTS_SRC/ssh_transition.py")
-regen_ok=1
-for f in "${regen_src[@]}"; do [[ -f "$f" ]] || regen_ok=0; done
-if [[ "$regen_ok" == 1 ]]; then
-  echo "[stealth] deploying per-start persona regeneration to $REGEN_DST"
-  sudo mkdir -p "$REGEN_DST"
-  sudo cp "${regen_src[@]}" "$REGEN_DST/"
+# every start, from a root-owned copy outside the Cowrie tree
+# (${SHARDLURE_PERSONA_LIB:-/usr/local/lib/shardlure/persona}; the account
+# cannot read the checkout). shardlure.py installs it (PERSONA_REGEN_FILES,
+# PERSONA_REGEN_LIB): root writes only into a directory no other account can
+# change, never through the Cowrie tree, and removes the copy older versions
+# kept in $COWRIE_HOME/shardlure-persona without following anything there.
+# Without it a restart leaves the motd's "Last login" naming a session last
+# no longer shows. Inert under a unit rendered before Task 8 until the unit is.
+if [[ -f "$SHARDLURE_PY" ]]; then
+  echo "[stealth] deploying per-start persona regeneration"
+  sudo python3 "$SHARDLURE_PY" persona-regen-install "$COWRIE_HOME" \
+    || echo "[stealth] WARN: persona regeneration not installed; a restart will not refresh the time persona"
 else
-  echo "[stealth] WARN: persona regeneration sources missing; a restart will not refresh the time persona"
+  echo "[stealth] WARN: scripts/shardlure.py not found; a restart will not refresh the time persona"
 fi
 
 # --- userdb: realistic weak creds, no *:* honeypot catch-alls ---
@@ -183,10 +181,10 @@ sudo ssh-keygen -t rsa -b 4096 -f "$KEYDIR/ssh_host_rsa_key" -N "" -q
 sudo chown cowrie:cowrie "$KEYDIR"/ssh_host_*key "$KEYDIR"/ssh_host_*key.pub 2>/dev/null || true
 sudo chmod 600 "$KEYDIR"/ssh_host_*key
 
-# share (the txtcmds rsync keeps the checkout's owner) and the regeneration
-# copy too: cowrie.service rewrites the time txtcmds as the cowrie account.
+# share too (the txtcmds rsync keeps the checkout's owner): cowrie.service
+# rewrites the time txtcmds as the cowrie account.
 owned=("$COWRIE_HOME/honeyfs" "$COWRIE_HOME/etc" "$COWRIE_HOME/var")
-for d in "$COWRIE_HOME/share" "$REGEN_DST"; do [[ -d "$d" ]] && owned+=("$d"); done
+[[ -d "$COWRIE_HOME/share" ]] && owned+=("$COWRIE_HOME/share")
 sudo chown -R cowrie:cowrie "${owned[@]}"
 
 # --- Cowrie source patches (anti-fingerprint shell fixes) ---

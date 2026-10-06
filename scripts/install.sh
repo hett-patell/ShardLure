@@ -344,16 +344,18 @@ require_cowrie_python() {
 
 # Per-start persona regeneration: the same two ExecStartPre= lines as
 # shardlure.py persona_regen_prestart (a test pins the text). They run as the
-# unit's User=cowrie (no +/! prefix), from the copy apply-stealth.sh puts in
-# the Cowrie tree; this installer deploys no persona, so until apply-stealth.sh
+# unit's User=cowrie (no +/! prefix), from the root-owned copy apply-stealth.sh
+# installs outside the Cowrie tree (PERSONA_REGEN_LIB, default
+# /usr/local/lib/shardlure/persona, SHARDLURE_PERSONA_LIB overrides it in both
+# installers); this installer deploys no persona, so until apply-stealth.sh
 # has run the copy is absent and each line exits 0 without doing anything.
 # The `-` prefix keeps a failed regeneration from keeping Cowrie down; see
-# PERSONA_REGEN_DIR in shardlure.py for the reasoning.
+# PERSONA_REGEN_LIB in shardlure.py for the reasoning.
 render_persona_regen_prestart() {
   local regen_sh='test -f "$$2" || exit 0; timeout 30 "$$@" && exit 0; rc=$$?; echo "persona regeneration: $$2 exited $$rc; Cowrie starts with its existing persona files" >&2; exit $$rc'
   local py regen home
   py="$(systemd_exec_arg "$COWRIE_HOME/venv/bin/python")" || return
-  regen="$COWRIE_HOME/shardlure-persona"
+  regen="${SHARDLURE_PERSONA_LIB:-/usr/local/lib/shardlure/persona}"
   home="$(systemd_exec_arg "$COWRIE_HOME")" || return
   printf "ExecStartPre=-/bin/sh -c '%s' persona-regen %s %s %s\n" \
     "$regen_sh" "$py" "$(systemd_exec_arg "$regen/gen-time-persona.py")" "$home"

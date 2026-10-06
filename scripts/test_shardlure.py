@@ -11,6 +11,7 @@ import re
 import grp
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1541,10 +1542,16 @@ def prestart_commands(unit: str) -> list[tuple[str, list[str]]]:
     return out
 
 
+def regen_lib(home: Path) -> Path:
+    """Where regen_tree installs the root-owned regeneration copy (the test's
+    stand-in for /usr/local/lib/shardlure/persona)."""
+    return home.parent.parent / "lib" / "persona"
+
+
 def regen_tree(root: Path) -> Path:
     """A deployed Cowrie tree as the per-start regeneration finds it: the
-    regeneration copy, a venv python, a cfg, honeyfs and txtcmd dirs, and the
-    pickle the cfg names."""
+    regeneration copy (outside the tree, regen_lib), a venv python, a cfg,
+    honeyfs and txtcmd dirs, and the pickle the cfg names."""
     import pickle
     home = root / 'data "q" $VALUE %n a\'s' / "cowrie"
     for d in ("venv/bin", "etc", "honeyfs/etc", "honeyfs/proc", "share/cowrie/txtcmds/usr/bin",
@@ -1556,7 +1563,8 @@ def regen_tree(root: Path) -> Path:
         + shardlure.cowrie_cfg_value(home / "src/cowrie/data/fs.pickle") + "\n")
     (home / "honeyfs/etc/motd").write_text("stale\n")
     (home / "src/cowrie/data/fs.pickle").write_bytes(pickle.dumps(persona_fs_tree()))
-    with mock.patch.object(shardlure, "COWRIE_HOME", home):
+    with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+          mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home))):
         shardlure.deploy_persona_regen()
     return home
 
@@ -1570,6 +1578,7 @@ class PersonaRegenTests(unittest.TestCase):
               mock.patch.object(shardlure, "COWRIE_HOME", home),
               mock.patch.object(shardlure, "COWRIE_LOG", home / "var/log/cowrie/cowrie.json"),
               mock.patch.object(shardlure, "CONFIG_FILE", home.parent / "shardlure.yaml"),
+              mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home)),
               mock.patch.object(shardlure, "_tailscale_iface", return_value="")):
             return shardlure.render_services(2222, 8080)["cowrie.service"]
 
@@ -1585,10 +1594,13 @@ class PersonaRegenTests(unittest.TestCase):
                     # failure never keeps Cowrie from starting.
                     self.assertEqual(prefix, "-")
                     self.assertEqual(argv[:2], ["/bin/sh", "-c"])
+            lib = regen_lib(home)
             self.assertEqual(pre[0][1][4:], [str(home / "venv/bin/python"),
-                                             str(home / "shardlure-persona/gen-time-persona.py"), str(home)])
+                                             str(lib / "gen-time-persona.py"), str(home)])
             self.assertEqual(pre[1][1][4:], [str(home / "venv/bin/python"),
-                                             str(home / "shardlure-persona/shardlure.py"), "persona-fs", str(home)])
+                                             str(lib / "shardlure.py"), "persona-fs", str(home)])
+            # The code it runs lives outside the tree the account owns.
+            self.assertFalse(lib.is_relative_to(home))
             self.assertIn(f"User={shardlure.COWRIE_USER}\n", unit)
             self.assertLess(unit.index("ExecStartPre="), unit.index("ExecStart="))
             check_service_unit(self, Path(tmp), unit)
@@ -1611,7 +1623,7 @@ class PersonaRegenTests(unittest.TestCase):
     def test_prestart_without_the_copy_is_a_silent_no_op(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = regen_tree(Path(tmp))
-            shutil.rmtree(home / shardlure.PERSONA_REGEN_DIR)
+            shutil.rmtree(regen_lib(home))
             for _, argv in prestart_commands(self.render(home)):
                 proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
                 self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
@@ -1636,26 +1648,100 @@ class PersonaRegenTests(unittest.TestCase):
     def test_regen_copy_is_the_scripts_the_steps_need(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = regen_tree(Path(tmp))
-            names = sorted(p.name for p in (home / shardlure.PERSONA_REGEN_DIR).iterdir())
+            lib = regen_lib(home)
+            names = sorted(p.name for p in lib.iterdir())
             self.assertEqual(names, sorted(shardlure.PERSONA_REGEN_FILES))
-            # apply-stealth.sh deploys the same list.
-            script = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
-            for name in shardlure.PERSONA_REGEN_FILES:
-                self.assertIn(name, script)
-            self.assertIn(f'REGEN_DST="$COWRIE_HOME/{shardlure.PERSONA_REGEN_DIR}"', script)
+            # Readable by the account, writable by nobody but its owner.
+            self.assertEqual(stat.S_IMODE(lib.stat().st_mode), 0o755)
+            for p in lib.iterdir():
+                self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o644, p.name)
+            self.assertFalse((home / shardlure.LEGACY_PERSONA_REGEN_DIR).exists())
+        # Every writer uses the same location, and apply-stealth.sh installs
+        # it through shardlure.py (same file list, same checks) instead of cp.
+        default = "/usr/local/lib/shardlure/persona"
+        self.assertEqual(str(shardlure.PERSONA_REGEN_LIB), os.environ.get("SHARDLURE_PERSONA_LIB") or default)
+        script = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
+        self.assertIn('sudo python3 "$SHARDLURE_PY" persona-regen-install "$COWRIE_HOME"', script)
+        self.assertNotIn("sudo cp \"${regen_src", script)
+        self.assertIn("${SHARDLURE_PERSONA_LIB:-" + default + "}", script)
+        installer = (Path(shardlure.ROOT) / "scripts/install.sh").read_text()
+        self.assertIn('regen="${SHARDLURE_PERSONA_LIB:-' + default + '}"', installer)
+
+    def test_root_never_follows_a_symlink_where_the_old_copy_went(self):
+        # Task 8 review I-1: the copy used to be root's copyfile/cp into the
+        # cowrie-owned COWRIE_HOME/shardlure-persona, following whatever the
+        # account planted there. Plant both shapes: the directory itself as a
+        # symlink, and a file symlink inside a real directory.
+        for shape in ("dir-link", "file-link"):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                home = regen_tree(Path(tmp))
+                victim_dir = Path(tmp) / "victim"
+                victim_dir.mkdir()
+                victim = victim_dir / "shardlure.py"
+                victim.write_text("root-owned original\n")
+                legacy = home / shardlure.LEGACY_PERSONA_REGEN_DIR
+                if shape == "dir-link":
+                    legacy.symlink_to(victim_dir)
+                else:
+                    legacy.mkdir()
+                    for name in shardlure.PERSONA_REGEN_FILES:
+                        (legacy / name).symlink_to(victim)
+                with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                      mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home))):
+                    shardlure.deploy_persona_regen()
+                self.assertEqual(victim.read_text(), "root-owned original\n")
+                self.assertEqual(sorted(p.name for p in victim_dir.iterdir()), ["shardlure.py"])
+                self.assertFalse(os.path.lexists(legacy))
+                self.assertEqual((regen_lib(home) / "shardlure.py").read_bytes(),
+                                 shardlure.PERSONA_REGEN_FILES["shardlure.py"].read_bytes())
+
+    def test_regen_lib_refuses_a_location_another_account_can_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            shared = Path(tmp) / "shared"
+            shared.mkdir()
+            shared.chmod(0o777)  # not sticky: anyone could swap the next name
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure, "PERSONA_REGEN_LIB", shared / "persona"),
+                  mock.patch.object(shardlure, "die", side_effect=SystemExit) as died):
+                with self.assertRaises(SystemExit):
+                    shardlure.deploy_persona_regen()
+            self.assertIn("replaceable", died.call_args[0][0])
+            self.assertFalse((shared / "persona").exists())
+
+    def test_regen_lib_replaces_a_link_never_its_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            victim = Path(tmp) / "victim"
+            victim.write_text("original\n")
+            target = regen_lib(home) / "shardlure.py"
+            target.unlink()
+            target.symlink_to(victim)
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home))):
+                shardlure.deploy_persona_regen()
+            self.assertEqual(victim.read_text(), "original\n")
+            self.assertFalse(target.is_symlink())
 
     def test_install_sh_renders_the_same_prestart(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / 'data "q" $VALUE %n a\'s' / "cowrie"
-            proc = subprocess.run(
-                ["bash", "-c", 'source "$INSTALLER"; COWRIE_HOME="$TEST_HOME"; '
-                 'COWRIE_EXEC="ExecStart=/bin/true"; render_cowrie_service'],
-                env=dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", TEST_HOME=str(home),
-                         INSTALLER=str(Path(shardlure.ROOT) / "scripts/install.sh")),
-                capture_output=True, text=True, timeout=30)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            lines = [line + "\n" for line in proc.stdout.splitlines() if line.startswith("ExecStartPre=")]
-            self.assertEqual("".join(lines), shardlure.persona_regen_prestart(home))
+        for override in (None, '/srv/lib "q" $V %n'):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp) / 'data "q" $VALUE %n a\'s' / "cowrie"
+                env = dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", TEST_HOME=str(home),
+                           INSTALLER=str(Path(shardlure.ROOT) / "scripts/install.sh"))
+                env.pop("SHARDLURE_PERSONA_LIB", None)
+                lib = Path("/usr/local/lib/shardlure/persona")
+                if override:
+                    env["SHARDLURE_PERSONA_LIB"] = override
+                    lib = Path(override)
+                proc = subprocess.run(
+                    ["bash", "-c", 'source "$INSTALLER"; COWRIE_HOME="$TEST_HOME"; '
+                     'COWRIE_EXEC="ExecStart=/bin/true"; render_cowrie_service'],
+                    env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines = [line + "\n" for line in proc.stdout.splitlines() if line.startswith("ExecStartPre=")]
+                with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                    self.assertEqual("".join(lines), shardlure.persona_regen_prestart(home))
             self.assertIn("User=cowrie\n", proc.stdout)
             self.assertLess(proc.stdout.index("ExecStartPre="), proc.stdout.index("ExecStart="))
 
@@ -1782,8 +1868,10 @@ class ApplyStealthPersonaFsTests(unittest.TestCase):
                                ("systemctl", "echo active")):
                 (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
                 (stubs / name).chmod(0o755)
+            lib = tmp / "lib" / "persona"
             env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}",
-                       COWRIE_HOME=str(home), PERSONA_DIR=str(persona))
+                       COWRIE_HOME=str(home), PERSONA_DIR=str(persona),
+                       SHARDLURE_PERSONA_LIB=str(lib))
             proc = subprocess.run(["bash", str(root / "scripts/apply-stealth.sh")],
                                   env=env, capture_output=True, text=True, timeout=120)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -1799,9 +1887,9 @@ class ApplyStealthPersonaFsTests(unittest.TestCase):
             served = (home / "honeyfs/etc/passwd").read_text()
             self.assertNotIn("phil", served)
             self.assertIn("deploy:x:1001:1001:", served)
-            # The per-start regeneration copy (Task 8) lands in the tree.
-            self.assertEqual(sorted(p.name for p in (home / shardlure.PERSONA_REGEN_DIR).iterdir()),
-                             sorted(shardlure.PERSONA_REGEN_FILES))
+            # The per-start regeneration copy (Task 8) lands outside the tree.
+            self.assertEqual(sorted(p.name for p in lib.iterdir()), sorted(shardlure.PERSONA_REGEN_FILES))
+            self.assertFalse((home / shardlure.LEGACY_PERSONA_REGEN_DIR).exists())
 
     def test_persona_fs_finds_the_pickle_the_cfg_names(self):
         with tempfile.TemporaryDirectory() as tmp:

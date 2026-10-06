@@ -1110,16 +1110,27 @@ def deploy_time_persona() -> None:
 # They run as the Cowrie account, never root: the unit's User= applies (no
 # `+`/`!` prefix) and everything they write is in the tree that account
 # owns (honeyfs, share/cowrie/txtcmds, the fs.pickle files and their
-# directories). They run from a copy inside that tree, because the checkout
-# the installer ran from (often /root/...) is not readable by the account,
-# and the copy is never run by root: root always uses the repo's own files.
+# directories). They run from a root-owned copy outside that tree,
+# PERSONA_REGEN_LIB (/usr/local/lib/shardlure/persona: root 0755, files
+# 0644), because the checkout the installer ran from (often /root/...) is not
+# readable by the account. The copy lives outside the Cowrie tree on purpose
+# (Task 8 review I-1): it used to sit in COWRIE_HOME/shardlure-persona, owned
+# by the account, so on every re-run root's copyfile/cp wrote through any
+# symlink the account had planted there (shardlure.py ->
+# /usr/local/bin/shardlure). Now root writes only into a directory nobody
+# else can change (installer_safety.install_root_files), and the account
+# cannot tamper with the code it runs before every start either.
+# SHARDLURE_PERSONA_LIB overrides the location (rehearsals under /srv); both
+# installers and apply-stealth.sh read the same variable and default.
 # The prefix `-` keeps a failed regeneration from keeping Cowrie down: a
 # honeypot that does not answer loses every capture, while a stale persona
 # is the residual tell the box ran with before this. `timeout` keeps both
 # steps inside systemd's 90 s start budget, so a hung step cannot turn into
 # a start-timeout restart loop. A missing copy (a box whose persona was never
 # deployed, e.g. install.sh without apply-stealth.sh) is a silent no-op.
-PERSONA_REGEN_DIR = "shardlure-persona"
+PERSONA_REGEN_LIB = Path(os.environ.get("SHARDLURE_PERSONA_LIB") or "/usr/local/lib/shardlure/persona")
+# Where the copy lived before; removed (never written) on every deploy.
+LEGACY_PERSONA_REGEN_DIR = "shardlure-persona"
 PERSONA_REGEN_TIMEOUT = 30
 PERSONA_REGEN_FILES = {
     "gen-time-persona.py": ROOT / "install/persona/gen-time-persona.py",
@@ -1142,10 +1153,10 @@ PERSONA_REGEN_SH = (
 def persona_regen_prestart(cowrie_home: Path) -> str:
     """cowrie.service's ExecStartPre= lines for the per-start regeneration."""
     py = cowrie_home / "venv/bin/python"
-    regen = cowrie_home / PERSONA_REGEN_DIR
+    lib = PERSONA_REGEN_LIB
     steps = (
-        [py, regen / "gen-time-persona.py", cowrie_home],
-        [py, regen / "shardlure.py", "persona-fs", cowrie_home],
+        [py, lib / "gen-time-persona.py", cowrie_home],
+        [py, lib / "shardlure.py", "persona-fs", cowrie_home],
     )
     return "".join(
         f"ExecStartPre=-/bin/sh -c '{PERSONA_REGEN_SH}' persona-regen "
@@ -1156,15 +1167,34 @@ def persona_regen_prestart(cowrie_home: Path) -> str:
     )
 
 
-def deploy_persona_regen() -> None:
-    """Copy the per-start regeneration scripts into the Cowrie tree (see
-    PERSONA_REGEN_DIR); prepare_cowrie_tree hands them to the account."""
-    dst = COWRIE_HOME / PERSONA_REGEN_DIR
-    dst.mkdir(parents=True, exist_ok=True)
+def remove_legacy_persona_regen(cowrie_home: Path) -> None:
+    """Delete the pre-fix copy in the Cowrie tree, following nothing: a
+    symlink there is unlinked itself, a directory is removed by rmtree's
+    descriptor-based walk (it never descends through a symlink)."""
+    legacy = cowrie_home / LEGACY_PERSONA_REGEN_DIR
+    try:
+        info = os.lstat(legacy)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode) and shutil.rmtree.avoids_symlink_attacks:
+        shutil.rmtree(legacy)
+    elif not stat.S_ISDIR(info.st_mode):
+        legacy.unlink()
+
+
+def deploy_persona_regen(cowrie_home: Path | None = None) -> None:
+    """Install the per-start regeneration scripts root-owned outside the
+    Cowrie tree (see PERSONA_REGEN_LIB) and drop the old in-tree copy."""
+    files = {}
     for name, src in PERSONA_REGEN_FILES.items():
         if not src.is_file():
             die(f"persona regeneration source missing: {src}")
-        shutil.copyfile(src, dst / name)
+        files[name] = src.read_bytes()
+    try:
+        installer_safety.install_root_files(PERSONA_REGEN_LIB, files)
+    except (OSError, installer_safety.SafetyError) as exc:
+        die(f"cannot install the persona regeneration scripts into {PERSONA_REGEN_LIB}: {exc}")
+    remove_legacy_persona_regen(COWRIE_HOME if cowrie_home is None else cowrie_home)
 
 
 def deploy_patches() -> None:
@@ -2043,6 +2073,13 @@ def main() -> None:
         if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
             die("usage: python3 scripts/shardlure.py persona-fs [COWRIE_HOME]")
         sys.exit(cmd_persona_fs(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME))
+    elif cmd == "persona-regen-install":
+        # apply-stealth.sh's way to (re)install PERSONA_REGEN_LIB with the
+        # same checks as the installer; COWRIE_HOME locates the legacy copy.
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
+            die("usage: sudo python3 scripts/shardlure.py persona-regen-install [COWRIE_HOME]")
+        deploy_persona_regen(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME)
+        log(f"persona regeneration scripts installed in {PERSONA_REGEN_LIB}")
     elif cmd in ("plant-bait", "bait"):
         need_root()
         plant_bait_files()
@@ -2056,7 +2093,8 @@ def main() -> None:
         cmd_uninstall()
     else:
         die("usage: sudo python3 scripts/shardlure.py "
-            "{run|finish|start|stop|status|plant-bait|persona-fs [COWRIE_HOME]|uninstall [--purge]}")
+            "{run|finish|start|stop|status|plant-bait|persona-fs [COWRIE_HOME]|"
+            "persona-regen-install [COWRIE_HOME]|uninstall [--purge]}")
 
 
 if __name__ == "__main__":
