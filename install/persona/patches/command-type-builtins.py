@@ -13,12 +13,16 @@ download ShardLure captures.
 `which` is the natural home: same name-resolution family, already in
 command_modules, so no edit to the module list.
 
-Behaviour (byte-matched to bash):
-  command -v NAME   -> resolved path (or bare NAME for a shell builtin), exit 0;
-                       nothing, exit 1 if not found.
-  command -V NAME   -> "NAME is /path" / "NAME is a shell builtin"; exit 1 if not.
-  type NAME         -> like `command -V` (bash's `type` default).
-  type -t NAME      -> "file" / "builtin"; empty + exit 1 if not found.
+Behaviour (byte-matched to bash 5.1.16 on ubuntu:22.04). A name resolves as
+bash looks it up: reserved word, then builtin, then each file on $PATH.
+  command -v NAME.. -> the word for a keyword/builtin, else the path; nothing
+                       for a missing name; exit 0 if any name resolved.
+  command -V NAME.. -> "NAME is a shell keyword|builtin" / "NAME is /path";
+                       "command: NAME: not found" on stderr for a missing one.
+  type [-a] NAME..  -> like `command -V` (-a: every match); exit 1 if any name
+                       is missing ("type: NAME: not found").
+  type -t|-p|-P     -> kind word / path when a file / path search only.
+  bad option        -> bash's "invalid option" + usage line, exit 2.
   command NAME ARGS -> DELEGATES to the real command via getCommand +
                        exec_command (v3.1.1's sudo.py/busybox.py pattern).
                        Without this a bot doing `command wget http://evil/x`
@@ -33,6 +37,17 @@ so `command -v wget` raised TypeError and hung the session until the client
 gave up. A text check cannot see that; scripts/behaviour's command-v-wget and
 type-wget cases can. Errors now use the shell's own prefix ("bash: line 1: "
 for an exec channel), as bash -c does.
+
+Builtins first (payload-yield Phase B Task 7, Task 3 review M-1): bash answers
+`command -v echo` with `echo` and `type echo` with "echo is a shell builtin";
+this patch searched PATH first and printed /usr/bin/echo, and it called any
+name in Cowrie's command registry with no file on PATH a "shell builtin"
+(`type sudo` -> "sudo is a shell builtin"). Now only bash's own keywords and
+builtins are reported as such, and every other name is looked up on the fake
+PATH alone; plant_bait_files gives the pickle the tools a 22.04 server ships
+(sudo, crontab, ping, git...) that it lacked. Several names per call, -a/-p/-P
+and the exit statuses follow bash (scripts/behaviour command-type-builtin,
+type-a-echo).
 """
 import sys
 from pathlib import Path
@@ -51,42 +66,90 @@ NEW = r'''
 
 # --- ShardLure stealth: `command` and `type` builtins -----------------------
 # See install/persona/patches/command-type-builtins.py for the why (the 482-fail
-# download gate). These resolve against $PATH + the live command registry so a
-# tool present in the fake FS reports as present, matching bash exactly.
+# download gate). A name resolves as bash resolves it: keyword, builtin, then
+# the files on $PATH in the fake FS, so a tool present there reports present.
 from cowrie.shell.pipe import PipeProtocol  # noqa: E402
 
 
-def _path_lookup(cmd, name):
-    for p in cmd.environ.get("PATH", "").split(":"):
+# bash 5.1.16's reserved words and builtins, as `compgen -k` and `compgen -b`
+# list them on ubuntu:22.04. bash looks a name up as a keyword, then a builtin,
+# then on $PATH, so `command -v echo` prints `echo` and `type echo` says "echo
+# is a shell builtin" although /usr/bin/echo exists (Task 3 review M-1).
+BASH_KEYWORDS = frozenset(
+    "if then else elif fi case esac for select while until do done in function"
+    " time { } ! [[ ]] coproc".split()
+)
+BASH_BUILTINS = frozenset(
+    ". : [ alias bg bind break builtin caller cd command compgen complete compopt"
+    " continue declare dirs disown echo enable eval exec exit export false fc fg"
+    " getopts hash help history jobs kill let local logout mapfile popd printf"
+    " pushd pwd read readarray readonly return set shift shopt source suspend test"
+    " times trap true type typeset ulimit umask unalias unset wait".split()
+)
+# `command -p`: confstr(_CS_PATH), `getconf PATH` on glibc.
+DEFAULT_PATH = "/bin:/usr/bin"
+
+
+def _path_hits(cmd, name, path=None):
+    """Every file NAME names on PATH, in PATH order (`type -a` lists them all)."""
+    hits = []
+    for p in (cmd.environ.get("PATH", "") if path is None else path).split(":"):
         if not p:
             continue
         cand = cmd.fs.resolve_path(name, p)
-        if cmd.fs.exists(cand):
-            return cand
-    return None
+        if cmd.fs.exists(cand) and not cmd.fs.isdir(cand):
+            hits.append(cand)
+    return hits
 
 
-def _resolve_target(cmd, name):
-    """Return (kind, display) for NAME, or (None, None) if unresolved.
+def _resolutions(cmd, name, files_only=False, path=None):
+    """How bash resolves NAME, in its order: [(kind, text)].
 
-    kind is "builtin" (in the command registry, no filesystem path) or "file"
-    (resolved on PATH in the fake FS). display is what bash prints for the path.
+    kind is "keyword", "builtin" or "file"; text is the file's path (a name
+    with a slash is printed as given, as bash does). Only what is really
+    there: a command Cowrie emulates with no file on PATH is not found, as on
+    a 22.04 box without it (the pickle carries the tools a server has).
     """
     if "/" in name:
         rp = cmd.fs.resolve_path(name, cmd.cwd)
-        if cmd.fs.exists(rp):
-            return ("file", rp)
-        return (None, None)
-    # A file on PATH wins: that is what bash shows for wget, curl, python3.
-    found = _path_lookup(cmd, name)
-    if found is not None:
-        return ("file", found)
-    # Registered commands with no path form (cd, export ...): bash prints the
-    # bare name for `command -v cd`. getCommand with no PATH entries answers
-    # from the registry alone; v3.1.1 requires the cwd argument.
-    if cmd.protocol.getCommand(name, [], cmd.cwd) is not None:
-        return ("builtin", name)
-    return (None, None)
+        if cmd.fs.exists(rp) and not cmd.fs.isdir(rp):
+            return [("file", name)]
+        return []
+    found = []
+    if not files_only:
+        if name in BASH_KEYWORDS:
+            found.append(("keyword", name))
+        if name in BASH_BUILTINS:
+            found.append(("builtin", name))
+    found.extend(("file", hit) for hit in _path_hits(cmd, name, path))
+    return found
+
+
+def _describe(name, kind, text):
+    if kind == "keyword":
+        return f"{name} is a shell keyword"
+    if kind == "builtin":
+        return f"{name} is a shell builtin"
+    return f"{name} is {text}"
+
+
+def _parse_options(cmd, builtin, letters, usage):
+    """bash's internal_getopt over the leading options: (flags, names), or
+    None after bash's invalid-option error (exit 2)."""
+    args = list(cmd.args)
+    flags = set()
+    while args and args[0].startswith("-") and args[0] != "-":
+        opt = args.pop(0)
+        if opt == "--":
+            break
+        for ch in opt[1:]:
+            if ch not in letters:
+                cmd.errorWrite(f"{cmd.shell.error_prefix()}{builtin}: -{ch}: invalid option\n"
+                               f"{builtin}: usage: {usage}\n")
+                cmd.exit(2)
+                return None
+            flags.add(ch)
+    return flags, args
 
 
 class Command_command(HoneyPotCommand):
@@ -95,35 +158,29 @@ class Command_command(HoneyPotCommand):
     consumes_stdin = True
 
     def start(self):
-        args = list(self.args)
-        # `command -v NAME` / `command -V NAME`: the honeypot-detection form.
-        mode = None
-        while args and args[0] in ("-v", "-V", "-p"):
-            opt = args.pop(0)
-            if opt in ("-v", "-V"):
-                mode = opt
-            # -p (use default PATH) changes nothing observable here; consume it.
-        if mode:
-            if not args:
-                self.exit(1)
-                return
-            name = args[0]
-            kind, disp = _resolve_target(self, name)
-            if kind is None:
-                # bash prints nothing for -v, a diagnostic for -V; both exit 1.
-                if mode == "-V":
-                    self.errorWrite(
-                        f"{self.shell.error_prefix()}command: {name}: not found\n"
-                    )
-                self.exit(1)
-                return
-            if mode == "-v":
-                self.write(f"{name if kind == 'builtin' else disp}\n")
-            elif kind == "builtin":
-                self.write(f"{name} is a shell builtin\n")
-            else:
-                self.write(f"{name} is {disp}\n")
-            self.exit(0)
+        parsed = _parse_options(self, "command", "pvV", "command [-pVv] command [arg ...]")
+        if parsed is None:
+            return
+        flags, args = parsed
+        path = DEFAULT_PATH if "p" in flags else None
+        if "v" in flags or "V" in flags:
+            # The honeypot-detection form. bash answers every name and
+            # succeeds if any resolved (`command -v nope ls` is rc 0).
+            found_any = False
+            for name in args:
+                found = _resolutions(self, name, path=path)
+                if not found:
+                    if "V" in flags:
+                        self.errorWrite(
+                            f"{self.shell.error_prefix()}command: {name}: not found\n")
+                    continue
+                found_any = True
+                kind, text = found[0]
+                if "V" in flags:
+                    self.write(_describe(name, kind, text) + "\n")
+                else:
+                    self.write(f"{text}\n")
+            self.exit(0 if found_any or not args else 1)
             return
         # Bare `command NAME ARGS...`: run the real command so a download still
         # happens, in this command's place (exec), exactly as sudo.py does.
@@ -131,7 +188,7 @@ class Command_command(HoneyPotCommand):
             self.exit(0)
             return
         cmdclass = self.protocol.getCommand(
-            args[0], self.environ.get("PATH", "").split(":"), self.cwd
+            args[0], (path or self.environ.get("PATH", "")).split(":"), self.cwd
         )
         if not cmdclass:
             self.errorWrite(self.shell.command_not_found_message(args[0]))
@@ -154,31 +211,28 @@ class Command_type(HoneyPotCommand):
     resolve_args = False
 
     def start(self):
-        args = list(self.args)
-        type_only = False
-        while args and args[0] in ("-t", "-a", "-p", "-P", "-f"):
-            opt = args.pop(0)
-            if opt == "-t":
-                type_only = True
-        if not args:
-            self.exit(0)
+        parsed = _parse_options(self, "type", "afptP", "type [-afptP] name [name ...]")
+        if parsed is None:
             return
+        flags, names = parsed
         missing = 0
-        for name in args:
-            kind, disp = _resolve_target(self, name)
-            if kind is None:
-                if not type_only:
-                    self.errorWrite(
-                        f"{self.shell.error_prefix()}type: {name}: not found\n"
-                    )
+        for name in names:
+            # -P searches PATH even for a builtin; -a lists every match.
+            found = _resolutions(self, name, files_only="P" in flags)
+            if not found:
+                if not flags & {"t", "p", "P"}:
+                    self.errorWrite(f"{self.shell.error_prefix()}type: {name}: not found\n")
                 missing += 1
                 continue
-            if type_only:
-                self.write("builtin\n" if kind == "builtin" else "file\n")
-            elif kind == "builtin":
-                self.write(f"{name} is a shell builtin\n")
-            else:
-                self.write(f"{name} is {disp}\n")
+            for kind, text in found if "a" in flags else found[:1]:
+                if "t" in flags:
+                    self.write(f"{kind}\n")
+                elif flags & {"p", "P"}:
+                    # -p prints a path only when the name is a file.
+                    if kind == "file":
+                        self.write(f"{text}\n")
+                else:
+                    self.write(_describe(name, kind, text) + "\n")
         self.exit(1 if missing else 0)
 
 
