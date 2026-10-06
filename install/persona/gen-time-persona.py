@@ -135,7 +135,7 @@ def build(now: datetime) -> dict[str, str]:
         f"\n"
         f"  System load:    {load1}                Processes:           287\n"
         f"  Usage of /:     61.2% of 94.43GB    Users logged in:     0\n"
-        f"  Memory usage:   22%                 IPv4 address for ens3: 10.0.0.14\n"
+        f"  Memory usage:   22%                 IPv4 address for eth0: 10.0.0.14\n"
         f"  Swap usage:     0%                  Uptime:              {days} days\n"
         f"\n"
         f"  23 updates can be applied immediately.\n"
