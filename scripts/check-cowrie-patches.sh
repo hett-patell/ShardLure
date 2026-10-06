@@ -666,6 +666,20 @@ python3 "$ROOT/install/persona/test_time_persona.py" "$cowrie" -v
 # And python3's fake success: attacker Python is never run, under an audit
 # hook, on every input form (python3-emulation.py).
 python3 "$ROOT/install/persona/test_python3_fake.py" "$cowrie" -v
+# The restricted fs.pickle loader root uses (persona-fs, plant-bait) must still
+# read the pin's own pickle, and the persona's edit of it, without a global.
+PYTHONPATH="$ROOT" python3 - "$cowrie/src/cowrie/data/fs.pickle" <<'PY'
+import pickle
+import sys
+from pathlib import Path
+
+from scripts import shardlure
+
+tree = shardlure.load_fs_pickle(Path(sys.argv[1]).read_bytes())
+shardlure.persona_fs_edit(tree, {"/etc/hostname": b"prod-app-server-01\n"}, 1.5)
+shardlure.load_fs_pickle(pickle.dumps(tree))
+print("[cowrie-patches] restricted fs.pickle loader reads the pinned pickle")
+PY
 
 # Drift the final target so a sequential check/apply implementation would alter
 # earlier files before discovering incompatibility. The entire working tree
@@ -729,4 +743,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 84 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona and python3 never-executes behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 84 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona and python3 never-executes behavior, restricted fs.pickle loading, and atomic preflight checks passed"

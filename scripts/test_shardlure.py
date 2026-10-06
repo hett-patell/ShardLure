@@ -1406,6 +1406,102 @@ class PersonaFsTests(unittest.TestCase):
         self.assertEqual(fs_lookup(tree, "/root/.env")[shardlure._FS_MODE], 0o100644)
 
 
+class _ReducePayload:
+    """Pickles as `posix.system(<cmd>)`: what a compromised cowrie account
+    would plant in fs.pickle for root's next persona-fs or plant-bait."""
+
+    def __init__(self, cmd: str) -> None:
+        self.cmd = cmd
+
+    def __reduce__(self):
+        return (os.system, (self.cmd,))
+
+
+class FsPickleLoaderTests(unittest.TestCase):
+    """Task 7 re-review N-2: root never unpickles fs.pickle with pickle.load."""
+
+    def test_reduce_payload_is_refused_and_runs_nothing(self):
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "ran"
+            tree = persona_fs_tree()
+            # Hidden inside an otherwise valid tree, as a planted file would be.
+            tree[shardlure._FS_CONTENTS].append(_ReducePayload(f"touch {shlex.quote(str(marker))}"))
+            data = pickle.dumps(tree)
+            with self.assertRaises(shardlure.FsPickleRefused) as caught:
+                shardlure.load_fs_pickle(data)
+            self.assertIn("system", str(caught.exception))
+            self.assertFalse(marker.exists(), "the pickle's payload ran")
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(data)
+            with mock.patch.object(shardlure, "log") as log:
+                self.assertFalse(shardlure.apply_persona_fs(path))
+            self.assertFalse(marker.exists(), "the pickle's payload ran")
+            self.assertIn("refusing a pickle that references", log.call_args[0][0])
+            self.assertEqual(path.read_bytes(), data)
+            # The same file through the installed CLI: refused, rc 1.
+            home = Path(tmp) / "cowrie"
+            (home / "src/cowrie/data").mkdir(parents=True)
+            shutil.copy2(path, home / "src/cowrie/data/fs.pickle")
+            with mock.patch.object(shardlure, "log"):
+                self.assertEqual(shardlure.cmd_persona_fs(home), 1)
+            self.assertFalse(marker.exists(), "the pickle's payload ran")
+
+    def test_every_global_and_persistent_id_is_refused(self):
+        import pickle
+        for data in (pickle.dumps(Path("/x")), pickle.dumps(len),
+                     b"\x80\x02P0\n.", pickle.dumps([1, {"a": 1}]), pickle.dumps([True]),
+                     pickle.dumps((1, 2)), b"not a pickle"):
+            with self.subTest(data=data[:40]):
+                with self.assertRaises(shardlure.FsPickleRefused):
+                    shardlure.load_fs_pickle(data)
+
+    def test_a_cowrie_tree_loads_in_every_bytes_protocol(self):
+        # Protocols 0-2 spell bytes as a _codecs.encode call, a global, and
+        # stay refused; Cowrie and fsctl write the default protocol (5 on the
+        # pin's pickle) and persona-fs keeps it.
+        import pickle
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree, {"/etc/hostname": b"prod\n"}, now=1.5)
+        for protocol in range(3, pickle.HIGHEST_PROTOCOL + 1):
+            with self.subTest(protocol=protocol):
+                self.assertEqual(shardlure.load_fs_pickle(pickle.dumps(tree, protocol)), tree)
+
+    def test_unknown_persona_fs_option_is_a_usage_error(self):
+        for argv in (["--bogus"], ["-h"], ["a", "b"]):
+            with self.subTest(argv=argv):
+                proc = subprocess.run([sys.executable, str(Path(shardlure.__file__)), "persona-fs", *argv],
+                                      capture_output=True, text=True, timeout=30)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn("usage:", proc.stderr)
+                self.assertNotIn("fs.pickle under", proc.stdout)
+
+    def test_plant_bait_runs_fsctl_as_the_cowrie_account_over_its_tree(self):
+        # Root running fsctl from a venv the Cowrie account owns would
+        # execute what that account planted; the tool runs as that account.
+        if os.geteuid() == 0:
+            self.skipTest("needs a non-root owner for the fixture tree")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie"
+            (home / "venv/bin").mkdir(parents=True)
+            (home / "src/cowrie/data").mkdir(parents=True)
+            (home / "var/lib/cowrie").mkdir(parents=True)
+            (home / "src/cowrie/data/fs.pickle").write_bytes(b"inert")
+            (home / "venv/bin/fsctl").write_text("inert")
+            calls = []
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure.os, "geteuid", return_value=0),
+                  mock.patch.object(shardlure, "log"),
+                  mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0))):
+                shardlure.plant_bait_files()
+            self.assertTrue(calls)
+            for args in calls:
+                self.assertEqual(args[:4], ["runuser", "-u", shardlure.COWRIE_USER, "--"])
+        with mock.patch.object(shardlure.os, "geteuid", return_value=0):
+            self.assertEqual(shardlure.cowrie_owned_prefix(Path("/usr/bin"), Path("/nonexistent")), [])
+        self.assertEqual(shardlure.cowrie_owned_prefix(Path(tempfile.gettempdir())), [])
+
+
 class ApplyStealthPersonaFsTests(unittest.TestCase):
     """Task 7 review I-1: the existing-box path (apply-stealth.sh) applies the
     same pickle edits as a fresh install."""

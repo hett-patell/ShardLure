@@ -564,6 +564,22 @@ def ensure_cowrie_filesystem() -> None:
         die(f"missing cowrie filesystem pickle: {src}")
 
 
+def cowrie_owned_prefix(*paths: Path) -> list[str]:
+    """`runuser -u <cowrie> --` when root is about to run code or parse data
+    that a non-root account can write (any of `paths` not owned by root),
+    else []. Unprivileged callers need no prefix."""
+    if os.geteuid() != 0:
+        return []
+    for path in paths:
+        try:
+            owner = os.lstat(path).st_uid
+        except OSError:
+            continue
+        if owner != 0:
+            return ["runuser", "-u", COWRIE_USER, "--"]
+    return []
+
+
 def plant_bait_files() -> None:
     bait_src = ROOT / "install" / "persona" / "bait"
     if not bait_src.is_dir():
@@ -587,6 +603,15 @@ def plant_bait_files() -> None:
         return
 
     python = COWRIE_HOME / "venv/bin/python"
+    # fsctl is Cowrie's own tool: it pickle.loads the fs.pickle, and it runs
+    # from the venv. On a fresh install both are root's (the tree is handed to
+    # the Cowrie account afterwards, prepare_cowrie_tree); on `plant-bait`
+    # over an installed tree both belong to the account that handles attacker
+    # input, so root running them would execute whatever that account planted
+    # (Task 7 re-review N-2). Run it as that account then: it can only edit a
+    # pickle it could already write.
+    as_owner = cowrie_owned_prefix(COWRIE_HOME / "venv", COWRIE_HOME / "venv/bin",
+                                   fsctl, pickle_path.parent, pickle_path)
 
     def fs(cmd: str) -> None:
         # mkdir on an existing dir (and similar) is a benign non-zero exit;
@@ -596,7 +621,7 @@ def plant_bait_files() -> None:
         # path without escaping `"`, `$` or `\`, so on such a data path every
         # call failed "not found" and the bait silently never loaded. This is
         # the same way cowrie.service starts twistd.
-        run([str(python), str(fsctl), str(pickle_path), cmd])
+        run([*as_owner, str(python), str(fsctl), str(pickle_path), cmd])
 
     for d in (
         "/opt", "/opt/app", "/opt/app/config", "/opt/app/secrets",
@@ -861,23 +886,78 @@ def honeyfs_files(honeyfs: Path) -> dict[str, bytes]:
     return files
 
 
-def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> None:
+class FsPickleRefused(ValueError):
+    """A file named fs.pickle that is not a plain Cowrie filesystem tree."""
+
+
+# Everything the pinned Cowrie's fs.pickle holds (v3.1.1, inspected with
+# pickletools: lists, str, int, None, a few bytes nodes, one float ctime) and
+# what persona_fs_edit adds (embedded honeyfs bytes, float times). Exact
+# types: a bool or a subclass is not a filesystem node.
+_FS_PICKLE_TYPES = (list, str, int, float, bytes, type(None))
+
+
+def load_fs_pickle(data: bytes) -> list:
+    """Unpickle a Cowrie fs.pickle without letting it run anything.
+
+    fs.pickle lives in the tree the cowrie account owns, and that account
+    handles attacker input; root runs persona-fs and plant-bait over it (Task
+    7 re-review N-2). pickle.load would call whatever callable the file names
+    (`__reduce__` -> os.system) as root. Cowrie's tree needs no global at all,
+    so find_class refuses every one (that is what GLOBAL, STACK_GLOBAL, INST,
+    OBJ and EXT* resolve through; without a callable REDUCE/NEWOBJ/BUILD have
+    nothing to call), persistent ids are refused, and the result must be made
+    of the node types alone."""
+    import io  # noqa: PLC0415
+    import pickle  # noqa: PLC0415
+
+    class _Unpickler(pickle.Unpickler):
+        def find_class(self, module: str, name: str):  # noqa: ANN202
+            raise FsPickleRefused(
+                f"refusing a pickle that references {module}.{name}: a Cowrie fs.pickle "
+                "holds only lists, str, int, float, bytes and None")
+
+        def persistent_load(self, pid):  # noqa: ANN001, ANN202
+            raise FsPickleRefused("refusing a pickle with a persistent id")
+
+    try:
+        tree = _Unpickler(io.BytesIO(data)).load()
+    except FsPickleRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any parse failure is "not a tree"
+        raise FsPickleRefused(f"not a Cowrie filesystem pickle ({type(exc).__name__}: {exc})") from None
+    seen: set[int] = set()
+    stack = [tree]
+    while stack:
+        obj = stack.pop()
+        if type(obj) not in _FS_PICKLE_TYPES:
+            raise FsPickleRefused(
+                f"refusing a pickle containing {type(obj).__name__}: a Cowrie fs.pickle "
+                "holds only lists, str, int, float, bytes and None")
+        if type(obj) is list and id(obj) not in seen:
+            seen.add(id(obj))
+            stack.extend(obj)
+    if not isinstance(tree, list) or len(tree) < 9 or tree[_FS_TYPE] != _FS_DIR:
+        raise FsPickleRefused("not a Cowrie filesystem tree")
+    return tree
+
+
+def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> bool:
     """Edit Cowrie's fs.pickle for the persona: what fsctl cannot express
     (setuid modes, symlinks, real sizes). The pickle is the pinned Cowrie
-    checkout's own file, the one Cowrie itself unpickles; it is rewritten via
-    a temporary file and an atomic rename."""
+    checkout's own file, the one Cowrie itself unpickles; it is read through
+    load_fs_pickle (never pickle.load: root runs this over a file the Cowrie
+    account can write) and rewritten via a temporary file and an atomic
+    rename. False when the pickle was refused or unreadable."""
     import pickle  # noqa: PLC0415 - only the installer's bait step needs it
     import time  # noqa: PLC0415
 
     try:
-        with pickle_path.open("rb") as f:
-            tree = pickle.load(f)
-        if not isinstance(tree, list) or len(tree) < 9 or tree[_FS_TYPE] != _FS_DIR:
-            raise ValueError("not a Cowrie filesystem tree")
-    except Exception as exc:  # noqa: BLE001 - a broken pickle is reported, not fatal
-        log(f"warning: cannot edit {pickle_path} for the persona ({type(exc).__name__}); "
+        tree = load_fs_pickle(pickle_path.read_bytes())
+    except (OSError, FsPickleRefused) as exc:
+        log(f"warning: cannot edit {pickle_path} for the persona ({exc}); "
             "persona filesystem nodes not applied (fingerprintable)")
-        return
+        return False
     files = honeyfs_files(honeyfs) if honeyfs is not None else {}
     skipped = persona_fs_edit(tree, files, time.time())
     if skipped:
@@ -897,6 +977,7 @@ def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> None:
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+    return True
 
 
 def cowrie_fs_pickles(cowrie_home: Path) -> list[Path]:
@@ -938,10 +1019,11 @@ def cmd_persona_fs(cowrie_home: Path) -> int:
     if not pickles:
         log(f"warning: no Cowrie fs.pickle under {cowrie_home}; persona filesystem not applied")
         return 1
+    ok = True
     for pickle_path in pickles:
         log(f"applying persona filesystem nodes to {pickle_path}")
-        apply_persona_fs(pickle_path, cowrie_home / "honeyfs")
-    return 0
+        ok = apply_persona_fs(pickle_path, cowrie_home / "honeyfs") and ok
+    return 0 if ok else 1
 
 
 # txtcmds the persona used to ship, removed from a deployed share dir on every
@@ -1857,7 +1939,10 @@ def main() -> None:
     elif cmd == "finish":
         cmd_finish()
     elif cmd == "persona-fs":
-        if len(sys.argv) > 3:
+        # An option-shaped argument is a usage error, not a Cowrie home
+        # (`persona-fs --bogus` used to look for a pickle under ./--bogus;
+        # Task 7 re-review N-1): unknown flags are fatal here.
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
             die("usage: python3 scripts/shardlure.py persona-fs [COWRIE_HOME]")
         sys.exit(cmd_persona_fs(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME))
     elif cmd in ("plant-bait", "bait"):
