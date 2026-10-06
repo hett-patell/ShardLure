@@ -956,6 +956,27 @@ class MainExitCodeTest(unittest.TestCase):
             [("scp -t /tmp/x", f"C0755 {len(data)} hw\n".encode() + data + b"\x00")],
         )])
 
+    def test_upload_script_case_uploads_a_generated_script_first(self):
+        (self.root / "probes.txt").write_text("big\tsh /tmp/big.sh; echo rc=$?\n")
+        (self.root / "expected" / "big.out").write_text(
+            "#harness: upload-script=/tmp/big.sh 40960\n#harness: within=8\n"
+            "script-ok {{UPLOAD_SIZE}}\nrc=0\n")
+        seen = []
+
+        def runner(command, timeout, stdin=None, before=None):
+            seen.append((command, stdin, before))
+            return cbt.RunResult("script-ok 40960\nrc=0\n", 0, False)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            # No --upload-source: the case needs no ELF.
+            rc = cbt.main(self.argv + ["--only", "probes", "--upload-source", "/nonexistent"],
+                          runner=runner)
+        self.assertEqual(rc, 0, out.getvalue())
+        script = cbt.dropper_script(40960)
+        self.assertEqual(seen, [("sh /tmp/big.sh; echo rc=$?", None,
+                                 [("scp -t /tmp/big.sh", cbt.scp_record("big.sh", script))])])
+
     def test_before_channels_follow_the_upload_channel(self):
         (self.root / "probes.txt").write_text("redir\tcat /tmp/m\n")
         (self.root / "expected" / "redir.out").write_text(
@@ -1119,6 +1140,32 @@ class UploadChannelTest(unittest.TestCase):
                     "/tmp/$(id) hw"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 cbt.parse_expected(f"#harness: upload-channel={bad}\n")
+
+    def test_upload_script_directive(self):
+        exp = cbt.parse_expected("#harness: upload-script=/tmp/big.sh 40960\n")
+        self.assertEqual(exp.upload_script, ("/tmp/big.sh", 40960))
+        for bad in ("", "/tmp/big.sh", "tmp/x 4096", "/tmp/ 4096", "/tmp/x 127", "/tmp/x 4k",
+                    f"/tmp/x {cbt.MAX_SCRIPT_BYTES + 1}", "/tmp/$(id) 4096", "/tmp/x 4096 z"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cbt.parse_expected(f"#harness: upload-script={bad}\n")
+        with self.assertRaises(ValueError):
+            cbt.parse_expected("#harness: upload-script=/tmp/x 4096\n#harness: upload-channel=/tmp/x hw\n")
+        cbt.parse_expected("#harness: upload-script=/tmp/x 4096\nsize {{UPLOAD_SIZE}}\n")
+
+    def test_dropper_script_is_exact_inert_and_deterministic(self):
+        for size in (128, 129, 4097, 16385, 40960, 65536):
+            with self.subTest(size=size):
+                data = cbt.dropper_script(size)
+                self.assertEqual(len(data), size)
+                self.assertEqual(data, cbt.dropper_script(size))
+                lines = data.decode().split("\n")
+                self.assertEqual(lines[0], "#!/bin/sh")
+                self.assertEqual(lines[-2:], [f"echo script-ok {size}", ""])
+                # Nothing but comments and assignments before the echo.
+                for line in lines[1:-2]:
+                    self.assertRegex(line, r"^(#.*|v\d+=/var/tmp/\.cache/\d+)$")
+        with self.assertRaises(ValueError):
+            cbt.dropper_script(60)
 
     def test_upload_size_needs_an_upload_directive(self):
         with self.assertRaises(ValueError):

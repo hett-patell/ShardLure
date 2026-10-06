@@ -119,6 +119,7 @@ kernel_build_string = #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024
 hardware_platform = x86_64
 operating_system = GNU/Linux
 ssh_version = OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022
+max_input_size = 16384
 
 [ssh]
 version = SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6

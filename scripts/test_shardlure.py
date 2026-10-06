@@ -727,6 +727,33 @@ class ServiceSafetyTests(unittest.TestCase):
         fallback.read_string(body)
         self.assertEqual(fallback.getint("honeypot", "boot_offset"), anchor)
 
+    def test_max_input_size_is_pinned_at_the_measured_16k_everywhere(self):
+        # Phase B Task 8: [shell] max_input_size stays v3.1.1's 16384, pinned
+        # explicitly (the cfg comment records the arm measurement: a larger
+        # cap stalls every session up to the 10 s parse timeout and then
+        # answers a syntax error). The template, the patch_cowrie_cfg
+        # injection and the apply-stealth.sh inline fallback must agree, and
+        # an operator's own value must be kept rather than duplicated.
+        root = Path(__file__).resolve().parent.parent
+        template = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        template.read_string((root / "install" / "persona" / "cowrie-stealth.cfg").read_text())
+        self.assertEqual(template.getint("shell", "max_input_size"), 16384)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+            kept = shardlure.patch_cowrie_cfg("[shell]\nmax_input_size = 32768\n", 2222)
+        patched = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        patched.read_string(text)
+        self.assertEqual(patched.getint("shell", "max_input_size"), 16384)
+        self.assertEqual(kept.count("max_input_size"), 1)
+        self.assertIn("max_input_size = 32768", kept)
+        script = (root / "scripts" / "apply-stealth.sh").read_text()
+        start = script.index('stealth = persona_cfg.read_text() if persona_cfg.exists() else """')
+        body = script[script.index('"""', start) + 3:]
+        body = body[:body.index('"""')]
+        fallback = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        fallback.read_string(body)
+        self.assertEqual(fallback.getint("shell", "max_input_size"), 16384)
+
     def test_operator_boot_offset_reaches_the_motd_and_short_ones_warn(self):
         # Review m-5: patch_cowrie_cfg keeps an operator's boot_offset, so
         # gen-time-persona must read the deployed cfg, not only the template.

@@ -164,3 +164,11 @@ awk-boolean	printf '1\n2\n3\n' | awk 'NR >= 2 && NR <= 2'; printf '1\n2\n3\n' | 
 # lsb_release and hostnamectl have persona txtcmds but had no node, so they
 # answered `command not found` (Task 7 review m-7).
 lsb-hostnamectl-present	command -v lsb_release hostnamectl; hostnamectl | head -1
+# A script exactly at Cowrie's [shell] max_input_size (Task 8): 16384 bytes,
+# uploaded on an earlier channel as scp droppers do, must run, well inside
+# the deadline. The cap stays v3.1.1's 16384 (cowrie-stealth.cfg records the
+# arm measurement: the Earley parse runs on Cowrie's one reactor thread at
+# 0.25-0.43 ms/byte for ordinary shapes, so a larger cap stalls every session
+# up to the 10 s parse timeout, then answers a syntax error); this case
+# catches a cap set below it or a regression in whole-script execution.
+script-16k	sh /tmp/big.sh; echo rc=$?

@@ -1269,6 +1269,11 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             ("operating_system", "GNU/Linux"),
             ("ssh_version", "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022"),
             ("filesystem", f"{home}/src/cowrie/data/fs.pickle"),
+            # (== cowrie-stealth.cfg, which records the measurement.) v3.1.1's
+            # own default, pinned so a change is deliberate: a higher cap
+            # makes big scripts stall every session for up to the 10 s parse
+            # timeout and then answer a syntax error instead of running.
+            ("max_input_size", "16384"),
         ],
         "output_jsonlog": [
             ("enabled", "true"),
