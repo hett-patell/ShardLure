@@ -854,11 +854,21 @@ def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> None:
     skipped = persona_fs_edit(tree, sizes, time.time())
     if skipped:
         log(f"warning: persona filesystem nodes without a parent directory: {', '.join(skipped)}")
-    tmp = pickle_path.with_name(pickle_path.name + ".persona-tmp")
-    with tmp.open("wb") as f:
-        pickle.dump(tree, f)
-    shutil.copymode(pickle_path, tmp)
-    os.replace(tmp, pickle_path)
+    # The directory belongs to the Cowrie account and this runs as root: a
+    # fixed temp name could be a planted symlink (review m-3). mkstemp opens
+    # a fresh name with O_EXCL; the result keeps the pickle's mode and owner.
+    st = pickle_path.stat()
+    fd, tmp_name = tempfile.mkstemp(dir=pickle_path.parent, prefix=".fs.pickle.persona-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(tree, f)
+        os.chmod(tmp_name, stat.S_IMODE(st.st_mode))
+        if os.geteuid() == 0:
+            os.chown(tmp_name, st.st_uid, st.st_gid)
+        os.replace(tmp_name, pickle_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def cowrie_fs_pickles(cowrie_home: Path) -> list[Path]:
