@@ -155,3 +155,5 @@ absent-tools	command -v gcc python php yum; echo rc=$?; gcc -v; echo rc=$?; pyth
 # side is ubuntu:22.04 with python3-minimal. A -c that would print is not
 # here: it prints nothing on Cowrie, the accepted cost of never running it.
 python3-fake	command -v python3 python3.10; python3 --version; python3 -V; python3 -c 'import sys; sys.exit(0)'; echo rc=$?; echo 'import os' | python3; echo rc=$?; python3 /nope.py; echo rc=$?; python3 -z; echo rc=$?
+# command/type need an execute bit, as bash's lookup does (Task 7 review m-1).
+command-exec-bit	command -v /etc/passwd; echo rc=$?; type /etc/passwd; echo rc=$?; PATH=/etc:$PATH command -v passwd

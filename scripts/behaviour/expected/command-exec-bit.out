@@ -1,0 +1,4 @@
+rc=1
+bash: line 1: type: /etc/passwd: not found
+rc=1
+/usr/bin/passwd

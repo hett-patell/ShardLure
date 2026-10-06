@@ -90,6 +90,18 @@ BASH_BUILTINS = frozenset(
 DEFAULT_PATH = "/bin:/usr/bin"
 
 
+def _executable(cmd, path):
+    """bash's lookup test: a regular file with an execute bit (as root, any
+    of the three). `command -v /etc/passwd` is not found, and PATH=/etc:...
+    skips /etc/passwd for /usr/bin/passwd (Task 7 review m-1)."""
+    from cowrie.shell.fs import A_MODE
+
+    if not cmd.fs.isfile(path):
+        return False
+    node = cmd.fs.getfile(path)
+    return node is not None and bool(node[A_MODE] & 0o111)
+
+
 def _path_hits(cmd, name, path=None):
     """Every file NAME names on PATH, in PATH order (`type -a` lists them all)."""
     hits = []
@@ -97,7 +109,7 @@ def _path_hits(cmd, name, path=None):
         if not p:
             continue
         cand = cmd.fs.resolve_path(name, p)
-        if cmd.fs.exists(cand) and not cmd.fs.isdir(cand):
+        if _executable(cmd, cand):
             hits.append(cand)
     return hits
 
@@ -111,8 +123,7 @@ def _resolutions(cmd, name, files_only=False, path=None):
     a 22.04 box without it (the pickle carries the tools a server has).
     """
     if "/" in name:
-        rp = cmd.fs.resolve_path(name, cmd.cwd)
-        if cmd.fs.exists(rp) and not cmd.fs.isdir(rp):
+        if _executable(cmd, cmd.fs.resolve_path(name, cmd.cwd)):
             return [("file", name)]
         return []
     found = []
