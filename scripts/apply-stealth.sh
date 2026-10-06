@@ -22,21 +22,6 @@ else
   echo 'Ubuntu 22.04.4 LTS' | sudo tee "$COWRIE_HOME/honeyfs/etc/issue.net" >/dev/null
 fi
 
-# --- persona filesystem nodes (fs.pickle) ---
-# The same edits plant_bait_files makes on a fresh install: the 22.04 tool
-# nodes `command -v`/`type` resolve against, phil's home dropped, the persona
-# users' homes, node sizes from honeyfs. Without them the patched resolver
-# reports sudo/crontab/ping absent (Task 7 review I-1). Idempotent.
-SHARDLURE_PY="${SCRIPT_DIR}/shardlure.py"
-[[ -f "$SHARDLURE_PY" ]] || SHARDLURE_PY="${PERSONA}/../../scripts/shardlure.py"
-if [[ -f "$SHARDLURE_PY" ]]; then
-  echo "[stealth] applying persona filesystem nodes"
-  sudo python3 "$SHARDLURE_PY" persona-fs "$COWRIE_HOME" \
-    || echo "[stealth] WARN: persona filesystem nodes not applied (fingerprintable)"
-else
-  echo "[stealth] WARN: scripts/shardlure.py not found; persona filesystem nodes not applied"
-fi
-
 # --- txtcmds: realistic command output stubs (anti-fingerprinting) ---
 if [[ -d "$PERSONA/txtcmds" ]]; then
   echo "[stealth] syncing txtcmds persona (anti-fingerprint stubs)"
@@ -58,6 +43,22 @@ if [[ -f "$PERSONA/gen-time-persona.py" ]]; then
   echo "[stealth] refreshing time-sensitive persona against live clock"
   sudo python3 "$PERSONA/gen-time-persona.py" "$COWRIE_HOME" \
     || echo "[stealth] WARN: time-persona generator failed; time files may be stale (fingerprintable)"
+fi
+
+# --- persona filesystem nodes (fs.pickle) ---
+# The same edits plant_bait_files makes on a fresh install, after the time
+# persona so the regenerated motd's node is sized from the final file: the 22.04 tool
+# nodes `command -v`/`type` resolve against, phil's home dropped, the persona
+# users' homes, node sizes from honeyfs. Without them the patched resolver
+# reports sudo/crontab/ping absent (Task 7 review I-1). Idempotent.
+SHARDLURE_PY="${SCRIPT_DIR}/shardlure.py"
+[[ -f "$SHARDLURE_PY" ]] || SHARDLURE_PY="${PERSONA}/../../scripts/shardlure.py"
+if [[ -f "$SHARDLURE_PY" ]]; then
+  echo "[stealth] applying persona filesystem nodes"
+  sudo python3 "$SHARDLURE_PY" persona-fs "$COWRIE_HOME" \
+    || echo "[stealth] WARN: persona filesystem nodes not applied (fingerprintable)"
+else
+  echo "[stealth] WARN: scripts/shardlure.py not found; persona filesystem nodes not applied"
 fi
 
 # --- userdb: realistic weak creds, no *:* honeypot catch-alls ---

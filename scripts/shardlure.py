@@ -539,6 +539,9 @@ def apply_stealth_persona(honeypot_port: int) -> None:
     plant_bait_files()
     deploy_txtcmds()
     deploy_time_persona()
+    # gen-time-persona rewrites honeyfs/etc/motd after plant_bait_files sized
+    # its node; size it (and embed it) again from the final file.
+    cmd_persona_fs(COWRIE_HOME)
     deploy_patches()
     keydir = COWRIE_HOME / "var/lib/cowrie"
     keydir.mkdir(parents=True, exist_ok=True)
