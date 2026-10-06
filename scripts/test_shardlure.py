@@ -1869,6 +1869,105 @@ class PersonaRegenTests(unittest.TestCase):
             self.assertEqual(victim.read_text(), "original\n")
             self.assertFalse(target.is_symlink())
 
+    def deployed_lib(self, tmp: str) -> Path:
+        """The default layout under tmp: .../usr/local/lib/shardlure/persona."""
+        lib = Path(tmp) / "usr/local/lib/shardlure/persona"
+        home = Path(tmp) / "data/cowrie"
+        home.mkdir(parents=True)
+        with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+              mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib)):
+            shardlure.deploy_persona_regen()
+        self.assertEqual(sorted(p.name for p in lib.iterdir()), sorted(shardlure.PERSONA_REGEN_FILES))
+        return lib
+
+    def test_uninstall_removes_the_regen_lib_and_its_empty_parent(self):
+        # Task 9: uninstall left /usr/local/lib/shardlure/persona behind.
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self.deployed_lib(tmp)
+            (lib / ".shardlure-write-0123abcd").write_bytes(b"interrupted temp")
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                self.assertEqual(shardlure.remove_persona_regen(), [])
+                self.assertFalse(os.path.lexists(lib))
+                self.assertFalse(os.path.lexists(lib.parent))
+                self.assertTrue((Path(tmp) / "usr/local/lib").is_dir())
+                # Idempotent: a second uninstall finds nothing to do.
+                self.assertEqual(shardlure.remove_persona_regen(), [])
+
+    def test_uninstall_keeps_what_the_installer_did_not_create(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self.deployed_lib(tmp)
+            (lib / "operator-notes.txt").write_text("mine\n")
+            sibling = lib.parent / "other-tool"
+            sibling.mkdir()
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                kept = shardlure.remove_persona_regen()
+            self.assertEqual(kept, [str(lib / "operator-notes.txt")])
+            self.assertEqual([p.name for p in lib.iterdir()], ["operator-notes.txt"])
+            self.assertTrue(sibling.is_dir())
+            # Our files gone, the foreign one kept, so lib stays: and with an
+            # empty lib but a foreign sibling, the shardlure parent stays.
+            (lib / "operator-notes.txt").unlink()
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                self.assertEqual(shardlure.remove_persona_regen(), [str(lib.parent)])
+            self.assertFalse(os.path.lexists(lib))
+            self.assertTrue(sibling.is_dir())
+
+    def test_uninstall_follows_no_symlink_in_the_regen_lib(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            victim_dir = Path(tmp) / "victim"
+            victim_dir.mkdir()
+            victim = victim_dir / "shardlure.py"
+            victim.write_text("original\n")
+            # A link at a managed name, and a hard link to a foreign file.
+            lib = self.deployed_lib(tmp)
+            (lib / "shardlure.py").unlink()
+            (lib / "shardlure.py").symlink_to(victim)
+            (lib / "ssh_transition.py").unlink()
+            os.link(victim, lib / "ssh_transition.py")
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                kept = shardlure.remove_persona_regen()
+            self.assertEqual(sorted(kept), [str(lib / "shardlure.py"), str(lib / "ssh_transition.py")])
+            self.assertEqual(victim.read_text(), "original\n")
+            self.assertTrue((lib / "shardlure.py").is_symlink())
+            # The directory itself as a symlink: neither it nor its target is touched.
+            link = Path(tmp) / "linked/persona"
+            link.parent.mkdir()
+            link.symlink_to(victim_dir)
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", link):
+                self.assertEqual(shardlure.remove_persona_regen(), [f"{link} (not a directory)"])
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(sorted(p.name for p in victim_dir.iterdir()), ["shardlure.py"])
+
+    def test_uninstall_refuses_a_regen_lib_another_account_can_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self.deployed_lib(tmp)
+            lib.chmod(0o777)  # not sticky: refused, nothing deleted
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                kept = shardlure.remove_persona_regen()
+            self.assertEqual(len(kept), 1)
+            self.assertIn("replaceable", kept[0])
+            self.assertEqual(sorted(p.name for p in lib.iterdir()), sorted(shardlure.PERSONA_REGEN_FILES))
+
+    def test_every_uninstall_removes_the_regen_lib_after_the_services(self):
+        for argv in (["shardlure", "uninstall"], ["shardlure", "uninstall", "--purge"]):
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp:
+                calls = []
+                with (mock.patch.object(shardlure, "need_root"),
+                      mock.patch.object(shardlure, "validate_purge_target"),
+                      mock.patch.object(shardlure, "installation_state"),
+                      mock.patch.object(shardlure, "BIN_DIR", Path(tmp)),
+                      mock.patch.object(shardlure, "DATA_DIR", Path(tmp) / "absent-data"),
+                      mock.patch.object(shardlure, "load_ports_from_config", return_value=(2222, 2200, 8080)),
+                      mock.patch.object(shardlure, "restore_sshd", side_effect=lambda: calls.append("ssh") or {2200}),
+                      mock.patch.object(shardlure, "remove_services", side_effect=lambda: calls.append("units")),
+                      mock.patch.object(shardlure, "remove_persona_regen", side_effect=lambda: calls.append("regen") or []),
+                      mock.patch.object(shardlure, "remove_firewall_rules"),
+                      mock.patch.object(shardlure, "log"),
+                      mock.patch("builtins.print"),
+                      mock.patch.object(sys, "argv", argv)):
+                    shardlure.cmd_uninstall()
+                self.assertEqual(calls, ["ssh", "units", "regen"])
+
     def test_root_runs_the_persona_steps_as_cowrie_over_its_tree(self):
         # Task 8 review m-3: root ran gen-time-persona (and persona-fs) over
         # the cowrie-owned honeyfs/share, writing through any symlink the

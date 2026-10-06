@@ -1316,6 +1316,62 @@ def deploy_persona_regen(cowrie_home: Path | None = None) -> None:
     remove_legacy_persona_regen(COWRIE_HOME if cowrie_home is None else cowrie_home)
 
 
+def remove_persona_regen() -> list[str]:
+    """Uninstall PERSONA_REGEN_LIB. It is code, like the binary and the
+    units, so every uninstall removes it, not only --purge: left behind,
+    a reinstall's cowrie.service would run whatever stale copy sits there.
+
+    Only what deploy_persona_regen creates is deleted: the PERSONA_REGEN_FILES
+    names and install_root_files' interrupted `.shardlure-write-*` temps, each
+    a regular, single-link file owned by us, unlinked relative to a pinned
+    descriptor of a directory nobody else can change (installer_safety.
+    directory refuses one another account could). Nothing is followed: a
+    symlink at the directory or at a file name is kept. The directory, then
+    its `shardlure` parent (the default /usr/local/lib/shardlure), is
+    rmdir'ed only when that leaves it empty, so an operator's file keeps
+    both. Returns what was retained, for the log; never raises, because SSH
+    is already restored and the remaining steps must still run."""
+    lib = PERSONA_REGEN_LIB
+    retained: list[str] = []
+    try:
+        info = os.lstat(lib)
+    except FileNotFoundError:
+        return retained
+    except OSError as exc:
+        return [f"{lib} ({exc})"]
+    if not stat.S_ISDIR(info.st_mode):
+        return [f"{lib} (not a directory)"]
+    names = set(PERSONA_REGEN_FILES)
+    try:
+        with installer_safety.directory(lib) as fd:
+            if not installer_safety.same_object(info, os.fstat(fd)):
+                raise installer_safety.SafetyError("directory replaced before removal")
+            for name in sorted(os.listdir(fd)):
+                if name not in names and not name.startswith(".shardlure-write-"):
+                    retained.append(str(lib / name))
+                    continue
+                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_uid != os.geteuid():
+                    retained.append(str(lib / name))
+                    continue
+                os.unlink(name, dir_fd=fd)
+            os.fsync(fd)
+        if retained:
+            return retained
+        dirs = [lib] + ([lib.parent] if lib.parent.name == "shardlure" else [])
+        for d in dirs:
+            with installer_safety.directory(d.parent) as parent:
+                try:
+                    os.rmdir(d.name, dir_fd=parent)
+                except OSError:  # not empty: something else lives there
+                    retained.append(str(d))
+                    break
+                os.fsync(parent)
+    except (OSError, installer_safety.SafetyError) as exc:
+        retained.append(f"{lib} ({exc})")
+    return retained
+
+
 def deploy_patches() -> None:
     """Preflight and apply all Cowrie source patches as one guarded batch."""
     orchestrator = ROOT / "install" / "persona" / "apply-patches.py"
@@ -2124,11 +2180,18 @@ def cmd_uninstall() -> None:
     log("step 2/5: stop + remove systemd services")
     remove_services()
 
-    log("step 3/5: remove the shardlure binary")
+    log("step 3/5: remove the shardlure binary and the persona regeneration scripts")
     binp = BIN_DIR / "shardlure"
     if binp.exists():
         installation_state().remove(binp)
         log(f"removed {binp}")
+    # After remove_services: cowrie.service no longer runs these before start.
+    regen_present = os.path.lexists(PERSONA_REGEN_LIB)
+    kept = remove_persona_regen()
+    for path in kept:
+        log(f"retained {path}; not created by this installer or not safely removable")
+    if regen_present and not kept:
+        log(f"removed {PERSONA_REGEN_LIB}")
 
     log("step 4/5: remove authbind byport file (if any)")
     if honeypot < 1024:
