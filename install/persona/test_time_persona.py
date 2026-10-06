@@ -97,6 +97,7 @@ def _install_stubs():
     sys.modules["cowrie.shell.command"] = command
     protocol = types.ModuleType("cowrie.shell.protocol")
     protocol.HoneyPotExecProtocol = HoneyPotExecProtocol
+    protocol.boot_offset = lambda: float(BOOT_OFFSET)
     sys.modules["cowrie.shell.protocol"] = protocol
     utils = types.ModuleType("cowrie.core.utils")
     utils.uptime = lambda s: "unused"
@@ -158,22 +159,30 @@ class LastTest(unittest.TestCase):
                     self.fail(f"age {age}s at {datetime.fromtimestamp(now, timezone.utc)}:\n"
                               + "\n".join(res.diff + res.messages))
 
-    def test_reference_rows_equal_gen_time_persona(self):
-        # At a grid instant the rows are exactly the txtcmd gen-time-persona
-        # writes for that instant, boot rows aside.
-        now = self.last.persona_reference(T0)
-        proto = HoneyPotExecProtocol(start=now)
-        out, _, _ = run(self.last.Command_last, proto, now=now)
-        txt = gtp.build(datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None))
+    def test_rows_and_motd_equal_gen_time_persona_run_at_the_start(self):
+        # gen-time-persona runs at deploy, just before Cowrie starts: its last
+        # txtcmd rows and its motd "Last login" name the sessions Cowrie's
+        # last lays out from the process start, at any later age.
+        start = T0
+        proto = HoneyPotExecProtocol(start=start)
+        out, _, _ = run(self.last.Command_last, proto, now=start + 9 * 86400 + 5)
+        txt = gtp.build(datetime.fromtimestamp(start, timezone.utc).replace(tzinfo=None))
         want = txt["share/cowrie/txtcmds/usr/bin/last"].split("\n")[:6]
         self.assertEqual(out.split("\n")[:6], want)
+        second = datetime.strptime(out.split("\n")[1][39:55] + " 2026", "%a %b %d %H:%M %Y")
+        self.assertIn(f"Last login: {second:%a %b %e %H:%M}", txt["honeyfs/etc/motd"])
 
-    def test_repeated_runs_agree_within_a_step(self):
-        now = self.last.persona_reference(T0) + 60
-        proto = HoneyPotExecProtocol(start=now)
-        a, _, _ = run(self.last.Command_last, proto, now=now)
-        b, _, _ = run(self.last.Command_last, proto, now=now + 1800)
-        self.assertEqual(a, b)
+    def test_history_never_moves_for_a_process(self):
+        # Review I-1: wtmp is append-only. For one Cowrie start, last prints
+        # the same bytes at every instant from 0 to 30 days of process age,
+        # with no 4 h (or any) jumps.
+        start = T0
+        proto = HoneyPotExecProtocol(start=start)
+        first, _, _ = run(self.last.Command_last, proto, now=start)
+        instants = [start + k * 13 * 60 + 7 for k in range(0, 30 * 24 * 60 // 13, 7)]
+        for now in instants + [start + age for age in AGES]:
+            out, _, _ = run(self.last.Command_last, proto, now=now)
+            self.assertEqual(out, first, f"history moved at age {now - start:.0f}s")
 
     def test_exec_caller_has_no_row_pty_caller_does(self):
         now = T0
@@ -200,6 +209,8 @@ class LastTest(unittest.TestCase):
         self.assertTrue(out.startswith("\nwtmp begins "))
         out, _, _ = run(self.last.Command_last, proto, ["-x", "-F"], now=T0)
         self.assertEqual(out.count("\n"), 7 + 2)
+        out, err, rc = run(self.last.Command_last, proto, ["-n", "x"], now=T0)
+        self.assertEqual((out, err, rc), ("", "last: failed to parse number: 'x'\n", 1))
         out, err, rc = run(self.last.Command_last, proto, ["-z"], now=T0)
         self.assertEqual((out, rc), ("", 1))
         self.assertEqual(err, "last: invalid option -- 'z'\nTry 'last --help' for more information.\n")
@@ -257,10 +268,10 @@ class UptimeWTest(unittest.TestCase):
                     self.fail(f"age {age}s at {datetime.fromtimestamp(now, timezone.utc)}:\n"
                               + "\n".join(res.diff + res.messages))
 
-    def test_w_at_a_grid_instant_is_gen_time_personas_txtcmd(self):
-        # Cowrie's w shadows txtcmds/usr/bin/w; at a grid instant, with the
+    def test_w_at_the_start_is_gen_time_personas_txtcmd(self):
+        # Cowrie's w shadows txtcmds/usr/bin/w; at the process start, with the
         # persona's anchor uptime, the two are byte-identical.
-        now = self.last.persona_reference(T0)
+        now = T0
         out, _, _ = run(self.w, HoneyPotExecProtocol(start=now), now=now)
         txt = gtp.build(datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None))
         self.assertEqual(out, txt["share/cowrie/txtcmds/usr/bin/w"])
@@ -327,7 +338,22 @@ class UptimeWTest(unittest.TestCase):
         self.assertEqual(len(out.split("\n")), 3)
         out, err, rc = run(self.w, proto, ["-z"], now=T0)
         self.assertEqual((out, rc), ("", 1))
-        self.assertTrue(err.startswith("w: invalid option -- 'z'\n\nUsage:\n w [options] [user]\n"))
+        self.assertTrue(err.startswith("w: invalid option -- 'z'\n\nUsage:\n w [options]\n\n"))
+
+    def test_w_login_ages_through_procps_forms(self):
+        # Review m-3: the admin's login is fixed at the start, so it reaches
+        # procps' "still today" HH:MM past 12 h, then DddHH, then DDMonYY.
+        def row(start, now):
+            out, _, _ = run(self.w, HoneyPotExecProtocol(start=start), now=now)
+            return out.split("\n")[2]
+        day = datetime(2026, 10, 3, 6, 47, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(row(day + 6 * 3600 + 47 * 60, day + 16 * 3600 + 13 * 60)[35:56],
+                         "06:47   15:32m  0.04s")   # login 06:47, now 23:00 same day
+        self.assertEqual(row(day + 6 * 3600 + 47 * 60, day + 3 * 86400)[35:56],
+                         "Sat06    2days  0.04s")
+        self.assertEqual(row(day + 6 * 3600 + 47 * 60, day + 8 * 86400)[35:56],
+                         "03Oct26  7days  0.04s")
+        self.assertEqual(self.last.last_date(day, seconds=False), "Sat Oct  3 06:47")
 
 
 if __name__ == "__main__":

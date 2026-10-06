@@ -20,8 +20,9 @@ uptime is protocol.uptime() (boot_time(), [honeypot] boot_offset, which
 /proc/uptime and last also read), the load average is the fake filesystem's
 /proc/loadavg, and the admin's login and last keystroke come from
 cowrie.commands.last's admin_session(), so `w` and `last` always name the same
-login (last-persona.py, which therefore comes first in PATCHES). The admin's
-IDLE grows in real time between runs, as on a real box. A pty caller gets
+login (last-persona.py, which therefore comes first in PATCHES). That login is
+fixed at the Cowrie process start; its LOGIN@ ages through procps' three
+forms and its IDLE grows in real time, as on a real box. A pty caller gets
 its own row and the user count includes it.
 
 Options: uptime -p/-s/-h/-V; w -h/-s/-f, a user name, and -u/-i/-o accepted
@@ -180,7 +181,7 @@ NEW = r'''class Command_w(HoneyPotCommand):
     last keystroke from commands/last.py, so w agrees with uptime and last."""
 
     USAGE = (
-        "\nUsage:\n w [options] [user]\n\nOptions:\n"
+        "\nUsage:\n w [options]\n\nOptions:\n"
         " -h, --no-header     do not print header\n"
         " -u, --no-current    ignore current process username\n"
         " -s, --short         short format\n"
@@ -208,9 +209,11 @@ NEW = r'''class Command_w(HoneyPotCommand):
 
     @staticmethod
     def logintime(login: float, now: float) -> str:
-        """print_logintime."""
+        """print_logintime: HH:MM within 12 h or on the same day, else DddHH,
+        or DDMonYY past 6 days (the persona's session ages through all three
+        over the Cowrie process's life)."""
         tm = time.localtime(login)
-        if now - login > 12 * 3600:
+        if now - login > 12 * 3600 and tm.tm_yday != time.localtime(now).tm_yday:
             if now - login > 6 * 86400:
                 return " " + time.strftime("%d%b%y", tm)
             return " " + time.strftime("%a", tm) + f"{tm.tm_hour:02d}  "
@@ -247,7 +250,7 @@ NEW = r'''class Command_w(HoneyPotCommand):
             return
 
         now = time.time()
-        login, active, tty, source = admin_session(now)
+        login, active, tty, source = admin_session(self.protocol)
         # (user, tty, from, login, idle, jcpu, pcpu, what)
         rows = [(PERSONA_USER, tty, source, login, now - active, "  0.04s", "  0.01s", "-bash")]
         if caller_has_utmp(self.protocol):

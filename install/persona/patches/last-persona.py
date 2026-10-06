@@ -10,16 +10,21 @@ for the caller at all: sshd writes wtmp only for pty sessions. The persona's
 history is the one gen-time-persona.py writes into the txtcmd this command
 shadows (six `ubuntu` logins from 10.0.0.8/.12, the reboot row, wtmp begins).
 
-Two clocks, on purpose (Task 1 review constraint):
+Where the times come from (Task 5 review I-1, option (b)):
 - The reboot row and `wtmp begins` come from protocol.boot_time(), the same
   boot Cowrie's /proc/uptime, uptime and w report ([honeypot] boot_offset).
-- The admin sessions are anchored to now, NOT to boot. Boot-anchored sessions
-  age with the Cowrie process: after ~5 h the "still logged in" row is more
-  than 12 h old and the profiler's LAST field stops matching the persona.
-  "Now" is stepped to a fixed 4 h grid (persona_reference), so two `last`
-  runs minutes apart print the same history, as a real box does, and the
-  still-logged-in row is always 6h47m..10h47m old. The step is the residual:
-  once every 4 h the whole history moves by 4 h.
+- The admin history is laid out once from the Cowrie process start
+  (persona_start = boot_time() + boot_offset() = factory.starttime) and never
+  moves while the process runs: wtmp is append-only, so a history anchored to
+  now (every row shifts minute by minute) or to a 4 h grid (every completed
+  row moves forward a day per day, the live session "re-logs-in" every 4 h)
+  is visible to any bot that stores its LAST field (the profiler, 1,452
+  sessions in 30 days). gen-time-persona writes the motd at deploy, just
+  before the Cowrie (re)start, so its "Last login" names the same session.
+  A restart regenerates the history together with the boot, which reads as a
+  reboot. The "still logged in" ubuntu session stays logged in for the
+  process's life (w shows its LOGIN@ ageing into procps' DddHH/DDMonYY forms
+  and its IDLE growing), as a forgotten tmux or jump-host session does.
 
 An interactive (pty) caller gets its own "still logged in" row on pts/1, as
 sshd would write it; an exec caller gets none. The helpers below are shared
@@ -71,25 +76,23 @@ PERSONA_SESSIONS = (
     (331260, 5160, "pts/0", "10.0.0.8"),
     (427380, 4980, "pts/0", "10.0.0.8"),
 )
-# Sessions are anchored to now, stepped to this grid so repeated runs agree;
-# never to boot_time(), which ages with the Cowrie process (see the patch).
-PERSONA_STEP = 4 * 3600
-PERSONA_PHASE = 2 * 3600 + 13 * 60
 # The still-logged-in admin's last keystroke, after login (w's IDLE).
 PERSONA_ACTIVE_FOR = 41 * 60
 CALLER_TTY = "pts/1"
 
 
-def persona_reference(now: float) -> float:
-    """The instant the persona's history is laid out from: now, stepped back
-    to the PERSONA_STEP grid."""
-    return now - ((now - PERSONA_PHASE) % PERSONA_STEP)
+def persona_start(protocol) -> float:
+    """The instant the persona's history is laid out from: the Cowrie process
+    start, fixed for the process's life (boot_time() is start - boot_offset)."""
+    from cowrie.shell.protocol import boot_offset
+
+    return protocol.boot_time() + boot_offset()
 
 
-def admin_session(now: float) -> tuple[float, float, str, str]:
+def admin_session(protocol) -> tuple[float, float, str, str]:
     """(login, last activity, tty, source) of the still-logged-in admin."""
     offset, _, tty, source = PERSONA_SESSIONS[0]
-    login = persona_reference(now) - offset
+    login = persona_start(protocol) - offset
     return login, login + PERSONA_ACTIVE_FOR, tty, source
 
 
@@ -111,18 +114,17 @@ def _last_row(user: str, tty: str, host: str, login: float, length) -> str:
     return f"{user[:8]:<8} {tty[:12]:<12} {host[:16]:<16} {when}   {status}"
 
 
-def persona_last_rows(now: float, boot: float, caller=None) -> list[tuple[str, str, str]]:
-    """last(1)'s rows, newest first, as (user, tty, text). `caller` is
-    (user, source, login) for a pty session, else None."""
+def persona_last_rows(start: float, boot: float, caller=None) -> list[tuple[str, str, str]]:
+    """last(1)'s rows, newest first, as (user, tty, text), for a history laid
+    out from `start`. `caller` is (user, source, login) for a pty session."""
     rows = []
     if caller is not None:
         user, source, login = caller
         rows.append((user, CALLER_TTY,
                      _last_row(user, CALLER_TTY, source, login, None)))
-    ref = persona_reference(now)
     for offset, length, tty, source in PERSONA_SESSIONS:
         rows.append((PERSONA_USER, tty,
-                     _last_row(PERSONA_USER, tty, source, ref - offset, length)))
+                     _last_row(PERSONA_USER, tty, source, start - offset, length)))
     rows.append(("reboot", "system boot",
                  f"{'reboot':<8} {'system boot':<12} {PERSONA_KERNEL[:16]:<16} "
                  f"{last_date(boot, seconds=False)}   still running"))
@@ -142,7 +144,7 @@ class Command_last(HoneyPotCommand):
             if arg in ("-n", "--limit") or arg.startswith("--limit="):
                 value = arg.split("=", 1)[1] if "=" in arg else (args.pop(0) if args else "")
                 if not value.isdigit():
-                    self.errorWrite(f"last: failed to parse number of lines: '{value}'\n")
+                    self.errorWrite(f"last: failed to parse number: '{value}'\n")
                     self.exit(1)
                     return
                 limit = int(value)
@@ -177,7 +179,7 @@ class Command_last(HoneyPotCommand):
         if caller_has_utmp(self.protocol):
             caller = (self.user["username"], self.protocol.clientIP,
                       self.protocol.logintime)
-        rows = persona_last_rows(time.time(), self.protocol.boot_time(), caller)
+        rows = persona_last_rows(persona_start(self.protocol), self.protocol.boot_time(), caller)
         if names:
             rows = [r for r in rows if r[0] in names or r[1] in names]
         if limit is not None:
