@@ -1187,5 +1187,125 @@ class ServiceSafetyTests(unittest.TestCase):
         )
 
 
+def _fs_node(name, kind, children=None, target=None, uid=0, gid=0, size=4096, mode=0o40755):
+    return [name, kind, uid, gid, size, mode, 0, children if children is not None else [],
+            target, None]
+
+
+def persona_fs_tree():
+    """A small fs.pickle-shaped tree: / with usr/{bin,sbin,lib}, etc, home,
+    and the usr-merge links bin -> usr/bin, sbin -> usr/sbin (root-relative,
+    as the pinned pickle stores them)."""
+    d = lambda n, c=None: _fs_node(n, shardlure._FS_DIR, c)  # noqa: E731
+    f = lambda n, size=10: _fs_node(n, shardlure._FS_FILE, size=size, mode=0o100755)  # noqa: E731
+    return d("/", [
+        d("usr", [d("bin", [f("ls", 151344), f("echo")]), d("sbin"), d("lib", [f("os-release", 267)])]),
+        d("etc", [d("alternatives")]),
+        d("home", [d("phil")]),
+        _fs_node("bin", shardlure._FS_LINK, target="usr/bin", mode=0o120777),
+        _fs_node("sbin", shardlure._FS_LINK, target="usr/sbin", mode=0o120777),
+    ])
+
+
+def fs_lookup(tree, path, depth=0):
+    """Cowrie's HoneyPotFilesystem.getfile: follow links, a relative target
+    resolved from / (shell/fs.py)."""
+    if depth > 16:
+        return None
+    node = tree
+    for part in [p for p in path.split("/") if p]:
+        if node[shardlure._FS_TYPE] == shardlure._FS_LINK:
+            node = fs_lookup(tree, "/" + node[shardlure._FS_TARGET].lstrip("/"), depth + 1)
+        if node is None or node[shardlure._FS_TYPE] != shardlure._FS_DIR:
+            return None
+        node = next((c for c in node[shardlure._FS_CONTENTS] if c[0] == part), None)
+        if node is None:
+            return None
+    if node[shardlure._FS_TYPE] == shardlure._FS_LINK:
+        return fs_lookup(tree, "/" + node[shardlure._FS_TARGET].lstrip("/"), depth + 1)
+    return node
+
+
+class PersonaFsTests(unittest.TestCase):
+    """plant_bait_files' pickle edits (payload-yield Phase B Task 7)."""
+
+    def test_server_tools_exist_with_their_modes(self):
+        tree = persona_fs_tree()
+        self.assertEqual(shardlure.persona_fs_edit(tree), [])
+        sudo = fs_lookup(tree, "/usr/bin/sudo")
+        self.assertEqual((sudo[shardlure._FS_SIZE], sudo[shardlure._FS_MODE]), (232416, 0o104755))
+        crontab = fs_lookup(tree, "/bin/crontab")
+        self.assertEqual((crontab[shardlure._FS_GID], crontab[shardlure._FS_MODE]), (104, 0o102755))
+        for path in ("/usr/bin/busybox", "/usr/bin/lspci", "/usr/bin/ping", "/usr/bin/git"):
+            with self.subTest(path=path):
+                self.assertEqual(fs_lookup(tree, path)[shardlure._FS_TYPE], shardlure._FS_FILE)
+
+    def test_every_link_resolves_to_a_file(self):
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree)
+        for path, _ in shardlure.PERSONA_FS_LINKS:
+            with self.subTest(link=path):
+                node = fs_lookup(tree, path)
+                self.assertIsNotNone(node, f"{path} dangles")
+                self.assertEqual(node[shardlure._FS_TYPE], shardlure._FS_FILE)
+        self.assertEqual(fs_lookup(tree, "/usr/sbin/reboot")[shardlure._FS_SIZE], 1119856)
+        self.assertEqual(fs_lookup(tree, "/usr/bin/nc")[shardlure._FS_SIZE], 39560)
+
+    def test_systemctl_node_has_a_silent_txtcmd(self):
+        # Cowrie registers no systemctl command: without a txtcmd the new node
+        # would answer `systemctl enable x` with "cannot execute binary file"
+        # where the pickle used to say "command not found". Both usr-merged
+        # spellings resolve to their own txtcmd path.
+        txtcmds = Path(shardlure.ROOT) / "install/persona/txtcmds"
+        for rel in ("usr/bin/systemctl", "bin/systemctl"):
+            with self.subTest(rel=rel):
+                self.assertEqual((txtcmds / rel).read_bytes(), b"")
+
+    def test_no_node_is_newer_than_the_persona_image(self):
+        for path, *_, ctime in shardlure.PERSONA_FS_FILES:
+            with self.subTest(path=path):
+                self.assertLessEqual(ctime, shardlure.PERSONA_IMAGE_TIME)
+
+    def test_edit_is_idempotent(self):
+        once = persona_fs_tree()
+        shardlure.persona_fs_edit(once)
+        twice = persona_fs_tree()
+        shardlure.persona_fs_edit(twice)
+        shardlure.persona_fs_edit(twice)
+        self.assertEqual(once, twice)
+
+    def test_missing_parent_is_reported_not_invented(self):
+        tree = persona_fs_tree()
+        tree[shardlure._FS_CONTENTS] = [c for c in tree[shardlure._FS_CONTENTS] if c[0] != "etc"]
+        skipped = shardlure.persona_fs_edit(tree)
+        self.assertIn("/etc/alternatives/nc", skipped)
+        self.assertIsNone(fs_lookup(tree, "/etc"))
+
+    def test_unreadable_pickle_is_a_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(b"inert")
+            with mock.patch.object(shardlure, "log") as log:
+                shardlure.apply_persona_fs(path)
+            self.assertIn("persona filesystem nodes not applied", log.call_args[0][0])
+            self.assertEqual(path.read_bytes(), b"inert")
+
+    def test_pickle_round_trip_keeps_mode(self):
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(pickle.dumps(persona_fs_tree()))
+            path.chmod(0o640)
+            shardlure.apply_persona_fs(path)
+            tree = pickle.loads(path.read_bytes())
+            self.assertEqual(stat_mode(path), 0o640)
+            self.assertIsNotNone(fs_lookup(tree, "/usr/bin/sudo"))
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["fs.pickle"])
+
+
+def stat_mode(path: Path) -> int:
+    return path.stat().st_mode & 0o7777
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -612,9 +612,128 @@ def plant_bait_files() -> None:
         dst = honeyfs / rel
         if dst.is_file():
             fs(f"load {vpath} {dst}")
+    apply_persona_fs(pickle_path)
     dst_pickle = COWRIE_HOME / "var/lib/cowrie/fs.pickle"
     if pickle_path.exists():
         shutil.copy2(pickle_path, dst_pickle)
+
+
+# Cowrie's fs.pickle node layout (cowrie/shell/fs.py A_NAME..A_REALFILE) and
+# node types. A node is a 10-item list; a directory's A_CONTENTS is its list of
+# children, a symlink's target is A_TARGET.
+_FS_NAME, _FS_TYPE, _FS_UID, _FS_GID, _FS_SIZE, _FS_MODE, _FS_CTIME, _FS_CONTENTS, _FS_TARGET = range(9)
+_FS_LINK, _FS_DIR, _FS_FILE = 0, 1, 2
+# The persona is a 22.04.4 cloud image built in early 2024 (os-release, kernel
+# 5.15.0-94); a node newer than that would date the box. The pickle stamps its
+# own /etc/os-release with this instant.
+PERSONA_IMAGE_TIME = 1706476800
+
+# Files a 22.04 server cloud image ships that Cowrie runs (it registers these
+# commands) but whose pickle has no node, so `ls -l /usr/bin/sudo`, `[ -x
+# /usr/bin/crontab ]` and `command -v sudo` said the box lacks them. Path,
+# size, mode, gid and time are the jammy cloud rootfs's (ubuntu-22.04-server-
+# cloudimg-amd64-root.tar.xz), times clamped to PERSONA_IMAGE_TIME; crontab is
+# setgid crontab (104 in the persona's /etc/group), sudo setuid root. The
+# names 22.04 does not ship (python, php, gcc, yum, ifconfig, netstat...) stay
+# absent, as on the real box.
+PERSONA_FS_FILES = (
+    ("/usr/bin/busybox", 2193272, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/crontab", 39568, 0o102755, 104, 1648063140),
+    ("/usr/bin/dig", 154448, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/git", 3710360, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/lspci", 94288, 0o100755, 0, 1630311300),
+    ("/usr/bin/nc.openbsd", 39560, 0o100755, 0, 1645634340),
+    ("/usr/bin/ping", 76680, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/sudo", 232416, 0o104755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/systemctl", 1119856, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/sbin/ethtool", 564712, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/sbin/xtables-nft-multi", 224296, 0o100755, 0, 1705459440),
+)
+# Their symlinks, as 22.04 lays them out. Targets are absolute: Cowrie resolves
+# a relative target from / rather than from the link's directory, so the real
+# `xtables-nft-multi` (relative) would dangle.
+PERSONA_FS_LINKS = (
+    ("/etc/alternatives/nc", "/bin/nc.openbsd"),
+    ("/etc/alternatives/netcat", "/bin/nc.openbsd"),
+    ("/usr/bin/nc", "/etc/alternatives/nc"),
+    ("/usr/bin/netcat", "/etc/alternatives/netcat"),
+    ("/etc/alternatives/iptables", "/usr/sbin/iptables-nft"),
+    ("/usr/sbin/iptables-nft", "/usr/sbin/xtables-nft-multi"),
+    ("/usr/sbin/iptables", "/etc/alternatives/iptables"),
+    ("/usr/sbin/halt", "/bin/systemctl"),
+    ("/usr/sbin/poweroff", "/bin/systemctl"),
+    ("/usr/sbin/reboot", "/bin/systemctl"),
+    ("/usr/sbin/shutdown", "/bin/systemctl"),
+)
+
+
+def _fs_dir(tree: list, path: str) -> list | None:
+    """The directory node at an absolute path, following no symlinks."""
+    node = tree
+    for part in [p for p in path.split("/") if p]:
+        if node[_FS_TYPE] != _FS_DIR:
+            return None
+        node = next((c for c in node[_FS_CONTENTS] if c[_FS_NAME] == part), None)
+        if node is None:
+            return None
+    return node if node[_FS_TYPE] == _FS_DIR else None
+
+
+def _fs_put(tree: list, path: str, node: list) -> bool:
+    """Link node at path, replacing any entry of the same name. False when the
+    parent directory is missing (the node is then skipped, never invented)."""
+    parent_path, _, name = path.rpartition("/")
+    parent = _fs_dir(tree, parent_path or "/")
+    if parent is None:
+        return False
+    node[_FS_NAME] = name
+    parent[_FS_CONTENTS][:] = [c for c in parent[_FS_CONTENTS] if c[_FS_NAME] != name] + [node]
+    return True
+
+
+def persona_fs_edit(tree: list) -> list[str]:
+    """Apply the persona's node changes to an unpickled fs tree in place.
+
+    Idempotent: every change replaces a node by name or sets attributes, so a
+    second `plant-bait` run leaves the tree as the first left it. Returns the
+    paths it could not place (a missing parent directory).
+    """
+    skipped = []
+    for path, size, mode, gid, ctime in PERSONA_FS_FILES:
+        node = [None, _FS_FILE, 0, gid, size, mode, ctime, [], None, None]
+        if not _fs_put(tree, path, node):
+            skipped.append(path)
+    for path, target in PERSONA_FS_LINKS:
+        node = [None, _FS_LINK, 0, 0, len(target), 0o120777, PERSONA_IMAGE_TIME, [], target, None]
+        if not _fs_put(tree, path, node):
+            skipped.append(path)
+    return skipped
+
+
+def apply_persona_fs(pickle_path: Path) -> None:
+    """Edit Cowrie's fs.pickle for the persona: what fsctl cannot express
+    (setuid modes, symlinks, real sizes). The pickle is the pinned Cowrie
+    checkout's own file, the one Cowrie itself unpickles; it is rewritten via
+    a temporary file and an atomic rename."""
+    import pickle  # noqa: PLC0415 - only the installer's bait step needs it
+
+    try:
+        with pickle_path.open("rb") as f:
+            tree = pickle.load(f)
+        if not isinstance(tree, list) or len(tree) < 9 or tree[_FS_TYPE] != _FS_DIR:
+            raise ValueError("not a Cowrie filesystem tree")
+    except Exception as exc:  # noqa: BLE001 - a broken pickle is reported, not fatal
+        log(f"warning: cannot edit {pickle_path} for the persona ({type(exc).__name__}); "
+            "persona filesystem nodes not applied (fingerprintable)")
+        return
+    skipped = persona_fs_edit(tree)
+    if skipped:
+        log(f"warning: persona filesystem nodes without a parent directory: {', '.join(skipped)}")
+    tmp = pickle_path.with_name(pickle_path.name + ".persona-tmp")
+    with tmp.open("wb") as f:
+        pickle.dump(tree, f)
+    shutil.copymode(pickle_path, tmp)
+    os.replace(tmp, pickle_path)
 
 
 def deploy_txtcmds() -> None:
