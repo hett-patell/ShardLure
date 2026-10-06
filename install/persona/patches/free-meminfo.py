@@ -419,7 +419,10 @@ class Command_free(HoneyPotCommand):
             self.exit(0)
             return
         self.write("\n")
-        self.scheduled = reactor.callLater(self.interval, self.show)
+        # procps accepts any positive interval; the honeypot floors it at
+        # 0.1 s so `free -s 0.000001` cannot spin the shared reactor or flood
+        # a transport the client never reads. Not observable as a tell.
+        self.scheduled = reactor.callLater(max(self.interval, 0.1), self.show)
 
     def render(self, mem: dict[str, int]) -> str:
         def col(size: int) -> str:

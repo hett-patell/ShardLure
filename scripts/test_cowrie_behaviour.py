@@ -1113,6 +1113,11 @@ class ShippedCasesTest(unittest.TestCase):
         for name in ("free-m-awk", "free", "free-h"):
             with self.subTest(case=name):
                 self.assertTrue(cbt.parse_expected(exp(name)).no_host_memtotal)
+        # free-meminfo.py falls back to MemFree when MemAvailable is missing,
+        # where procps would estimate from the zone watermarks; the persona
+        # meminfo must keep the field so that fallback stays unreachable.
+        meminfo = (HERE.parent / "install" / "persona" / "honeyfs" / "proc" / "meminfo").read_text()
+        self.assertRegex(meminfo, r"(?m)^MemAvailable:\s+\d+ kB$")
         # The shadowed free txtcmd is procps' own output for the persona.
         self.assertEqual(
             cbt.parse_expected(exp("free")).content,
