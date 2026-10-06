@@ -15,6 +15,11 @@ ShardLure patch set (x86 here; arm is slower):
   already produced; the differential over every `$(...)` in the harness,
   the profiler and Cowrie's own tests found no change in statements, line
   numbers or transcripts.
+* A backtick body is one flat token, with no tree in its line to reuse, so
+  the same line with backticks still parsed every pass (24 s). Each parser
+  now remembers its last 64 parse results (64 K input characters at most),
+  keyed by the exact input, and splits a repeat from the remembered tree:
+  the 200-pass backtick loop went from 4.5 s to 0.26 s, the same as $(...).
 * ~200 levels of "(", "{" or if raised RecursionError out of lineReceived
   (128 levels of `$(` raised one while evaluating), and nested case clauses
   are superlinear in the grammar itself (64 levels, 1.2 KB: 5.8 s). Input
@@ -52,10 +57,22 @@ NEW_LIMITS = r'''    return CowrieConfig.getfloat("shell", "parse_timeout_second
 # 3-12 KB profiler); 16 leaves that 10 levels of headroom.
 MAX_NESTING_DEPTH = 16
 
+# Parse results each parser keeps, keyed by the exact input: a loop runs the
+# same backtick body, and the same line, every pass. A backtick body is one
+# flat token in the grammar, so it has no tree in its line to reuse the way a
+# "$(...)" body does, and the 104-byte `while` line with backticks parsed
+# 1,000 times (24 s). Bounded by entries and by total input characters, since
+# a tree is many times its input's size.
+PARSE_MEMO_ENTRIES = 64
+PARSE_MEMO_CHARS = 65536
+
 _NEST_WORD_BREAK = frozenset(" \t\r\n;&|<>()")
-# A case clause only where the grammar can read one: "case WORD in" at a word
-# start, closed by "esac" as a whole word.
-_NEST_CASE_HEAD = re.compile(r"case[ \t]+[^ \t\r\n;&|<>()]+[ \t]+in[ \t\r\n]")
+# A case clause opens at "case" and a blank at a word start, closed by "esac"
+# as a whole word. The head's WORD is not read: the grammar takes any word
+# there, quoted, "$(x)" or after a "\\"-newline, and a narrower head let
+# 64 nested `case "a b" in` levels through (7.8 s). A "case" that never
+# closes is read as a word on a second pass (nesting_too_deep).
+_NEST_CASE_HEAD = re.compile(r"case(?:[ \t]|\\\r?\n)")
 _NEST_ESAC = re.compile(r"esac(?![^ \t\r\n;&|<>()])")
 
 
@@ -73,7 +90,8 @@ def _nesting_scan(text: str, ignore: frozenset[int]) -> tuple[int, set[int]]:
     spans = [(0, len(text), 0)]
     while spans:
         pos, end, depth = spans.pop()
-        # ("(", 0) group, ('"', 0) double quote, ("case", offset) case clause.
+        # ("(", 0) group, ("$(", 0) substitution, ('"', 0) double quote,
+        # ("case", offset) case clause.
         stack: list[tuple[str, int]] = []
         word_start = True
         while pos < end:
@@ -94,7 +112,7 @@ def _nesting_scan(text: str, ignore: frozenset[int]) -> tuple[int, set[int]]:
                 word_start = False
                 continue
             if ch == "$" and text.startswith("$(", pos):
-                stack.append(("(", 0))
+                stack.append(("$(", 0))
                 depth += 1
                 pos += 2
                 word_start = True
@@ -128,12 +146,17 @@ def _nesting_scan(text: str, ignore: frozenset[int]) -> tuple[int, set[int]]:
                 continue
             if ch == ")":
                 # Inside a case clause a ")" may close a pattern, which opened
-                # nothing; it only closes a group the scan saw open.
-                if top == "(":
+                # nothing; it only closes a group the scan saw open. A "$(...)"
+                # is part of a word, so a "#" right after it continues the
+                # word (`$(x)#` prints "#"); reading it as a comment hid the
+                # rest of the line from the scan.
+                pos += 1
+                if top in ("(", "$("):
                     stack.pop()
                     depth -= 1
-                pos += 1
-                word_start = True
+                    word_start = top == "("
+                else:
+                    word_start = True
                 continue
             if (
                 word_start
@@ -210,7 +233,9 @@ NEW = r'''        previous "unexpected end of file" fallback.
         the evaluator is about to run is split from the tree its enclosing
         line already produced (see _substitute), never parsed again. Input
         nested deeper than MAX_NESTING_DEPTH is refused before the grammar
-        runs, and a RecursionError, from nesting the scan does not count
+        runs, an input this parser saw recently is split from its remembered
+        tree (or answered its remembered error) instead of parsed again, and
+        a RecursionError, from nesting the scan does not count
         (if/while/{ ...; }), fails this parse instead of escaping into the
         protocol. All three answer as bash answers an unclosed "( (" group:
         "syntax error: unexpected end of file", status 2, the reply Cowrie
@@ -219,6 +244,9 @@ NEW = r'''        previous "unexpected end of file" fallback.
         reused, self._reuse = self._reuse, None
         if reused is not None and reused[0] is line:
             return self._split_reused(reused[0], reused[1], reused[2])
+        remembered = self._memo_lookup(line)
+        if remembered is not None:
+            return remembered
         if nesting_too_deep(line):
             self._log.warn(
                 "Shell parse refused: groups nested deeper than {limit}"
@@ -226,19 +254,17 @@ NEW = r'''        previous "unexpected end of file" fallback.
                 limit=MAX_NESTING_DEPTH,
                 length=len(line),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            return self._memo_error(line, "", self._end_line(line))
         timed_out = False
         try:
             with _parse_alarm(parse_timeout_seconds()):
                 tree = _parser.parse(line)
         except UnexpectedCharacters as error:
-            return [
-                SyntaxError_(
-                    token=self._unexpected_char(line, error), lineno=error.line
-                )
-            ]
+            return self._memo_error(
+                line, self._unexpected_char(line, error), error.line
+            )
         except LarkError:
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            return self._memo_error(line, "", self._end_line(line))
         except ParseTimeoutError:
             timed_out = True
             self._log.warn(
@@ -246,24 +272,26 @@ NEW = r'''        previous "unexpected end of file" fallback.
                 timeout=parse_timeout_seconds(),
                 length=len(line),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            return self._memo_error(line, "", self._end_line(line))
         except RecursionError:
             self._log.warn(
                 "Shell parse hit the recursion limit (input: {length} characters)",
                 length=len(line),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            return self._memo_error(line, "", self._end_line(line))
         finally:
             if timed_out or len(line) >= gc_collect_threshold():
                 gc.collect()
         try:
-            return self._split_statements(line, tree)
+            statements = self._split_statements(line, tree)
         except RecursionError:
             self._log.warn(
                 "Shell parse hit the recursion limit (input: {length} characters)",
                 length=len(line),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            return self._memo_error(line, "", self._end_line(line))
+        self._memo_put(line, tree)
+        return statements
 '''
 
 OLD_LINES = r'''    @staticmethod
@@ -307,6 +335,45 @@ NEW_LINES = r'''    # ShardLure (shell-parse-bounds.py): while _split_reused spl
         else:
             return 0
         return raw - self._line_shift if raw else 0
+
+    _memo: dict[str, Tree | tuple[str, int]] | None = None
+    _memo_chars = 0
+
+    def _memo_lookup(self, line: str) -> list[Statement] | None:
+        """What parse(line) answered last time, if this parser remembers it:
+        statements split afresh from the remembered tree (the evaluator
+        mutates statements, never the tree), or the same syntax error."""
+        if self._memo is None:
+            return None
+        hit = self._memo.get(line)
+        if hit is None:
+            return None
+        if isinstance(hit, tuple):
+            return [SyntaxError_(token=hit[0], lineno=hit[1])]
+        try:
+            return self._split_statements(line, hit)
+        except RecursionError:
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+
+    def _memo_put(self, line: str, entry: Tree | tuple[str, int]) -> None:
+        if len(line) > PARSE_MEMO_CHARS:
+            return
+        if self._memo is None:
+            self._memo = {}
+        memo = self._memo
+        while memo and (
+            len(memo) >= PARSE_MEMO_ENTRIES
+            or self._memo_chars + len(line) > PARSE_MEMO_CHARS
+        ):
+            oldest = next(iter(memo))
+            del memo[oldest]
+            self._memo_chars -= len(oldest)
+        memo[line] = entry
+        self._memo_chars += len(line)
+
+    def _memo_error(self, line: str, token: str, lineno: int) -> list[Statement]:
+        self._memo_put(line, (token, lineno))
+        return [SyntaxError_(token=token, lineno=lineno)]
 
     def _split_reused(self, source: str, line: str, body: Tree) -> list[Statement]:
         """The statements of a ``$(...)`` body, from the ``start`` tree the

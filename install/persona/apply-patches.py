@@ -89,9 +89,11 @@ PATCHES = (
     # The shell parses on the single reactor thread: a $(...) body was parsed
     # again on every evaluation (a 116-byte `while` line held every session
     # 22 s; nested $( froze all sessions 189 s live), and ~200 levels of
-    # nesting raised RecursionError out of the protocol. Bodies now reuse
-    # their line's tree, nesting past 16 is refused before the grammar runs,
-    # and a RecursionError fails one parse (production nests at most 6).
+    # nesting raised RecursionError out of the protocol. $(...) bodies now
+    # reuse their line's tree, each parser remembers recent results (backtick
+    # bodies have no tree to reuse), nesting past 16 is refused before the
+    # grammar runs, and a RecursionError fails one parse (production nests at
+    # most 6).
     "shell-parse-bounds.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
