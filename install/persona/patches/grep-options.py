@@ -192,7 +192,42 @@ OLD = r'''class Command_grep(HoneyPotCommand):
 commands["/bin/grep"] = Command_grep
 '''
 
-NEW = r'''# ShardLure persona (grep-options.py): GNU grep 3.7's pattern dialects. Python
+NEW = r'''import signal as _grep_signal
+import threading as _grep_threading
+import time as _grep_time
+
+# ShardLure persona (grep-options.py): a time budget per grep. Python's re
+# backtracks; GNU grep's DFA does not. `printf 'aaa...a!' | grep -E '(a+)+$'`
+# (40 bytes) would otherwise hold Cowrie's single reactor thread for hours:
+# every session, and the JSON log ShardLure ingests, would freeze. CPython's
+# sre checks for pending signals while it matches, so a SIGALRM interrupts it.
+# The rule is upstream's bashparse _parse_alarm: only on the main thread, only
+# while SIGALRM has its default handler and no real-time alarm is pending,
+# always disarmed and the handler restored before returning.
+GREP_BUDGET_SECONDS = 0.75
+_GREP_HAS_ALARM = all(
+    hasattr(_grep_signal, name) for name in ("SIGALRM", "ITIMER_REAL", "getitimer", "setitimer")
+)
+
+
+class GrepTimeout(Exception):
+    """This grep's time budget ran out."""
+
+
+def _grep_raise_timeout(signum: int, frame: object) -> None:
+    raise GrepTimeout
+
+
+def grep_alarm_usable() -> bool:
+    if not _GREP_HAS_ALARM or _grep_threading.current_thread() is not _grep_threading.main_thread():
+        return False
+    if _grep_signal.getsignal(_grep_signal.SIGALRM) is not _grep_signal.SIG_DFL:
+        return False
+    delay, interval = _grep_signal.getitimer(_grep_signal.ITIMER_REAL)
+    return not (delay or interval)
+
+
+# ShardLure persona (grep-options.py): GNU grep 3.7's pattern dialects. Python
 # re is neither BRE nor ERE, so every pattern is translated first: in the
 # default BRE `\|` `\(` `\{` `\+` `\?` are the operators and the bare forms are
 # literals (`grep "model name\|Hardware"` is a common recon idiom), ERE is the
@@ -297,8 +332,13 @@ def grep_translate(pattern: str, extended: bool, group_base: int = 0) -> tuple[s
     def quantify(q: str) -> None:
         nonlocal quantified
         assert atom is not None
+        if quantified and q in "*+?" and out[-1] in ("*", "+", "?"):
+            # a**, a+*, a?+ ...: one simple repetition (collapsed rather than
+            # re-wrapped, which is quadratic on `a` and 100k stars).
+            out[-1] = q if q == out[-1] else "*"
+            return
         if quantified:
-            # GNU accepts stacked repetition (a**, a+*); Python does not.
+            # GNU accepts stacked repetition (a{2}*); Python does not.
             out[atom:] = ["(?:" + "".join(out[atom:]) + ")"]
         out.append(q)
         quantified = True
@@ -317,10 +357,10 @@ def grep_translate(pattern: str, extended: bool, group_base: int = 0) -> tuple[s
         hi = m.group(3)
         if not m.group(2):
             hi = m.group(1)
-        if (hi and int(hi) < lo) or lo > GREP_DUP_MAX or (hi and int(hi) > GREP_DUP_MAX):
+        if lo > GREP_DUP_MAX or (hi and int(hi) > GREP_DUP_MAX):
+            raise GrepPatternError("Regular expression too big")
+        if hi and int(hi) < lo:
             return "!", i
-        if not m.group(1) and m.group(2) and not hi:
-            return None, i
         return "{%d,%s}" % (lo, hi) if m.group(2) else "{%d}" % lo, end + len(close)
 
     while i < n:
@@ -416,7 +456,9 @@ def grep_translate(pattern: str, extended: bool, group_base: int = 0) -> tuple[s
             atom, quantified, at_start = None, False, True
         elif c == "{":  # ERE only
             q, nxt = interval(i, "}")
-            if q is None or q == "!":
+            if q == "!":
+                raise GrepPatternError("Invalid content of \\{\\}")
+            if q is None:
                 literal("{")
                 continue
             if atom is not None:
@@ -426,6 +468,8 @@ def grep_translate(pattern: str, extended: bool, group_base: int = 0) -> tuple[s
         elif c in "*+?":
             if atom is None:
                 if extended:
+                    if c in "*?" and out and out[-1] in ("^", "$"):
+                        out.pop()  # (^)* matches the empty string anywhere
                     continue  # GNU ignores a leading ERE repetition
                 literal(c)  # a leading BRE "*" is literal
                 continue
@@ -433,7 +477,7 @@ def grep_translate(pattern: str, extended: bool, group_base: int = 0) -> tuple[s
         elif c == "^":
             if extended or at_start:
                 out.append("^")
-                atom, quantified = None, False
+                atom, quantified, at_start = None, False, extended
             else:
                 literal("^")
         elif c == "$":
@@ -596,6 +640,9 @@ class Command_grep(HoneyPotCommand):
     errored: bool = False
     dialect: str = "-G"
     whole: str | None = None  # "-w" or "-x"
+    match_nothing: bool = False  # -f with an empty pattern file
+    timed_out: bool = False
+    budget_left: float = GREP_BUDGET_SECONDS
     stdin_label: str = "(standard input)"
 
     def grep_get_contents(self, filename: str, match: str, label: str | None = None) -> None:
@@ -614,6 +661,8 @@ class Command_grep(HoneyPotCommand):
     def compile_match(self, match: str) -> re.Pattern[bytes]:
         """The selected dialect, translated to Python re; raises
         GrepPatternError (GNU's message) or re.error."""
+        if self.match_nothing:
+            return re.compile(b"(?!)")
         parts: list[str] = []
         groups = 0
         # PATTERNS can hold several patterns separated by newlines (repeated
@@ -640,15 +689,65 @@ class Command_grep(HoneyPotCommand):
         self.grep_lines(contents, match, label)
         self.grep_finish(label)
 
+    def grep_bounded(self, fn) -> bool:
+        """Run fn() within what is left of this grep's time budget. False
+        when the budget ran out (fn was interrupted)."""
+        if self.timed_out:
+            return False
+        if not grep_alarm_usable():
+            fn()  # another component owns SIGALRM: unbounded, as upstream
+            return True
+        if self.budget_left <= 0:
+            return self.grep_timeout()
+        started = _grep_time.monotonic()
+        previous = _grep_signal.signal(_grep_signal.SIGALRM, _grep_raise_timeout)
+        try:
+            try:
+                _grep_signal.setitimer(_grep_signal.ITIMER_REAL, self.budget_left)
+                try:
+                    fn()
+                finally:
+                    _grep_signal.setitimer(_grep_signal.ITIMER_REAL, 0)
+            finally:
+                _grep_signal.signal(_grep_signal.SIGALRM, previous)
+                self.budget_left -= _grep_time.monotonic() - started
+        except GrepTimeout:
+            return self.grep_timeout()
+        return True
+
+    def grep_timeout(self) -> bool:
+        """The budget ran out: stop matching and finish as if nothing more
+        was selected (a real grep would say so for the pathological inputs
+        that get here). Logged for the operator, invisible to the client."""
+        if not self.timed_out:
+            self.timed_out = True
+            log = getattr(self, "_log", None)
+            if log is not None:
+                log.info("grep: matching stopped after {s}s budget", s=GREP_BUDGET_SECONDS)
+        return False
+
     def grep_lines(self, contents: bytes, match: str, label: str) -> None:
-        if self.quiet and self.matched:
+        if (self.quiet and self.matched) or self.timed_out:
             return
-        matcher = self.matcher if getattr(self, "matcher", None) else self.compile_match(match)
+        if getattr(self, "matcher", None) is None:
+            compiled: list[re.Pattern[bytes]] = []
+            if not self.grep_bounded(lambda: compiled.append(self.compile_match(match))):
+                return
+            self.matcher = compiled[0]
         lines = contents.split(b"\n")
         if lines[-1] == b"":
             # The newline ends the last line; it does not start an empty one
             # (which `grep -v x` would otherwise print).
             lines.pop()
+        # Output is collected and written after the alarm is disarmed, so a
+        # timeout can never land inside a transport write.
+        pending: list[bytes] = []
+        self.grep_bounded(lambda: self.grep_scan(lines, label, pending))
+        for chunk in pending:
+            self.writeBytes(chunk)
+
+    def grep_scan(self, lines: list[bytes], label: str, pending: list[bytes]) -> None:
+        matcher = self.matcher
         name = label.encode("utf8") + b":" if self.show_names else b""
         for line in lines:
             self.line_no += 1
@@ -664,7 +763,7 @@ class Command_grep(HoneyPotCommand):
                 break
             if self.list_mode:
                 if self.list_mode == "-l":
-                    self.writeBytes(label.encode("utf8") + b"\n")
+                    pending.append(label.encode("utf8") + b"\n")
                 self.listed = True
                 break
             if self.count_only:
@@ -676,9 +775,9 @@ class Command_grep(HoneyPotCommand):
                 if not self.invert:
                     for m in matcher.finditer(line):
                         if m.group(0):
-                            self.writeBytes(prefix + m.group(0) + b"\n")
+                            pending.append(prefix + m.group(0) + b"\n")
                 continue
-            self.writeBytes(prefix + line + b"\n")
+            pending.append(prefix + line + b"\n")
 
     def grep_finish(self, label: str) -> None:
         if self.list_mode == "-L" and not self.match_count and not self.quiet:
@@ -760,15 +859,36 @@ class Command_grep(HoneyPotCommand):
 
         with_filename: bool | None = None
         patterns: list[str] = []
+        from_file = False
         for opt, arg in optlist:
             if opt.startswith("--"):
                 opt = GREP_LONGOPTS.get(opt[2:] + "=", GREP_LONGOPTS.get(opt[2:], opt))
             if opt == "-e":
                 patterns.append(arg)
+            elif opt == "-f":
+                # Patterns from a file of the FAKE filesystem, one per line;
+                # an empty file contributes none (and so matches nothing).
+                path = self.fs.resolve_path(arg, self.cwd)
+                try:
+                    if self.fs.isdir(path):
+                        raise IsADirectoryError
+                    text = self.fs.file_contents(path).decode("utf8", "surrogateescape")
+                except IsADirectoryError:
+                    self.errorWrite(f"grep: {arg}: Is a directory\n")
+                    self.exit(2)
+                    return
+                except Exception:
+                    self.errorWrite(f"grep: {arg}: No such file or directory\n")
+                    self.exit(2)
+                    return
+                from_file = True
+                patterns.extend(text[:-1].split("\n") if text.endswith("\n") else
+                                text.split("\n") if text else [])
             elif opt in ("-E", "-F", "-G", "-P"):
                 self.dialect = opt
             elif opt in ("-w", "-x"):
-                self.whole = opt
+                if self.whole != "-x":  # -x wins over -w in any order
+                    self.whole = opt
             elif opt == "-i":
                 self.ignore_case = True
             elif opt == "-q":
@@ -823,8 +943,9 @@ class Command_grep(HoneyPotCommand):
                     return
                 self.max_count = n
 
-        if patterns:
-            # -e PATTERN (repeatable): every operand is then a file.
+        if patterns or from_file:
+            # -e PATTERN / -f FILE (repeatable): every operand is then a file.
+            self.match_nothing = not patterns
             args = ["\n".join(patterns), *args]
         if not args:
             # Options only, no pattern (e.g. `grep -i`).
@@ -837,7 +958,14 @@ class Command_grep(HoneyPotCommand):
         # grep validates the pattern before it reads any input, so a malformed
         # one is reported once rather than per file or per line of stdin.
         try:
-            self.matcher = self.compile_match(self.match)
+            compiled: list[re.Pattern[bytes]] = []
+            if not self.grep_bounded(lambda: compiled.append(self.compile_match(self.match))):
+                # Only a pathological pattern gets here; GNU's own answer to
+                # a regex it cannot build is this message.
+                self.errorWrite("grep: memory exhausted\n")
+                self.exit(2)
+                return
+            self.matcher = compiled[0]
         except GrepPatternError as err:
             self.errorWrite(f"grep: {err}\n")
             self.exit(2)
