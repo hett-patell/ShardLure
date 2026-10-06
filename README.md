@@ -912,7 +912,8 @@ What it does, in order (SSH first, on purpose):
    regeneration scripts `cowrie.service` ran before every start
    (`/usr/local/lib/shardlure/persona`, plus its `shardlure` parent if that
    leaves it empty). Only files the installer wrote are deleted; anything else
-   found there is kept and logged.
+   found there is kept and logged. If you installed with `SHARDLURE_PERSONA_LIB`,
+   set the same value for uninstall.
 4. **Remove the authbind byport file** (only created when the honeypot port is
    < 1024).
 5. **Firewall** — delete the honeypot and dashboard `ufw allow` rules. The

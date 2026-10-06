@@ -2189,8 +2189,8 @@ def cmd_uninstall() -> None:
     regen_present = os.path.lexists(PERSONA_REGEN_LIB)
     kept = remove_persona_regen()
     for path in kept:
-        log(f"retained {path}; not created by this installer or not safely removable")
-    if regen_present and not kept:
+        log(f"retained {path}; not empty, not created by this installer, or not safely removable")
+    if regen_present and not os.path.lexists(PERSONA_REGEN_LIB):
         log(f"removed {PERSONA_REGEN_LIB}")
 
     log("step 4/5: remove authbind byport file (if any)")
