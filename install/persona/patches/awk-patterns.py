@@ -8,12 +8,16 @@ is a comparison pattern, so the parser stopped at "FNR", no rule ran, and the
 probe printed nothing where a real box prints the root fs size. Bots use the
 same form for `NR==2`, `NR>1` (skip a header) and `$1 == "x"`.
 
-A rule may now carry one comparison as its pattern: operands NR, FNR, NF,
-$N, $NF, a number or a string constant; operators == != < <= > >=. Values
-compare as mawk (22.04's awk) compares them: numerically when both sides look
-numeric (a field is a "strnum"), else as strings, so `$2 > 9` is true for a
-field "b". FNR restarts at each input file; `print` accepts FNR too. Checked
-against ubuntu:22.04 mawk (scripts/behaviour awk-patterns).
+A rule may now carry comparisons joined by && and || as its pattern (&&
+binds tighter): operands NR, FNR, NF, $N, $NF, a number or a string constant;
+operators == != < <= > >=. Values compare as mawk (22.04's awk) compares
+them: numerically when both sides look numeric by awk's own test (a field is
+a "strnum"; nan, inf and 1_000 are strings), else as strings, so `$2 > 9` is
+true for a field "b". FNR restarts at each input file; `print` accepts FNR
+too. A program with anything this emulation does not parse runs no rule
+rather than the parsed prefix (review m-2: `NR >= 2 && NR <= 2` ran as
+`NR >= 2`). Checked against ubuntu:22.04 mawk (scripts/behaviour
+awk-patterns, awk-boolean).
 """
 import sys
 from pathlib import Path
@@ -37,11 +41,11 @@ OLD = r'''        code = []
 
 NEW = r'''        code = []
         # ShardLure (install/persona/patches/awk-patterns.py): a rule's pattern
-        # may also be one comparison (`FNR == 2`, `NR>1`, `$1 == "x"`).
-        operand = self._SHARDLURE_OPERAND
+        # may also be comparisons joined by && and || (`FNR == 2`, `NR>1`,
+        # `$1 == "x"`, `NR >= 2 && NR <= 4`).
         rule = re.compile(
             r"\s*(?:/(?P<pattern>(?:\\.|[^/\\])*)/"
-            r"|(?P<expr>" + operand + r"\s*(?:==|!=|<=|>=|<|>)\s*" + operand + r"))?"
+            r"|(?P<expr>" + self._SHARDLURE_CHAIN + r"))?"
             r"\s*(?:\{(?P<code>[^}]*)\})?\s*;?"
         )
         pos = 0
@@ -56,9 +60,23 @@ NEW = r'''        code = []
                 code.append({"regex": m.group("pattern") or "",
                              "expr": m.group("expr") or "", "code": action})
             pos = m.end()
+        if program[pos:].strip():
+            # Part of the program is beyond this emulation (BEGIN/END, an
+            # assignment, a bare `&&`...). Running only the rules parsed so
+            # far ran a different program (`NR >= 2 && NR <= 2` printed lines
+            # 2 and 3); run none instead.
+            return []
         return code
 
     _SHARDLURE_OPERAND = r'(?:FNR|NR|NF|\$(?:NF|\d+)|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?)'
+    _SHARDLURE_COMPARISON = (_SHARDLURE_OPERAND + r"\s*(?:==|!=|<=|>=|<|>)\s*"
+                             + _SHARDLURE_OPERAND)
+    _SHARDLURE_CHAIN = (_SHARDLURE_COMPARISON + r"(?:\s*(?:&&|\|\|)\s*"
+                        + _SHARDLURE_COMPARISON + r")*")
+    # awk's numeric-string test (mawk): optional blanks and sign, digits with
+    # an optional fraction and exponent. Not Python's float(), which also
+    # takes nan, inf and 1_000.
+    _SHARDLURE_NUMBER = re.compile(r"[ \t\n]*[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?[ \t\n]*")
 
     def _shardlure_value(self, token: str, line: str, fields: list[str]):
         """(number or None, string) for an awk operand. Constants keep their
@@ -74,13 +92,27 @@ NEW = r'''        code = []
         if token.startswith("$"):
             index = len(fields) if token == "$NF" else int(token[1:])
             text = line if index == 0 else (fields[index - 1] if index <= len(fields) else "")
-            try:
+            if self._SHARDLURE_NUMBER.fullmatch(text):
                 return float(text), text
-            except ValueError:
-                return None, text
+            return None, text
         return float(token), token
 
     def _shardlure_compare(self, expr: str, line: str, fields: list[str]) -> bool:
+        """A chain of comparisons: && binds tighter than ||, as in awk."""
+        step = re.compile(r"\s*(" + self._SHARDLURE_COMPARISON + r")\s*(&&|\|\||$)")
+        alternatives, current, pos = [], True, 0
+        while pos < len(expr):
+            m = step.match(expr, pos)
+            if not m or m.end() == pos:
+                return False
+            current = self._shardlure_compare_one(m.group(1), line, fields) and current
+            if m.group(2) != "&&":
+                alternatives.append(current)
+                current = True
+            pos = m.end()
+        return any(alternatives)
+
+    def _shardlure_compare_one(self, expr: str, line: str, fields: list[str]) -> bool:
         operand = self._SHARDLURE_OPERAND
         m = re.fullmatch(
             r"\s*(" + operand + r")\s*(==|!=|<=|>=|<|>)\s*(" + operand + r")\s*", expr
