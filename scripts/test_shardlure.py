@@ -1502,6 +1502,150 @@ class FsPickleLoaderTests(unittest.TestCase):
         self.assertEqual(shardlure.cowrie_owned_prefix(Path(tempfile.gettempdir())), [])
 
 
+def prestart_commands(unit: str) -> list[tuple[str, list[str]]]:
+    """(prefix, argv) of every ExecStartPre= line, in unit order."""
+    out = []
+    for line in unit.splitlines():
+        if line.startswith("ExecStartPre="):
+            value = line.partition("=")[2]
+            prefix = value[:len(value) - len(value.lstrip("-+!@:"))]
+            words = shlex.split(value[len(prefix):])
+            out.append((prefix, [w.replace("%%", "%").replace("$$", "$") for w in words]))
+    return out
+
+
+def regen_tree(root: Path) -> Path:
+    """A deployed Cowrie tree as the per-start regeneration finds it: the
+    regeneration copy, a venv python, a cfg, honeyfs and txtcmd dirs, and the
+    pickle the cfg names."""
+    import pickle
+    home = root / 'data "q" $VALUE %n a\'s' / "cowrie"
+    for d in ("venv/bin", "etc", "honeyfs/etc", "honeyfs/proc", "share/cowrie/txtcmds/usr/bin",
+              "src/cowrie/data", "var/lib/cowrie"):
+        (home / d).mkdir(parents=True, exist_ok=True)
+    (home / "venv/bin/python").symlink_to(sys.executable)
+    (home / "etc/cowrie.cfg").write_text(
+        "[honeypot]\nboot_offset = 3640620\n[shell]\nfilesystem = "
+        + shardlure.cowrie_cfg_value(home / "src/cowrie/data/fs.pickle") + "\n")
+    (home / "honeyfs/etc/motd").write_text("stale\n")
+    (home / "src/cowrie/data/fs.pickle").write_bytes(pickle.dumps(persona_fs_tree()))
+    with mock.patch.object(shardlure, "COWRIE_HOME", home):
+        shardlure.deploy_persona_regen()
+    return home
+
+
+class PersonaRegenTests(unittest.TestCase):
+    """Task 8: cowrie.service regenerates the time persona and the persona
+    filesystem before every start, as the Cowrie account, fail-safe."""
+
+    def render(self, home: Path) -> str:
+        with (mock.patch.object(shardlure, "DATA_DIR", home.parent),
+              mock.patch.object(shardlure, "COWRIE_HOME", home),
+              mock.patch.object(shardlure, "COWRIE_LOG", home / "var/log/cowrie/cowrie.json"),
+              mock.patch.object(shardlure, "CONFIG_FILE", home.parent / "shardlure.yaml"),
+              mock.patch.object(shardlure, "_tailscale_iface", return_value="")):
+            return shardlure.render_services(2222, 8080)["cowrie.service"]
+
+    def test_unit_regenerates_as_the_cowrie_account_before_starting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            unit = self.render(home)
+            pre = prestart_commands(unit)
+            self.assertEqual(len(pre), 2)
+            for prefix, argv in pre:
+                with self.subTest(argv=argv[-3:]):
+                    # `-` only: no `+`/`!`/`!!`, so User= applies and a
+                    # failure never keeps Cowrie from starting.
+                    self.assertEqual(prefix, "-")
+                    self.assertEqual(argv[:2], ["/bin/sh", "-c"])
+            self.assertEqual(pre[0][1][4:], [str(home / "venv/bin/python"),
+                                             str(home / "shardlure-persona/gen-time-persona.py"), str(home)])
+            self.assertEqual(pre[1][1][4:], [str(home / "venv/bin/python"),
+                                             str(home / "shardlure-persona/shardlure.py"), "persona-fs", str(home)])
+            self.assertIn(f"User={shardlure.COWRIE_USER}\n", unit)
+            self.assertLess(unit.index("ExecStartPre="), unit.index("ExecStart="))
+            check_service_unit(self, Path(tmp), unit)
+
+    def test_prestart_rewrites_motd_and_sizes_its_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            env = {"PATH": "/usr/bin:/bin", "TZ": "UTC", "PYTHONPATH": str(home / "src")}
+            for _, argv in prestart_commands(self.render(home)):
+                proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            motd = (home / "honeyfs/etc/motd").read_bytes()
+            self.assertIn(b"System information as of", motd)
+            self.assertIn(b"Last login:", motd)
+            tree = shardlure.load_fs_pickle((home / "src/cowrie/data/fs.pickle").read_bytes())
+            node = fs_lookup(tree, "/etc/motd")
+            self.assertEqual((node[shardlure._FS_SIZE], node[shardlure._FS_CONTENTS]), (len(motd), motd))
+            self.assertIsNotNone(fs_lookup(tree, "/usr/bin/sudo"))
+
+    def test_prestart_without_the_copy_is_a_silent_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            shutil.rmtree(home / shardlure.PERSONA_REGEN_DIR)
+            for _, argv in prestart_commands(self.render(home)):
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+            self.assertEqual((home / "honeyfs/etc/motd").read_text(), "stale\n")
+
+    def test_a_failed_step_is_logged_and_the_next_still_runs(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes a read-only file")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            (home / "honeyfs/proc/uptime").write_text("0 0\n")
+            (home / "honeyfs/proc/uptime").chmod(0o444)
+            first, second = prestart_commands(self.render(home))
+            proc = subprocess.run(first[1], capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("honeyfs/proc/uptime", proc.stderr)
+            self.assertIn("Cowrie starts with its existing persona files", proc.stderr)
+            # Every other file was still refreshed.
+            self.assertIn("System information as of", (home / "honeyfs/etc/motd").read_text())
+            self.assertEqual(subprocess.run(second[1], capture_output=True, timeout=60).returncode, 0)
+
+    def test_regen_copy_is_the_scripts_the_steps_need(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            names = sorted(p.name for p in (home / shardlure.PERSONA_REGEN_DIR).iterdir())
+            self.assertEqual(names, sorted(shardlure.PERSONA_REGEN_FILES))
+            # apply-stealth.sh deploys the same list.
+            script = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
+            for name in shardlure.PERSONA_REGEN_FILES:
+                self.assertIn(name, script)
+            self.assertIn(f'REGEN_DST="$COWRIE_HOME/{shardlure.PERSONA_REGEN_DIR}"', script)
+
+    def test_install_sh_renders_the_same_prestart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / 'data "q" $VALUE %n a\'s' / "cowrie"
+            proc = subprocess.run(
+                ["bash", "-c", 'source "$INSTALLER"; COWRIE_HOME="$TEST_HOME"; '
+                 'COWRIE_EXEC="ExecStart=/bin/true"; render_cowrie_service'],
+                env=dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", TEST_HOME=str(home),
+                         INSTALLER=str(Path(shardlure.ROOT) / "scripts/install.sh")),
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            lines = [line + "\n" for line in proc.stdout.splitlines() if line.startswith("ExecStartPre=")]
+            self.assertEqual("".join(lines), shardlure.persona_regen_prestart(home))
+            self.assertIn("User=cowrie\n", proc.stdout)
+            self.assertLess(proc.stdout.index("ExecStartPre="), proc.stdout.index("ExecStart="))
+
+    def test_plant_bait_hands_the_tree_back_to_cowrie(self):
+        calls = []
+        with (mock.patch.object(shardlure, "need_root"),
+              mock.patch.object(shardlure, "plant_bait_files", side_effect=lambda: calls.append("plant")),
+              mock.patch.object(shardlure.installer_safety, "prepare_cowrie_tree",
+                                side_effect=lambda d, u: calls.append(("prepare", d, u))),
+              mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0)),
+              mock.patch.object(shardlure, "log"),
+              mock.patch.object(sys, "argv", ["shardlure.py", "plant-bait"])):
+            shardlure.main()
+        self.assertEqual(calls, ["plant", ("prepare", shardlure.DATA_DIR, shardlure.COWRIE_USER),
+                                 ["systemctl", "restart", "cowrie.service"]])
+
+
 class ApplyStealthPersonaFsTests(unittest.TestCase):
     """Task 7 review I-1: the existing-box path (apply-stealth.sh) applies the
     same pickle edits as a fresh install."""
@@ -1548,6 +1692,9 @@ class ApplyStealthPersonaFsTests(unittest.TestCase):
             served = (home / "honeyfs/etc/passwd").read_text()
             self.assertNotIn("phil", served)
             self.assertIn("deploy:x:1001:1001:", served)
+            # The per-start regeneration copy (Task 8) lands in the tree.
+            self.assertEqual(sorted(p.name for p in (home / shardlure.PERSONA_REGEN_DIR).iterdir()),
+                             sorted(shardlure.PERSONA_REGEN_FILES))
 
     def test_persona_fs_finds_the_pickle_the_cfg_names(self):
         with tempfile.TemporaryDirectory() as tmp:

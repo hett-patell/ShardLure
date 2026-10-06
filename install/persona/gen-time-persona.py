@@ -227,14 +227,27 @@ def main() -> int:
     # motd's "Last login" sat 5h30m off the session Cowrie's last prints.
     files = build(datetime.now(timezone.utc).replace(tzinfo=None))
     written = 0
+    failed = []
     for rel, text in files.items():
         dst = cowrie_home / rel
         if not dst.parent.is_dir():
             # Only write where the persona already placed the tree; a missing
             # parent means that command/proc file was never deployed here.
             continue
-        dst.write_text(text)
+        try:
+            dst.write_text(text)
+        except OSError as exc:
+            # cowrie.service runs this as the Cowrie account before every
+            # start: one file it cannot write (left root-owned by a manual
+            # step) must not keep the motd and the rest stale, so carry on and
+            # report every failure at the end.
+            failed.append(f"{rel} ({exc.strerror or type(exc).__name__})")
+            continue
         written += 1
+    if failed:
+        print(f"  [FAIL] time-persona: refreshed {written}/{len(files)} files; "
+              f"not written: {', '.join(failed)}", file=sys.stderr)
+        return 1
     print(f"  [ok] time-persona: refreshed {written}/{len(files)} files against live clock")
     return 0
 

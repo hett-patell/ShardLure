@@ -330,6 +330,51 @@ preflight_installation() {
   validate_existing_accounts
 }
 
+# Per-start persona regeneration: the same two ExecStartPre= lines as
+# shardlure.py persona_regen_prestart (a test pins the text). They run as the
+# unit's User=cowrie (no +/! prefix), from the copy apply-stealth.sh puts in
+# the Cowrie tree; this installer deploys no persona, so until apply-stealth.sh
+# has run the copy is absent and each line exits 0 without doing anything.
+# The `-` prefix keeps a failed regeneration from keeping Cowrie down; see
+# PERSONA_REGEN_DIR in shardlure.py for the reasoning.
+render_persona_regen_prestart() {
+  local regen_sh='test -f "$$2" || exit 0; timeout 30 "$$@" && exit 0; rc=$$?; echo "persona regeneration: $$2 exited $$rc; Cowrie starts with its existing persona files" >&2; exit $$rc'
+  local py regen home
+  py="$(systemd_exec_arg "$COWRIE_HOME/venv/bin/python")" || return
+  regen="$COWRIE_HOME/shardlure-persona"
+  home="$(systemd_exec_arg "$COWRIE_HOME")" || return
+  printf "ExecStartPre=-/bin/sh -c '%s' persona-regen %s %s %s\n" \
+    "$regen_sh" "$py" "$(systemd_exec_arg "$regen/gen-time-persona.py")" "$home"
+  printf "ExecStartPre=-/bin/sh -c '%s' persona-regen %s %s persona-fs %s\n" \
+    "$regen_sh" "$py" "$(systemd_exec_arg "$regen/shardlure.py")" "$home"
+}
+
+render_cowrie_service() {
+  local prestart
+  prestart="$(render_persona_regen_prestart)" || return
+  cat <<SVC
+[Unit]
+Description=Cowrie SSH honeypot (ShardLure)
+After=network.target
+[Service]
+Type=simple
+User=cowrie
+Group=cowrie
+WorkingDirectory=$(systemd_path "$COWRIE_HOME")
+# TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
+# 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
+# host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.
+Environment=TZ=UTC
+UMask=0027
+$prestart
+$COWRIE_EXEC
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+SVC
+}
+
 render_live_service() {
   local service_value
   for service_value in "$DATA_DIR" "$DEST" "${COWRIE_HOME:-}" "${COWRIE_LOG:-}" "$DASH_TOKEN"; do
@@ -677,26 +722,7 @@ if [[ "$COWRIE" -eq 1 ]]; then
   if [[ -z "$COWRIE_EXEC" ]]; then
     err "could not locate cowrie entry point at $COWRIE_HOME/venv/bin/cowrie or $COWRIE_HOME/bin/cowrie. The checkout may have failed or upstream layout changed again."
   fi
-  cat > "$DL_COWRIE_UNIT" <<SVC
-[Unit]
-Description=Cowrie SSH honeypot (ShardLure)
-After=network.target
-[Service]
-Type=simple
-User=cowrie
-Group=cowrie
-WorkingDirectory=$(systemd_path "$COWRIE_HOME")
-# TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
-# 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
-# host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.
-Environment=TZ=UTC
-UMask=0027
-$COWRIE_EXEC
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-SVC
+  render_cowrie_service > "$DL_COWRIE_UNIT"
   log "cowrie systemd unit written"
 fi
 

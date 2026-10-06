@@ -542,6 +542,7 @@ def apply_stealth_persona(honeypot_port: int) -> None:
     # gen-time-persona rewrites honeyfs/etc/motd after plant_bait_files sized
     # its node; size it (and embed it) again from the final file.
     cmd_persona_fs(COWRIE_HOME)
+    deploy_persona_regen()
     deploy_patches()
     keydir = COWRIE_HOME / "var/lib/cowrie"
     keydir.mkdir(parents=True, exist_ok=True)
@@ -1075,6 +1076,75 @@ def deploy_time_persona() -> None:
             "persona time files may be stale (fingerprintable)")
 
 
+# Per-start persona regeneration (Task 8). gen-time-persona anchors the motd's
+# "Last login" and the txtcmd/proc time files to the clock it runs at, and
+# Cowrie's patched last/w anchor the same persona history to its own process
+# start: run only at deploy, every later restart (a crash, a reboot, a
+# Restart=always) left the motd naming a login that last no longer shows
+# (Task 5 residual). cowrie.service therefore re-runs both generators before
+# every start, gen-time-persona first and persona-fs second (it sizes the
+# motd node from the rewritten file).
+#
+# They run as the Cowrie account, never root: the unit's User= applies (no
+# `+`/`!` prefix) and everything they write is in the tree that account
+# owns (honeyfs, share/cowrie/txtcmds, the fs.pickle files and their
+# directories). They run from a copy inside that tree, because the checkout
+# the installer ran from (often /root/...) is not readable by the account,
+# and the copy is never run by root: root always uses the repo's own files.
+# The prefix `-` keeps a failed regeneration from keeping Cowrie down: a
+# honeypot that does not answer loses every capture, while a stale persona
+# is the residual tell the box ran with before this. `timeout` keeps both
+# steps inside systemd's 90 s start budget, so a hung step cannot turn into
+# a start-timeout restart loop. A missing copy (a box whose persona was never
+# deployed, e.g. install.sh without apply-stealth.sh) is a silent no-op.
+PERSONA_REGEN_DIR = "shardlure-persona"
+PERSONA_REGEN_TIMEOUT = 30
+PERSONA_REGEN_FILES = {
+    "gen-time-persona.py": ROOT / "install/persona/gen-time-persona.py",
+    "cowrie-stealth.cfg": ROOT / "install/persona/cowrie-stealth.cfg",
+    "shardlure.py": ROOT / "scripts/shardlure.py",
+    "installer_safety.py": ROOT / "scripts/installer_safety.py",
+    "ssh_transition.py": ROOT / "scripts/ssh_transition.py",
+}
+# The /bin/sh program both installers put in front of each step ($$ is
+# systemd's escape for a literal $). The paths are positional arguments, never
+# shell syntax; install.sh renders the same text (a test pins the two).
+PERSONA_REGEN_SH = (
+    'test -f "$$2" || exit 0; '
+    f'timeout {PERSONA_REGEN_TIMEOUT} "$$@" && exit 0; rc=$$?; '
+    'echo "persona regeneration: $$2 exited $$rc; Cowrie starts with its existing persona files" >&2; '
+    "exit $$rc"
+)
+
+
+def persona_regen_prestart(cowrie_home: Path) -> str:
+    """cowrie.service's ExecStartPre= lines for the per-start regeneration."""
+    py = cowrie_home / "venv/bin/python"
+    regen = cowrie_home / PERSONA_REGEN_DIR
+    steps = (
+        [py, regen / "gen-time-persona.py", cowrie_home],
+        [py, regen / "shardlure.py", "persona-fs", cowrie_home],
+    )
+    return "".join(
+        f"ExecStartPre=-/bin/sh -c '{PERSONA_REGEN_SH}' persona-regen "
+        # Paths are quoted and escaped; the literal subcommand is not.
+        + " ".join(systemd_exec_arg(str(arg)) if isinstance(arg, Path) else arg for arg in step)
+        + "\n"
+        for step in steps
+    )
+
+
+def deploy_persona_regen() -> None:
+    """Copy the per-start regeneration scripts into the Cowrie tree (see
+    PERSONA_REGEN_DIR); prepare_cowrie_tree hands them to the account."""
+    dst = COWRIE_HOME / PERSONA_REGEN_DIR
+    dst.mkdir(parents=True, exist_ok=True)
+    for name, src in PERSONA_REGEN_FILES.items():
+        if not src.is_file():
+            die(f"persona regeneration source missing: {src}")
+        shutil.copyfile(src, dst / name)
+
+
 def deploy_patches() -> None:
     """Preflight and apply all Cowrie source patches as one guarded batch."""
     orchestrator = ROOT / "install" / "persona" / "apply-patches.py"
@@ -1474,7 +1544,7 @@ Environment={systemd_environment("PYTHONPATH",str(COWRIE_HOME / "src"))}
 Environment={systemd_environment("PATH",str(COWRIE_HOME / "venv/bin")+":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
 Environment=TZ=UTC
 UMask=0027
-ExecStart={cowrie_exec}
+{persona_regen_prestart(COWRIE_HOME)}ExecStart={cowrie_exec}
 Restart=always
 RestartSec=5
 
@@ -1948,6 +2018,10 @@ def main() -> None:
     elif cmd in ("plant-bait", "bait"):
         need_root()
         plant_bait_files()
+        # The bait copy runs as root; hand the tree back to the Cowrie account
+        # (as install does), or the per-start regeneration, which runs as that
+        # account, can no longer rewrite the honeyfs files root just wrote.
+        installer_safety.prepare_cowrie_tree(DATA_DIR, COWRIE_USER)
         run(["systemctl", "restart", "cowrie.service"]).check_returncode()
         log("bait planted — test: ssh root@<public-ip> then cat /opt/app/.env")
     elif cmd in ("uninstall", "remove"):

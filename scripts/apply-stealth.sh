@@ -61,6 +61,26 @@ else
   echo "[stealth] WARN: scripts/shardlure.py not found; persona filesystem nodes not applied"
 fi
 
+# --- per-start persona regeneration (cowrie.service ExecStartPre) ---
+# The unit re-runs gen-time-persona and persona-fs as the cowrie account before
+# every start, from this copy inside the Cowrie tree (the account cannot read
+# the checkout; shardlure.py PERSONA_REGEN_FILES is the same list). Without it
+# a restart leaves the motd's "Last login" naming a session last no longer
+# shows. Inert under a unit rendered before Task 8 until the unit is.
+REGEN_DST="$COWRIE_HOME/shardlure-persona"
+SCRIPTS_SRC="$(dirname "$SHARDLURE_PY")"
+regen_src=("$PERSONA/gen-time-persona.py" "$PERSONA/cowrie-stealth.cfg" "$SHARDLURE_PY"
+           "$SCRIPTS_SRC/installer_safety.py" "$SCRIPTS_SRC/ssh_transition.py")
+regen_ok=1
+for f in "${regen_src[@]}"; do [[ -f "$f" ]] || regen_ok=0; done
+if [[ "$regen_ok" == 1 ]]; then
+  echo "[stealth] deploying per-start persona regeneration to $REGEN_DST"
+  sudo mkdir -p "$REGEN_DST"
+  sudo cp "${regen_src[@]}" "$REGEN_DST/"
+else
+  echo "[stealth] WARN: persona regeneration sources missing; a restart will not refresh the time persona"
+fi
+
 # --- userdb: realistic weak creds, no *:* honeypot catch-alls ---
 if [[ -f "$PERSONA/userdb.txt" ]]; then
   sudo cp "$PERSONA/userdb.txt" "$COWRIE_HOME/etc/userdb.txt"
@@ -162,7 +182,11 @@ sudo ssh-keygen -t rsa -b 4096 -f "$KEYDIR/ssh_host_rsa_key" -N "" -q
 sudo chown cowrie:cowrie "$KEYDIR"/ssh_host_*key "$KEYDIR"/ssh_host_*key.pub 2>/dev/null || true
 sudo chmod 600 "$KEYDIR"/ssh_host_*key
 
-sudo chown -R cowrie:cowrie "$COWRIE_HOME/honeyfs" "$COWRIE_HOME/etc" "$COWRIE_HOME/var"
+# share (the txtcmds rsync keeps the checkout's owner) and the regeneration
+# copy too: cowrie.service rewrites the time txtcmds as the cowrie account.
+owned=("$COWRIE_HOME/honeyfs" "$COWRIE_HOME/etc" "$COWRIE_HOME/var")
+for d in "$COWRIE_HOME/share" "$REGEN_DST"; do [[ -d "$d" ]] && owned+=("$d"); done
+sudo chown -R cowrie:cowrie "${owned[@]}"
 
 # --- Cowrie source patches (anti-fingerprint shell fixes) ---
 ORCHESTRATOR="$PERSONA/apply-patches.py"
