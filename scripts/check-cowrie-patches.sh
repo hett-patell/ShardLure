@@ -48,6 +48,7 @@ partial_ls_human_size="$tmp_root/cowrie-partial-ls-human-size"
 partial_who_persona="$tmp_root/cowrie-partial-who-persona"
 partial_awk_patterns="$tmp_root/cowrie-partial-awk-patterns"
 partial_python3_emulation="$tmp_root/cowrie-partial-python3-emulation"
+partial_shell_parse_bounds="$tmp_root/cowrie-partial-shell-parse-bounds"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -79,6 +80,7 @@ cp -a "$cowrie" "$partial_ls_human_size"
 cp -a "$cowrie" "$partial_who_persona"
 cp -a "$cowrie" "$partial_awk_patterns"
 cp -a "$cowrie" "$partial_python3_emulation"
+cp -a "$cowrie" "$partial_shell_parse_bounds"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
@@ -101,6 +103,7 @@ cp -a "$cowrie" "$partial_python3_emulation"
 # Task 7: who lists an exec caller again.
 # Task 7: awk parses comparison patterns but never applies them.
 # Task 7: python3 is emulated but not registered under its bare name.
+# Task 8b: the nesting bound is added but the parser never consults it.
 # The bashparse and honeypot fixtures went with the patches upstream made
 # redundant.
 python3 - \
@@ -125,7 +128,8 @@ python3 - \
   "$partial_ls_human_size/src/cowrie/commands/ls.py" \
   "$partial_who_persona/src/cowrie/commands/base.py" \
   "$partial_awk_patterns/src/cowrie/commands/awk.py" \
-  "$partial_python3_emulation/src/cowrie/commands/python.py" <<'PY'
+  "$partial_python3_emulation/src/cowrie/commands/python.py" \
+  "$partial_shell_parse_bounds/src/cowrie/shell/bashparse.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -175,6 +179,7 @@ ls_human_size_path = Path(sys.argv[19])
 who_persona_path = Path(sys.argv[20])
 awk_patterns_path = Path(sys.argv[21])
 python3_emulation_path = Path(sys.argv[22])
+shell_parse_bounds_path = Path(sys.argv[23])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -333,6 +338,12 @@ partial = py3["NEW"].replace(registration, "", 1)
 content = replace_once(python3_emulation_path, py3["OLD"], partial, "python3 partial")
 if content.count(py3["OLD"]) != 0 or content.count(py3["NEW"]) != 0:
     raise SystemExit(f"python3 partial fixture unexpectedly contains a complete block in {python3_emulation_path}")
+
+bounds = string_constants(root / "install/persona/patches/shell-parse-bounds.py")
+content = replace_once(shell_parse_bounds_path, bounds["OLD_LIMITS"], bounds["NEW_LIMITS"], "shell-parse-bounds partial")
+expected = {"OLD_LIMITS": 0, "NEW_LIMITS": 1, "OLD": 1, "NEW": 0}
+if any(content.count(bounds[name]) != count for name, count in expected.items()):
+    raise SystemExit(f"shell-parse-bounds partial fixture has unexpected block counts in {shell_parse_bounds_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -360,6 +371,7 @@ for patch in \
   "$ROOT/install/persona/patches/who-persona.py" \
   "$ROOT/install/persona/patches/awk-patterns.py" \
   "$ROOT/install/persona/patches/python3-emulation.py" \
+  "$ROOT/install/persona/patches/shell-parse-bounds.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -567,6 +579,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_python3_emulation" \
     "$ROOT/install/persona/patches/python3-emulation.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "shell-parse-bounds" \
+    "$partial_shell_parse_bounds" \
+    "$ROOT/install/persona/patches/shell-parse-bounds.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -602,6 +619,7 @@ expected_changed=(
   "src/cowrie/commands/uptime.py"
   "src/cowrie/commands/which.py"
   "src/cowrie/insults/insults.py"
+  "src/cowrie/shell/bashparse.py"
   "src/cowrie/shell/filetransfer.py"
   "src/cowrie/shell/fs.py"
   "src/cowrie/shell/pipe.py"
@@ -743,4 +761,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 84 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona and python3 never-executes behavior, restricted fs.pickle loading, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 88 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona and python3 never-executes behavior, restricted fs.pickle loading, and atomic preflight checks passed"

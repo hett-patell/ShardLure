@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""Patch cowrie/shell/bashparse.py: bound what one input costs the parser.
+
+WHY (payload-yield Phase B Task 8b): Cowrie parses every command line, script
+and command substitution with a Lark Earley grammar on the reactor thread, so
+while one input parses every other session waits. Measured on v3.1.1 with the
+ShardLure patch set (x86 here; arm is slower):
+
+* A command substitution was parsed again each time it ran. Nested `$(`
+  cost the depth times the body (8 levels around 11 KB: 23 s), and a loop
+  re-parsed its body every pass: the 116-byte line
+  `i=0; while true; do x=$(true w0 ... w19); done` made 1,001 parses and held
+  the reactor 22 s (436 bytes: 107 s). The 189 s stall Task 8 saw live is
+  this shape. A `$(...)` body now runs from the tree its enclosing line
+  already produced; the differential over every `$(...)` in the harness,
+  the profiler and Cowrie's own tests found no change in statements, line
+  numbers or transcripts.
+* ~200 levels of "(", "{" or if raised RecursionError out of lineReceived
+  (128 levels of `$(` raised one while evaluating), and nested case clauses
+  are superlinear in the grammar itself (64 levels, 1.2 KB: 5.8 s). Input
+  nested deeper than MAX_NESTING_DEPTH (16) is refused by a linear scan
+  before the grammar runs; production's deepest input in 28,479 commands and
+  104 captured scripts nests 6 levels.
+* Nesting the scan does not count (if, while, `{ }`) parses in linear time
+  but can still exhaust the stack; that RecursionError now fails the one
+  parse instead of escaping into the protocol.
+
+Refusals answer as bash answers an unclosed "( (" group, "syntax error:
+unexpected end of file" with status 2: the reply Cowrie already gives an
+oversized or timed-out parse, so a refusal is no new kind of answer. Nothing
+is ever executed.
+"""
+import sys
+from pathlib import Path
+
+OLD_LIMITS = r'''    return CowrieConfig.getfloat("shell", "parse_timeout_seconds", fallback=10.0)
+
+
+_HAS_PARSE_ALARM = all(
+'''
+
+NEW_LIMITS = r'''    return CowrieConfig.getfloat("shell", "parse_timeout_seconds", fallback=10.0)
+
+
+# ShardLure (shell-parse-bounds.py): how deeply "(", "$(", backtick bodies and
+# case clauses may nest in one input before it is refused without parsing.
+# Every level costs a recursion in the statement splitter and in the
+# substitution runtime, and nested case clauses are superlinear in the Earley
+# grammar itself (64 levels, 1.2 KB: 5.8 s on the reactor thread). Unbounded,
+# ~200 levels raised a RecursionError out of lineReceived. Production's deepest
+# input in 28,479 commands and 104 captured scripts was 6 levels (the recurring
+# 3-12 KB profiler); 16 leaves that 10 levels of headroom.
+MAX_NESTING_DEPTH = 16
+
+_NEST_WORD_BREAK = frozenset(" \t\r\n;&|<>()")
+# A case clause only where the grammar can read one: "case WORD in" at a word
+# start, closed by "esac" as a whole word.
+_NEST_CASE_HEAD = re.compile(r"case[ \t]+[^ \t\r\n;&|<>()]+[ \t]+in[ \t\r\n]")
+_NEST_ESAC = re.compile(r"esac(?![^ \t\r\n;&|<>()])")
+
+
+def _nesting_scan(text: str, ignore: frozenset[int]) -> tuple[int, set[int]]:
+    """One linear pass over ``text`` with the grammar's quoting rules.
+
+    Returns the deepest nesting of "(", "$(", backtick bodies and case clauses,
+    and the offsets of case heads that no "esac" closed (the grammar reads
+    those as plain words). Heads at offsets in ``ignore`` are read as words.
+    """
+    deepest = 0
+    unclosed: set[int] = set()
+    # (start, end, depth) spans: a backtick body is scanned as its own input,
+    # one level deeper, from this work list, so the scan never recurses.
+    spans = [(0, len(text), 0)]
+    while spans:
+        pos, end, depth = spans.pop()
+        # ("(", 0) group, ('"', 0) double quote, ("case", offset) case clause.
+        stack: list[tuple[str, int]] = []
+        word_start = True
+        while pos < end:
+            if depth > deepest:
+                deepest = depth
+            ch = text[pos]
+            top = stack[-1][0] if stack else ""
+            if ch == "\\":
+                pos += 2
+                word_start = False
+                continue
+            if ch == "`":
+                close = text.find("`", pos + 1, end)
+                if close < 0:
+                    break
+                spans.append((pos + 1, close, depth + 1))
+                pos = close + 1
+                word_start = False
+                continue
+            if ch == "$" and text.startswith("$(", pos):
+                stack.append(("(", 0))
+                depth += 1
+                pos += 2
+                word_start = True
+                continue
+            if top == '"':
+                if ch == '"':
+                    stack.pop()
+                pos += 1
+                continue
+            if ch == "'":
+                close = text.find("'", pos + 1, end)
+                if close < 0:
+                    break
+                pos = close + 1
+                word_start = False
+                continue
+            if ch == '"':
+                stack.append(('"', 0))
+                pos += 1
+                word_start = False
+                continue
+            if ch == "#" and word_start:
+                newline = text.find("\n", pos, end)
+                pos = end if newline < 0 else newline
+                continue
+            if ch == "(":
+                stack.append(("(", 0))
+                depth += 1
+                pos += 1
+                word_start = True
+                continue
+            if ch == ")":
+                # Inside a case clause a ")" may close a pattern, which opened
+                # nothing; it only closes a group the scan saw open.
+                if top == "(":
+                    stack.pop()
+                    depth -= 1
+                pos += 1
+                word_start = True
+                continue
+            if (
+                word_start
+                and ch == "c"
+                and pos not in ignore
+                and _NEST_CASE_HEAD.match(text, pos, end)
+            ):
+                stack.append(("case", pos))
+                depth += 1
+                pos += 4
+                word_start = False
+                continue
+            if word_start and ch == "e" and top == "case" and _NEST_ESAC.match(text, pos, end):
+                stack.pop()
+                depth -= 1
+                pos += 4
+                word_start = False
+                continue
+            word_start = ch in _NEST_WORD_BREAK
+            pos += 1
+        if depth > deepest:
+            deepest = depth
+        unclosed.update(offset for kind, offset in stack if kind == "case")
+    return deepest, unclosed
+
+
+def nesting_too_deep(text: str, limit: int = MAX_NESTING_DEPTH) -> bool:
+    """Whether ``text`` nests groups deeper than ``limit``: a linear scan, run
+    before the grammar so a refused input costs milliseconds, not the parse.
+    A "case WORD in" that never closes is a word to the grammar, so a second
+    pass reads it as one rather than as a level (`echo case x in y` repeated
+    must not be refused)."""
+    deepest, unclosed = _nesting_scan(text, frozenset())
+    if deepest > limit and unclosed:
+        deepest, _ = _nesting_scan(text, frozenset(unclosed))
+    return deepest > limit
+
+
+_HAS_PARSE_ALARM = all(
+'''
+
+OLD = r'''        previous "unexpected end of file" fallback.
+        """
+        timed_out = False
+        try:
+            with _parse_alarm(parse_timeout_seconds()):
+                tree = _parser.parse(line)
+        except UnexpectedCharacters as error:
+            return [
+                SyntaxError_(
+                    token=self._unexpected_char(line, error), lineno=error.line
+                )
+            ]
+        except LarkError:
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        except ParseTimeoutError:
+            timed_out = True
+            self._log.warn(
+                "Shell parse exceeded {timeout}s (input: {length} characters)",
+                timeout=parse_timeout_seconds(),
+                length=len(line),
+            )
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        finally:
+            if timed_out or len(line) >= gc_collect_threshold():
+                gc.collect()
+        return self._split_statements(line, tree)
+'''
+
+NEW = r'''        previous "unexpected end of file" fallback.
+
+        ShardLure (shell-parse-bounds.py): the shell parses on the reactor
+        thread, so one input's parse stalls every session. A ``$(...)`` body
+        the evaluator is about to run is split from the tree its enclosing
+        line already produced (see _substitute), never parsed again. Input
+        nested deeper than MAX_NESTING_DEPTH is refused before the grammar
+        runs, and a RecursionError, from nesting the scan does not count
+        (if/while/{ ...; }), fails this parse instead of escaping into the
+        protocol. All three answer as bash answers an unclosed "( (" group:
+        "syntax error: unexpected end of file", status 2, the reply Cowrie
+        already gives an oversized or timed-out parse.
+        """
+        reused, self._reuse = self._reuse, None
+        if reused is not None and reused[0] is line:
+            return self._split_reused(reused[0], reused[1], reused[2])
+        if nesting_too_deep(line):
+            self._log.warn(
+                "Shell parse refused: groups nested deeper than {limit}"
+                " (input: {length} characters)",
+                limit=MAX_NESTING_DEPTH,
+                length=len(line),
+            )
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        timed_out = False
+        try:
+            with _parse_alarm(parse_timeout_seconds()):
+                tree = _parser.parse(line)
+        except UnexpectedCharacters as error:
+            return [
+                SyntaxError_(
+                    token=self._unexpected_char(line, error), lineno=error.line
+                )
+            ]
+        except LarkError:
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        except ParseTimeoutError:
+            timed_out = True
+            self._log.warn(
+                "Shell parse exceeded {timeout}s (input: {length} characters)",
+                timeout=parse_timeout_seconds(),
+                length=len(line),
+            )
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        except RecursionError:
+            self._log.warn(
+                "Shell parse hit the recursion limit (input: {length} characters)",
+                length=len(line),
+            )
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        finally:
+            if timed_out or len(line) >= gc_collect_threshold():
+                gc.collect()
+        try:
+            return self._split_statements(line, tree)
+        except RecursionError:
+            self._log.warn(
+                "Shell parse hit the recursion limit (input: {length} characters)",
+                length=len(line),
+            )
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+'''
+
+OLD_LINES = r'''    @staticmethod
+    def _end_line(line: str) -> int:
+        """The line bash reports an unexpected end of input on: the one after
+        the last."""
+        return len(line.rstrip("\n").split("\n")) + 1
+
+    @staticmethod
+    def _node_line(node: Tree | Token | None) -> int:
+        """The 1-based source line a grammar node starts on, or 0."""
+        if isinstance(node, Token):
+            return node.line or 0
+        if isinstance(node, Tree) and not node.meta.empty:
+            return node.meta.line
+        return 0
+'''
+
+NEW_LINES = r'''    # ShardLure (shell-parse-bounds.py): while _split_reused splits a $(...)
+    # body out of its enclosing line's tree, line numbers count from the
+    # body's first line and the input ends where the body ends, exactly as a
+    # fresh parse of the body numbered them, so the "line N:" of its errors
+    # is unchanged.
+    _reuse: tuple[str, str, Tree] | None = None
+    _line_shift = 0
+    _reuse_end: int | None = None
+
+    def _end_line(self, line: str) -> int:
+        """The line bash reports an unexpected end of input on: the one after
+        the last."""
+        if self._reuse_end is not None:
+            return self._reuse_end
+        return len(line.rstrip("\n").split("\n")) + 1
+
+    def _node_line(self, node: Tree | Token | None) -> int:
+        """The 1-based source line a grammar node starts on, or 0."""
+        if isinstance(node, Token):
+            raw = node.line or 0
+        elif isinstance(node, Tree) and not node.meta.empty:
+            raw = node.meta.line
+        else:
+            return 0
+        return raw - self._line_shift if raw else 0
+
+    def _split_reused(self, source: str, line: str, body: Tree) -> list[Statement]:
+        """The statements of a ``$(...)`` body, from the ``start`` tree the
+        grammar built for it inside ``line``: what parse(source) returns, with
+        the word trees still pointing into ``line``."""
+        self._line_shift = line.count("\n", 0, body.meta.start_pos)
+        self._reuse_end = len(source.rstrip("\n").split("\n")) + 1
+        try:
+            return self._split_statements(line, body)
+        except RecursionError:
+            return [SyntaxError_(token="", lineno=self._reuse_end)]
+        finally:
+            self._line_shift = 0
+            self._reuse_end = None
+'''
+
+OLD_ATOM = r'''        if atom.data == "cmdsub":
+            return await self.context.command_substitution(
+                self._group_source(line, atom)
+            )
+        if atom.data == "backtick":
+'''
+
+NEW_ATOM = r'''        if atom.data == "cmdsub":
+            return await self._substitute(line, atom)
+        if atom.data == "backtick":
+'''
+
+OLD_DQ = r'''            elif part.data == "cmdsub":
+                parts.append(
+                    await self.context.command_substitution(
+                        self._group_source(line, part)
+                    )
+                )
+            elif part.data == "backtick":
+                parts.append(
+                    await self.context.command_substitution(
+                        self._backtick_source(line, part)
+                    )
+                )
+        return "".join(parts)
+'''
+
+NEW_DQ = r'''            elif part.data == "cmdsub":
+                parts.append(await self._substitute(line, part))
+            elif part.data == "backtick":
+                parts.append(
+                    await self.context.command_substitution(
+                        self._backtick_source(line, part)
+                    )
+                )
+        return "".join(parts)
+
+    def _substitute(self, line: str, node: Tree) -> Awaitable[str]:
+        """Run a ``$(...)`` through the context's command_substitution.
+
+        ShardLure (shell-parse-bounds.py): the body was parsed with the
+        enclosing line, so its tree is handed to the parse() that the
+        substitution makes instead of the Earley parser reading the same text
+        again. A re-parse per evaluation made the cost the nesting depth
+        times the body (8 levels around 11 KB: 23 s) and every loop pass
+        (a 116-byte `while` line: 1,001 parses, 22 s), all on the reactor.
+        """
+        source = self._group_source(line, node)
+        body = next(
+            (
+                child
+                for child in node.children
+                if isinstance(child, Tree) and child.data == "start"
+            ),
+            None,
+        )
+        if source and body is not None:
+            self._reuse = (source, line, body)
+        try:
+            return self.context.command_substitution(source)
+        finally:
+            self._reuse = None
+'''
+
+
+BLOCKS = (
+    (OLD_LIMITS, NEW_LIMITS),
+    (OLD, NEW),
+    (OLD_LINES, NEW_LINES),
+    (OLD_ATOM, NEW_ATOM),
+    (OLD_DQ, NEW_DQ),
+)
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if (len(args) not in (1, 2) or not args[0] or args[0] == "--check"
+            or (len(args) == 2 and args[1] != "--check")):
+        print(f"usage: {Path(sys.argv[0]).name} COWRIE_HOME [--check]", file=sys.stderr)
+        return 2
+    path = Path(args[0]) / "src/cowrie/shell/bashparse.py"
+    content = path.read_text(encoding="utf-8")
+    counts = [(content.count(old), content.count(new)) for old, new in BLOCKS]
+    if all(c == (0, 1) for c in counts):
+        print(f"  [skip] {path}: already patched")
+        return 0
+    if not all(c == (1, 0) for c in counts):
+        print(
+            f"  [FAIL] {path}: target is neither pristine nor fully patched "
+            f"(old/new counts {counts}) - upstream bashparse changed",
+            file=sys.stderr,
+        )
+        return 1
+    if len(args) == 2:
+        print(f"  [check] {path}: compatible")
+        return 0
+    for old, new in BLOCKS:
+        content = content.replace(old, new, 1)
+    path.write_text(content, encoding="utf-8")
+    print(f"  [ok] {path}: patched (parse once per substitution, nesting bound)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

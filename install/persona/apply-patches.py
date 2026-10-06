@@ -86,6 +86,13 @@ PATCHES = (
     # such file or directory". python3 answers as 22.04's: fake success,
     # never execution (the patch's docstring and test_python3_fake.py).
     "python3-emulation.py",
+    # The shell parses on the single reactor thread: a $(...) body was parsed
+    # again on every evaluation (a 116-byte `while` line held every session
+    # 22 s; nested $( froze all sessions 189 s live), and ~200 levels of
+    # nesting raised RecursionError out of the protocol. Bodies now reuse
+    # their line's tree, nesting past 16 is refused before the grammar runs,
+    # and a RecursionError fails one parse (production nests at most 6).
+    "shell-parse-bounds.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
