@@ -140,3 +140,8 @@ bin-df-h	/bin/df -h | head -n 2
 who-last	who; last
 home-users	grep -c phil /etc/passwd /etc/group /etc/shadow; ls -d /home/phil; ls -ld /home/deploy /home/ubuntu | awk '{print $1, $3, $4, $9}'; grep -E '^(ubuntu|deploy):' /etc/passwd
 os-release-size	ls -l /usr/lib/os-release | awk '{print $1, $5}'; cat /etc/os-release | wc -c
+# awk comparison patterns (Task 7): v3.1.1's awk parses only /regex/ patterns,
+# so `df -h | head -n 2 | awk 'FNR == 2 {print $2;}'` printed nothing. mawk
+# (22.04's awk) compares numerically when both sides look numeric, else as
+# strings ("b" > 9).
+awk-patterns	printf 'a b\nc 10\ne 9\n' | awk 'FNR == 2 {print $2;}'; printf 'a b\nc 10\ne 9\n' | awk 'NR>1'; printf 'a b\nc 10\ne 9\n' | awk '$1 == "c" {print $2}'; printf 'a b\nc 10\ne 9\n' | awk '$2 > 9 {print FNR, $1}'
