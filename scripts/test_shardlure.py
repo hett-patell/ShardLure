@@ -1371,6 +1371,65 @@ class PersonaFsTests(unittest.TestCase):
         self.assertEqual(fs_lookup(tree, "/root/.env")[shardlure._FS_MODE], 0o100644)
 
 
+class ApplyStealthPersonaFsTests(unittest.TestCase):
+    """Task 7 review I-1: the existing-box path (apply-stealth.sh) applies the
+    same pickle edits as a fresh install."""
+
+    def test_apply_stealth_applies_the_persona_filesystem(self):
+        import pickle
+        root = Path(shardlure.ROOT)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            home = tmp / "cowrie"
+            (home / "src/cowrie/data").mkdir(parents=True)
+            (home / "etc").mkdir()
+            (home / "var/lib/cowrie").mkdir(parents=True)
+            pickle_path = home / "src/cowrie/data/fs.pickle"
+            pickle_path.write_bytes(pickle.dumps(persona_fs_tree()))
+            # A copy of the persona whose patch orchestrator does nothing:
+            # this test is about the filesystem step, not Cowrie's source.
+            persona = tmp / "persona"
+            shutil.copytree(root / "install/persona", persona,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            (persona / "apply-patches.py").write_text("raise SystemExit(0)\n")
+            # The script runs privileged steps through sudo and restarts the
+            # service; stand those in, keep everything else real.
+            stubs = tmp / "bin"
+            stubs.mkdir()
+            for name, body in (("sudo", 'exec "$@"'), ("chown", "exit 0"),
+                               ("systemctl", "echo active")):
+                (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
+                (stubs / name).chmod(0o755)
+            env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}",
+                       COWRIE_HOME=str(home), PERSONA_DIR=str(persona))
+            proc = subprocess.run(["bash", str(root / "scripts/apply-stealth.sh")],
+                                  env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("applying persona filesystem nodes", proc.stdout)
+            tree = pickle.loads(pickle_path.read_bytes())
+            self.assertIsNone(fs_lookup(tree, "/home/phil"))
+            for path in ("/usr/bin/sudo", "/usr/bin/crontab", "/usr/bin/ping", "/usr/bin/nc"):
+                with self.subTest(path=path):
+                    self.assertIsNotNone(fs_lookup(tree, path))
+            ubuntu = fs_lookup(tree, "/home/ubuntu")
+            self.assertEqual((ubuntu[shardlure._FS_UID], ubuntu[shardlure._FS_MODE]),
+                             (1000, 0o40750))
+            served = (home / "honeyfs/etc/passwd").read_text()
+            self.assertNotIn("phil", served)
+            self.assertIn("deploy:x:1001:1001:", served)
+
+    def test_persona_fs_finds_the_pickle_the_cfg_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie $x"
+            (home / "etc").mkdir(parents=True)
+            (home / "custom").mkdir()
+            (home / "custom/fs.pickle").write_bytes(b"x")
+            (home / "etc/cowrie.cfg").write_text(
+                "[shell]\nfilesystem = " + shardlure.cowrie_cfg_value(home / "custom/fs.pickle") + "\n")
+            self.assertEqual(shardlure.cowrie_fs_pickles(home), [home / "custom/fs.pickle"])
+            self.assertEqual(shardlure.cowrie_fs_pickles(Path(tmp) / "none"), [])
+
+
 class PersonaUsersTests(unittest.TestCase):
     """honeyfs/etc/{passwd,group,shadow,gshadow}: the 22.04 cloud image's
     accounts, cloud-init's ubuntu and the persona's deploy, no phil."""

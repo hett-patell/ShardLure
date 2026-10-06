@@ -839,6 +839,51 @@ def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> None:
     os.replace(tmp, pickle_path)
 
 
+def cowrie_fs_pickles(cowrie_home: Path) -> list[Path]:
+    """Every fs.pickle an installed Cowrie may load: the cfg's [shell]
+    filesystem (patch_cowrie_cfg points it at src/cowrie/data/fs.pickle; an
+    older or hand-edited cfg may not), the checkout's own, and the
+    var/lib/cowrie copy plant_bait_files keeps. Existing files only."""
+    import configparser  # noqa: PLC0415
+
+    found: list[Path] = []
+    cfg = cowrie_home / "etc/cowrie.cfg"
+    if cfg.is_file():
+        # Cowrie reads its cfg with ExtendedInterpolation (`$$` is a literal `$`).
+        parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        try:
+            parser.read_string(cfg.read_text())
+            name = parser.get("shell", "filesystem", fallback="")
+        except (configparser.Error, UnicodeDecodeError):
+            name = ""
+        if name:
+            path = Path(name)
+            found.append(path if path.is_absolute() else cowrie_home / path)
+    found += [cowrie_home / "src/cowrie/data/fs.pickle", cowrie_home / "var/lib/cowrie/fs.pickle"]
+    unique: list[Path] = []
+    for path in found:
+        if path.is_file() and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def cmd_persona_fs(cowrie_home: Path) -> int:
+    """`shardlure.py persona-fs [COWRIE_HOME]`: apply the persona's pickle
+    edits to an installed Cowrie. apply-stealth.sh (the re-apply path for an
+    existing box) calls it after syncing honeyfs: without it such a box got
+    the new command/type resolver, which answers from the fake PATH alone,
+    over a stock pickle with no sudo/crontab/ping nodes, and kept /home/phil
+    (Task 7 review I-1). Idempotent; Cowrie must be restarted to load it."""
+    pickles = cowrie_fs_pickles(cowrie_home)
+    if not pickles:
+        log(f"warning: no Cowrie fs.pickle under {cowrie_home}; persona filesystem not applied")
+        return 1
+    for pickle_path in pickles:
+        log(f"applying persona filesystem nodes to {pickle_path}")
+        apply_persona_fs(pickle_path, cowrie_home / "honeyfs")
+    return 0
+
+
 # txtcmds the persona used to ship, removed from a deployed share dir on every
 # deploy (the copy below only adds). bin/uname printed the static `uname -a`
 # line for every option set and won over Cowrie's own uname for any path that
@@ -1751,6 +1796,10 @@ def main() -> None:
         cmd_start()
     elif cmd == "finish":
         cmd_finish()
+    elif cmd == "persona-fs":
+        if len(sys.argv) > 3:
+            die("usage: python3 scripts/shardlure.py persona-fs [COWRIE_HOME]")
+        sys.exit(cmd_persona_fs(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME))
     elif cmd in ("plant-bait", "bait"):
         need_root()
         plant_bait_files()
@@ -1760,7 +1809,7 @@ def main() -> None:
         cmd_uninstall()
     else:
         die("usage: sudo python3 scripts/shardlure.py "
-            "{run|finish|start|stop|status|plant-bait|uninstall [--purge]}")
+            "{run|finish|start|stop|status|plant-bait|persona-fs [COWRIE_HOME]|uninstall [--purge]}")
 
 
 if __name__ == "__main__":
