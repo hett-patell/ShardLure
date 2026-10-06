@@ -633,14 +633,17 @@ PERSONA_IMAGE_TIME = 1706476800
 # /usr/bin/crontab ]` and `command -v sudo` said the box lacks them. Path,
 # size, mode, gid and time are the jammy cloud rootfs's (ubuntu-22.04-server-
 # cloudimg-amd64-root.tar.xz), times clamped to PERSONA_IMAGE_TIME; crontab is
-# setgid crontab (104 in the persona's /etc/group), sudo setuid root. The
+# setgid crontab (104 in the persona's /etc/group), sudo setuid root. Where
+# the package was updated after the persona image, the time is a plausible
+# pre-image jammy-updates build of it, not the image instant for all (seven
+# nodes sharing one minute looked like a cluster; review m-6). The
 # names 22.04 does not ship (python, php, gcc, yum, ifconfig, netstat...) stay
 # absent, as on the real box.
 PERSONA_FS_FILES = (
-    ("/usr/bin/busybox", 2193272, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/busybox", 2193272, 0o100755, 0, 1648118592),
     ("/usr/bin/crontab", 39568, 0o102755, 104, 1648063140),
-    ("/usr/bin/dig", 154448, 0o100755, 0, PERSONA_IMAGE_TIME),
-    ("/usr/bin/git", 3710360, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/dig", 154448, 0o100755, 0, 1697212300),
+    ("/usr/bin/git", 3710360, 0o100755, 0, 1689171362),
     # The persona ships txtcmds for these two, but with no node they answered
     # `command not found` (review m-7): lsb-release 11.1.0ubuntu4 and systemd.
     ("/usr/bin/hostnamectl", 31104, 0o100755, 0, 1699965993),
@@ -649,10 +652,10 @@ PERSONA_FS_FILES = (
     ("/usr/bin/killall", 32096, 0o100755, 0, 1648139377),
     ("/usr/bin/lspci", 94288, 0o100755, 0, 1630311300),
     ("/usr/bin/nc.openbsd", 39560, 0o100755, 0, 1645634340),
-    ("/usr/bin/ping", 76680, 0o100755, 0, PERSONA_IMAGE_TIME),
-    ("/usr/bin/sudo", 232416, 0o104755, 0, PERSONA_IMAGE_TIME),
-    ("/usr/bin/systemctl", 1119856, 0o100755, 0, PERSONA_IMAGE_TIME),
-    ("/usr/sbin/ethtool", 564712, 0o100755, 0, PERSONA_IMAGE_TIME),
+    ("/usr/bin/ping", 76680, 0o100755, 0, 1643876571),
+    ("/usr/bin/sudo", 232416, 0o104755, 0, 1680595879),
+    ("/usr/bin/systemctl", 1119856, 0o100755, 0, 1699965993),
+    ("/usr/sbin/ethtool", 564712, 0o100755, 0, 1645855964),
     ("/usr/sbin/xtables-nft-multi", 224296, 0o100755, 0, 1705459440),
     # python3.10 3.10.12-1~22.04.3 (built Nov 20 2023, the build python3 -VV
     # and its REPL banner print; install/persona/patches/python3-emulation.py).
@@ -701,6 +704,12 @@ PERSONA_HOMES = (
     ("/home/ubuntu", 1000, 1000),
     ("/home/deploy", 1001, 1001),
 )
+# The account files were last written when the operator added deploy (its
+# shadow change day, 19790 = 2024-03-08); the pickle stamped them with one
+# instant every v3.1.1 install shares (May  4 20:16, review m-6).
+PERSONA_ACCOUNTS_TIME = 1709906557
+PERSONA_FS_STAMPS = tuple((f"/etc/{name}", PERSONA_ACCOUNTS_TIME)
+                          for name in ("passwd", "group", "shadow", "gshadow"))
 # Modes the owning tool would have set; fsctl gives a node its parent's mode,
 # so the bait key was -rwxr-xr-x inside a world-readable .ssh.
 PERSONA_FS_MODES = (
@@ -817,6 +826,10 @@ def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int | bytes] | None = N
             node[_FS_UID], node[_FS_GID] = uid, gid
             if node[_FS_TYPE] == _FS_DIR:
                 stack.extend(node[_FS_CONTENTS])
+    for path, ctime in PERSONA_FS_STAMPS:
+        node = _fs_entry(tree, path)
+        if node is not None and node[_FS_TYPE] == _FS_FILE:
+            node[_FS_CTIME] = ctime
     for path, mode in PERSONA_FS_MODES:
         node = _fs_entry(tree, path)
         if node is not None and node[_FS_TYPE] in (_FS_FILE, _FS_DIR):

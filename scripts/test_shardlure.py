@@ -1283,6 +1283,17 @@ class PersonaFsTests(unittest.TestCase):
         for path, *_, ctime in shardlure.PERSONA_FS_FILES:
             with self.subTest(path=path):
                 self.assertLessEqual(ctime, shardlure.PERSONA_IMAGE_TIME)
+        # Review m-6: no cluster of nodes at one instant.
+        times = [ctime for *_, ctime in shardlure.PERSONA_FS_FILES]
+        self.assertLessEqual(max(times.count(t) for t in times), 2)
+
+    def test_account_files_carry_the_persona_time(self):
+        tree = persona_fs_tree()
+        etc = fs_lookup(tree, "/etc")
+        etc[shardlure._FS_CONTENTS].append(_fs_node("passwd", shardlure._FS_FILE, size=1, mode=0o100644))
+        shardlure.persona_fs_edit(tree)
+        self.assertEqual(fs_lookup(tree, "/etc/passwd")[shardlure._FS_CTIME],
+                         shardlure.PERSONA_ACCOUNTS_TIME)
 
     def test_edit_is_idempotent(self):
         once = persona_fs_tree()
