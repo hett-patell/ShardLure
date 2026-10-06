@@ -57,10 +57,12 @@ def persona(now=NOW) -> dict:
 
 
 def persona_last(now=NOW, uptime=ANCHOR) -> str:
-    """last(1) as a correct honeypot prints it: sessions anchored to now (the
-    persona's offsets), the reboot row and "wtmp begins" at now - uptime."""
-    rows = persona(now)["share/cowrie/txtcmds/usr/bin/last"].split("\n")
+    """last(1) as a correct honeypot prints it: sessions laid out from the
+    Cowrie start (boot + the anchor; the persona's offsets), the reboot row
+    and "wtmp begins" at now - uptime."""
     boot = now - timedelta(seconds=uptime)
+    start = boot + timedelta(seconds=ANCHOR)
+    rows = persona(start)["share/cowrie/txtcmds/usr/bin/last"].split("\n")
     out = []
     for row in rows:
         if row.startswith("reboot"):
@@ -455,6 +457,94 @@ class TimePersonaConsistencyTest(unittest.TestCase):
         profiler = (CASES_DIR / "expected" / "profiler.out").read_text()
         block = profiler[profiler.index("LAST:") + 5:profiler.index("FILTER:")]
         self.assertEqual((CASES_DIR / "expected" / "last.out").read_text(), block)
+
+
+class WLoginFormTest(unittest.TestCase):
+    """Task 5 review: the history is fixed at the Cowrie start, so the admin's
+    LOGIN@ ages through procps' three print_logintime forms."""
+
+    def w_at(self, now, login, cell, age):
+        out = (uptime_line(now=now, human=cbt._format_human(ANCHOR + age))
+               + "USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n"
+               + f"ubuntu   pts/0    10.0.0.8         {cell}  0:01m  0.04s  0.01s -bash\n")
+        return w_check(out, clock(now=now, age=age))
+
+    def test_each_procps_form_passes_only_where_procps_prints_it(self):
+        now = datetime(2026, 10, 5, 23, 0, tzinfo=timezone.utc)
+        cases = (
+            # 13.5 h ago but still today: procps keeps HH:MM.
+            (now - timedelta(hours=13, minutes=30), "09:30  ", "Mon09  "),
+            # Alone, w can only be judged on whether the cell is a form procps
+            # prints for some login: an HH:MM later than now is yesterday,
+            # >12 h and another day, so procps would print a weekday.
+            (now - timedelta(days=3, hours=1), "Fri22  ", "23:30  "),
+            (now - timedelta(days=8), "27Sep26", "01Oct26"),
+        )
+        for login, good, bad in cases:
+            age = (now - login).total_seconds()
+            with self.subTest(good=good):
+                res = self.w_at(now, login, good, age)
+                self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
+                res = self.w_at(now, login, bad, age)
+                self.assertFalse(res.ok)
+                self.assertTrue(any("procps' form" in m for m in res.messages), res.messages)
+
+    def test_current_session_is_judged_against_the_cowrie_start(self):
+        age = 30 * 86400.0
+        uptime = ANCHOR + age + 5
+        ok = profiler_output(uptime=uptime)
+        self.assertTrue(profiler_check(ok, clock(age=age)).ok)
+        # Sessions anchored to now instead of the start: the history moved.
+        now_rows = persona_last(NOW, ANCHOR + 5).partition("reboot")[0]
+        boot_rows = "reboot" + persona_last(NOW, uptime).partition("reboot")[2]
+        moved = profiler_output(uptime=uptime, last=now_rows + boot_rows)
+        res = profiler_check(moved, clock(age=age))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("after the Cowrie start" in m for m in res.messages), res.messages)
+
+
+class LastStabilityTest(unittest.TestCase):
+    """Every last(1) block in one harness run must be identical (wtmp is
+    append-only; review I-1)."""
+
+    def run_cases(self, last_case_output):
+        now = datetime.now(timezone.utc)
+        answers = {
+            "PROFILER": cbt.RunResult(profiler_output(now=now), 0, False),
+            "last": cbt.RunResult(last_case_output(now), 0, False),
+        }
+        profiler = (CASES_DIR / "profiler.sh").read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            userdb = Path(tmp) / "userdb.txt"
+            userdb.write_text("root:x:pw\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cbt.main(["--host", "h", "--port", "1", "--password-from", str(userdb),
+                               "--case", "profiler", "--case", "last"],
+                              runner=lambda c, t: answers["PROFILER" if c == profiler else c])
+        return rc, out.getvalue()
+
+    def test_identical_blocks_pass(self):
+        rc, out = self.run_cases(lambda now: persona_last(now, ANCHOR + 12.34))
+        self.assertEqual(rc, 0, out)
+
+    def test_a_moved_history_fails_even_when_each_case_passes_alone(self):
+        def moved(now):
+            text = persona_last(now, ANCHOR + 12.34)
+            first = text.split("\n")[0]
+            dt = datetime.strptime(f"{first[WHEN:WHEN + 16]} {now.year}", "%a %b %d %H:%M %Y")
+            earlier = first[:WHEN] + f"{dt - timedelta(minutes=1):%a %b %e %H:%M}" + first[WHEN + 16:]
+            return text.replace(first, earlier)
+        rc, out = self.run_cases(moved)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("last output differs from case profiler's", out)
+        self.assertIn("FAIL last", out)
+
+    def test_last_block_finds_the_profilers_field(self):
+        block = cbt.last_block(profiler_output())
+        self.assertTrue(block.startswith("ubuntu   pts/0 "))
+        self.assertTrue(block.endswith("\n") and "wtmp begins" in block)
+        self.assertNotIn("FILTER", block)
 
 
 LS_TPL = "-rwxr-xr-x 1 root root 135K {{LSDATE}} /usr/bin/ls\n"

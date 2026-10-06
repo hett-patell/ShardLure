@@ -96,14 +96,21 @@ anchor (+ slack).
   {{IDLE_SECS}}     /proc/uptime idle seconds (shape only)
   {{UPTIME_HUMAN}}  procps "up N days,  H:MM" / "up N days, M min", same bound
   {{NOW_HMS}}       uptime/w clock, within 2 min of now
-  {{LAST_LOGIN_CURRENT}}  last's "still logged in" row: after boot, <= 12 h old
+  {{LAST_LOGIN_CURRENT}}  last's "still logged in" row: after boot and at most
+                    12 h before the Cowrie process start (boot + the anchor;
+                    pass --cowrie-age against a long-running Cowrie). The
+                    persona's history is fixed at process start, so it ages
+                    with the process; anchored to now it would move.
   {{LAST_LOGIN}}    a completed session: after boot, before today (the
                     persona's completed sessions are all >= 1d8h old)
   {{LOGOUT_HM}}     its "- HH:MM", equal to login + the row's "(HH:MM)"
   {{BOOT_HM}}       last's reboot row, boot to the minute (+-1 min)
   {{BOOT_FULL}}     "wtmp begins", boot to the second (+-60 s), never today
-  {{LOGIN_HM}}      w's LOGIN@, <= 12 h before now (procps prints HH:MM
-                    only then)
+  {{W_LOGIN}}       w's LOGIN@ cell after its leading space, in procps'
+                    print_logintime form for that login: "HH:MM  " within
+                    12 h or on the same day, "DddHH  " up to 6 days, else
+                    "DDMonYY"; equal to last's still-logged-in row in a case
+                    that prints both
   {{W_IDLE}}        w's 7-char IDLE cell, no longer than the session
   {{LSDATE}}        ls -l's date of a packaged binary: the year form, older
                     than six months (never a node stamped "now")
@@ -112,7 +119,10 @@ anchor (+ slack).
 All last rows (logins, then reboot) must be in non-increasing time order, and
 every weekday must match its date. Within one case the commands must agree:
 {{UPTIME_HUMAN}} with {{UPTIME_SECS}} (to the minute, plus the run time), and
-w's {{LOGIN_HM}} with last's {{LAST_LOGIN_CURRENT}}.
+w's {{W_LOGIN}} with last's {{LAST_LOGIN_CURRENT}}. Across the whole run, every
+last(1) block (the profiler's LAST field, the last case, ...) must be byte
+for byte the same: wtmp is append-only, so a history that moves between two
+runs minutes apart is a tell (Task 5 review I-1).
 
 Transport: paramiko when importable (exec_command, no pty - like the
 profiler's Go client), otherwise `sshpass -e ssh`. Each case gets a 10 s
@@ -172,7 +182,7 @@ COWRIE_AGE_MARGIN = 900
 
 NOW_TOLERANCE = 120        # uptime/w HH:MM:SS vs the run window
 BOOT_TOLERANCE = 60        # last's boot stamps vs now - uptime
-CURRENT_SESSION_MAX = 12 * 3600
+CURRENT_SESSION_MAX = 12 * 3600   # before the Cowrie start (persona_start)
 LS_MIN_AGE = 183 * 86400   # ls prints the year form only for files > ~6 months
 
 DEFAULT_TIMEOUT = 10.0
@@ -195,7 +205,9 @@ TOKENS = {
     "LOGOUT_HM": _HM,
     "BOOT_HM": _WDATE_HM,
     "BOOT_FULL": _WDATE_HM + r":[0-5]\d \d{4}",
-    "LOGIN_HM": _HM,
+    # procps print_logintime minus its leading space: " %02d:%02d  ",
+    # " %3s%02d  ", " %02d%3s%02d".
+    "W_LOGIN": r"(?:" + _HM + "  |" + _WDAY + r"(?:[01]\d|2[0-3])  |[0-3]\d" + _MON + r"\d\d)",
     # procps print_time_ival7: " %2ludays", " %2lu:%02um", " %2lu:%02u ", " %2lu.%02us"
     "W_IDLE": r" (?:[ \d]\ddays|[ \d]\d:[0-5]\dm|[ \d]\d:[0-5]\d |[ \d]\d\.\d\ds)",
     "LSDATE": _MON + r" [ 123]\d  \d{4}",
@@ -482,8 +494,15 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                     flag(i, f"session '{val}' is not between boot and now")
                 if tok == "LAST_LOGIN_CURRENT":
                     current.append(dt)
-                    if (end - dt).total_seconds() > CURRENT_SESSION_MAX:
-                        flag(i, f"still-logged-in session '{val}' is more than 12 h old")
+                    # The history is laid out at the Cowrie start, boot + anchor.
+                    t0_lo = boot_lo + timedelta(seconds=UPTIME_ANCHOR)
+                    t0_hi = boot_hi + timedelta(seconds=UPTIME_ANCHOR)
+                    if dt < t0_lo - timedelta(seconds=CURRENT_SESSION_MAX + BOOT_TOLERANCE):
+                        flag(i, f"still-logged-in session '{val}' is more than 12 h before"
+                                f" the Cowrie start ({t0_lo:%a %b %e %H:%M}..{t0_hi:%H:%M})")
+                    elif dt > t0_hi + timedelta(seconds=BOOT_TOLERANCE):
+                        flag(i, f"still-logged-in session '{val}' is after the Cowrie start"
+                                f" ({t0_hi:%a %b %e %H:%M}): the persona's history moved")
                 elif dt.date() >= end.date():
                     flag(i, f"completed session '{val}' is today; the persona's"
                             " history is in the past")
@@ -516,15 +535,15 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                 # wtmp begins <today> 00:01:03) if the bounds ever loosen.
                 if dt.date() == end.date():
                     flag(i, f"wtmp begins '{val}' is today (Cowrie's own last.py tell)")
-            elif tok == "LOGIN_HM":
-                t = datetime.strptime(val, "%H:%M")
+            elif tok == "W_LOGIN":
                 login_hms.append((i, val))
-                login_hm = end.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-                if login_hm > end:
-                    login_hm -= timedelta(days=1)
-                if (end - login_hm).total_seconds() > CURRENT_SESSION_MAX:
-                    flag(i, f"LOGIN@ {val} is more than 12 h before now (procps would"
-                            " print a weekday)")
+                span = _resolve_w_login(val, end)
+                login_hm = span[0] if span else None
+                if span is None or val not in {procps_logintime(t, end) for t in span}:
+                    flag(i, f"LOGIN@ '{val.strip()}' is not procps' form for that login"
+                            " (HH:MM only within 12 h or the same day, DddHH up to"
+                            " 6 days, then DDMonYY)")
+                    login_hm = None
             elif tok == "W_IDLE":
                 idle = _idle_seconds(val)
                 if login_hm is not None and idle > (end - login_hm).total_seconds() + 60:
@@ -563,10 +582,57 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                         f" '{_format_human(u0)}')")
     if current:
         for i, val in login_hms:
-            if val != f"{current[0]:%H:%M}":
-                flag(i, f"w LOGIN@ {val} is not last's still-logged-in session"
-                        f" ({current[0]:%H:%M})")
+            # last prints the minute; the login lies anywhere inside it.
+            spans = {procps_logintime(current[0] + timedelta(seconds=x), end) for x in (0, 59)}
+            want = procps_logintime(current[0], end)
+            if val not in spans:
+                flag(i, f"w LOGIN@ '{val.strip()}' is not last's still-logged-in session"
+                        f" ('{want.strip()}')")
     return bad
+
+
+def procps_logintime(login: datetime, now: datetime) -> str:
+    """procps 3.3.17 print_logintime, without its leading space."""
+    if (now - login).total_seconds() > 12 * 3600 and \
+            login.timetuple().tm_yday != now.timetuple().tm_yday:
+        if (now - login).total_seconds() > 6 * 86400:
+            return f"{login:%d%b%y}"
+        return f"{login:%a}{login.hour:02d}  "
+    return f"{login:%H:%M}  "
+
+
+def _resolve_w_login(val: str, now: datetime) -> tuple[datetime, datetime] | None:
+    """The span (earliest, latest) of the latest login not after now that w's
+    LOGIN@ cell can denote: a minute, an hour (DddHH) or a day (DDMonYY)."""
+    if val[2] == ":":
+        t = datetime.strptime(val[:5], "%H:%M")
+        dt = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if dt > now:
+            dt -= timedelta(days=1)
+        return dt, min(now, dt + timedelta(seconds=59))
+    if val[:3].isalpha():
+        for back in range(0, 8):
+            day = now - timedelta(days=back)
+            if day.strftime("%a") == val[:3]:
+                dt = day.replace(hour=int(val[3:5]), minute=0, second=0, microsecond=0)
+                if dt <= now:
+                    return dt, min(now, dt + timedelta(minutes=59))
+        return None
+    try:
+        dt = datetime.strptime(val, "%d%b%y")
+    except ValueError:
+        return None
+    return (dt, dt.replace(hour=23, minute=59)) if dt.date() < now.date() else None
+
+
+LAST_BLOCK_RE = re.compile(r"(?m)^(?:LAST:)?((?:\S+ +\S.*(?:still logged in|still running|\(\d\d:\d\d\))\n)+\nwtmp begins .*\n)")
+
+
+def last_block(output: str) -> str | None:
+    """The last(1) output inside a case's output (the profiler prefixes its
+    first row with LAST:), or None."""
+    m = LAST_BLOCK_RE.search(output if output.endswith("\n") else output + "\n")
+    return m.group(1) if m else None
 
 
 def _tod_between(t: datetime, start: datetime, end: datetime) -> bool:
@@ -985,6 +1051,7 @@ def main(argv: list[str] | None = None, runner=None) -> int:
         cases = [c for c in cases if c[0] in args.case]
 
     passed = failed = skipped = 0
+    first_last: tuple[str, str] | None = None
     for name, command in cases:
         exp_path = args.cases_dir / "expected" / f"{name}.out"
         try:
@@ -1055,6 +1122,18 @@ def main(argv: list[str] | None = None, runner=None) -> int:
                     res.ok = False
                     res.messages.append("host memory leaked (this machine's MemTotal"
                                         f" rendered as {', '.join(leaked)})")
+        block = last_block(run.output) if "wtmp begins" in exp.content else None
+        if block is not None:
+            if first_last is None:
+                first_last = (name, block)
+            elif block != first_last[1]:
+                res.ok = False
+                res.messages.append(
+                    f"last output differs from case {first_last[0]}'s: wtmp is append-only,"
+                    " so the persona's history must not move during the run")
+                res.diff.extend(difflib.unified_diff(
+                    first_last[1].split("\n"), block.split("\n"),
+                    fromfile=f"{first_last[0]} last", tofile=f"{name} last", lineterm=""))
         if res.ok:
             passed += 1
             print(f"PASS {name}")
