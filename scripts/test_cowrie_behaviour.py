@@ -1208,13 +1208,50 @@ class UploadChannelTest(unittest.TestCase):
 
     def test_ssh_transport_refuses_rather_than_running_one_connection_per_step(self):
         with mock.patch.object(cbt.shutil, "which", return_value="/usr/bin/x"):
-            run = cbt.ssh_runner("127.0.0.1", 2299, "root", "pw")
+            run = cbt.ssh_runner("127.0.0.1", 2299, "root", "pw", "/dev/null")
         with mock.patch.object(cbt.subprocess, "run") as sp:
             res = run("/tmp/x", 5, before=[("scp -t /tmp/x", b"")])
         sp.assert_not_called()
         self.assertIsNone(res.rc)
         self.assertIn("--transport paramiko", res.note)
 
+
+
+class HostKeyPinningTest(unittest.TestCase):
+    """The harness accepts only the Cowrie's own host keys (CodeQL
+    py/paramiko-missing-host-key-validation on AutoAddPolicy)."""
+
+    def test_known_hosts_pins_every_host_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "ssh_host_ed25519_key.pub").write_text("ssh-ed25519 AAAAED root@x\n")
+            (d / "ssh_host_rsa_key.pub").write_text("ssh-rsa AAAARSA\n")
+            (d / "ssh_host_rsa_key").write_text("private, never read\n")
+            self.assertEqual(cbt.known_hosts("127.0.0.1", 2299, d),
+                             "[127.0.0.1]:2299 ssh-ed25519 AAAAED\n"
+                             "[127.0.0.1]:2299 ssh-rsa AAAARSA\n")
+            self.assertTrue(cbt.known_hosts("h", 22, d).startswith("h ssh-ed25519 "))
+
+    def test_no_key_to_pin_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                cbt.known_hosts("127.0.0.1", 2299, Path(tmp))
+
+    def test_ssh_transport_checks_host_keys_strictly(self):
+        with mock.patch.object(cbt.shutil, "which", return_value="/usr/bin/x"):
+            run = cbt.ssh_runner("127.0.0.1", 2299, "root", "pw", "/tmp/kh")
+        with mock.patch.object(cbt.subprocess, "run") as sp:
+            sp.return_value = cbt.subprocess.CompletedProcess([], 0, b"", b"")
+            run("true", 5)
+        argv = sp.call_args[0][0]
+        self.assertIn("StrictHostKeyChecking=yes", argv)
+        self.assertIn("UserKnownHostsFile=/tmp/kh", argv)
+        self.assertNotIn("StrictHostKeyChecking=no", argv)
+
+    def test_paramiko_transport_rejects_unknown_keys(self):
+        src = Path(cbt.__file__).read_text()
+        self.assertNotIn("AutoAddPolicy", src)
+        self.assertIn("RejectPolicy()", src)
 
 
 class ConcurrentChannelTest(unittest.TestCase):

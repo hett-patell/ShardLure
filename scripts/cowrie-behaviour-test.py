@@ -157,6 +157,7 @@ Exit 0 when every case matches, else 1 with a unified diff per failing case.
 from __future__ import annotations
 
 import argparse
+import atexit
 import difflib
 import hashlib
 import os
@@ -164,6 +165,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -974,7 +976,23 @@ def scp_record(name: str, data: bytes) -> bytes:
     return f"C0755 {len(data)} {name}\n".encode() + data + b"\x00"
 
 
-def paramiko_runner(host: str, port: int, user: str, password: str):
+def known_hosts(host: str, port: int, keys_dir: Path) -> str:
+    """known_hosts lines pinning the Cowrie under test to its own host keys
+    (KEYS_DIR/ssh_host_*_key.pub), so neither transport accepts whatever key
+    answers on HOST:PORT. Raises SystemExit when there is none to pin."""
+    name = host if port == 22 else f"[{host}]:{port}"
+    lines = []
+    for pub in sorted(keys_dir.glob("ssh_host_*_key.pub")):
+        fields = pub.read_text().split()
+        if len(fields) >= 2:
+            lines.append(f"{name} {fields[0]} {fields[1]}")
+    if not lines:
+        raise SystemExit(f"no ssh_host_*_key.pub in {keys_dir}: pass --host-keys DIR "
+                         "(the Cowrie's var/lib/cowrie)")
+    return "\n".join(lines) + "\n"
+
+
+def paramiko_runner(host: str, port: int, user: str, password: str, known_hosts_file: str):
     import paramiko  # noqa: PLC0415 - optional dependency
 
     def run(command: str, timeout: float, stdin: bytes | None = None,
@@ -983,7 +1001,8 @@ def paramiko_runner(host: str, port: int, user: str, password: str):
             overlap: str | None = None) -> RunResult:
         deadline = time.monotonic() + timeout
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_host_keys(known_hosts_file)
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         try:
             client.connect(host, port=port, username=user, password=password,
                            look_for_keys=False, allow_agent=False, timeout=timeout,
@@ -1013,12 +1032,13 @@ def paramiko_runner(host: str, port: int, user: str, password: str):
     return run
 
 
-def ssh_runner(host: str, port: int, user: str, password: str):
+def ssh_runner(host: str, port: int, user: str, password: str, known_hosts_file: str):
     if not shutil.which("sshpass") or not shutil.which("ssh"):
         raise SystemExit("neither paramiko nor ssh+sshpass is available")
     base = [
         "sshpass", "-e", "ssh", "-p", str(port),
-        "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts_file}",
+        "-o", "GlobalKnownHostsFile=/dev/null",
         "-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password",
         "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
         "-T", f"{user}@{host}",
@@ -1043,15 +1063,16 @@ def ssh_runner(host: str, port: int, user: str, password: str):
     return run
 
 
-def make_runner(kind: str, host: str, port: int, user: str, password: str):
+def make_runner(kind: str, host: str, port: int, user: str, password: str,
+                known_hosts_file: str):
     if kind in ("auto", "paramiko"):
         try:
             import paramiko  # noqa: F401, PLC0415
-            return "paramiko", paramiko_runner(host, port, user, password)
+            return "paramiko", paramiko_runner(host, port, user, password, known_hosts_file)
         except ImportError:
             if kind == "paramiko":
                 raise SystemExit("paramiko is not installed")
-    return "ssh+sshpass", ssh_runner(host, port, user, password)
+    return "ssh+sshpass", ssh_runner(host, port, user, password, known_hosts_file)
 
 
 # --- CLI --------------------------------------------------------------------
@@ -1072,6 +1093,10 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     ap.add_argument("--password-from", required=True, metavar="USERDB",
                     help="Cowrie userdb.txt; the first literal password for --user is used")
     ap.add_argument("--user", default="root")
+    ap.add_argument("--host-keys", type=Path, metavar="DIR",
+                    help="directory holding the Cowrie's ssh_host_*_key.pub, pinned as"
+                         " the only acceptable host keys (default: var/lib/cowrie beside"
+                         " the --password-from userdb's etc/)")
     ap.add_argument("--only", choices=("profiler", "probes"))
     ap.add_argument("--case", action="append", default=[], metavar="NAME",
                     help="run only these case names (repeatable)")
@@ -1102,7 +1127,13 @@ def main(argv: list[str] | None = None, runner=None) -> int:
 
     if runner is None:
         password = password_from_userdb(Path(args.password_from).read_text(), args.user)
-        kind, runner = make_runner(args.transport, args.host, args.port, args.user, password)
+        keys_dir = args.host_keys or Path(args.password_from).resolve().parent.parent / "var/lib/cowrie"
+        pinned = tempfile.NamedTemporaryFile("w", prefix="cowrie-known-hosts-", delete=False)
+        with pinned:
+            pinned.write(known_hosts(args.host, args.port, keys_dir))
+        atexit.register(os.unlink, pinned.name)
+        kind, runner = make_runner(args.transport, args.host, args.port, args.user, password,
+                                   pinned.name)
         print(f"transport: {kind}; target {args.user}@{args.host}:{args.port}")
 
     if args.uptime_slack < 0:
