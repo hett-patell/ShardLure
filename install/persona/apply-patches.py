@@ -64,6 +64,10 @@ PATCHES = (
     # last-persona's admin_session (so it must come after last-persona).
     # Command_w shares commands/base.py with passwd-stdin; disjoint anchors.
     "uptime-loadavg.py",
+    # who printed the caller where w and last name the persona's ubuntu
+    # session; it reads last-persona's helpers too (after last-persona).
+    # A third disjoint block in commands/base.py.
+    "who-persona.py",
     # 22.04 is usr-merged: /usr/bin/uname and /bin/uname are one file, but
     # Cowrie registers one spelling, so the other ran the pickle's ELF node
     # ("cannot execute binary file"). Shares shell/protocol.py with

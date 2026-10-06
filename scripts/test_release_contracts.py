@@ -181,8 +181,11 @@ class ReleaseContractTests(unittest.TestCase):
 
         last = constants("last-persona.py")["NEW"]
         uptime = constants("uptime-loadavg.py")
+        who = constants("who-persona.py")["NEW"]
         imported = set()
-        for block in (uptime["NEW_UPTIME"], uptime["NEW"]):
+        # who (who-persona.py, Task 7) reads the same helpers, so who, w and
+        # last name one login.
+        for block in (uptime["NEW_UPTIME"], uptime["NEW"], who):
             for names in re.findall(r"from cowrie\.commands\.last import ([\w, ]+)", block):
                 imported |= {n.strip() for n in names.split(",")}
         self.assertEqual(imported, {"CALLER_TTY", "PERSONA_USER", "admin_session", "caller_has_utmp"})
@@ -196,6 +199,9 @@ class ReleaseContractTests(unittest.TestCase):
             if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "PATCHES"
         )
         self.assertLess(patches.index("last-persona.py"), patches.index("uptime-loadavg.py"))
+        self.assertLess(patches.index("last-persona.py"), patches.index("who-persona.py"))
+        self.assertIn("from cowrie.commands.last import CALLER_TTY, PERSONA_USER, "
+                      "admin_session, caller_has_utmp", who)
 
     def test_lspci_patch_emits_the_persona_txtcmd(self) -> None:
         # One device list, two copies: the registered command (patched) and

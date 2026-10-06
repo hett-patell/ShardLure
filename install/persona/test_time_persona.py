@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the checked-out Cowrie's last (and, once patched, uptime and w)
+"""Exercise the checked-out Cowrie's last (and, once patched, uptime, w and who)
 against the persona clock, over days of simulated time.
 
 Runs the real pinned, patched Command_last (last-persona.py) without Twisted
@@ -216,16 +216,20 @@ class LastTest(unittest.TestCase):
         self.assertEqual(err, "last: invalid option -- 'z'\nTry 'last --help' for more information.\n")
 
 
-def load_w():
-    """Command_w alone: base.py imports Twisted, so exec just its class."""
+def load_base_class(name):
+    """One command class alone: base.py imports Twisted, so exec just it."""
     import ast  # noqa: PLC0415
 
     source = (COWRIE_HOME / "src/cowrie/commands/base.py").read_text()
     node = next(n for n in ast.parse(source).body
-                if isinstance(n, ast.ClassDef) and n.name == "Command_w")
+                if isinstance(n, ast.ClassDef) and n.name == name)
     ns = {"time": time, "HoneyPotCommand": HoneyPotCommand}
     exec(compile(ast.Module(body=[node], type_ignores=[]), "base.py", "exec"), ns)
-    return ns["Command_w"]
+    return ns[name]
+
+
+def load_w():
+    return load_base_class("Command_w")
 
 
 def proc_uptime(proto):
@@ -354,6 +358,59 @@ class UptimeWTest(unittest.TestCase):
         self.assertEqual(row(day + 6 * 3600 + 47 * 60, day + 8 * 86400)[35:56],
                          "03Oct26  7days  0.04s")
         self.assertEqual(self.last.last_date(day, seconds=False), "Sat Oct  3 06:47")
+
+
+class WhoTest(unittest.TestCase):
+    """who-persona.py (Task 7; Task 5 review I-2): who reads the utmp w and
+    last describe, on both channel types."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.last = load_module("src/cowrie/commands/last.py", "cowrie.commands.last")
+        cls.who = load_base_class("Command_who")
+
+    def test_who_and_last_name_one_session_at_every_cowrie_age(self):
+        for age in AGES:
+            for now in SAMPLES[::5]:
+                proto = HoneyPotExecProtocol(start=now - age)
+                out = run(self.who, proto, now=now)[0] + run(self.last.Command_last, proto, now=now)[0]
+                res = harness("who-last", out, now, age)
+                if not res.ok:
+                    self.fail(f"age {age}s at {datetime.fromtimestamp(now, timezone.utc)}:\n"
+                              + "\n".join(res.diff + res.messages))
+
+    def test_exec_caller_has_no_row_pty_caller_is_on_pts_1(self):
+        out, _, _ = run(self.who, HoneyPotExecProtocol(T0 - 60, "203.0.113.9"), now=T0)
+        self.assertEqual(out.count("\n"), 1)
+        self.assertNotIn("203.0.113.9", out)
+        proto = HoneyPotInteractiveProtocol(T0 - 60, "203.0.113.9", login=T0 - 30)
+        rows = run(self.who, proto, now=T0)[0].split("\n")
+        self.assertTrue(rows[0].startswith("ubuntu   pts/0        "))
+        self.assertEqual(rows[1], "root     pts/1        2026-10-06 06:15 (203.0.113.9)")
+        # w and last put the pty caller on the same tty.
+        self.assertEqual(self.last.CALLER_TTY, "pts/1")
+        self.assertEqual(run(self.who, proto, ["am", "i"], now=T0)[0], rows[1] + "\n")
+        self.assertEqual(run(self.who, HoneyPotExecProtocol(T0 - 60), ["-m"], now=T0)[0], "")
+
+    def test_who_at_the_start_is_gen_time_personas_txtcmd(self):
+        # Cowrie's who shadows txtcmds/usr/bin/who; at the process start the
+        # two are byte-identical, as w's are.
+        out, _, _ = run(self.who, HoneyPotExecProtocol(start=T0), now=T0 + 3600)
+        txt = gtp.build(datetime.fromtimestamp(T0, timezone.utc).replace(tzinfo=None))
+        self.assertEqual(out, txt["share/cowrie/txtcmds/usr/bin/who"])
+
+    def test_options(self):
+        proto = HoneyPotExecProtocol(T0 - 60)
+        self.assertEqual(run(self.who, proto, ["-q"], now=T0), ("ubuntu\n# users=1\n", "", 0))
+        self.assertEqual(run(self.who, proto, ["--count"], now=T0)[0], "ubuntu\n# users=1\n")
+        boot = datetime.fromtimestamp(T0 - 60 - BOOT_OFFSET, timezone.utc)
+        self.assertEqual(run(self.who, proto, ["-b"], now=T0)[0],
+                         f"         system boot  {boot:%Y-%m-%d %H:%M}\n")
+        out = run(self.who, proto, ["-H"], now=T0)[0].split("\n")
+        self.assertEqual(out[0], "NAME     LINE         TIME             COMMENT")
+        self.assertEqual(run(self.who, proto, ["-z"], now=T0),
+                         ("", "who: invalid option -- 'z'\nTry 'who --help' for more information.\n", 1))
+        self.assertEqual(run(self.who, proto, ["--bogus"], now=T0)[2], 1)
 
 
 if __name__ == "__main__":
