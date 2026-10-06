@@ -61,6 +61,11 @@ PATCHES = (
     # last-persona's admin_session (so it must come after last-persona).
     # Command_w shares commands/base.py with passwd-stdin; disjoint anchors.
     "uptime-loadavg.py",
+    # 22.04 is usr-merged: /usr/bin/uname and /bin/uname are one file, but
+    # Cowrie registers one spelling, so the other ran the pickle's ELF node
+    # ("cannot execute binary file"). Shares shell/protocol.py with
+    # connection-shared-fs; disjoint anchors.
+    "usr-bin-aliases.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and

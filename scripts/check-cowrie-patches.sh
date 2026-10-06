@@ -41,6 +41,7 @@ partial_uname="$tmp_root/cowrie-partial-uname"
 partial_last="$tmp_root/cowrie-partial-last"
 partial_uptime="$tmp_root/cowrie-partial-uptime"
 partial_which_first="$tmp_root/cowrie-partial-which-first"
+partial_usr_bin_aliases="$tmp_root/cowrie-partial-usr-bin-aliases"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -65,6 +66,7 @@ cp -a "$cowrie" "$partial_uname"
 cp -a "$cowrie" "$partial_last"
 cp -a "$cowrie" "$partial_uptime"
 cp -a "$cowrie" "$partial_which_first"
+cp -a "$cowrie" "$partial_usr_bin_aliases"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
@@ -80,6 +82,7 @@ cp -a "$cowrie" "$partial_which_first"
 # preset to True) beside the old flag row and output; last puts a pty caller
 # on the admin's own pts/0; uptime has its uptime.py half but not its
 # base.py (w) half. Task 7: which prints every match again without -a.
+# Task 7: usr-bin-aliases aliases /bin but not /sbin.
 # The bashparse and honeypot fixtures went with the patches upstream made
 # redundant.
 python3 - \
@@ -97,7 +100,8 @@ python3 - \
   "$partial_uname/src/cowrie/commands/uname.py" \
   "$partial_last/src/cowrie/commands/last.py" \
   "$partial_uptime/src/cowrie/commands/uptime.py" \
-  "$partial_which_first/src/cowrie/commands/which.py" <<'PY'
+  "$partial_which_first/src/cowrie/commands/which.py" \
+  "$partial_usr_bin_aliases/src/cowrie/shell/protocol.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -140,6 +144,7 @@ uname_path = Path(sys.argv[12])
 last_path = Path(sys.argv[13])
 uptime_path = Path(sys.argv[14])
 which_first_path = Path(sys.argv[15])
+usr_bin_aliases_path = Path(sys.argv[16])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -246,6 +251,15 @@ partial = which["NEW"].replace("if not all_matches:", "if all_matches:", 1)
 content = replace_once(which_first_path, which["OLD"], partial, "which partial")
 if content.count(which["OLD"]) != 0 or content.count(which["NEW"]) != 0:
     raise SystemExit(f"which partial fixture unexpectedly contains a complete block in {which_first_path}")
+
+aliases = string_constants(root / "install/persona/patches/usr-bin-aliases.py")
+pairs = '(("/bin/", "/usr/bin/"), ("/sbin/", "/usr/sbin/"))'
+if aliases["NEW"].count(pairs) != 1:
+    raise SystemExit("usr-bin-aliases NEW block does not contain the expected fixture anchor")
+partial = aliases["NEW"].replace(pairs, '(("/bin/", "/usr/bin/"),)', 1)
+content = replace_once(usr_bin_aliases_path, aliases["OLD"], partial, "usr-bin-aliases partial")
+if content.count(aliases["OLD"]) != 0 or content.count(aliases["NEW"]) != 0:
+    raise SystemExit(f"usr-bin-aliases partial fixture unexpectedly contains a complete block in {usr_bin_aliases_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -266,6 +280,7 @@ for patch in \
   "$ROOT/install/persona/patches/last-persona.py" \
   "$ROOT/install/persona/patches/uptime-loadavg.py" \
   "$ROOT/install/persona/patches/which-first.py" \
+  "$ROOT/install/persona/patches/usr-bin-aliases.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -438,6 +453,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_which_first" \
     "$ROOT/install/persona/patches/which-first.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "usr-bin-aliases" \
+    "$partial_usr_bin_aliases" \
+    "$ROOT/install/persona/patches/usr-bin-aliases.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -593,4 +613,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 56 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 60 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona behavior, and atomic preflight checks passed"
