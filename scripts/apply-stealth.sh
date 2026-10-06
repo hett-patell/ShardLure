@@ -11,6 +11,15 @@ fi
 
 echo "[stealth] cowrie=$COWRIE_HOME persona=$PERSONA"
 
+# Preflight the source patches (read-only) before touching the persona: on a
+# Cowrie checkout at another pin the orchestrator refuses, and once the steps
+# below had run, the next restart served the new persona over unpatched
+# Cowrie (final review M-3). Move the checkout to install/cowrie.commit first.
+if [[ -f "$PERSONA/apply-patches.py" ]] && ! sudo python3 "$PERSONA/apply-patches.py" "$COWRIE_HOME" --check; then
+  echo "[stealth] ERROR: Cowrie at $COWRIE_HOME does not take this patch set (pin: $(cat "$PERSONA/../cowrie.commit" 2>/dev/null || echo unknown)); nothing changed" >&2
+  exit 1
+fi
+
 # --- honeyfs persona (looks like a boring prod Ubuntu box) ---
 if [[ -d "$PERSONA/honeyfs" ]]; then
   echo "[stealth] syncing honeyfs persona"

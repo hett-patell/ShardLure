@@ -684,6 +684,10 @@ python3 "$ROOT/install/persona/test_time_persona.py" "$cowrie" -v
 # And python3's fake success: attacker Python is never run, under an audit
 # hook, on every input form (python3-emulation.py).
 python3 "$ROOT/install/persona/test_python3_fake.py" "$cowrie" -v
+# And the shell parse bounds (shell-parse-bounds.py): the nesting scan, the
+# per-connection memo and grammar budget, with the grammar stubbed out (CI has
+# no lark); three review rounds found a regression in exactly this scan.
+python3 "$ROOT/install/persona/test_shell_parse_bounds.py" "$cowrie" -v
 # The restricted fs.pickle loader root uses (persona-fs, plant-bait) must still
 # read the pin's own pickle, and the persona's edit of it, without a global.
 PYTHONPATH="$ROOT" python3 - "$cowrie/src/cowrie/data/fs.pickle" <<'PY'
@@ -761,4 +765,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 88 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona and python3 never-executes behavior, restricted fs.pickle loading, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 88 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona and python3 never-executes behavior, shell parse bounds, restricted fs.pickle loading, and atomic preflight checks passed"
