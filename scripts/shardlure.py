@@ -743,6 +743,10 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             # Bounded downloads (== capture.max_bytes). Cowrie reads it only
             # from [honeypot]; without it an attacker can fill the disk.
             ("download_limit_size", "52428800"),
+            # The persona's 42d 3h17m (== cowrie-stealth.cfg). Unset, v3.1.1
+            # picks a random 1-90 day boot per process, and /proc/uptime,
+            # uptime, w and last stop agreeing with the persona.
+            ("boot_offset", "3640620"),
         ],
         "shell": [
             ("arch", "linux-x64-lsb"),

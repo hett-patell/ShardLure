@@ -69,6 +69,7 @@ stealth = persona_cfg.read_text() if persona_cfg.exists() else """
 hostname = prod-app-server-01
 sensor_name = prod-app-server-01
 download_limit_size = 52428800
+boot_offset = 3640620
 
 [shell]
 arch = linux-x64-lsb

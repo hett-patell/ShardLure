@@ -28,14 +28,34 @@ while `date` tracked the real clock. It is regenerated here from the same
 UPTIME / LOAD / SESSIONS constants so load, uptime, and the last-login line all
 agree with who/w/last/uptime.
 
+The 42d 3h17m is not a constant here: it is [honeypot] boot_offset in the
+sibling cowrie-stealth.cfg, the value Cowrie v3.1.1 itself uses for
+boot_time() (its live /proc/uptime, uptime, w and last). One source of truth,
+so the deploy-time files cannot drift from what Cowrie answers.
+
 Usage: gen-time-persona.py COWRIE_HOME
 """
+import configparser
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+STEALTH_CFG = Path(__file__).resolve().parent / "cowrie-stealth.cfg"
+
+
+def _boot_offset() -> int:
+    """[honeypot] boot_offset from the persona template, in seconds."""
+    cfg = configparser.ConfigParser(interpolation=None)
+    try:
+        with STEALTH_CFG.open(encoding="utf-8") as fh:
+            cfg.read_file(fh)
+        return cfg.getint("honeypot", "boot_offset")
+    except (OSError, configparser.Error, ValueError) as exc:
+        raise SystemExit(f"  [FAIL] time-persona: no [honeypot] boot_offset in {STEALTH_CFG}: {exc}")
+
+
 # Canonical uptime the persona advertises. Boot slides so this stays constant.
-UPTIME = timedelta(days=42, hours=3, minutes=17)
+UPTIME = timedelta(seconds=_boot_offset())
 NCPU = 4                      # must match persona nproc/lscpu/cpuinfo
 LOAD = "0.38, 0.42, 0.45"     # must match honeyfs/proc/loadavg
 KERNEL = "5.15.0-94-generic"

@@ -676,6 +676,56 @@ class ServiceSafetyTests(unittest.TestCase):
         parser.read_string(merged)
         self.assertEqual(parser.getint("honeypot", "download_limit_size"), 52428800)
 
+    def test_boot_offset_is_one_constant_everywhere(self):
+        # The persona's 42d 3h17m uptime (Phase B Task 5). v3.1.1 picks a
+        # random 1-90 day boot_offset per process unless [honeypot] sets one,
+        # and every time source must agree with it: Cowrie's /proc/uptime,
+        # uptime, w and last (boot_time()), the deploy-time files
+        # gen-time-persona writes (motd "Uptime: 42 days"), and the anchor the
+        # behavioural harness checks against.
+        import importlib.util
+        root = Path(__file__).resolve().parent.parent
+        anchor = 42 * 86400 + 3 * 3600 + 17 * 60
+        template = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        template.read_string((root / "install" / "persona" / "cowrie-stealth.cfg").read_text())
+        self.assertEqual(template.getint("honeypot", "boot_offset"), anchor)
+        # A required key: a cfg without it still gets it (fresh install from
+        # cowrie.cfg.dist, or a stealth template that lost the line).
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+        patched = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        patched.read_string(text)
+        self.assertEqual(patched.getint("honeypot", "boot_offset"), anchor)
+        # ...and an operator's own value is kept, not duplicated.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nboot_offset = 99\n", 2222)
+        self.assertEqual(text.count("boot_offset"), 1)
+        # gen-time-persona derives its anchor from the template, not a copy.
+        spec = importlib.util.spec_from_file_location(
+            "gen_time_persona_t5", root / "install" / "persona" / "gen-time-persona.py")
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        self.assertEqual(int(gen.UPTIME.total_seconds()), anchor)
+        source = (root / "install" / "persona" / "gen-time-persona.py").read_text()
+        self.assertNotIn("timedelta(days=42", source)
+        # The harness's anchor and the apply-stealth.sh inline fallback.
+        hspec = importlib.util.spec_from_file_location(
+            "cowrie_behaviour_test_t5", root / "scripts" / "cowrie-behaviour-test.py")
+        harness = importlib.util.module_from_spec(hspec)
+        sys.modules[hspec.name] = harness  # dataclasses resolve through sys.modules
+        try:
+            hspec.loader.exec_module(harness)
+        finally:
+            del sys.modules[hspec.name]
+        self.assertEqual(harness.UPTIME_ANCHOR, anchor)
+        script = (root / "scripts" / "apply-stealth.sh").read_text()
+        start = script.index('stealth = persona_cfg.read_text() if persona_cfg.exists() else """')
+        body = script[script.index('"""', start) + 3:]
+        body = body[:body.index('"""')]
+        fallback = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        fallback.read_string(body)
+        self.assertEqual(fallback.getint("honeypot", "boot_offset"), anchor)
+
     def test_apply_stealth_fallback_template_caps_downloads(self):
         # apply-stealth.sh writes an inline fallback when cowrie-stealth.cfg
         # is missing; it must not be the one managed cfg left unbounded.
