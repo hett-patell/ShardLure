@@ -1303,6 +1303,49 @@ class PersonaFsTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["fs.pickle"])
 
 
+class PersonaTxtcmdTests(unittest.TestCase):
+    """txtcmds (payload-yield Phase B Task 7)."""
+
+    TXTCMDS = Path(shardlure.ROOT) / "install/persona/txtcmds"
+
+    def test_df_answers_on_both_usr_merged_paths(self):
+        # PATH finds /usr/bin/df first; the stub used to sit at bin/df only,
+        # so `df -h` ran the pickle's ELF node ("cannot execute binary file").
+        self.assertEqual((self.TXTCMDS / "usr/bin/df").read_bytes(),
+                         (self.TXTCMDS / "bin/df").read_bytes())
+
+    def test_df_is_the_h_form_with_root_on_line_two(self):
+        # Task 1 ruling: `df -h | head -n 2 | awk 'FNR == 2 {print $2;}'` is
+        # 95G, the root fs's 99014048 1K-blocks under df's ceiling rounding
+        # (94.43 GiB, the motd's "94.43GB").
+        lines = (self.TXTCMDS / "usr/bin/df").read_text().splitlines()
+        self.assertEqual(lines[0], "Filesystem      Size  Used Avail Use% Mounted on")
+        self.assertEqual(lines[1].split(), ["/dev/sda1", "95G", "58G", "32G", "65%", "/"])
+        self.assertEqual(-(-99014048 // (1024 * 1024)), 95)
+        expected = Path(shardlure.ROOT) / "scripts/behaviour/expected"
+        self.assertEqual((expected / "df-h-awk.out").read_text(), "95G\n")
+        self.assertEqual((expected / "bin-df-h.out").read_text().splitlines(), lines[:2])
+
+    def test_retired_txtcmds_are_not_shipped_and_both_writers_remove_them(self):
+        stealth = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
+        for rel in shardlure.RETIRED_TXTCMDS:
+            with self.subTest(rel=rel):
+                self.assertFalse((self.TXTCMDS / rel).exists())
+                self.assertIn(f'sudo rm -f "$TXTCMDS_DST/{rel}"', stealth)
+
+    def test_deploy_removes_a_retired_stub_left_by_an_older_deploy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie"
+            stale = home / "share/cowrie/txtcmds/bin/uname"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("Linux static\n")
+            with mock.patch.object(shardlure, "COWRIE_HOME", home), \
+                    mock.patch.object(shardlure, "log"):
+                shardlure.deploy_txtcmds()
+            self.assertFalse(stale.exists())
+            self.assertTrue((home / "share/cowrie/txtcmds/usr/bin/df").is_file())
+
+
 def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o7777
 

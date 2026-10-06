@@ -736,6 +736,15 @@ def apply_persona_fs(pickle_path: Path) -> None:
     os.replace(tmp, pickle_path)
 
 
+# txtcmds the persona used to ship, removed from a deployed share dir on every
+# deploy (the copy below only adds). bin/uname printed the static `uname -a`
+# line for every option set and won over Cowrie's own uname for any path that
+# resolves to /bin/uname, e.g. `/bin/./uname -s -v -n -r -m` (130 sessions in
+# 30 days); Cowrie's uname reads the persona cfg and answers each option.
+# apply-stealth.sh retires the same list (test_shardlure pins the two).
+RETIRED_TXTCMDS = ("bin/uname",)
+
+
 def deploy_txtcmds() -> None:
     """Copy persona txtcmds into Cowrie's share dir (anti-fingerprint stubs)."""
     txtcmds_src = ROOT / "install" / "persona" / "txtcmds"
@@ -744,6 +753,8 @@ def deploy_txtcmds() -> None:
     txtcmds_dst = COWRIE_HOME / "share" / "cowrie" / "txtcmds"
     txtcmds_dst.mkdir(parents=True, exist_ok=True)
     log("deploying txtcmds anti-fingerprint stubs")
+    for rel in RETIRED_TXTCMDS:
+        (txtcmds_dst / rel).unlink(missing_ok=True)
     for src_file in txtcmds_src.rglob("*"):
         if not src_file.is_file():
             continue

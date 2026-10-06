@@ -28,6 +28,10 @@ if [[ -d "$PERSONA/txtcmds" ]]; then
   TXTCMDS_DST="$COWRIE_HOME/share/cowrie/txtcmds"
   sudo mkdir -p "$TXTCMDS_DST"
   sudo rsync -a "$PERSONA/txtcmds/" "$TXTCMDS_DST/"
+  # rsync only adds: retire the stubs the persona no longer ships (the
+  # static bin/uname shadowed Cowrie's uname for /bin/./uname; same list as
+  # shardlure.py RETIRED_TXTCMDS).
+  sudo rm -f "$TXTCMDS_DST/bin/uname"
 else
   echo "[stealth] no txtcmds dir in persona — skipping"
 fi
