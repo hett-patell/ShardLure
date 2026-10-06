@@ -665,8 +665,19 @@ def plant_bait_files() -> None:
         dst = honeyfs / rel
         if dst.is_file():
             fs(f"load {vpath} {dst}")
-    apply_persona_fs(pickle_path, honeyfs)
     dst_pickle = COWRIE_HOME / "var/lib/cowrie/fs.pickle"
+    if persona_tree_prefix(COWRIE_HOME):
+        # Over a tree the Cowrie account owns, the pickle edit and the copy
+        # run as that account (final review I-1): root reading, rewriting and
+        # copying pickles in the account's directories is what let it
+        # redirect root's writes. cmd_persona_fs re-runs itself as the
+        # account and covers the var/lib copy too (cowrie_fs_pickles).
+        prefix = persona_tree_prefix(COWRIE_HOME)
+        if pickle_path.exists():
+            run([*prefix, "cp", "--", str(pickle_path), str(dst_pickle)])
+        cmd_persona_fs(COWRIE_HOME)
+        return
+    apply_persona_fs(pickle_path, honeyfs)
     if pickle_path.exists():
         shutil.copy2(pickle_path, dst_pickle)
 
@@ -1077,9 +1088,14 @@ def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> bool:
     try:
         with os.fdopen(fd, "wb") as f:
             pickle.dump(tree, f)
-        os.chmod(tmp_name, stat.S_IMODE(st.st_mode))
-        if os.geteuid() == 0:
-            os.chown(tmp_name, st.st_uid, st.st_gid)
+            # On the descriptor, never by name: the directory is the Cowrie
+            # account's, so between mkstemp and a by-name chown it could swap
+            # the temp for a symlink and have root chown any root file to it
+            # (final review I-1). A swap before os.replace only moves the
+            # account's own file into the account's own directory.
+            os.fchmod(f.fileno(), stat.S_IMODE(st.st_mode))
+            if os.geteuid() == 0:
+                os.fchown(f.fileno(), st.st_uid, st.st_gid)
         os.replace(tmp_name, pickle_path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)

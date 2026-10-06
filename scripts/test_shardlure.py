@@ -1373,6 +1373,24 @@ class PersonaFsTests(unittest.TestCase):
             self.assertIsNotNone(fs_lookup(tree, "/usr/bin/sudo"))
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["fs.pickle"])
 
+    def test_pickle_mode_and_owner_are_set_on_the_descriptor(self):
+        # The pickle's directory belongs to the Cowrie account: a by-name
+        # chmod/chown on the temp lets it swap in a symlink and have root
+        # chown any root file to it (final review I-1).
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(pickle.dumps(persona_fs_tree()))
+            path.chmod(0o640)
+            with mock.patch.object(shardlure.os, "chmod", side_effect=AssertionError("by-name chmod")), \
+                    mock.patch.object(shardlure.os, "chown", side_effect=AssertionError("by-name chown")), \
+                    mock.patch.object(shardlure.os, "geteuid", return_value=0), \
+                    mock.patch.object(shardlure.os, "fchown") as fchown:
+                self.assertTrue(shardlure.apply_persona_fs(path))
+            st = path.stat()
+            fchown.assert_called_once_with(mock.ANY, st.st_uid, st.st_gid)
+            self.assertEqual(stat_mode(path), 0o640)
+
     def test_honeyfs_files_list_their_own_size(self):
         tree = persona_fs_tree()
         sizes = {"/usr/lib/os-release": 386, "/root/notes": 5}
@@ -1595,14 +1613,30 @@ class FsPickleLoaderTests(unittest.TestCase):
             (home / "src/cowrie/data/fs.pickle").write_bytes(b"inert")
             (home / "venv/bin/fsctl").write_text("inert")
             calls = []
+            real_copy2 = shutil.copy2
+
+            def refuse_pickle_copy(src, dst, *a, **k):
+                if Path(dst).name == "fs.pickle":
+                    raise AssertionError("root pickle copy")
+                return real_copy2(src, dst, *a, **k)
+
             with (mock.patch.object(shardlure, "COWRIE_HOME", home),
                   mock.patch.object(shardlure.os, "geteuid", return_value=0),
                   mock.patch.object(shardlure, "log"),
-                  mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0))):
+                  mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0)),
+                  # Root must not rewrite or copy the account's pickles
+                  # itself either (final review I-1): persona-fs re-runs as
+                  # the account, and the var/lib copy is the account's cp.
+                  mock.patch.object(shardlure, "apply_persona_fs", side_effect=AssertionError("root pickle edit")),
+                  mock.patch.object(shardlure.shutil, "copy2", side_effect=refuse_pickle_copy),
+                  mock.patch.object(shardlure, "cmd_persona_fs", return_value=0) as persona_fs):
                 shardlure.plant_bait_files()
+            persona_fs.assert_called_once_with(home)
             self.assertTrue(calls)
             for args in calls:
                 self.assertEqual(args[:4], ["runuser", "-u", shardlure.COWRIE_USER, "--"])
+            self.assertIn(["runuser", "-u", shardlure.COWRIE_USER, "--", "cp", "--",
+                           str(home / "src/cowrie/data/fs.pickle"), str(home / "var/lib/cowrie/fs.pickle")], calls)
         with mock.patch.object(shardlure.os, "geteuid", return_value=0):
             self.assertEqual(shardlure.cowrie_owned_prefix(Path("/usr/bin"), Path("/nonexistent")), [])
         self.assertEqual(shardlure.cowrie_owned_prefix(Path(tempfile.gettempdir())), [])
