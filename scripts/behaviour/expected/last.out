@@ -1,0 +1,9 @@
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN_CURRENT}}   still logged in
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (02:43)
+ubuntu   pts/1        10.0.0.12        {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (00:43)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:48)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:26)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:23)
+reboot   system boot  5.15.0-94-generi {{BOOT_HM}}   still running
+
+wtmp begins {{BOOT_FULL}}

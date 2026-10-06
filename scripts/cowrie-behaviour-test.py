@@ -110,7 +110,9 @@ anchor (+ slack).
   {{LSDATE_RECENT}} ls -l's date of a file written during the case (GNU's
                     recent form "Oct  5 12:34"), within the run window
 All last rows (logins, then reboot) must be in non-increasing time order, and
-every weekday must match its date.
+every weekday must match its date. Within one case the commands must agree:
+{{UPTIME_HUMAN}} with {{UPTIME_SECS}} (to the minute, plus the run time), and
+w's {{LOGIN_HM}} with last's {{LAST_LOGIN_CURRENT}}.
 
 Transport: paramiko when importable (exec_command, no pty - like the
 profiler's Go client), otherwise `sshpass -e ssh`. Each case gets a 10 s
@@ -443,11 +445,15 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
         boot_hi = end - timedelta(seconds=up_lo)
 
     order: list[tuple[int, datetime]] = []
+    humans: list[tuple[int, str, int]] = []
+    current: list[datetime] = []
+    login_hms: list[tuple[int, str]] = []
     for i, text, vals in lines:
         login = login_hm = None
         for tok, val in vals:
             if tok == "UPTIME_HUMAN":
                 h = _human_seconds(val)
+                humans.append((i, val, h))
                 # procps truncates to the minute.
                 if not up_lo - 60 < h <= up_hi:
                     flag(i, f"'{val}' is not on the persona anchor: want"
@@ -475,6 +481,7 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                 if dt < boot_lo - timedelta(seconds=2 * BOOT_TOLERANCE) or dt > end:
                     flag(i, f"session '{val}' is not between boot and now")
                 if tok == "LAST_LOGIN_CURRENT":
+                    current.append(dt)
                     if (end - dt).total_seconds() > CURRENT_SESSION_MAX:
                         flag(i, f"still-logged-in session '{val}' is more than 12 h old")
                 elif dt.date() >= end.date():
@@ -511,6 +518,7 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                     flag(i, f"wtmp begins '{val}' is today (Cowrie's own last.py tell)")
             elif tok == "LOGIN_HM":
                 t = datetime.strptime(val, "%H:%M")
+                login_hms.append((i, val))
                 login_hm = end.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
                 if login_hm > end:
                     login_hm -= timedelta(days=1)
@@ -542,6 +550,22 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
     for (_, a), (i, b) in zip(order, order[1:]):
         if b > a:
             flag(i, "last rows are out of order (each must be no later than the one above)")
+    # Cross-command agreement inside one case (time-persona-consistent): every
+    # command reads one boot and one admin session, or a visitor who runs two
+    # of them side by side sees two machines. uptime/w truncate to the minute
+    # and ran somewhere in the window, /proc/uptime too.
+    if uptimes:
+        u0 = uptimes[0][1]
+        run = (clock.end - clock.start).total_seconds()
+        for i, val, h in humans:
+            if not u0 - run - 60 < h <= u0 + run:
+                flag(i, f"'{val}' disagrees with /proc/uptime ({u0:.2f}s,"
+                        f" '{_format_human(u0)}')")
+    if current:
+        for i, val in login_hms:
+            if val != f"{current[0]:%H:%M}":
+                flag(i, f"w LOGIN@ {val} is not last's still-logged-in session"
+                        f" ({current[0]:%H:%M})")
     return bad
 
 

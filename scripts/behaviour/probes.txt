@@ -111,3 +111,10 @@ grep-color	printf 'foo\n' | grep --color=auto foo; printf 'bar\n' | grep --colou
 # patterns from the fake filesystem (it used to wait on stdin forever).
 grep-redos-budget	printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!\n' | grep -E '(a+)+$'; echo rc=$?; echo alive
 grep-f-file	printf 'model name\nHardware\n' > /tmp/pats; grep -c -f /tmp/pats /proc/cpuinfo; grep -f /tmp/nope /proc/cpuinfo; echo rc=$?
+# Persona time (Phase B Task 5). v3.1.1's last lists the caller's own exec
+# session (sshd writes no wtmp row without a pty) and nothing of the persona's
+# admin history; uptime and w hard-code load 0.00 and print the caller's row.
+# The second case runs every time source on one channel: /proc/uptime, uptime,
+# w and last must name one boot and one admin login, as on a real box.
+last	last
+time-persona-consistent	cat /proc/uptime; uptime; w; last

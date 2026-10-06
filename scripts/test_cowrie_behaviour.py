@@ -410,6 +410,53 @@ class WRowTest(unittest.TestCase):
         self.assertFalse(w_check(pin).ok)
 
 
+TIME_TPL_PATH = CASES_DIR / "expected" / "time-persona-consistent.out"
+
+
+def time_persona_output(now=NOW, uptime=ANCHOR + 300.0, human=None, w_login=None):
+    """cat /proc/uptime; uptime; w; last as a consistent honeypot prints them."""
+    human = human or cbt._format_human(uptime)
+    last = persona_last(now, uptime)
+    current = last.split("\n")[0]
+    login = w_login or datetime.strptime(current[39:55], "%a %b %d %H:%M").replace(
+        year=now.year, tzinfo=timezone.utc)
+    w = w_output(now=now, login=login, idle="  2:00m", uptime_human=human)
+    return (f"{uptime:.2f} {uptime * 3.88:.2f}\n" + uptime_line(now=now, human=human)
+            + w + last.rstrip("\n") + "\n")
+
+
+def time_check(output, clk=None):
+    return cbt.compare("time-persona-consistent",
+                       cbt.parse_expected(TIME_TPL_PATH.read_text()), output, 0, False,
+                       clk or clock(run_seconds=2))
+
+
+class TimePersonaConsistencyTest(unittest.TestCase):
+    """Task 5: /proc/uptime, uptime, w and last on one channel name one boot
+    and one admin login."""
+
+    def test_consistent_output_passes(self):
+        res = time_check(time_persona_output())
+        self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
+
+    def test_uptime_disagreeing_with_proc_uptime_is_rejected(self):
+        # Both inside the 6 h window, but two different boots.
+        res = time_check(time_persona_output(human="up 42 days,  5:17"))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("disagrees with /proc/uptime" in m for m in res.messages),
+                        res.messages)
+
+    def test_w_login_disagreeing_with_last_is_rejected(self):
+        res = time_check(time_persona_output(w_login=NOW - timedelta(hours=2)))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("still-logged-in" in m for m in res.messages), res.messages)
+
+    def test_last_case_is_the_profilers_last_block(self):
+        profiler = (CASES_DIR / "expected" / "profiler.out").read_text()
+        block = profiler[profiler.index("LAST:") + 5:profiler.index("FILTER:")]
+        self.assertEqual((CASES_DIR / "expected" / "last.out").read_text(), block)
+
+
 LS_TPL = "-rwxr-xr-x 1 root root 135K {{LSDATE}} /usr/bin/ls\n"
 
 
