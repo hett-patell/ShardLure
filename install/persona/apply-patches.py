@@ -66,6 +66,9 @@ PATCHES = (
     # ("cannot execute binary file"). Shares shell/protocol.py with
     # connection-shared-fs; disjoint anchors.
     "usr-bin-aliases.py",
+    # cat exited 0 on a missing file, so `cat /x || fallback` never fell
+    # back; `cat -n` wrote two spaces where coreutils writes a TAB.
+    "cat-exit.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
