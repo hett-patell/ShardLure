@@ -104,3 +104,10 @@ grep-fixed-string	printf 'a.b\naxb\n' | grep -F 'a.b'
 grep-bre-interval	printf '1 23\n4 5\n' | grep '[[:digit:]]\{2\}'
 grep-bre-unmatched	grep '\(' /proc/cpuinfo
 grep-color	printf 'foo\n' | grep --color=auto foo; printf 'bar\n' | grep --colour bar
+# grep under a SIGALRM budget (Task 4 re-review R1): Python's re backtracks
+# where GNU's DFA does not, and this 40-byte line held Cowrie's one reactor
+# thread for hours, freezing every session. Run once on an earlier channel,
+# then again with a liveness check, all within 3 s. And -f FILE reads its
+# patterns from the fake filesystem (it used to wait on stdin forever).
+grep-redos-budget	printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!\n' | grep -E '(a+)+$'; echo rc=$?; echo alive
+grep-f-file	printf 'model name\nHardware\n' > /tmp/pats; grep -c -f /tmp/pats /proc/cpuinfo; grep -f /tmp/nope /proc/cpuinfo; echo rc=$?

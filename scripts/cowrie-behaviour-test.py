@@ -69,6 +69,11 @@ line:
                             sleeps before it reads.
                             sftp-during and overlap combine with no other
                             channel directive; both need paramiko.
+  #harness: within=SECONDS  the case (all its channels) must finish within
+                            SECONDS, well under the 10 s deadline: a command
+                            that stalls Cowrie's single reactor stalls every
+                            session (grep's backtracking budget, Task 4
+                            re-review R1)
   #harness: no-host-memtotal
                             the output must not contain the MemTotal of the
                             machine the harness runs on (--host-meminfo,
@@ -212,6 +217,7 @@ class Expected:
     sftp_during: str | None = None
     overlap: str | None = None
     no_host_memtotal: bool = False
+    within: float | None = None
 
 
 @dataclass
@@ -301,6 +307,13 @@ def parse_expected(text: str) -> Expected:
             if not command:
                 raise ValueError(f"empty overlap directive: {lines[i]!r}")
             exp.overlap = command
+        elif body.startswith("within="):
+            try:
+                exp.within = float(body[7:])
+            except ValueError:
+                exp.within = -1.0
+            if not exp.within > 0:
+                raise ValueError(f"bad within directive (want SECONDS > 0): {lines[i]!r}")
         elif body == "no-host-memtotal":
             exp.no_host_memtotal = True
         else:
@@ -999,6 +1012,11 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             if problem:
                 res.ok = False
                 res.messages.append(problem)
+        if exp.within is not None:
+            took = (clock.end - clock.start).total_seconds()
+            if took > exp.within:
+                res.ok = False
+                res.messages.append(f"took {took:.1f}s, limit {exp.within:g}s")
         if exp.no_host_memtotal:
             # Fail closed: an unreadable host meminfo proves nothing.
             try:

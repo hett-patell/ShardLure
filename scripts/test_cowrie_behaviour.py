@@ -568,6 +568,34 @@ class HostMemtotalTest(unittest.TestCase):
         rc, out = self.run_free("Mem: 8039340\n", self.ARM)
         self.assertEqual(rc, 0, out)
 
+    def test_within_directive(self):
+        self.assertEqual(cbt.parse_expected("#harness: within=2.5\nx\n").within, 2.5)
+        for bad in ("0", "-1", "soon"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cbt.parse_expected(f"#harness: within={bad}\nx\n")
+
+    def test_within_fails_a_slow_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "expected").mkdir()
+            (root / "profiler.sh").write_text("echo hi")
+            (root / "expected" / "profiler.out").write_text("#harness: skip=x\n")
+            (root / "probes.txt").write_text("slow\tsleep 1\n")
+            (root / "expected" / "slow.out").write_text("#harness: within=0.2\n")
+            (root / "userdb.txt").write_text("root:x:pw\n")
+            argv = ["--host", "127.0.0.1", "--port", "2299", "--cases-dir", str(root),
+                    "--password-from", str(root / "userdb.txt")]
+
+            def runner(command, timeout):
+                time.sleep(0.4)
+                return cbt.RunResult("", 0, False)
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cbt.main(argv, runner=runner)
+            self.assertEqual(rc, 1, out.getvalue())
+            self.assertIn("took 0.4s, limit 0.2s", out.getvalue())
+
     def test_unreadable_host_meminfo_fails_closed(self):
         rc, out = self.run_free("Mem: 8039340\n", None)
         self.assertEqual(rc, 1, out)
