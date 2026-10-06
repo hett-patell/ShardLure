@@ -1,0 +1,8 @@
+/etc/passwd:0
+/etc/group:0
+/etc/shadow:0
+ls: cannot access '/home/phil': No such file or directory
+drwxr-x--- deploy deploy /home/deploy
+drwxr-x--- ubuntu ubuntu /home/ubuntu
+ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash
+deploy:x:1001:1001:,,,:/home/deploy:/bin/bash

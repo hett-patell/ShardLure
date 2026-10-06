@@ -459,6 +459,58 @@ class TimePersonaConsistencyTest(unittest.TestCase):
         self.assertEqual((CASES_DIR / "expected" / "last.out").read_text(), block)
 
 
+WHO_TPL_PATH = CASES_DIR / "expected" / "who-last.out"
+
+
+def who_last_output(now=NOW, uptime=ANCHOR + 300.0, who_login=None):
+    """who; last as a consistent honeypot prints them on an exec channel: one
+    utmp row, the persona's still-logged-in ubuntu session, and no caller."""
+    last = persona_last(now, uptime)
+    current = last.split("\n")[0]
+    login = who_login or datetime.strptime(current[39:55], "%a %b %d %H:%M").replace(
+        year=now.year)
+    return f"ubuntu   pts/0        {login:%Y-%m-%d %H:%M} (10.0.0.8)\n" + last
+
+
+def who_check(output, clk=None):
+    return cbt.compare("who-last", cbt.parse_expected(WHO_TPL_PATH.read_text()),
+                       output, 0, False, clk or clock(run_seconds=2))
+
+
+class WhoAgreesWithLastTest(unittest.TestCase):
+    """Task 7 (Task 5 review I-2): who reads the same utmp session last's
+    still-logged-in row names, in coreutils' C.UTF-8 ISO form."""
+
+    def test_consistent_output_passes(self):
+        res = who_check(who_last_output())
+        self.assertTrue(res.ok, "\n".join(res.diff + res.messages))
+
+    def test_who_disagreeing_with_last_is_rejected(self):
+        res = who_check(who_last_output(who_login=datetime(2026, 10, 5, 1, 0)))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("who login" in m and "still-logged-in" in m
+                            for m in res.messages), res.messages)
+
+    def test_who_naming_the_caller_now_is_rejected(self):
+        # Stock Command_who prints the caller's own login, which is now: after
+        # the start of a Cowrie that has run for an hour.
+        age = 3600
+        out = who_last_output(uptime=ANCHOR + age, who_login=NOW.replace(tzinfo=None))
+        res = who_check(out, clock(run_seconds=2, age=age))
+        self.assertFalse(res.ok)
+        self.assertTrue(any("after the Cowrie start" in m for m in res.messages),
+                        res.messages)
+
+    def test_stock_caller_row_shape_is_rejected(self):
+        out = who_last_output().replace("ubuntu   pts/0        2", "root     pts/0        2", 1)
+        self.assertFalse(who_check(out).ok)
+
+    def test_last_part_is_the_last_case(self):
+        who = WHO_TPL_PATH.read_text()
+        self.assertEqual(who.split("\n", 1)[1],
+                         (CASES_DIR / "expected" / "last.out").read_text())
+
+
 class WLoginFormTest(unittest.TestCase):
     """Task 5 review: the history is fixed at the Cowrie start, so the admin's
     LOGIN@ ages through procps' three print_logintime forms."""

@@ -1,0 +1,12 @@
+echo
+cd
+if
+/usr/bin/ls
+echo is a shell builtin
+if is a shell keyword
+ls is /usr/bin/ls
+builtin
+keyword
+file
+bash: line 1: command: nope: not found
+rc=1

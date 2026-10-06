@@ -118,3 +118,25 @@ grep-f-file	printf 'model name\nHardware\n' > /tmp/pats; grep -c -f /tmp/pats /p
 # w and last must name one boot and one admin login, as on a real box.
 last	last
 time-persona-consistent	cat /proc/uptime; uptime; w; last
+# Command resolution and filesystem realism (Phase B Task 7). cat exits 0 on a
+# missing file, so `cat /x || fallback` chains never fall back; bash's own
+# builtins and keywords (`command -v echo`, `type if`) were reported as
+# /usr/bin files; which printed every PATH hit (`ls -lh $(which ls)` got two
+# words); /usr/bin/<x> ran nothing for commands registered only as /bin/<x>
+# although 22.04 is usr-merged; who printed the caller, where w and last name
+# the persona's ubuntu session; the stock Cowrie user phil was in passwd,
+# group and shadow with a /home/phil, while the persona's ubuntu and deploy
+# homes had no users. Expected outputs are ubuntu:22.04 `bash -c` runs; the
+# users, groups and home modes are the 22.04 cloud image's (cloud-init's
+# default ubuntu user, HOME_MODE 0750) plus the persona's deploy.
+cat-missing-fallback	cat /nope || echo fb
+cat-missing-rc	cat /nope /etc/hostname; echo rc=$?; cat /etc; echo rc=$?
+command-type-builtin	command -v echo cd if ls; type echo if ls; type -t echo if ls; command -V nope; echo rc=$?
+type-a-echo	type -a echo; type -p ls; type -P echo
+which-first	which -a ls; which ls nope; echo rc=$?; which -x ls; echo rc=$?
+usr-bin-alias	/usr/bin/uname -s -r; /bin/uname -m; /usr/bin/bash -c 'echo ok'
+crontab-l-stderr	crontab -l 2>/dev/null; echo rc=$?
+bin-df-h	/bin/df -h | head -n 2
+who-last	who; last
+home-users	grep -c phil /etc/passwd /etc/group /etc/shadow; ls -d /home/phil; ls -ld /home/deploy /home/ubuntu | awk '{print $1, $3, $4, $9}'; grep -E '^(ubuntu|deploy):' /etc/passwd
+os-release-size	ls -l /usr/lib/os-release | awk '{print $1, $5}'; cat /etc/os-release | wc -c

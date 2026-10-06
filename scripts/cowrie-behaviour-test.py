@@ -112,6 +112,10 @@ anchor (+ slack).
                     "DDMonYY"; equal to last's still-logged-in row in a case
                     that prints both
   {{W_IDLE}}        w's 7-char IDLE cell, no longer than the session
+  {{WHO_LOGIN}}     who's "%Y-%m-%d %H:%M" login (coreutils under the box's
+                    C.UTF-8 locale): the same window as {{LAST_LOGIN_CURRENT}},
+                    and equal to last's still-logged-in row, to the minute,
+                    in a case that prints both
   {{LSDATE}}        ls -l's date of a packaged binary: the year form, older
                     than six months (never a node stamped "now")
   {{LSDATE_RECENT}} ls -l's date of a file written during the case (GNU's
@@ -119,7 +123,7 @@ anchor (+ slack).
 All last rows (logins, then reboot) must be in non-increasing time order, and
 every weekday must match its date. Within one case the commands must agree:
 {{UPTIME_HUMAN}} with {{UPTIME_SECS}} (to the minute, plus the run time), and
-w's {{W_LOGIN}} with last's {{LAST_LOGIN_CURRENT}}. Across the whole run, every
+w's {{W_LOGIN}} and who's {{WHO_LOGIN}} with last's {{LAST_LOGIN_CURRENT}}. Across the whole run, every
 last(1) block (the profiler's LAST field, the last case, ...) must be byte
 for byte the same: wtmp is append-only, so a history that moves between two
 runs minutes apart is a tell (Task 5 review I-1).
@@ -210,6 +214,8 @@ TOKENS = {
     "W_LOGIN": r"(?:" + _HM + "  |" + _WDAY + r"(?:[01]\d|2[0-3])  |[0-3]\d" + _MON + r"\d\d)",
     # procps print_time_ival7: " %2ludays", " %2lu:%02um", " %2lu:%02u ", " %2lu.%02us"
     "W_IDLE": r" (?:[ \d]\ddays|[ \d]\d:[0-5]\dm|[ \d]\d:[0-5]\d |[ \d]\d\.\d\ds)",
+    # coreutils who under a hard locale (Ubuntu's LANG=C.UTF-8): ISO date.
+    "WHO_LOGIN": r"\d{4}-[01]\d-[0-3]\d " + _HM,
     "LSDATE": _MON + r" [ 123]\d  \d{4}",
     "LSDATE_RECENT": _MON + r" [ 123]\d " + _HM,
 }
@@ -460,6 +466,7 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
     humans: list[tuple[int, str, int]] = []
     current: list[datetime] = []
     login_hms: list[tuple[int, str]] = []
+    who_logins: list[tuple[int, str, datetime]] = []
     for i, text, vals in lines:
         login = login_hm = None
         for tok, val in vals:
@@ -544,6 +551,25 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
                             " (HH:MM only within 12 h or the same day, DddHH up to"
                             " 6 days, then DDMonYY)")
                     login_hm = None
+            elif tok == "WHO_LOGIN":
+                # who(1) reads utmp, the same admin session last's
+                # still-logged-in row names (Task 5 review I-2): same window.
+                try:
+                    dt = datetime.strptime(val, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    flag(i, f"who login '{val}' is an invalid date")
+                    continue
+                who_logins.append((i, val, dt))
+                t0_lo = boot_lo + timedelta(seconds=UPTIME_ANCHOR)
+                t0_hi = boot_hi + timedelta(seconds=UPTIME_ANCHOR)
+                if dt < boot_lo - timedelta(seconds=2 * BOOT_TOLERANCE) or dt > end:
+                    flag(i, f"who login '{val}' is not between boot and now")
+                elif dt < t0_lo - timedelta(seconds=CURRENT_SESSION_MAX + BOOT_TOLERANCE):
+                    flag(i, f"who login '{val}' is more than 12 h before the Cowrie start"
+                            f" ({t0_lo:%Y-%m-%d %H:%M}..{t0_hi:%H:%M})")
+                elif dt > t0_hi + timedelta(seconds=BOOT_TOLERANCE):
+                    flag(i, f"who login '{val}' is after the Cowrie start"
+                            f" ({t0_hi:%Y-%m-%d %H:%M}): the persona's session moved")
             elif tok == "W_IDLE":
                 idle = _idle_seconds(val)
                 if login_hm is not None and idle > (end - login_hm).total_seconds() + 60:
@@ -588,6 +614,10 @@ def _check_values(lines: list[tuple[int, str, list[tuple[str, str]]]],
             if val not in spans:
                 flag(i, f"w LOGIN@ '{val.strip()}' is not last's still-logged-in session"
                         f" ('{want.strip()}')")
+        for i, val, dt in who_logins:
+            if dt != current[0].replace(second=0):
+                flag(i, f"who login '{val}' is not last's still-logged-in session"
+                        f" ('{current[0]:%Y-%m-%d %H:%M}')")
     return bad
 
 
