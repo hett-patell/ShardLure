@@ -696,6 +696,11 @@ $CFG_MARKER
 [honeypot]
 download_limit_size = 52428800
 
+[shell]
+# == install/persona/cowrie-stealth.cfg (measured on arm; see its comment):
+# v3.1.1's own default, pinned so a pin bump cannot move it unnoticed.
+max_input_size = 16384
+
 [ssh]
 listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0
 

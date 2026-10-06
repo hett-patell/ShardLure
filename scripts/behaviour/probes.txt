@@ -171,4 +171,8 @@ lsb-hostnamectl-present	command -v lsb_release hostnamectl; hostnamectl | head -
 # 0.25-0.43 ms/byte for ordinary shapes, so a larger cap stalls every session
 # up to the 10 s parse timeout, then answers a syntax error); this case
 # catches a cap set below it or a regression in whole-script execution.
+# Its limits: the script is the cheapest shape (plain assignments, 0.76 s
+# offline), so it says nothing about the reactor-stall budget, and it cannot
+# see a cap raised above 16384 on a live box (the cfg pin tests cover only
+# the shipped value).
 script-16k	sh /tmp/big.sh; echo rc=$?

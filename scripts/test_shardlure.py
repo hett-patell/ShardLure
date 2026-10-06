@@ -754,6 +754,18 @@ class ServiceSafetyTests(unittest.TestCase):
         fallback = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
         fallback.read_string(body)
         self.assertEqual(fallback.getint("shell", "max_input_size"), 16384)
+        self.assertIn("# == cowrie-stealth.cfg", body)
+        # install.sh's managed cfg, the fourth writer, pins it too (an
+        # install.sh-only box gets no persona merge).
+        installer = (root / "scripts" / "install.sh").read_text()
+        start = installer.index('cat > "$COWRIE_CFG" <<CFG\n') + len('cat > "$COWRIE_CFG" <<CFG\n')
+        managed = installer[start:installer.index("\nCFG\n", start)]
+        managed = (managed.replace("$CFG_MARKER", "# managed").replace("$HONEYPOT_PORT", "2222")
+                   .replace("$COWRIE_CFG_HOME", "/x"))
+        heredoc = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        heredoc.read_string(managed)
+        self.assertEqual(heredoc.getint("shell", "max_input_size"), 16384)
+        self.assertEqual(heredoc.getint("honeypot", "download_limit_size"), 52428800)
 
     def test_operator_boot_offset_reaches_the_motd_and_short_ones_warn(self):
         # Review m-5: patch_cowrie_cfg keeps an operator's boot_offset, so
