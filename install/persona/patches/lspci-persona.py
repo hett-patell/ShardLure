@@ -19,8 +19,10 @@ commands/busybox.py, second block: the profiler runs `busybox lspci | grep -i
 vga` too, and Cowrie's busybox hands any registered command to it, so the
 persona's GPU line came out twice. BusyBox 1.20.2, the version Cowrie's
 busybox claims, has no lspci applet (it is not in that banner's "Currently
-defined functions"), so `busybox lspci` now takes busybox's own "applet not
-found" branch. Only lspci: refusing every unlisted applet would also refuse
+defined functions"), so `busybox lspci` now answers as busybox does for a
+missing applet: "lspci: applet not found" on stderr, exit 1 (stock Cowrie's
+own not-found branch, left alone for other names, writes stdout with exit 0).
+Only lspci: refusing every unlisted applet would also refuse
 `busybox curl`, and a download Cowrie answers is a payload ShardLure captures.
 """
 
@@ -71,13 +73,23 @@ def lspci_out():
 
 
 # commands/busybox.py: lspci is not an applet of the BusyBox Cowrie claims.
-OLD_BUSYBOX = r'''        if not cmdclass:
+OLD_BUSYBOX = r'''            cmd, self.environ.get("PATH", "").split(":"), self.cwd
+        )
+        if not cmdclass:
             self.write(f"{cmd}: applet not found\n")
 '''
 
-NEW_BUSYBOX = r'''        # ShardLure persona (lspci-persona.py): BusyBox 1.20.2 has no lspci
+NEW_BUSYBOX = r'''            cmd, self.environ.get("PATH", "").split(":"), self.cwd
+        )
+        # ShardLure persona (lspci-persona.py): BusyBox 1.20.2 has no lspci
         # applet; without this, `busybox lspci` repeated the persona's list.
-        if not cmdclass or cmd == "lspci":
+        # Real busybox reports a missing applet on stderr and fails
+        # (xfunc_die, exit 1), so `busybox lspci 2>/dev/null` prints nothing.
+        if cmd == "lspci":
+            self.errorWrite(f"{cmd}: applet not found\n")
+            self.exit(1)
+            return
+        if not cmdclass:
             self.write(f"{cmd}: applet not found\n")
 '''
 
