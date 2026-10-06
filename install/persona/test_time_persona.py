@@ -49,6 +49,7 @@ class HoneyPotCommand:
         self.user = {"username": user}
         self.out, self.err = [], []
         self.exit_code = None
+        self.environ = {}
         self.fs = types.SimpleNamespace(file_contents=lambda path: self._file(path, loadavg))
 
     @staticmethod
@@ -411,6 +412,19 @@ class WhoTest(unittest.TestCase):
         self.assertEqual(run(self.who, proto, ["-z"], now=T0),
                          ("", "who: invalid option -- 'z'\nTry 'who --help' for more information.\n", 1))
         self.assertEqual(run(self.who, proto, ["--bogus"], now=T0)[2], 1)
+
+    def test_c_locale_uses_coreutils_short_time(self):
+        # Review m-9: `LC_ALL=C who` on 22.04 prints "Oct  5 02:22".
+        proto = HoneyPotExecProtocol(T0 - 60)
+        iso = run(self.who, proto, now=T0)[0]
+        cmd = self.who(proto, ["-H"])
+        cmd.environ = {"LC_ALL": "C", "LANG": "C.UTF-8"}
+        with mock.patch("time.time", return_value=T0):
+            cmd.call()
+        head, row = "".join(cmd.out).split("\n")[:2]
+        login = datetime.strptime(iso[22:38], "%Y-%m-%d %H:%M")
+        self.assertEqual(head, "NAME     LINE         TIME         COMMENT")
+        self.assertEqual(row, iso[:22] + f"{login:%b} {login.day:2d} {login:%H:%M}" + iso[38:-1])
 
 
 if __name__ == "__main__":

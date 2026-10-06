@@ -15,7 +15,7 @@ both channel types:
 Now who reads the same helpers as w (uptime-loadavg.py) and last
 (last-persona.py): admin_session(), caller_has_utmp() and CALLER_TTY. The
 format is coreutils 8.32's under 22.04's LANG=C.UTF-8 (a hard locale, so ISO
-times): "%-8s %-12s %Y-%m-%d %H:%M (host)". Options: -q/--count, -H, -b
+times; an explicit C or POSIX LC_ALL/LC_TIME/LANG gives `Oct  5 02:22`): "%-8s %-12s %Y-%m-%d %H:%M (host)". Options: -q/--count, -H, -b
 (the reboot row at boot_time()), `am i`/-m (the caller's row, nothing on an
 exec channel), and coreutils' error on an invalid option; the other valid
 options print the plain list. Every form was compared with ubuntu:22.04 who
@@ -71,15 +71,22 @@ NEW = '''class Command_who(HoneyPotCommand):
             rows.append((self.user["username"], CALLER_TTY, self.protocol.logintime,
                          self.protocol.clientIP))
 
+        # coreutils prints ISO times under a "hard" locale and `%b %e %H:%M`
+        # under C/POSIX. A real session gets LANG=C.UTF-8 from pam_env, so an
+        # unset locale is the persona's C.UTF-8; `LC_ALL=C who` is not.
+        locale = next((self.environ.get(k) for k in ("LC_ALL", "LC_TIME", "LANG")
+                       if self.environ.get(k)), "C.UTF-8")
+        fmt = "%b %e %H:%M" if locale in ("C", "POSIX") else "%Y-%m-%d %H:%M"
+
         def stamp(when: float) -> str:
-            return time.strftime("%Y-%m-%d %H:%M", time.localtime(when))
+            return time.strftime(fmt, time.localtime(when))
 
         if "q" in flags:
             self.write(" ".join(user for user, *_ in rows) + "\\n")
             self.write(f"# users={len(rows)}\\n")
             return
         if "H" in flags:
-            self.write("NAME     LINE         TIME             COMMENT\\n")
+            self.write(f"NAME     LINE         {'TIME':<{len(stamp(0))}} COMMENT\\n")
         if "b" in flags:
             self.write(f"{'':<8} {'system boot':<12} {stamp(self.protocol.boot_time())}\\n")
             return
