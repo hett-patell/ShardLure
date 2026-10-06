@@ -25,8 +25,13 @@ ShardLure patch set (x86 here; arm is slower):
 * Shape bounds alone kept missing costly inputs (each review round found
   another), so grammar time is also budgeted: PARSE_BUDGET_SECONDS (30 s)
   per connection, after which every parse that needs the grammar is
-  refused at once. Whatever shape an input takes, one connection holds the
-  reactor at most the budget plus one parse (the 10 s parse timeout).
+  refused at once. Whatever shape an input takes, one connection spends at
+  most the budget plus one parse (the 10 s parse timeout) in the grammar.
+  It bounds grammar time only: running what parsed is not budgeted, so a
+  line that keeps re-entering the shell still holds the reactor longer
+  than it is charged (a 70-body `while true` line: 46.6 s for 30 s
+  charged), and nested `while true` loops hold it as long as pristine
+  v3.1.1 lets them (64 s for two levels).
 * ~200 levels of "(", "{" or if raised RecursionError out of lineReceived
   (128 levels of `$(` raised one while evaluating), and nested case clauses
   are superlinear in the grammar itself (64 levels, 1.2 KB: 5.8 s). Input
@@ -68,7 +73,9 @@ MAX_NESTING_DEPTH = 16
 # child shells its subshells, pipelines and substitutions run in. Shape bounds
 # alone kept missing inputs (a review found a new costly shape per round); this
 # bounds them all: past it every parse that needs the grammar is refused at
-# once. A connection that spends it has held the reactor 30 s; a 16 KiB
+# once. It counts grammar time only, not the time spent running what parsed
+# (see the module docstring). A connection that spends it has held the
+# reactor at least 30 s; a 16 KiB
 # dropper script, the largest input [shell] max_input_size admits, costs 4-7 s
 # on arm, and a bot's ordinary commands milliseconds.
 PARSE_BUDGET_SECONDS = 30.0
@@ -119,9 +126,14 @@ def _nesting_scan(text: str, ignore: frozenset[int]) -> tuple[int, set[int]]:
             ch = text[pos]
             top = stack[-1][0] if stack else ""
             if ch == "\\":
-                # The grammar reads "\\"-newline as a blank (a case head may
-                # follow it); any other escaped byte continues the word.
-                if text.startswith("\n", pos + 1) or text.startswith("\r\n", pos + 1):
+                # Outside double quotes the grammar reads "\\"-newline as a
+                # blank (a case head may follow it); inside them, and for any
+                # other escaped byte, the word continues: a word start set
+                # inside quotes outlived the closing quote, and a "#" after it
+                # hid the rest of the line.
+                if top != '"' and (
+                    text.startswith("\n", pos + 1) or text.startswith("\r\n", pos + 1)
+                ):
                     pos += 2 if text[pos + 1] == "\n" else 3
                     word_start = True
                 else:
@@ -145,6 +157,7 @@ def _nesting_scan(text: str, ignore: frozenset[int]) -> tuple[int, set[int]]:
             if top == '"':
                 if ch == '"':
                     stack.pop()
+                    word_start = False
                 pos += 1
                 continue
             if ch == "'":
