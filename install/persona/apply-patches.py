@@ -21,6 +21,10 @@ PATCHES = (
     # cwd): the pin-era text applied cleanly and then raised TypeError, hanging
     # every `command -v` session (scripts/behaviour command-v-wget catches it).
     "command-type-builtins.py",
+    # which printed every PATH hit; 22.04 is usr-merged, so `which ls` gave
+    # /usr/bin/ls and /bin/ls and `ls -lh $(which ls)` failed. Shares
+    # which.py with command-type-builtins on a disjoint anchor (class body).
+    "which-first.py",
     "passwd-stdin.py",
     # v3.1.1 folds "too large" and "binary" into one refusal; only an
     # attacker's own binary, run directly, is answered with a silent exit 0.
