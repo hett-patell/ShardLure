@@ -800,6 +800,24 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
                     have.add(key)
     out = rebuilt
 
+    # The persona's last history spans 4d23h before the Cowrie start
+    # (last-persona.py); a smaller kept boot_offset puts sessions before boot.
+    cur = ""
+    for line in out:
+        sec = section_of(line)
+        if sec is not None:
+            cur = sec
+            continue
+        key, _, val = line.partition("=")
+        if cur == "honeypot" and key.strip().lower() == "boot_offset":
+            try:
+                kept = int(val.strip())
+            except ValueError:
+                kept = -1
+            if kept < 604800:
+                log(f"warning: [honeypot] boot_offset = {val.strip()} is under 7 days; the"
+                    " persona's login history (last/w) would predate the boot")
+
     # Append any required section that was entirely absent.
     joined_secs = {section_of(l) for l in out if section_of(l) is not None}
     for sec, kvs in required.items():

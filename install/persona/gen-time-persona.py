@@ -54,6 +54,20 @@ def _boot_offset() -> int:
         raise SystemExit(f"  [FAIL] time-persona: no [honeypot] boot_offset in {STEALTH_CFG}: {exc}")
 
 
+def deployed_boot_offset(cowrie_home: Path) -> int | None:
+    """The boot_offset the deployed Cowrie will use: COWRIE_HOME/etc/cowrie.cfg
+    [honeypot] boot_offset, which patch_cowrie_cfg keeps when an operator set
+    their own (Task 5 review m-5), else None. Reading only the template made
+    the motd's "Uptime: N days" disagree with Cowrie under an override."""
+    cfg = configparser.ConfigParser(interpolation=None)
+    try:
+        with (cowrie_home / "etc/cowrie.cfg").open(encoding="utf-8") as fh:
+            cfg.read_file(fh)
+        return cfg.getint("honeypot", "boot_offset")
+    except (OSError, configparser.Error, ValueError):
+        return None
+
+
 # Canonical uptime the persona advertises. Boot slides so this stays constant.
 UPTIME = timedelta(seconds=_boot_offset())
 NCPU = 4                      # must match persona nproc/lscpu/cpuinfo
@@ -164,7 +178,11 @@ def build(now: datetime) -> dict[str, str]:
     # agrees with uptime/w/last (load's first field, the "42 days" uptime). The
     # "Last login" line is the newest COMPLETED admin session, i.e. the one
     # before the current still-logged-in one (SESSIONS[1]), which is what a real
-    # motd shows the operator on this login.
+    # motd shows the operator on this login. Cowrie's last lays the same
+    # history out from its process start, which follows this script at deploy,
+    # so the two name the same session (to within the deploy-to-start gap).
+    # "Users logged in: 1" is the still-logged-in admin that uptime/w count
+    # (landscape-sysinfo counts utmp at login).
     load1 = LOAD.split(",")[0].strip()
     prev_login = now - SESSIONS[1][0]
     motd_txt = (
@@ -172,7 +190,7 @@ def build(now: datetime) -> dict[str, str]:
         f"  System information as of {now:%a %b %e %H:%M:%S} UTC {now:%Y}\n"
         f"\n"
         f"  System load:    {load1}                Processes:           287\n"
-        f"  Usage of /:     61.2% of 94.43GB    Users logged in:     0\n"
+        f"  Usage of /:     61.2% of 94.43GB    Users logged in:     1\n"
         f"  Memory usage:   22%                 IPv4 address for eth0: 10.0.0.14\n"
         f"  Swap usage:     0%                  Uptime:              {days} days\n"
         f"\n"
@@ -200,6 +218,10 @@ def main() -> int:
     if not cowrie_home.is_dir():
         print(f"  [FAIL] COWRIE_HOME not a directory: {cowrie_home}", file=sys.stderr)
         return 1
+    global UPTIME
+    deployed = deployed_boot_offset(cowrie_home)
+    if deployed is not None and deployed >= 0:
+        UPTIME = timedelta(seconds=deployed)
     files = build(datetime.now())
     written = 0
     for rel, text in files.items():

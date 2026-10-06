@@ -698,7 +698,7 @@ class ServiceSafetyTests(unittest.TestCase):
         self.assertEqual(patched.getint("honeypot", "boot_offset"), anchor)
         # ...and an operator's own value is kept, not duplicated.
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
-            text = shardlure.patch_cowrie_cfg("[honeypot]\nboot_offset = 99\n", 2222)
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nboot_offset = 864000\n", 2222)
         self.assertEqual(text.count("boot_offset"), 1)
         # gen-time-persona derives its anchor from the template, not a copy.
         spec = importlib.util.spec_from_file_location(
@@ -725,6 +725,33 @@ class ServiceSafetyTests(unittest.TestCase):
         fallback = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
         fallback.read_string(body)
         self.assertEqual(fallback.getint("honeypot", "boot_offset"), anchor)
+
+    def test_operator_boot_offset_reaches_the_motd_and_short_ones_warn(self):
+        # Review m-5: patch_cowrie_cfg keeps an operator's boot_offset, so
+        # gen-time-persona must read the deployed cfg, not only the template.
+        root = Path(__file__).resolve().parent.parent
+        gen = root / "install" / "persona" / "gen-time-persona.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "etc").mkdir()
+            (home / "honeyfs/etc").mkdir(parents=True)
+            (home / "etc/cowrie.cfg").write_text("[honeypot]\nboot_offset = 864000\nlog_path = $$x\n")
+            subprocess.run([sys.executable, str(gen), str(home)], check=True, capture_output=True)
+            motd = (home / "honeyfs/etc/motd").read_text()
+            self.assertIn("Uptime:              10 days", motd)
+            self.assertIn("Users logged in:     1", motd)
+            (home / "etc/cowrie.cfg").write_text("[honeypot]\nhostname = x\n")
+            subprocess.run([sys.executable, str(gen), str(home)], check=True, capture_output=True)
+            self.assertIn("Uptime:              42 days", (home / "honeyfs/etc/motd").read_text())
+        logs = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)), \
+                mock.patch.object(shardlure, "log", side_effect=logs.append):
+            shardlure.patch_cowrie_cfg("[honeypot]\nboot_offset = 3600\n", 2222)
+            self.assertTrue(any("boot_offset = 3600 is under 7 days" in m for m in logs), logs)
+            logs.clear()
+            shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+            self.assertFalse(any("boot_offset" in m for m in logs), logs)
 
     def test_apply_stealth_fallback_template_caps_downloads(self):
         # apply-stealth.sh writes an inline fallback when cowrie-stealth.cfg
