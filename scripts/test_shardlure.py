@@ -1336,6 +1336,14 @@ class PersonaFsTests(unittest.TestCase):
         shardlure.persona_fs_edit(tree)
         self.assertEqual(fs_lookup(tree, "/bin/ls")[shardlure._FS_SIZE], 138216)
 
+    def test_honeyfs_bytes_are_embedded(self):
+        # Review m-4: the pickle's own copy is what Cowrie serves when
+        # contents_path is unset; it must not keep phil.
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree, {"/usr/lib/os-release": b"ID=ubuntu\n"})
+        node = fs_lookup(tree, "/usr/lib/os-release")
+        self.assertEqual((node[shardlure._FS_CONTENTS], node[shardlure._FS_SIZE]), (b"ID=ubuntu\n", 10))
+
     def test_honeyfs_sizes_skip_proc_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1344,7 +1352,7 @@ class PersonaFsTests(unittest.TestCase):
             (root / "etc").mkdir()
             (root / "etc/hostname").write_text("prod-app-server-01\n")
             (root / "etc/link").symlink_to("hostname")
-            self.assertEqual(shardlure.honeyfs_file_sizes(root), {"/etc/hostname": 19})
+            self.assertEqual(shardlure.honeyfs_files(root), {"/etc/hostname": b"prod-app-server-01\n"})
 
     def test_os_release_lives_behind_its_usr_lib_symlink(self):
         # 22.04's /etc/os-release is a symlink to ../usr/lib/os-release, and

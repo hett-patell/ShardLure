@@ -742,7 +742,7 @@ def _fs_entry(tree: list, path: str) -> list | None:
     return next((c for c in parent[_FS_CONTENTS] if c[_FS_NAME] == name), None)
 
 
-def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
+def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int | bytes] | None = None,
                     now: float = PERSONA_IMAGE_TIME) -> list[str]:
     """Apply the persona's node changes to an unpickled fs tree in place.
 
@@ -754,14 +754,19 @@ def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
     node gets one (Cowrie serves honeyfs only onto an existing node, so the
     persona's /home/ubuntu/.bash_history was never visible), stamped `now`.
     These are data files: a node fsctl created with its parent's x bits
-    loses them (every bait file was -rwxr-xr-x).
+    loses them (every bait file was -rwxr-xr-x). A value given as bytes is
+    the file's content and is also embedded in the node (fsctl `load`'s
+    effect), so the pickle itself serves the persona's /etc/passwd, group
+    and shadow: its stock copies carry phil and Cowrie's root hash, masked
+    only while contents_path points at honeyfs (review m-4).
 
     Idempotent: every change replaces a node by name or sets attributes, so a
     second `plant-bait` run leaves the tree as the first left it. Returns the
     paths it could not place (a missing parent directory).
     """
     skipped = []
-    for path, size in sorted((honeyfs_sizes or {}).items()):
+    for path, data in sorted((honeyfs_sizes or {}).items()):
+        size = len(data) if isinstance(data, bytes) else data
         node = _fs_entry(tree, path)
         if node is None:
             parent = _fs_dir(tree, path.rpartition("/")[0] or "/")
@@ -775,6 +780,8 @@ def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
             node[_FS_SIZE] = size
         if node[_FS_TYPE] == _FS_FILE:
             node[_FS_MODE] &= ~0o111
+            if isinstance(data, bytes):
+                node[_FS_CONTENTS] = data
     for path, size in PERSONA_FS_SIZES:
         node = _fs_entry(tree, path)
         if node is None or node[_FS_TYPE] != _FS_FILE:
@@ -821,16 +828,17 @@ def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
     return skipped
 
 
-def honeyfs_file_sizes(honeyfs: Path) -> dict[str, int]:
-    """Virtual path -> size of every regular file under honeyfs, except /proc:
-    a real /proc lists every file as 0 bytes, and so does the pickle."""
-    sizes = {}
+def honeyfs_files(honeyfs: Path) -> dict[str, bytes]:
+    """Virtual path -> content of every regular file under honeyfs, except
+    /proc: a real /proc lists every file as 0 bytes, and so does the pickle
+    (and Cowrie generates /proc/uptime)."""
+    files = {}
     if honeyfs.is_dir():
         for f in honeyfs.rglob("*"):
             rel = f.relative_to(honeyfs).as_posix()
             if f.is_file() and not f.is_symlink() and rel.split("/")[0] != "proc":
-                sizes["/" + rel] = f.stat().st_size
-    return sizes
+                files["/" + rel] = f.read_bytes()
+    return files
 
 
 def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> None:
@@ -850,8 +858,8 @@ def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> None:
         log(f"warning: cannot edit {pickle_path} for the persona ({type(exc).__name__}); "
             "persona filesystem nodes not applied (fingerprintable)")
         return
-    sizes = honeyfs_file_sizes(honeyfs) if honeyfs is not None else {}
-    skipped = persona_fs_edit(tree, sizes, time.time())
+    files = honeyfs_files(honeyfs) if honeyfs is not None else {}
+    skipped = persona_fs_edit(tree, files, time.time())
     if skipped:
         log(f"warning: persona filesystem nodes without a parent directory: {', '.join(skipped)}")
     # The directory belongs to the Cowrie account and this runs as root: a
