@@ -39,6 +39,9 @@ PATCHES = (
     # GNU ls -l dates: v3.1.1 prints the --time-style=long-iso form, a tell on
     # any `ls -l`, including a dropper listing the file it just uploaded.
     "ls-date-format.py",
+    # ls -lh rounded to one decimal at every scale (135.0K); GNU rounds up
+    # and drops the decimal from 10 on (135K). Disjoint from ls-date-format.
+    "ls-human-size.py",
     # Persona commands (payload-yield Phase B). grep honours -i -q -c -v -l -o
     # and GNU's exit status (supersedes grep-case-insensitive, whose anchor
     # v3.1.1 refactored away): the profiler's `lspci | grep -i vga` GPU probe.
