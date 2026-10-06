@@ -43,6 +43,7 @@ partial_uptime="$tmp_root/cowrie-partial-uptime"
 partial_which_first="$tmp_root/cowrie-partial-which-first"
 partial_usr_bin_aliases="$tmp_root/cowrie-partial-usr-bin-aliases"
 partial_cat_exit="$tmp_root/cowrie-partial-cat-exit"
+partial_crontab_list="$tmp_root/cowrie-partial-crontab-list"
 git init -q "$cowrie"
 git -C "$cowrie" remote add origin https://github.com/cowrie/cowrie.git
 git -C "$cowrie" fetch -q --depth 1 origin "$EXPECTED_PIN"
@@ -69,6 +70,7 @@ cp -a "$cowrie" "$partial_uptime"
 cp -a "$cowrie" "$partial_which_first"
 cp -a "$cowrie" "$partial_usr_bin_aliases"
 cp -a "$cowrie" "$partial_cat_exit"
+cp -a "$cowrie" "$partial_crontab_list"
 
 # Build exact incomplete states from the patch scripts' literal blocks:
 # passwd has the piped-stdin branch without its early return, and builtins
@@ -86,6 +88,7 @@ cp -a "$cowrie" "$partial_cat_exit"
 # base.py (w) half. Task 7: which prints every match again without -a.
 # Task 7: usr-bin-aliases aliases /bin but not /sbin.
 # Task 7: cat exits 1 on a bad option but still 0 on a missing file.
+# Task 7: crontab's usage error goes to stderr but "no crontab" still to stdout.
 # The bashparse and honeypot fixtures went with the patches upstream made
 # redundant.
 python3 - \
@@ -105,7 +108,8 @@ python3 - \
   "$partial_uptime/src/cowrie/commands/uptime.py" \
   "$partial_which_first/src/cowrie/commands/which.py" \
   "$partial_usr_bin_aliases/src/cowrie/shell/protocol.py" \
-  "$partial_cat_exit/src/cowrie/commands/cat.py" <<'PY'
+  "$partial_cat_exit/src/cowrie/commands/cat.py" \
+  "$partial_crontab_list/src/cowrie/commands/crontab.py" <<'PY'
 import ast
 import sys
 from pathlib import Path
@@ -150,6 +154,7 @@ uptime_path = Path(sys.argv[14])
 which_first_path = Path(sys.argv[15])
 usr_bin_aliases_path = Path(sys.argv[16])
 cat_exit_path = Path(sys.argv[17])
+crontab_list_path = Path(sys.argv[18])
 
 passwd = string_constants(root / "install/persona/patches/passwd-stdin.py")
 early_return = "            return\n"
@@ -271,6 +276,12 @@ content = replace_once(cat_exit_path, cat["OLD_OPT"], cat["NEW_OPT"], "cat parti
 expected = {"OLD_OPT": 0, "NEW_OPT": 1, "OLD": 1, "NEW": 0, "OLD_NUMBER": 1, "NEW_NUMBER": 0}
 if any(content.count(cat[name]) != count for name, count in expected.items()):
     raise SystemExit(f"cat partial fixture has unexpected block counts in {cat_exit_path}")
+
+crontab = string_constants(root / "install/persona/patches/crontab-list.py")
+content = replace_once(crontab_list_path, crontab["OLD"], crontab["NEW"], "crontab partial")
+expected = {"OLD": 0, "NEW": 1, "OLD_LIST": 1, "NEW_LIST": 0}
+if any(content.count(crontab[name]) != count for name, count in expected.items()):
+    raise SystemExit(f"crontab partial fixture has unexpected block counts in {crontab_list_path}")
 PY
 
 # Every entry point must reject extra or misplaced arguments rather than
@@ -293,6 +304,7 @@ for patch in \
   "$ROOT/install/persona/patches/which-first.py" \
   "$ROOT/install/persona/patches/usr-bin-aliases.py" \
   "$ROOT/install/persona/patches/cat-exit.py" \
+  "$ROOT/install/persona/patches/crontab-list.py" \
   "$ROOT/install/persona/patches/sftp-capture-permissions.py"; do
   if python3 "$patch" "$args_checkout" --unexpected; then
     echo "[cowrie-patches] $(basename "$patch") accepted an unexpected argument" >&2
@@ -475,6 +487,11 @@ for mode in individual-check individual-apply orchestrator-check orchestrator-ap
     "$partial_cat_exit" \
     "$ROOT/install/persona/patches/cat-exit.py" \
     "$mode"
+  assert_partial_rejected_unchanged \
+    "crontab-list" \
+    "$partial_crontab_list" \
+    "$ROOT/install/persona/patches/crontab-list.py" \
+    "$mode"
 done
 if ((partial_failures != 0)); then
   exit 1
@@ -497,6 +514,7 @@ expected_changed=(
   "src/cowrie/commands/base.py"
   "src/cowrie/commands/busybox.py"
   "src/cowrie/commands/cat.py"
+  "src/cowrie/commands/crontab.py"
   "src/cowrie/commands/free.py"
   "src/cowrie/commands/fs.py"
   "src/cowrie/commands/last.py"
@@ -631,4 +649,4 @@ if [[ "$drifted_after" != "$drifted_before" ]]; then
   exit 1
 fi
 
-echo "[cowrie-patches] pin, 64 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona behavior, and atomic preflight checks passed"
+echo "[cowrie-patches] pin, 68 partial-state rejections, idempotence, install.sh standalone patches, capture, scp-target, shared-fs backing and time-persona behavior, and atomic preflight checks passed"

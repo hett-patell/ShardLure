@@ -69,6 +69,9 @@ PATCHES = (
     # cat exited 0 on a missing file, so `cat /x || fallback` never fell
     # back; `cat -n` wrote two spaces where coreutils writes a TAB.
     "cat-exit.py",
+    # crontab -l printed "no crontab for root" on stdout with exit 0; cron
+    # writes it to stderr and exits 1 (it ended up inside droppers' crontabs).
+    "crontab-list.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
