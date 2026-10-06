@@ -93,3 +93,14 @@ lspci	lspci
 free	free
 free-h	free -h
 uname-mpi	uname -m -p -i
+# grep pattern dialects and --color (Task 4 review I1/I2): GNU's default BRE
+# makes \| \( \{ \+ \? the operators (`grep 'model name\|Hardware'` is a recon
+# idiom), -E is ERE, -F is literal; stock compiled every pattern as Python re
+# and refused --color=auto.
+grep-bre-alternation	grep 'model name\|Hardware' /proc/cpuinfo
+grep-ere-alternation	printf 'a\nb\nc\n' | grep -E 'a|b'
+grep-bre-plus-literal	printf 'a+\naa\n' | grep 'a+'
+grep-fixed-string	printf 'a.b\naxb\n' | grep -F 'a.b'
+grep-bre-interval	printf '1 23\n4 5\n' | grep '[[:digit:]]\{2\}'
+grep-bre-unmatched	grep '\(' /proc/cpuinfo
+grep-color	printf 'foo\n' | grep --color=auto foo; printf 'bar\n' | grep --colour bar
