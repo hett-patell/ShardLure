@@ -1787,6 +1787,55 @@ class PersonaRegenTests(unittest.TestCase):
             self.assertEqual(victim.read_text(), "original\n")
             self.assertFalse(target.is_symlink())
 
+    def test_root_runs_the_persona_steps_as_cowrie_over_its_tree(self):
+        # Task 8 review m-3: root ran gen-time-persona (and persona-fs) over
+        # the cowrie-owned honeyfs/share, writing through any symlink the
+        # account planted. Over a tree another account owns, both now run as
+        # cowrie from the root-owned copy, like the unit; root runs them only
+        # over a tree root owns (the fresh install).
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))  # owned by the test's (non-root) user
+            lib = regen_lib(home)
+            calls = []
+            fake_run = lambda argv, **k: calls.append(argv) or subprocess.CompletedProcess(argv, 0)  # noqa: E731
+            with (mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib),
+                  mock.patch.object(shardlure.os, "geteuid", return_value=0),
+                  mock.patch.object(shardlure, "run", side_effect=fake_run),
+                  mock.patch.object(shardlure, "log")):
+                shardlure.deploy_time_persona(home)
+                self.assertEqual(shardlure.cmd_persona_fs(home), 0)
+            drop = ["runuser", "-u", shardlure.COWRIE_USER, "--", sys.executable]
+            self.assertEqual(calls, [drop + [str(lib / "gen-time-persona.py"), str(home)],
+                                     drop + [str(lib / "shardlure.py"), "persona-fs", str(home)]])
+            # A root-owned tree (fresh install): root runs the checkout's own copy.
+            calls.clear()
+            with (mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib),
+                  mock.patch.object(shardlure, "persona_tree_prefix", return_value=[]),
+                  mock.patch.object(shardlure, "run", side_effect=fake_run),
+                  mock.patch.object(shardlure, "log")):
+                shardlure.deploy_time_persona(home)
+            self.assertEqual(calls, [[sys.executable,
+                                      str(Path(shardlure.ROOT) / "install/persona/gen-time-persona.py"),
+                                      str(home)]])
+            # No copy to drop to: refuse rather than fall back to root.
+            calls.clear()
+            shutil.rmtree(lib)
+            with (mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib),
+                  mock.patch.object(shardlure.os, "geteuid", return_value=0),
+                  mock.patch.object(shardlure, "run", side_effect=fake_run),
+                  mock.patch.object(shardlure, "log")):
+                shardlure.deploy_time_persona(home)
+                self.assertEqual(shardlure.cmd_persona_fs(home), 1)
+            self.assertEqual(calls, [])
+        # apply-stealth.sh goes through those entry points, never root python
+        # on the generator itself, and hands the rsynced trees back first.
+        script = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
+        self.assertNotIn('sudo python3 "$PERSONA/gen-time-persona.py"', script)
+        steps = [script.index(s) for s in ('sudo chown -R cowrie:cowrie "${early_owned[@]}"',
+                                            'persona-regen-install "$COWRIE_HOME"',
+                                            'time-persona "$COWRIE_HOME"', 'persona-fs "$COWRIE_HOME"')]
+        self.assertEqual(steps, sorted(steps))
+
     def test_install_sh_renders_the_same_prestart(self):
         for override in (None, '/srv/lib "q" $V %n'):
             with self.subTest(override=override), tempfile.TemporaryDirectory() as tmp:

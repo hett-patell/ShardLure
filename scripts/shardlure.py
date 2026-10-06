@@ -560,11 +560,13 @@ def apply_stealth_persona(honeypot_port: int) -> None:
     ensure_cowrie_filesystem()
     plant_bait_files()
     deploy_txtcmds()
+    # Before the two persona steps: over a tree the Cowrie account already
+    # owns they run as that account from this root-owned copy.
+    deploy_persona_regen()
     deploy_time_persona()
     # gen-time-persona rewrites honeyfs/etc/motd after plant_bait_files sized
     # its node; size it (and embed it) again from the final file.
     cmd_persona_fs(COWRIE_HOME)
-    deploy_persona_regen()
     deploy_patches()
     keydir = COWRIE_HOME / "var/lib/cowrie"
     keydir.mkdir(parents=True, exist_ok=True)
@@ -1091,7 +1093,21 @@ def cmd_persona_fs(cowrie_home: Path) -> int:
     existing box) calls it after syncing honeyfs: without it such a box got
     the new command/type resolver, which answers from the fake PATH alone,
     over a stock pickle with no sudo/crontab/ping nodes, and kept /home/phil
-    (Task 7 review I-1). Idempotent; Cowrie must be restarted to load it."""
+    (Task 7 review I-1). Idempotent; Cowrie must be restarted to load it.
+
+    Run by root over a tree the Cowrie account owns, it re-runs itself as
+    that account from the root-owned PERSONA_REGEN_LIB copy (as
+    cowrie.service does before every start): the pickles, their directories
+    and honeyfs are the account's, so root would read and write through paths
+    the account can redirect (Task 8 fix round, the same rule as
+    deploy_time_persona)."""
+    prefix = persona_tree_prefix(cowrie_home)
+    if prefix:
+        copy = PERSONA_REGEN_LIB / "shardlure.py"
+        if not copy.is_file():
+            log(f"warning: {copy} missing (run persona-regen-install); persona filesystem not applied")
+            return 1
+        return run([*prefix, sys.executable, str(copy), "persona-fs", str(cowrie_home)]).returncode
     pickles = cowrie_fs_pickles(cowrie_home)
     if not pickles:
         log(f"warning: no Cowrie fs.pickle under {cowrie_home}; persona filesystem not applied")
@@ -1131,7 +1147,14 @@ def deploy_txtcmds() -> None:
         shutil.copy2(src_file, dst)
 
 
-def deploy_time_persona() -> None:
+def persona_tree_prefix(cowrie_home: Path) -> list[str]:
+    """`runuser -u <cowrie> --` when the tree the persona steps write is not
+    root's own (cowrie_owned_prefix), else []."""
+    return cowrie_owned_prefix(cowrie_home, cowrie_home / "honeyfs", cowrie_home / "share/cowrie/txtcmds",
+                               cowrie_home / "src/cowrie/data", cowrie_home / "var/lib/cowrie")
+
+
+def deploy_time_persona(cowrie_home: Path | None = None) -> None:
     """Regenerate time-sensitive persona files against the live clock.
 
     The txtcmds/honeyfs files are otherwise frozen at a fixed date, which is a
@@ -1140,12 +1163,26 @@ def deploy_time_persona() -> None:
     the past. The generator rewrites uptime/w/who/last and /proc/uptime so they
     track "now" and agree with each other. Must run AFTER deploy_txtcmds() (it
     overwrites files that step just planted).
+
+    Root runs it only over a tree root owns (a fresh install, before
+    prepare_cowrie_tree hands it over). Over a tree the Cowrie account owns
+    (a re-run, apply-stealth.sh) it runs as that account, from the root-owned
+    PERSONA_REGEN_LIB copy, exactly as cowrie.service runs it before every
+    start (Task 8 review m-3): the generator opens paths inside that tree, and
+    as root it wrote persona text through any symlink the account planted
+    there. As the account it can only write what the account could already
+    write. That is simpler than making every write in the generator
+    descriptor-pinned and no-follow, and it is the same code path and the same
+    privileges as the per-start run, so the two cannot diverge.
     """
-    gen = ROOT / "install" / "persona" / "gen-time-persona.py"
+    home = COWRIE_HOME if cowrie_home is None else cowrie_home
+    prefix = persona_tree_prefix(home)
+    gen = (PERSONA_REGEN_LIB if prefix else ROOT / "install" / "persona") / "gen-time-persona.py"
     if not gen.is_file():
+        log(f"warning: {gen} missing; persona time files may be stale (fingerprintable)")
         return
     log("refreshing time-sensitive persona against live clock")
-    proc = run([sys.executable, str(gen), str(COWRIE_HOME)])
+    proc = run([*prefix, sys.executable, str(gen), str(home)])
     if proc.returncode != 0:
         # Non-fatal: a stale-but-planted persona still works, just fingerprintable.
         log(f"warning: time-persona generator exited {proc.returncode}; "
@@ -2127,6 +2164,12 @@ def main() -> None:
         if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
             die("usage: python3 scripts/shardlure.py persona-fs [COWRIE_HOME]")
         sys.exit(cmd_persona_fs(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME))
+    elif cmd == "time-persona":
+        # apply-stealth.sh's entry to deploy_time_persona: the same
+        # run-as-the-tree's-owner rule as the installer.
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
+            die("usage: sudo python3 scripts/shardlure.py time-persona [COWRIE_HOME]")
+        deploy_time_persona(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME)
     elif cmd == "persona-regen-install":
         # apply-stealth.sh's way to (re)install PERSONA_REGEN_LIB with the
         # same checks as the installer; COWRIE_HOME locates the legacy copy.
@@ -2148,7 +2191,7 @@ def main() -> None:
     else:
         die("usage: sudo python3 scripts/shardlure.py "
             "{run|finish|start|stop|status|plant-bait|persona-fs [COWRIE_HOME]|"
-            "persona-regen-install [COWRIE_HOME]|uninstall [--purge]}")
+            "persona-regen-install [COWRIE_HOME]|time-persona [COWRIE_HOME]|uninstall [--purge]}")
 
 
 if __name__ == "__main__":
