@@ -11,10 +11,12 @@ import re
 import grp
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1711,7 +1713,9 @@ class PersonaRegenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = regen_tree(Path(tmp))
             (home / "honeyfs/proc/uptime").write_text("0 0\n")
-            (home / "honeyfs/proc/uptime").chmod(0o444)
+            # Files are replaced by rename, so what the account cannot write
+            # is a directory (left root-owned by a manual step).
+            (home / "honeyfs/proc").chmod(0o555)  # TemporaryDirectory restores it
             first, second = prestart_commands(self.render(home))
             proc = subprocess.run(first[1], capture_output=True, text=True, timeout=60)
             self.assertEqual(proc.returncode, 1)
@@ -1720,6 +1724,72 @@ class PersonaRegenTests(unittest.TestCase):
             # Every other file was still refreshed.
             self.assertIn("System information as of", (home / "honeyfs/etc/motd").read_text())
             self.assertEqual(subprocess.run(second[1], capture_output=True, timeout=60).returncode, 0)
+
+    def test_persona_writes_are_whole_or_absent(self):
+        # Task 8 review m-2: `timeout` kills a step mid-run. gen-time-persona
+        # replaces each file by rename and removes its temp on SIGTERM, and
+        # both steps sweep temps a SIGKILL left behind.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "gen_time_persona_m2", Path(shardlure.ROOT) / "install/persona/gen-time-persona.py")
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            motd = d / "motd"
+            motd.write_text("old complete motd\n")
+            motd.chmod(0o640)
+            # Killed between writing the temp and the rename: the old file
+            # stays whole and no temp is left.
+            with mock.patch.object(gen.os, "replace", side_effect=SystemExit(143)):
+                with self.assertRaises(SystemExit):
+                    gen.write_atomic(motd, "new motd\n")
+            self.assertEqual(motd.read_text(), "old complete motd\n")
+            self.assertEqual(sorted(os.listdir(d)), ["motd"])
+            gen.write_atomic(motd, "new motd\n")
+            self.assertEqual((motd.read_text(), stat.S_IMODE(motd.stat().st_mode)), ("new motd\n", 0o640))
+            # A link at the name is replaced, never written through.
+            victim = d / "victim"
+            victim.write_text("v\n")
+            link = d / "uptime"
+            link.symlink_to(victim)
+            gen.write_atomic(link, "1 1\n")
+            self.assertEqual((victim.read_text(), link.is_symlink()), ("v\n", False))
+            # SIGTERM becomes SystemExit, so the cleanup above runs.
+            old = signal.signal(signal.SIGTERM, gen._terminate)
+            try:
+                with self.assertRaises(SystemExit) as caught:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(1)
+                self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+            finally:
+                signal.signal(signal.SIGTERM, old)
+            # SIGKILL leftovers: only temps older than any run are removed.
+            stale, fresh = d / ".motd.persona-stale", d / ".motd.persona-fresh"
+            for p in (stale, fresh):
+                p.write_text("x")
+            os.utime(stale, (time.time() - 3600,) * 2)
+            gen.remove_stale_temps(d, "motd")
+            self.assertEqual((stale.exists(), fresh.exists()), (False, True))
+            pstale, pfresh = d / ".fs.pickle.persona-stale", d / ".fs.pickle.persona-fresh"
+            for p in (pstale, pfresh):
+                p.write_text("x")
+            os.utime(pstale, (time.time() - 3600,) * 2)
+            shardlure.remove_stale_pickle_temps(d)
+            self.assertEqual((pstale.exists(), pfresh.exists()), (False, True))
+        # Both steps sweep on every run.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            left = [home / "honeyfs/etc/.motd.persona-killed", home / "src/cowrie/data/.fs.pickle.persona-killed"]
+            for p in left:
+                p.write_text("partial")
+                os.utime(p, (time.time() - 3600,) * 2)
+            for _, argv in prestart_commands(self.render(home)):
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual([p.exists() for p in left], [False, False])
+            names = [p.name for p in home.rglob("*") if ".persona-" in p.name]
+            self.assertEqual(names, [])
 
     def test_regen_copy_is_the_scripts_the_steps_need(self):
         with tempfile.TemporaryDirectory() as tmp:

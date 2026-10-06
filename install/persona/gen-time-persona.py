@@ -36,7 +36,12 @@ so the deploy-time files cannot drift from what Cowrie answers.
 Usage: gen-time-persona.py COWRIE_HOME
 """
 import configparser
+import os
+import signal
+import stat
 import sys
+import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -210,7 +215,65 @@ def build(now: datetime) -> dict[str, str]:
     }
 
 
+# Temp files sit beside their target as `.<name>.persona-XXXX`. A SIGTERM
+# (cowrie.service's `timeout 30`) unwinds through write_atomic's cleanup; a
+# SIGKILL (systemd's start timeout) cannot, so each run first removes
+# leftovers older than STALE_TEMP_SECONDS: older than any run, so never a
+# concurrent run's live temp.
+STALE_TEMP_SECONDS = 60
+
+
+def _terminate(signum, frame):  # noqa: ANN001, ARG001
+    raise SystemExit(128 + signum)
+
+
+def remove_stale_temps(directory: Path, name: str, now: float | None = None) -> None:
+    """Delete `.<name>.persona-*` regular files in directory older than
+    STALE_TEMP_SECONDS (unlink never follows a link)."""
+    prefix = f".{name}.persona-"
+    cutoff = (time.time() if now is None else now) - STALE_TEMP_SECONDS
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if (entry.name.startswith(prefix) and entry.is_file(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime < cutoff):
+                os.unlink(entry.path)
+        except OSError:
+            continue
+
+
+def write_atomic(dst: Path, text: str) -> None:
+    """Replace dst whole, never in place: write a fresh temp file (O_EXCL)
+    in the same directory and rename it over dst. A run killed mid-write
+    leaves the previous complete file (a stale persona is the accepted
+    residual; a truncated motd or txtcmd is a tell of its own). The new file
+    keeps dst's mode; rename replaces a link at dst, never its target."""
+    try:
+        st = os.lstat(dst)
+        mode = stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else 0o644
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.persona-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def main() -> int:
+    signal.signal(signal.SIGTERM, _terminate)
     if len(sys.argv) != 2:
         print("usage: gen-time-persona.py COWRIE_HOME", file=sys.stderr)
         return 2
@@ -234,8 +297,9 @@ def main() -> int:
             # Only write where the persona already placed the tree; a missing
             # parent means that command/proc file was never deployed here.
             continue
+        remove_stale_temps(dst.parent, dst.name)
         try:
-            dst.write_text(text)
+            write_atomic(dst, text)
         except OSError as exc:
             # cowrie.service runs this as the Cowrie account before every
             # start: one file it cannot write (left root-owned by a manual

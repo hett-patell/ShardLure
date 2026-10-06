@@ -1013,6 +1013,30 @@ def load_fs_pickle(data: bytes) -> list:
     return tree
 
 
+PICKLE_TEMP_PREFIX = ".fs.pickle.persona-"
+STALE_TEMP_SECONDS = 60
+
+
+def remove_stale_pickle_temps(directory: Path, now: float | None = None) -> None:
+    """Delete PICKLE_TEMP_PREFIX regular files in directory older than
+    STALE_TEMP_SECONDS, older than any run, so never a concurrent run's live
+    temp (unlink never follows a link)."""
+    import time  # noqa: PLC0415
+
+    cutoff = (time.time() if now is None else now) - STALE_TEMP_SECONDS
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if (entry.name.startswith(PICKLE_TEMP_PREFIX) and entry.is_file(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime < cutoff):
+                os.unlink(entry.path)
+        except OSError:
+            continue
+
+
 def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> bool:
     """Edit Cowrie's fs.pickle for the persona: what fsctl cannot express
     (setuid modes, symlinks, real sizes). The pickle is the pinned Cowrie
@@ -1044,8 +1068,12 @@ def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> bool:
     # The directory belongs to the Cowrie account and this runs as root: a
     # fixed temp name could be a planted symlink (review m-3). mkstemp opens
     # a fresh name with O_EXCL; the result keeps the pickle's mode and owner.
+    # A SIGTERM (cowrie.service's `timeout`) unwinds through the cleanup
+    # below (main turns it into SystemExit); a SIGKILL cannot, so temps older
+    # than any run are removed first (review m-2).
+    remove_stale_pickle_temps(pickle_path.parent)
     st = pickle_path.stat()
-    fd, tmp_name = tempfile.mkstemp(dir=pickle_path.parent, prefix=".fs.pickle.persona-")
+    fd, tmp_name = tempfile.mkstemp(dir=pickle_path.parent, prefix=PICKLE_TEMP_PREFIX)
     try:
         with os.fdopen(fd, "wb") as f:
             pickle.dump(tree, f)
@@ -2163,6 +2191,10 @@ def main() -> None:
         # Task 7 re-review N-1): unknown flags are fatal here.
         if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
             die("usage: python3 scripts/shardlure.py persona-fs [COWRIE_HOME]")
+        # cowrie.service's `timeout` sends SIGTERM: unwind through
+        # apply_persona_fs's temp cleanup instead of dying mid-write.
+        import signal  # noqa: PLC0415
+        signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
         sys.exit(cmd_persona_fs(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME))
     elif cmd == "time-persona":
         # apply-stealth.sh's entry to deploy_time_persona: the same
