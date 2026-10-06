@@ -1480,6 +1480,16 @@ class PersonaUsersTests(unittest.TestCase):
         for name in ("ubuntu", "deploy"):
             self.assertIn(":".join(users[name]) + "\n", expected)
 
+    def test_password_login_users_are_not_locked(self):
+        # Review m-5: the userdb admits ubuntu and deploy by password, so a
+        # locked `!` in shadow contradicts the login the attacker just made.
+        # Their hashes are yescrypt of random, discarded passwords.
+        shadow = {r[0]: r[1] for r in self.rows("shadow")}
+        for user in ("root", "ubuntu", "deploy"):
+            with self.subTest(user=user):
+                self.assertTrue(shadow[user].startswith("$y$j9T$"), shadow[user])
+        self.assertEqual(len({shadow[u] for u in ("root", "ubuntu", "deploy")}), 3)
+
     def test_files_agree_with_each_other(self):
         passwd, shadow = self.rows("passwd"), self.rows("shadow")
         group, gshadow = self.rows("group"), self.rows("gshadow")
