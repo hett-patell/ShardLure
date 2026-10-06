@@ -641,6 +641,10 @@ PERSONA_FS_FILES = (
     ("/usr/bin/crontab", 39568, 0o102755, 104, 1648063140),
     ("/usr/bin/dig", 154448, 0o100755, 0, PERSONA_IMAGE_TIME),
     ("/usr/bin/git", 3710360, 0o100755, 0, PERSONA_IMAGE_TIME),
+    # The persona ships txtcmds for these two, but with no node they answered
+    # `command not found` (review m-7): lsb-release 11.1.0ubuntu4 and systemd.
+    ("/usr/bin/hostnamectl", 31104, 0o100755, 0, 1699965993),
+    ("/usr/bin/lsb_release", 3638, 0o100755, 0, 1566787260),
     # psmisc 23.4-2build3; Cowrie registers killall (Task 7 review I-2).
     ("/usr/bin/killall", 32096, 0o100755, 0, 1648139377),
     ("/usr/bin/lspci", 94288, 0o100755, 0, 1630311300),

@@ -161,3 +161,6 @@ command-exec-bit	command -v /etc/passwd; echo rc=$?; type /etc/passwd; echo rc=$
 # parse ran `NR >= 2` for `NR >= 2 && NR <= 2`; float() made nan/inf/1_000
 # numbers.
 awk-boolean	printf '1\n2\n3\n' | awk 'NR >= 2 && NR <= 2'; printf '1\n2\n3\n' | awk 'NR == 1 || NR == 3 {print $1}'; printf 'nan\ninf\n1_000\n1e5\n0x1A\n+3\n.5\n' | awk '$1 > 5'
+# lsb_release and hostnamectl have persona txtcmds but had no node, so they
+# answered `command not found` (Task 7 review m-7).
+lsb-hostnamectl-present	command -v lsb_release hostnamectl; hostnamectl | head -1
