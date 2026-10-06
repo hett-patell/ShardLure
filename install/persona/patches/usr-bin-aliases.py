@@ -16,6 +16,15 @@ After the registry is built, every /bin/X or /sbin/X entry gains its
 /usr/bin/X or /usr/sbin/X twin, and every /usr/... entry gains its short
 twin. An existing registration is never replaced (setdefault), so where
 upstream registers both spellings, each keeps its own class.
+
+Absent tools (Task 7 review I-2): gcc, php, python (python2) and yum are not
+on a 22.04 server, and the persona's fake PATH has no file for them, so
+`command -v gcc`, `which gcc` and `type gcc` report them absent. Cowrie still
+ran them (`gcc --version` printed `gcc (Debian 4.7.2-8) 4.7.2`, rc 0), and
+a two-step probe `command -v gcc || gcc -v` saw both answers. The block now
+removes them from the registry, in every spelling, so they answer
+`command not found` with rc 127. The loop variables are deleted afterwards so
+they do not stay behind as attributes of HoneyPotBaseProtocol.
 """
 import sys
 from pathlib import Path
@@ -56,6 +65,14 @@ NEW = '''    commands: ClassVar[dict] = {}
                 commands.setdefault(
                     _shardlure_short + _shardlure_name[len(_shardlure_long):],
                     commands[_shardlure_name])
+    # Tools a 22.04 server does not ship: no python2 (python-is-python3 is not
+    # installed), no compiler, no PHP, no yum. command -v/which/type already
+    # say so; running one must say so too (`command not found`, rc 127),
+    # not print Cowrie's Debian banners (`gcc (Debian 4.7.2-8)`).
+    for _shardlure_name in ("gcc", "php", "python", "yum"):
+        for _shardlure_short in ("", "/bin/", "/usr/bin/"):
+            commands.pop(_shardlure_short + _shardlure_name, None)
+    del _shardlure_name, _shardlure_short, _shardlure_long
 
     def __init__(self, avatar):
 '''

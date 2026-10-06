@@ -145,3 +145,7 @@ os-release-size	ls -l /usr/lib/os-release | awk '{print $1, $5}'; cat /etc/os-re
 # (22.04's awk) compares numerically when both sides look numeric, else as
 # strings ("b" > 9).
 awk-patterns	printf 'a b\nc 10\ne 9\n' | awk 'FNR == 2 {print $2;}'; printf 'a b\nc 10\ne 9\n' | awk 'NR>1'; printf 'a b\nc 10\ne 9\n' | awk '$1 == "c" {print $2}'; printf 'a b\nc 10\ne 9\n' | awk '$2 > 9 {print FNR, $1}'
+# Absent tools end to end (Task 7 review I-2): 22.04 ships no gcc, php, yum
+# or python2, and command -v already says so; running one must not print
+# Cowrie's Debian banners. killall (psmisc) is present.
+absent-tools	command -v gcc python php yum; echo rc=$?; gcc -v; echo rc=$?; python -V; echo rc=$?; php -v; echo rc=$?; yum install -y x; echo rc=$?; /usr/bin/gcc --version; echo rc=$?; command -v killall

@@ -641,6 +641,8 @@ PERSONA_FS_FILES = (
     ("/usr/bin/crontab", 39568, 0o102755, 104, 1648063140),
     ("/usr/bin/dig", 154448, 0o100755, 0, PERSONA_IMAGE_TIME),
     ("/usr/bin/git", 3710360, 0o100755, 0, PERSONA_IMAGE_TIME),
+    # psmisc 23.4-2build3; Cowrie registers killall (Task 7 review I-2).
+    ("/usr/bin/killall", 32096, 0o100755, 0, 1648139377),
     ("/usr/bin/lspci", 94288, 0o100755, 0, 1630311300),
     ("/usr/bin/nc.openbsd", 39560, 0o100755, 0, 1645634340),
     ("/usr/bin/ping", 76680, 0o100755, 0, PERSONA_IMAGE_TIME),
