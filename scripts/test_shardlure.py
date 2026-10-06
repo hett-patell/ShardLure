@@ -1199,7 +1199,10 @@ def persona_fs_tree():
     d = lambda n, c=None: _fs_node(n, shardlure._FS_DIR, c)  # noqa: E731
     f = lambda n, size=10: _fs_node(n, shardlure._FS_FILE, size=size, mode=0o100755)  # noqa: E731
     return d("/", [
-        d("usr", [d("bin", [f("ls", 151344), f("echo")]), d("sbin"), d("lib", [f("os-release", 267)])]),
+        d("usr", [d("bin", [f("ls", 151344), f("echo"), f("python3.11", 6831736),
+                            _fs_node("python3", shardlure._FS_LINK, target="usr/bin/python3.11",
+                                     mode=0o120777)]),
+                  d("sbin"), d("lib", [f("os-release", 267), d("python3.11", [f("os.py")])])]),
         d("etc", [d("alternatives")]),
         d("home", [d("phil"), d("ubuntu", [d(".aws", [f("credentials")])]),
                    d("deploy", [d(".ssh", [f("id_rsa")])])]),
@@ -1262,6 +1265,19 @@ class PersonaFsTests(unittest.TestCase):
         for rel in ("usr/bin/systemctl", "bin/systemctl"):
             with self.subTest(rel=rel):
                 self.assertEqual((txtcmds / rel).read_bytes(), b"")
+
+    def test_python3_is_22_04s_3_10(self):
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree)
+        node = fs_lookup(tree, "/usr/bin/python3")
+        self.assertEqual((node[shardlure._FS_NAME], node[shardlure._FS_SIZE]), ("python3.10", 5941864))
+        self.assertIsNone(fs_lookup(tree, "/usr/bin/python3.11"))
+        self.assertIsNotNone(fs_lookup(tree, "/usr/lib/python3.10/os.py"))
+        self.assertIsNone(fs_lookup(tree, "/usr/lib/python3.11"))
+        again = persona_fs_tree()
+        shardlure.persona_fs_edit(again)
+        shardlure.persona_fs_edit(again)
+        self.assertEqual(tree, again)
 
     def test_no_node_is_newer_than_the_persona_image(self):
         for path, *_, ctime in shardlure.PERSONA_FS_FILES:

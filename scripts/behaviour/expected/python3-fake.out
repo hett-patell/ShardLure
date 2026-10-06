@@ -1,0 +1,12 @@
+/usr/bin/python3
+/usr/bin/python3.10
+Python 3.10.12
+Python 3.10.12
+rc=0
+rc=0
+python3: can't open file '/nope.py': [Errno 2] No such file or directory
+rc=2
+Unknown option: -z
+usage: python3 [option] ... [-c cmd | -m mod | file | -] [arg] ...
+Try `python -h' for more information.
+rc=2

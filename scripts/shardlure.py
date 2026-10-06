@@ -650,6 +650,11 @@ PERSONA_FS_FILES = (
     ("/usr/bin/systemctl", 1119856, 0o100755, 0, PERSONA_IMAGE_TIME),
     ("/usr/sbin/ethtool", 564712, 0o100755, 0, PERSONA_IMAGE_TIME),
     ("/usr/sbin/xtables-nft-multi", 224296, 0o100755, 0, 1705459440),
+    # python3.10 3.10.12-1~22.04.3 (built Nov 20 2023, the build python3 -VV
+    # and its REPL banner print; install/persona/patches/python3-emulation.py).
+    # The pickle shipped Debian's python3.11, which 22.04 does not have.
+    ("/usr/bin/python3.10", 5941864, 0o100755, 0, 1700493240),
+    ("/usr/bin/pydoc3.10", 79, 0o100755, 0, 1700493240),
 )
 # Their symlinks, as 22.04 lays them out. Targets are absolute: Cowrie resolves
 # a relative target from / rather than from the link's directory, so the real
@@ -666,6 +671,13 @@ PERSONA_FS_LINKS = (
     ("/usr/sbin/poweroff", "/bin/systemctl"),
     ("/usr/sbin/reboot", "/bin/systemctl"),
     ("/usr/sbin/shutdown", "/bin/systemctl"),
+    ("/usr/bin/python3", "/usr/bin/python3.10"),
+    ("/usr/bin/pydoc3", "/usr/bin/pydoc3.10"),
+)
+# Directories renamed in place (contents kept): the stdlib directory follows
+# the interpreter version.
+PERSONA_FS_RENAMES = (
+    ("/usr/lib/python3.11", "python3.10"),
 )
 # Real 22.04 sizes for binaries whose pickle node carries another build's:
 # `ls -lh $(which ls)` (35 sessions in 30 days) prints this one, `135K` on
@@ -677,7 +689,7 @@ PERSONA_FS_SIZES = (
 # and shadow with a /home/phil, a known Cowrie fingerprint (the IMC 2025
 # study saw >90% of phil logins disconnect at once). The persona's honeyfs
 # passwd/group/shadow drop him; this drops his home.
-PERSONA_FS_REMOVE = ("/home/phil",)
+PERSONA_FS_REMOVE = ("/home/phil", "/usr/bin/python3.11", "/usr/bin/pydoc3.11")
 # The persona's users own their homes (honeyfs/etc/passwd: cloud-init's ubuntu
 # 1000, the operator's deploy 1001); fsctl made them root's. 22.04's
 # login.defs HOME_MODE is 0750.
@@ -769,6 +781,14 @@ def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int] | None = None,
             skipped.append(path)
             continue
         node[_FS_SIZE] = size
+    for path, new_name in PERSONA_FS_RENAMES:
+        parent_path, _, name = path.rpartition("/")
+        parent = _fs_dir(tree, parent_path or "/")
+        if parent is None or any(c[_FS_NAME] == new_name for c in parent[_FS_CONTENTS]):
+            continue
+        for child in parent[_FS_CONTENTS]:
+            if child[_FS_NAME] == name:
+                child[_FS_NAME] = new_name
     for path in PERSONA_FS_REMOVE:
         parent_path, _, name = path.rpartition("/")
         parent = _fs_dir(tree, parent_path or "/")

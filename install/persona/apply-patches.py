@@ -82,6 +82,10 @@ PATCHES = (
     # awk parsed only /regex/ patterns: `df -h | awk 'FNR == 2 {print $2;}'`
     # printed nothing. Comparison patterns and FNR, compared as mawk does.
     "awk-patterns.py",
+    # `command -v python3` passes the bots' gate, then `python3 -c` hit "No
+    # such file or directory". python3 answers as 22.04's: fake success,
+    # never execution (the patch's docstring and test_python3_fake.py).
+    "python3-emulation.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in
     # PATCHES and apply on the pin (test_release_contracts and
