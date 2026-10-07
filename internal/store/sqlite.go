@@ -802,6 +802,13 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	// v27: artifacts keyed by (url, fetch_epoch) instead of UNIQUE(url), and
+	// refetch_schedule (payload yield Phase C). See artifacts_v27.go.
+	if current < 27 {
+		if err := s.WithTx(func(tx *sql.Tx) error { return migrateArtifactsV27(tx, now) }); err != nil {
+			return err
+		}
+	}
 	// After the ladder, on every Open: the v26 rung was amended in place
 	// after branch builds had already stamped databases 26 (see v26Objects),
 	// and `current < 26` never lets those databases see the later objects.

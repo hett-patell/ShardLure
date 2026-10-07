@@ -34,23 +34,10 @@ func (s *Store) ensureArtifactsTable() error {
 	// Runs the DDL once; every later call is a cheap sync.Once check (no DDL,
 	// no writeMu) instead of a CREATE-TABLE on every read/write.
 	s.onceArtifacts.Do(func() {
-		if _, err := s.execWrite(`
-CREATE TABLE IF NOT EXISTS artifacts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT NOT NULL,
-  src_ip TEXT,
-  session_id TEXT,
-  actor_id TEXT,
-  url TEXT NOT NULL,
-  local_path TEXT,
-  sha256 TEXT,
-  size_bytes INTEGER DEFAULT 0,
-  origin TEXT NOT NULL,
-  status TEXT NOT NULL,
-  detail TEXT,
-  created_at TEXT NOT NULL,
-  UNIQUE(url)
-)`); err != nil {
+		// The ladder creates the table (v17) and rebuilds it into this shape
+		// (v27) before any caller gets here, so the CREATE is normally a
+		// no-op; it stays so the lazy path and the ladder agree on the shape.
+		if _, err := s.execWrite(artifactsTableDDL); err != nil {
 			s.errArtifacts = err
 			return
 		}
@@ -59,12 +46,15 @@ CREATE TABLE IF NOT EXISTS artifacts (
 		// (WHERE session_id), the bazaar pending NOT-IN (WHERE sha256), and
 		// ListRecentArtifacts / ArtifactsForShare (ORDER BY created_at) all
 		// full-scanned the table. This function owns the table (lazily created),
-		// so the indexes live here rather than in the migration ladder.
-		_, s.errArtifacts = s.execWrite(`
-CREATE INDEX IF NOT EXISTS idx_artifacts_sha256 ON artifacts(sha256);
-CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
-CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at);
-`)
+		// so the indexes live here; the v27 rung recreates them after its
+		// rebuild from the same artifactsLazyIndexes text. The (url,
+		// fetch_epoch) key replaces v27's dropped UNIQUE(url).
+		for _, ddl := range append([]string{artifactsURLEpochIndex}, artifactsLazyIndexes...) {
+			if _, err := s.execWrite(ddl); err != nil {
+				s.errArtifacts = err
+				return
+			}
+		}
 	})
 	return s.errArtifacts
 }
