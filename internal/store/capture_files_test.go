@@ -826,3 +826,29 @@ func TestUploadMissingSourceFailsWithoutRetry(t *testing.T) {
 		t.Fatalf("failed upload still holds its source: %v %v", held, err)
 	}
 }
+
+func TestUploadBackfillStartsAtTheOldestRetainedEvent(t *testing.T) {
+	s := newTestStore(t, "upload-backfill-start.db")
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	var events []*models.Event
+	for i := 0; i < 5; i++ {
+		events = append(events, &models.Event{TS: at, Source: models.SourceCowrie, Kind: models.KindConnect})
+	}
+	if err := s.AppendEventsAndUpsertActorsAgg(events, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Retention purged ids 1..3; the old cursor sits at the newest event.
+	if _, err := s.db.Exec("DELETE FROM events WHERE id<=3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('capture',?,0,5,'',?)", fileCaptureDiscoveryPath, captureTime(at)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	var ceiling, progress int64
+	if err := s.db.QueryRow("SELECT inode,offset FROM ingest_state WHERE source='capture' AND path=?", fileUploadBackfillPath).Scan(&ceiling, &progress); err != nil || ceiling != 5 || progress != 3 {
+		t.Fatalf("backfill ceiling=%d progress=%d err=%v; want 5 and 3", ceiling, progress, err)
+	}
+}

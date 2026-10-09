@@ -133,6 +133,8 @@ func (w *FileWorker) tick(ctx context.Context) (int, error) {
 	} // publication happened; leave bytes for retry/adoption
 	reason, status := store.FileCaptureReadFailure, store.FileCaptureRetry
 	switch {
+	case errors.Is(err, errSourceRootMissing):
+		reason = store.FileCaptureReadFailure
 	case errors.Is(err, safefile.ErrNotExist):
 		reason = store.FileCaptureMissingSource
 	case errors.Is(err, ErrEmptyArtifact):
@@ -157,6 +159,7 @@ func (w *FileWorker) tick(ctx context.Context) (int, error) {
 }
 
 var errFileTooLarge = errors.New("file capture: size limit exceeded")
+var errSourceRootMissing = errors.New("file capture: downloads directory missing")
 var errFileHashMismatch = errors.New("file capture: hash mismatch")
 
 func hashCaptureFile(ctx context.Context, f *os.File, maxBytes int64) (string, int64, error) {
@@ -259,6 +262,12 @@ func (w *FileWorker) archive(ctx context.Context, job store.FileCaptureJob, outp
 		}
 	}
 	source, err := safefile.OpenRoot(w.downloadsRoot)
+	if errors.Is(err, safefile.ErrNotExist) {
+		// The downloads directory itself is missing (Cowrie not started yet,
+		// or its path moved): that says nothing about this file, so retry
+		// rather than report missing_source, which fails an upload at once.
+		return false, errSourceRootMissing
+	}
 	if err != nil {
 		return false, err
 	}

@@ -32,6 +32,10 @@ type Store struct {
 	writeMu       sync.Mutex
 	captureMu     sync.Mutex
 	capturePolicy CaptureRetentionPolicy
+	// uploadBackfillReleased lifts the source-retention hold of an upload
+	// backfill that keeps failing (see ReleaseUploadBackfillHold). Guarded by
+	// captureMu, like capturePolicy.
+	uploadBackfillReleased bool
 
 	// Lazy-table creation guards. The artifacts / enrichment / bazaar / tty
 	// tables are created on first use (CREATE TABLE IF NOT EXISTS), but the

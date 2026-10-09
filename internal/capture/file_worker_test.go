@@ -579,12 +579,13 @@ func TestFileWorkerUploadWithMissingFileFailsAtOnce(t *testing.T) {
 	}
 }
 
-// The ShardLure-side cause of uploads missing from the archive: Cowrie keeps
-// one content-addressed file per payload and never refreshes its mtime when
-// the same bytes are uploaded again, and the directory sync dated its
-// session-less row from that mtime. A payload first seen past retention and
-// re-uploaded yesterday therefore lost its source file, its row and its
-// evidence copy in one purge. An upload job dates its own row from the upload.
+// A possible case, not the observed one (prod's September misses were the
+// pre-v3.1.1 Cowrie never keeping the file): Cowrie keeps one
+// content-addressed file per payload and never refreshes its mtime when the
+// same bytes are uploaded again, and the directory sync dates its session-less
+// row from that mtime. A payload first seen past retention and re-uploaded
+// yesterday would lose its source file, its row and its evidence copy in one
+// purge. An upload job dates its own row from the upload, so it survives.
 func TestRedeliveredUploadSurvivesRetentionOfItsOldSource(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "capture.db"))
@@ -635,5 +636,113 @@ func TestRedeliveredUploadSurvivesRetentionOfItsOldSource(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(r.fetch.EvidenceDir, "cowrie", name)); err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("redelivered upload lost its evidence copy: %v", err)
+	}
+}
+
+func TestFileWorkerUploadWithMissingDownloadsDirRetries(t *testing.T) {
+	st, w, ev, _ := uploadFixture(t, []byte(strings.Repeat("inert later ", 8)), false)
+	if err := os.Remove(w.downloadsRoot); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := w.tick(context.Background()); err != nil || n != 0 {
+		t.Fatalf("tick=%d %v", n, err)
+	}
+	if n := captureScalar(t, st, "SELECT COUNT(*) FROM capture_file_jobs WHERE event_id=? AND state='retry' AND reason='read_failure'", ev.ID); n != 1 {
+		t.Fatalf("a missing downloads directory failed the upload instead of retrying it")
+	}
+}
+
+// upgradedUploadRunner models a database the downloads-only discovery already
+// walked: an old upload sits below the file-downloads-v1 cursor, unqueued.
+func upgradedUploadRunner(t *testing.T) (*store.Store, *Runner, *models.Event) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "capture.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := config.Config{DataDir: dir}
+	cfg.Capture.Enabled = true
+	r := NewRunner(st, cfg)
+	for _, d := range []string{r.cowrieDownloadsDir(), r.cowrieTTYDir()} {
+		if err := os.MkdirAll(d, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	up := &models.Event{TS: time.Now().Add(-time.Hour), Source: models.SourceCowrie, Kind: models.KindFileUp, SrcIP: "203.0.113.11", SessionID: "inert-old-upload", Filename: "sshd", SHA256: strings.Repeat("a", 64)}
+	if err := st.InsertEvent(up); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec("INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('capture','file-downloads-v1',0,?,'',?)", up.ID, time.Now().UTC().Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return st, r, up
+}
+
+func TestRunnerRunsTheUploadBackfill(t *testing.T) {
+	st, r, up := upgradedUploadRunner(t)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := captureScalar(t, st, "SELECT COUNT(*) FROM capture_file_jobs WHERE event_id=? AND session_id='inert-old-upload'", up.ID); n != 1 {
+		t.Fatalf("Run did not backfill the upload the old cursor passed")
+	}
+}
+
+func TestFailingUploadBackfillReleasesSourceRetention(t *testing.T) {
+	st, r, up := upgradedUploadRunner(t)
+	if _, err := st.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(fmt.Sprintf("CREATE TRIGGER inert_backfill_failure BEFORE INSERT ON capture_file_jobs WHEN NEW.event_id=%d BEGIN SELECT RAISE(ABORT,'inert failure'); END", up.ID))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An expired Cowrie source, and a TTY recording the sync must still copy.
+	oldBody := []byte("inert expired source bytes, long enough to keep")
+	oldSum := sha256.Sum256(oldBody)
+	old := filepath.Join(r.cowrieDownloadsDir(), hex.EncodeToString(oldSum[:]))
+	if err := os.WriteFile(old, oldBody, 0600); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(old, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.cowrieTTYDir(), strings.Repeat("c", 64)), []byte("inert tty bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= uploadBackfillReleaseAfter; i++ {
+		_, runErr := r.Run(context.Background())
+		if runErr == nil {
+			t.Fatalf("run %d: backfill failure not reported", i)
+		}
+		if i == 1 && captureScalar(t, st, "SELECT COUNT(*) FROM artifacts WHERE origin='cowrie_tty'") != 1 {
+			t.Fatalf("a failing backfill skipped the TTY sync")
+		}
+		r.PurgeOldSourceFiles(1)
+		_, statErr := os.Stat(old)
+		if i < uploadBackfillReleaseAfter && statErr != nil {
+			t.Fatalf("run %d: source removed while the backfill hold applies: %v", i, statErr)
+		}
+		if i == uploadBackfillReleaseAfter && !os.IsNotExist(statErr) {
+			t.Fatalf("hold not released after %d failed runs: %v", i, statErr)
+		}
+	}
+	if err := st.WithTx(func(tx *sql.Tx) error { _, err := tx.Exec("DROP TRIGGER inert_backfill_failure"); return err }); err != nil {
+		t.Fatal(err)
+	}
+	r.Run(context.Background())
+	if r.uploadBackfillFailures != 0 {
+		t.Fatalf("recovery not seen: %d", r.uploadBackfillFailures)
+	}
+	if n := captureScalar(t, st, "SELECT COUNT(*) FROM capture_file_jobs WHERE event_id=?", up.ID); n != 1 {
+		t.Fatalf("recovered backfill did not queue the upload")
 	}
 }

@@ -257,7 +257,9 @@ func (s *Store) DiscoverFileCaptures(ctx context.Context, limit int) (int, error
 		// Uploads became jobs after this cursor had already passed history.
 		// Pin the backfill ceiling before the cursor moves again: every event
 		// above it is read by the query below, which now includes uploads.
-		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('capture',?,?,0,'',?)", fileUploadBackfillPath, cursor, now); err != nil {
+		// Progress starts just below the oldest retained event (an O(1) rowid
+		// read), so the walk never spans ids retention already purged.
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('capture',?,?,MIN(?,(SELECT COALESCE(MIN(id),1)-1 FROM events)),'',?)", fileUploadBackfillPath, cursor, cursor, now); err != nil {
 			return err
 		}
 		rows, err := tx.QueryContext(ctx, fileDiscoveryQuery, cursor, limit)
@@ -527,12 +529,17 @@ AND (lease_until<=? OR lease_started_at>? OR last_clock_at>?)`, key, key, key, k
 		state, reason := result.Status, result.Reason
 		next := key
 		if state == FileCaptureRetry && reason == FileCaptureMissingSource {
-			// Cowrie publishes an upload as download_path/<sha256> before it
-			// logs the event, so an absent file was removed after the fact
-			// (a same-channel redirection into the uploaded path finalises
-			// over it, or source retention ran first) and never comes back:
-			// a later re-upload is its own event and job. Fail it now rather
-			// than spend four backoff rounds on it. Downloads keep the retry.
+			// The worker reports missing_source only for a missing file inside
+			// an open downloads root (a missing root is a retried
+			// read_failure). An upload whose file is not there when its job
+			// runs is not coming back: a later re-upload is its own event and
+			// job. Observed on prod: on the pre-v3.1.1 Cowrie pin one sha was
+			// logged as uploaded 26 times (from 2026-07-11 until the move)
+			// and never kept in downloads/ (no artifact row for any of
+			// them); since the Phase B move to v3.1.1 the same sha is kept
+			// and archived (2026-10-08). Fail it now
+			// rather than spend four backoff rounds on it. Downloads keep the
+			// retry ladder.
 			var upload bool
 			if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM events WHERE id=? AND kind='file_upload' AND source='cowrie')", stored.EventID).Scan(&upload); err != nil {
 				return err

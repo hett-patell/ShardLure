@@ -29,7 +29,15 @@ type Runner struct {
 	// harvestOutside is set while recorded payload paths fall outside the
 	// evidence root, so that is logged once per streak, and recovery once.
 	harvestOutside bool
+	// uploadBackfillFailures counts consecutive failed upload-backfill runs;
+	// at uploadBackfillReleaseAfter the source-retention hold is released.
+	uploadBackfillFailures int
 }
+
+// uploadBackfillReleaseAfter consecutive failed runs (5 s apart, so about a
+// minute) release source retention's wait for the upload backfill: a stuck
+// backfill must never stop every Cowrie source from expiring.
+const uploadBackfillReleaseAfter = 10
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
 	capCfg := cfg.Capture
@@ -123,9 +131,11 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		return n, err
 	}
 	// Bounded catch-up for uploads the downloads-only cursor passed; a no-op
-	// read once it reaches its ceiling.
-	if _, err := r.st.BackfillUploadCaptures(ctx, 2000); err != nil {
-		return n, err
+	// read once it reaches its ceiling. A failure must not stop the TTY sync
+	// below, so it is reported with this run's result instead of ending it.
+	backfillErr := r.backfillUploads(ctx)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return n, ctxErr
 	}
 	// One-shot: backfill the sha->session index from all available
 	// cowrie.json (current + rotated) log files so the cowrie-tty
@@ -134,15 +144,40 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	// looks at cowrie.log.closed) and idempotent.
 	if !r.ttyIndexed {
 		if err := r.backfillCowrieTTYIndexContext(ctx); err != nil {
-			return n, err
+			return n, errors.Join(err, backfillErr)
 		}
 		r.ttyIndexed = true
 	}
 	if !r.space.Allow() {
-		return n, nil
+		return n, backfillErr
 	}
 	c3, err := r.syncCowrieSources(ctx, true)
-	return n + c3, err
+	return n + c3, errors.Join(err, backfillErr)
+}
+
+// backfillUploads runs one bounded upload-backfill step and keeps the
+// failure streak. After uploadBackfillReleaseAfter consecutive failures it
+// releases source retention's hold on the backfill (logged once) and restores
+// it on the next success (logged once).
+func (r *Runner) backfillUploads(ctx context.Context) error {
+	_, err := r.st.BackfillUploadCaptures(ctx, 2000)
+	if err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		r.uploadBackfillFailures++
+		if r.uploadBackfillFailures == uploadBackfillReleaseAfter {
+			r.st.ReleaseUploadBackfillHold(true)
+			log.Printf("capture: upload backfill failed %d consecutive runs; source retention no longer waits for it", uploadBackfillReleaseAfter)
+		}
+		return safeCaptureError(err, "capture upload backfill failed")
+	}
+	if r.uploadBackfillFailures >= uploadBackfillReleaseAfter {
+		r.st.ReleaseUploadBackfillHold(false)
+		log.Print("capture: upload backfill recovered; source retention waits for it again")
+	}
+	r.uploadBackfillFailures = 0
+	return nil
 }
 
 // reportHarvestError logs a harvest failure once per streak, by its safe

@@ -28,6 +28,17 @@ func (s *Store) SetCaptureRetentionPolicy(policy CaptureRetentionPolicy) {
 	s.capturePolicy = policy
 }
 
+// ReleaseUploadBackfillHold stops (released=true) or resumes source retention's
+// wait for the upload backfill. The capture runner releases it after the
+// backfill has failed on several consecutive runs: a stuck backfill must not
+// stop every Cowrie source from ever expiring. It is per process and resumes
+// when the backfill next succeeds.
+func (s *Store) ReleaseUploadBackfillHold(released bool) {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	s.uploadBackfillReleased = released
+}
+
 // WithCaptureFileAccess ties final file publication/adoption to its durable
 // record against retention. Long source copying/hashing stays outside it.
 func (s *Store) WithCaptureFileAccess(ctx context.Context, fn func() error) error {
@@ -101,7 +112,7 @@ func (s *Store) RemoveCaptureSourceIfSafe(ctx context.Context, name string, remo
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return false, err
 		}
-		if err == nil && progress < ceiling {
+		if err == nil && progress < ceiling && !s.uploadBackfillReleased {
 			return false, nil
 		}
 	}
