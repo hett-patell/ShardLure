@@ -446,17 +446,27 @@ func TestHarvestRootFailureKeepsCursor(t *testing.T) {
 	}
 }
 
-// M-1: a line ending in tens of thousands of ')' is linear to trim.
+// M-1: trimming a URL that ends in a long run of unbalanced closers is
+// linear. HarvestURLs caps a line at 64 KiB, where the old per-byte recount
+// cost only ~80 ms against ~10 ms of regex and deobfuscation, too close to any
+// wall-clock bound to tell the two apart. trimURLTail is therefore timed
+// directly on 512 KiB of closers: the old quadratic code took ~5 s there
+// (~1.2 s at 256 KiB), the linear one under 1 ms, so a 100 ms bound misses the
+// old code by more than an order of magnitude with ample headroom for -race
+// and a slow CI runner.
 func TestHarvestURLsTrailingBracketsLinear(t *testing.T) {
 	line := "wget http://203.0.113.5/x" + strings.Repeat(")", 64<<10-40)
-	start := time.Now()
-	got := HarvestURLs(line+"\n", 32)
-	// Linear: ~10 ms here; the old per-byte recount took ~80 ms on x86.
-	if d := time.Since(start); d > 50*time.Millisecond {
-		t.Fatalf("trailing-bracket line took %v", d)
-	}
-	if fmt.Sprint(got) != "[http://203.0.113.5/x]" {
+	if got := HarvestURLs(line+"\n", 32); fmt.Sprint(got) != "[http://203.0.113.5/x]" {
 		t.Fatalf("got %v", got)
+	}
+	u := "http://203.0.113.5/x" + strings.Repeat(")]}", (512<<10)/3)
+	start := time.Now()
+	got := trimURLTail(u)
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("trimming %d trailing closers took %v", len(u)-len("http://203.0.113.5/x"), d)
+	}
+	if got != "http://203.0.113.5/x" {
+		t.Fatalf("trimURLTail kept %q", got[:min(len(got), 40)])
 	}
 }
 
