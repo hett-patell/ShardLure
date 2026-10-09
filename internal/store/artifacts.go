@@ -1093,7 +1093,7 @@ WHERE url=? AND fetch_epoch=0 AND attempt_count=? AND status='capturing'
 				break
 			}
 		}
-		return seedRefetchTx(tx, url, firstSeen, sha256)
+		return seedRefetchTx(tx, url, firstSeen, now, sha256)
 	})
 }
 

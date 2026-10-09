@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -30,6 +32,13 @@ func TestNextRefetchSchedule(t *testing.T) {
 		{"offline past day10", 10*d + h, 6, "done", 0},
 		{"age10d", 10 * d, 0, "done", 0},
 		{"age6d20h crosses day 7 still active", 6*d + 20*h, 0, "active", 6 * h},
+		// Exact boundaries: the hourly phase is age < 24h, the 6-hourly
+		// phase age < 7d.
+		{"age23h59m", 23*h + 59*time.Minute, 0, "active", h},
+		{"age24h exactly", 24 * h, 0, "active", 6 * h},
+		{"age6d23h", 6*d + 23*h, 0, "active", 6 * h},
+		{"age7d exactly", 7 * d, 0, "done", 0},
+		{"offline day9 lands on day10", 9 * d, 6, "done", 0},
 	}
 	for _, c := range cases {
 		now := first.Add(c.age)
@@ -88,9 +97,11 @@ func TestSeedRefetchOnlyHTTPAndIdempotent(t *testing.T) {
 		t.Fatalf("non-http seeded %d rows", n)
 	}
 	u := "HTTP://198.51.100.9/x"
+	before := time.Now().UTC()
 	if err := st.SeedRefetch(u, first, "aa"); err != nil {
 		t.Fatal(err)
 	}
+	after := time.Now().UTC()
 	if err := st.SeedRefetch(u, first.Add(time.Hour), "bb"); err != nil {
 		t.Fatal(err)
 	}
@@ -98,8 +109,55 @@ func TestSeedRefetchOnlyHTTPAndIdempotent(t *testing.T) {
 		t.Fatalf("rows=%d want 1", n)
 	}
 	state, _, checks, next, _, sha, leased := refetchRow(t, st, u)
-	if state != "active" || checks != 0 || sha != "aa" || leased || next != captureTime(first.Add(time.Hour)) {
+	// The first check is one schedule step after the seed, not after the
+	// first sighting.
+	if state != "active" || checks != 0 || sha != "aa" || leased ||
+		next < captureTime(before.Add(time.Hour)) || next > captureTime(after.Add(time.Hour)) {
 		t.Fatalf("seed row = %s %d %q %v %s", state, checks, sha, leased, next)
+	}
+}
+
+// seedAt seeds as if the capture completed at now.
+func seedAt(t *testing.T, st *Store, u string, first, now time.Time, sha string) {
+	t.Helper()
+	if err := st.WithTx(func(tx *sql.Tx) error { return seedRefetchTx(tx, u, first, now, sha) }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSeedRefetchFromSeedTime(t *testing.T) {
+	st := newTestStore(t, "seedtime.db")
+	d := 24 * time.Hour
+	first := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		u         string
+		at        time.Duration
+		wantState string
+		wantNext  time.Duration // from first
+	}{
+		{"http://198.51.100.1/a", 5 * time.Minute, "active", 5*time.Minute + time.Hour},
+		{"http://198.51.100.1/b", 2 * d, "active", 2*d + 6*time.Hour},
+		// Day 7-10: done, not re-fetched minutes after the capture.
+		{"http://198.51.100.1/c", 8 * d, "done", 8 * d},
+		// On or after day 10: done, kept at the seed time.
+		{"http://198.51.100.1/d", 10 * d, "done", 10 * d},
+		{"http://198.51.100.1/e", 12 * d, "done", 12 * d},
+	}
+	for _, c := range cases {
+		seedAt(t, st, c.u, first, first.Add(c.at), "aa")
+		state, _, _, next, _, _, _ := refetchRow(t, st, c.u)
+		if state != c.wantState || next != captureTime(first.Add(c.wantNext)) {
+			t.Errorf("%s: %s %s want %s %s", c.u, state, next, c.wantState, captureTime(first.Add(c.wantNext)))
+		}
+	}
+	if j, err := st.ClaimRefetch(first.Add(30*d), time.Minute); err != nil || j == nil || j.URL != "http://198.51.100.1/a" {
+		t.Fatalf("claim = %+v %v", j, err)
+	}
+	if j, err := st.ClaimRefetch(first.Add(30*d), time.Minute); err != nil || j == nil || j.URL != "http://198.51.100.1/b" {
+		t.Fatalf("claim = %+v %v", j, err)
+	}
+	if j, err := st.ClaimRefetch(first.Add(30*d), time.Minute); err != nil || j != nil {
+		t.Fatalf("a done seed was claimed: %+v %v", j, err)
 	}
 }
 
@@ -114,9 +172,7 @@ VALUES(?,?,?,?,?,?,?,4096,'quarantine_fetch','fetched',?,1,?,?,?,?,?)`,
 		ft, "203.0.113.5", "sess-0", "cowrie:hh", u, "/e/q/"+sha, sha, ft, ft, ft, ft, "parentsha", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SeedRefetch(u, first, sha); err != nil {
-		t.Fatal(err)
-	}
+	seedAt(t, st, u, first, first, sha)
 }
 
 func TestClaimRefetchDueAndLease(t *testing.T) {
@@ -165,7 +221,9 @@ func TestCompleteRefetchSameSHA(t *testing.T) {
 	if err := st.db.QueryRow(`SELECT COUNT(*), MAX(last_successful_fetch_at), MAX(last_seen_at) FROM artifacts WHERE url=?`, u).Scan(&rows, &lastOK, &lastSeen); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 1 || lastOK != captureTime(now) || lastSeen != captureTime(now) {
+	// Our own re-fetch moves only the fetch clock; last_seen_at records
+	// attacker sightings.
+	if rows != 1 || lastOK != captureTime(now) || lastSeen != captureTime(first) {
 		t.Fatalf("rows=%d lastOK=%s lastSeen=%s", rows, lastOK, lastSeen)
 	}
 	state, failures, checks, next, last, sha, leased := refetchRow(t, st, u)
@@ -329,6 +387,11 @@ func TestCompleteRefetchStaleChecks(t *testing.T) {
 	if _, err := st.CompleteRefetch(stale, now, RefetchOutcome{OK: true, SHA256: "bb"}); !errors.Is(err, ErrClaimStale) {
 		t.Fatalf("stale checks: %v", err)
 	}
+	// A hand-built job has no lease token and fails closed, even while the
+	// row is leased with matching checks.
+	if _, err := st.CompleteRefetch(RefetchJob{URL: u, Checks: job.Checks, FirstSeen: job.FirstSeen}, now, RefetchOutcome{OK: true, SHA256: "bb"}); !errors.Is(err, ErrClaimStale) {
+		t.Fatalf("hand-built job: %v", err)
+	}
 	// After the lease lapses, the original holder is fenced out too.
 	if _, err := st.CompleteRefetch(*job, now.Add(2*time.Minute), RefetchOutcome{OK: true, SHA256: "bb"}); !errors.Is(err, ErrClaimStale) {
 		t.Fatalf("expired lease: %v", err)
@@ -374,7 +437,7 @@ func TestCompleteArtifactCaptureSeedsRefetch(t *testing.T) {
 		t.Fatalf("schedule rows=%d want 1", n)
 	}
 	state, _, _, next, _, sha, _ := refetchRow(t, st, "http://198.51.100.7/a.sh")
-	if state != "active" || sha != "aa" || next != captureTime(first.Add(time.Hour)) {
+	if state != "active" || sha != "aa" || next < captureTime(now.Add(time.Hour)) || next > captureTime(time.Now().Add(time.Hour)) {
 		t.Fatalf("seeded row: %s %s %s", state, sha, next)
 	}
 
@@ -395,5 +458,125 @@ func TestCompleteArtifactCaptureSeedsRefetch(t *testing.T) {
 	}
 	if n := countRefetch(t, st); n != 1 {
 		t.Fatalf("schedule rows=%d want 1", n)
+	}
+}
+
+func TestCompleteArtifactCaptureSeedsLateCaptureDone(t *testing.T) {
+	st := newTestStore(t, "late.db")
+	if err := st.ensureArtifactsTable(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	first := now.Add(-11 * 24 * time.Hour)
+	u := "http://198.51.100.7/late.sh"
+	if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,origin,status,created_at,attempt_count,first_observed_at) VALUES(?,?,'quarantine_fetch','pending',?,0,?)`,
+		captureTime(first), u, captureTime(first), captureTime(first)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ClaimArtifactCapture(u, now, now.Add(time.Minute), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteArtifactCapture(u, 1, "fetched", "", "/e/q/aa", "aa", 100, nil); err != nil {
+		t.Fatal(err)
+	}
+	if state, _, _, _, _, _, _ := refetchRow(t, st, u); state != "done" {
+		t.Fatalf("capture on day 11 seeded %s, want done", state)
+	}
+}
+
+// Retention removed every artifact row of the URL: the re-fetched payload is
+// still recorded (LEFT JOIN — an inner join would insert nothing), with no
+// provenance and first_observed_at from the schedule's first sighting.
+func TestCompleteRefetchAfterArtifactsPurged(t *testing.T) {
+	st := newTestStore(t, "purged.db")
+	first := time.Now().UTC().Add(-2 * time.Hour)
+	u := "http://198.51.100.9/bins/x"
+	seedFetched(t, st, u, "aa", first)
+	if _, err := st.db.Exec(`DELETE FROM artifacts WHERE url=?`, u); err != nil {
+		t.Fatal(err)
+	}
+	now := first.Add(time.Hour + time.Second)
+	job, err := st.ClaimRefetch(now, time.Minute)
+	if err != nil || job == nil {
+		t.Fatal(job, err)
+	}
+	np, err := st.CompleteRefetch(*job, now, RefetchOutcome{OK: true, SHA256: "bb", LocalPath: "/e/q/bb", Size: 9})
+	if err != nil || !np {
+		t.Fatalf("complete: %v %v", np, err)
+	}
+	var n, epoch int
+	var src, sess, actor, parent sql.NullString
+	var firstObs, lastOK string
+	if err := st.db.QueryRow(`SELECT COUNT(*), MAX(fetch_epoch), MAX(src_ip), MAX(session_id), MAX(actor_id), MAX(parent_sha256),
+  MAX(first_observed_at), MAX(last_successful_fetch_at) FROM artifacts WHERE url=?`, u).
+		Scan(&n, &epoch, &src, &sess, &actor, &parent, &firstObs, &lastOK); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || epoch != 0 || src.Valid || sess.Valid || actor.Valid || parent.Valid {
+		t.Fatalf("row: n=%d epoch=%d provenance=%v %v %v %v", n, epoch, src, sess, actor, parent)
+	}
+	if firstObs != captureTime(first) || lastOK != captureTime(now) {
+		t.Fatalf("first_observed_at=%s (want schedule first_seen %s) last_ok=%s", firstObs, captureTime(first), lastOK)
+	}
+}
+
+func TestClaimRefetchOldestDueFirst(t *testing.T) {
+	st := newTestStore(t, "order.db")
+	base := time.Now().UTC().Add(-48 * time.Hour)
+	// Seeded out of order; next_check_at = first + 1h for each.
+	seedAt(t, st, "http://198.51.100.1/mid", base.Add(2*time.Hour), base.Add(2*time.Hour), "aa")
+	seedAt(t, st, "http://198.51.100.1/old", base, base, "aa")
+	seedAt(t, st, "http://198.51.100.1/new", base.Add(4*time.Hour), base.Add(4*time.Hour), "aa")
+	now := base.Add(10 * time.Hour)
+	for _, want := range []string{"http://198.51.100.1/old", "http://198.51.100.1/mid", "http://198.51.100.1/new"} {
+		j, err := st.ClaimRefetch(now, time.Minute)
+		if err != nil || j == nil || j.URL != want {
+			t.Fatalf("claim = %+v %v, want %s", j, err, want)
+		}
+	}
+}
+
+func TestMaintenancePurgeDropsOldDoneRefetchRows(t *testing.T) {
+	st := newTestStore(t, "purge.db")
+	now := time.Now().UTC()
+	old := now.Add(-40 * 24 * time.Hour)
+	recent := now.Add(-2 * 24 * time.Hour)
+	ins := func(u, state string, first time.Time, last any) {
+		t.Helper()
+		if _, err := st.db.Exec(`INSERT INTO refetch_schedule(url, first_seen_at, next_check_at, state, last_check_at) VALUES(?,?,?,?,?)`,
+			u, captureTime(first), captureTime(first), state, last); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins("http://x/old-done-checked", "done", old, captureTime(old.Add(time.Hour)))
+	ins("http://x/old-done-unchecked", "done", old, nil)
+	ins("http://x/old-first-recent-check", "done", old, captureTime(recent))
+	ins("http://x/recent-done", "done", recent, captureTime(recent))
+	ins("http://x/old-active", "active", old, captureTime(old))
+	ins("http://x/old-offline", "offline", old, captureTime(old))
+	if err := st.MaintenancePurgeContext(context.Background(), 30); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.db.Query(`SELECT url FROM refetch_schedule ORDER BY url`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, u)
+	}
+	want := []string{"http://x/old-active", "http://x/old-first-recent-check", "http://x/old-offline", "http://x/recent-done"}
+	if len(got) != len(want) {
+		t.Fatalf("kept %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("kept %v want %v", got, want)
+		}
 	}
 }

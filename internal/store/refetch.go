@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -53,18 +54,23 @@ func (s *Store) SeedRefetch(url string, firstSeen time.Time, sha string) error {
 	if !refetchableURL(url) {
 		return nil
 	}
-	return s.WithTx(func(tx *sql.Tx) error { return seedRefetchTx(tx, url, firstSeen, sha) })
+	now := time.Now().UTC()
+	return s.WithTx(func(tx *sql.Tx) error { return seedRefetchTx(tx, url, firstSeen, now, sha) })
 }
 
-func seedRefetchTx(tx *sql.Tx, url string, firstSeen time.Time, sha string) error {
+// seedRefetchTx schedules from the seed time, not from the first sighting:
+// the capture that seeds the row has just fetched the payload, so the next
+// check is one schedule step after now. A capture completing on day 7-10
+// is therefore not re-fetched minutes later, and one completing on or after
+// day 10 is seeded done (a later capture could never be shared).
+func seedRefetchTx(tx *sql.Tx, url string, firstSeen, now time.Time, sha string) error {
 	if !refetchableURL(url) {
 		return nil
 	}
-	next, state := NextRefetch(firstSeen, firstSeen, 0)
+	next, state := NextRefetch(firstSeen, now, 0)
 	if state == "done" {
-		// Unreachable for (firstSeen, firstSeen, 0), but a done row must
-		// still carry a NOT NULL next_check_at.
-		next = firstSeen
+		// A done row keeps a NOT NULL next_check_at: the seed time.
+		next = now
 	}
 	var last any
 	if sha != "" {
@@ -83,10 +89,9 @@ type RefetchJob struct {
 	Checks    int
 	FirstSeen time.Time
 
-	// lease is the lease_until this claim wrote. A job built outside
-	// ClaimRefetch leaves it empty and is fenced on checks + a live lease
-	// alone; a claimed job is also fenced against a reclaim after expiry,
-	// which leaves checks unchanged.
+	// lease is the lease_until this claim wrote. It fences against a
+	// reclaim after expiry, which leaves checks unchanged. A job built
+	// outside ClaimRefetch has none and is always refused (fail closed).
 	lease string
 }
 
@@ -154,6 +159,11 @@ func (s *Store) CompleteRefetch(job RefetchJob, now time.Time, out RefetchOutcom
 	if out.OK && out.SHA256 == "" {
 		return false, errors.New("refetch outcome OK without a sha256")
 	}
+	if job.lease == "" {
+		// Only a job ClaimRefetch returned carries its lease; a hand-built
+		// one could otherwise complete over another holder's live lease.
+		return false, ErrClaimStale
+	}
 	if err := s.ensureArtifactsTable(); err != nil {
 		return false, err
 	}
@@ -164,7 +174,7 @@ func (s *Store) CompleteRefetch(job RefetchJob, now time.Time, out RefetchOutcom
 		var failures int
 		err := tx.QueryRow(`SELECT first_seen_at, consecutive_failures FROM refetch_schedule
 WHERE url=? AND checks=? AND lease_until IS NOT NULL AND julianday(lease_until) > julianday(?)
-  AND (?='' OR lease_until=?)`, job.URL, job.Checks, nowS, job.lease, job.lease).Scan(&first, &failures)
+  AND lease_until=?`, job.URL, job.Checks, nowS, job.lease).Scan(&first, &failures)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrClaimStale
 		}
@@ -179,14 +189,21 @@ WHERE url=? AND checks=? AND lease_until IS NOT NULL AND julianday(lease_until) 
 		if out.OK {
 			failures = 0
 			lastSHA = out.SHA256
-			res, err := tx.Exec(`UPDATE artifacts SET last_successful_fetch_at=?, last_seen_at=?
-WHERE url=? AND status='fetched' AND sha256=?`, nowS, nowS, job.URL, out.SHA256)
+			// Only the fetch clock moves. ts, first_observed_at and
+			// last_seen_at record attacker sightings: discovery drops a
+			// sighting older than last_seen_at and retention ages rows on
+			// it, so our own fetch cadence must never touch them.
+			res, err := tx.Exec(`UPDATE artifacts SET last_successful_fetch_at=?
+WHERE url=? AND status='fetched' AND sha256=?`, nowS, job.URL, out.SHA256)
 			if err != nil {
 				return err
 			}
 			if n, _ := res.RowsAffected(); n == 0 {
-				// A LEFT JOIN so a URL whose epoch-0 row retention already
-				// purged still records the payload, minus provenance.
+				// A LEFT JOIN so a URL whose artifact rows retention already
+				// purged still records the payload: provenance stays empty
+				// and first_observed_at falls back to the schedule's
+				// first_seen_at (the URL's first sighting), never to now,
+				// which would re-anchor the sample's freshness.
 				if _, err := tx.Exec(`INSERT INTO artifacts(ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes,
   origin, status, detail, created_at, attempt_count, first_observed_at, last_seen_at,
   last_fetch_attempt_at, last_successful_fetch_at, fetch_epoch, parent_sha256, depth)
@@ -195,7 +212,7 @@ SELECT ?, a.src_ip, a.session_id, a.actor_id, ?, ?, ?, ?,
   ?, ?, (SELECT COALESCE(MAX(fetch_epoch), -1) + 1 FROM artifacts WHERE url=?), a.parent_sha256, COALESCE(a.depth, 0)
 FROM (SELECT 1) LEFT JOIN artifacts a ON a.url=? AND a.fetch_epoch=0`,
 					nowS, job.URL, out.LocalPath, out.SHA256, out.Size,
-					out.Detail, nowS, nowS, nowS,
+					out.Detail, nowS, captureTime(firstSeen), nowS,
 					nowS, nowS, job.URL, job.URL); err != nil {
 					return err
 				}
@@ -226,4 +243,38 @@ WHERE url=? AND checks=?`, nowS, lastSHA, failures, captureTime(next), state, jo
 		return false, err
 	}
 	return newPayload, nil
+}
+
+// purgeRefetchSchedule deletes finished schedule rows whose last check (or,
+// never checked, first sighting) is older than the retention cutoff. Only
+// done rows go: active/offline rows are live work and all reach done by day
+// 10. Bounded chunks, each its own transaction, so writeMu is released
+// between them. A row with an unparsable time has a NULL julianday and is
+// kept (fail closed).
+func (s *Store) purgeRefetchSchedule(ctx context.Context, cutoff time.Time) error {
+	const chunk = 5000
+	cut := captureTime(cutoff)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var n int64
+		err := s.WithTx(func(tx *sql.Tx) error {
+			res, err := tx.Exec(`DELETE FROM refetch_schedule WHERE rowid IN (
+  SELECT rowid FROM refetch_schedule
+  WHERE state='done' AND julianday(COALESCE(last_check_at, first_seen_at)) < julianday(?)
+  LIMIT ?)`, cut, chunk)
+			if err != nil {
+				return err
+			}
+			n, err = res.RowsAffected()
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if n < chunk {
+			return nil
+		}
+	}
 }

@@ -43,3 +43,40 @@ func TestHostGate(t *testing.T) {
 		}
 	}
 }
+
+func TestHostGateCanonicalSpellings(t *testing.T) {
+	pairs := [][2]string{
+		{"http://[2001:db8::1]/a", "http://[2001:db8:0:0::1]/b"},
+		{"http://[2001:DB8::1]/a", "http://[2001:0db8:0000::0001]:8080/b"},
+		{"http://evil.com/a", "http://evil.com./b"},
+		{"http://EVIL.com./a", "https://evil.COM:443/b"},
+		{"http://1.2.3.4/a", "http://[::ffff:1.2.3.4]/b"},
+		{"http://BÜCHER.de/a", "http://bücher.de/b"},
+	}
+	for _, p := range pairs {
+		g := NewHostGate()
+		rel, ok := g.TryAcquire(p[0])
+		if !ok {
+			t.Fatalf("%q refused", p[0])
+		}
+		if _, ok := g.TryAcquire(p[1]); ok {
+			t.Fatalf("%q and %q got separate keys", p[0], p[1])
+		}
+		rel()
+		if _, ok := g.TryAcquire(p[1]); !ok {
+			t.Fatalf("%q blocked after release", p[1])
+		}
+	}
+	// A bare trailing dot is not a host.
+	if _, ok := NewHostGate().TryAcquire("http://./x"); ok {
+		t.Fatal("root-dot host accepted")
+	}
+	// Distinct servers stay distinct.
+	g := NewHostGate()
+	if _, ok := g.TryAcquire("http://1.2.3.4/"); !ok {
+		t.Fatal("refused")
+	}
+	if _, ok := g.TryAcquire("http://[::1.2.3.5]/"); !ok {
+		t.Fatal("different address blocked")
+	}
+}
