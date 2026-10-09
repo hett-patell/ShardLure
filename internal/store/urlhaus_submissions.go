@@ -100,13 +100,9 @@ func (s *Store) URLhausSubmissionStats(activeDays int) (URLhausStats, error) {
 			return st, err
 		}
 	}
-	if activeDays <= 0 {
-		activeDays = 3
-	}
-	cutoff := time.Now().UTC().Add(-time.Duration(activeDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	if err := s.db.QueryRow(`
 SELECT COUNT(*)
-FROM artifacts a`+urlhausCandidateWhere, cutoff, cutoff).Scan(&st.Pending); err != nil {
+FROM artifacts a`+urlhausCandidateWhere, urlhausCandidateArgs(activeDays, time.Now())...).Scan(&st.Pending); err != nil {
 		log.Printf("urlhaus pending count: %v (defaulting to 0)", err)
 	}
 	return st, nil
@@ -139,11 +135,22 @@ func (s *Store) ListURLhausSubmissions(limit int) ([]URLhausSubmission, error) {
 	return out, rows.Err()
 }
 
+// urlhausCandidateArgs binds urlhausCandidateWhere. The one-hour future
+// tolerance is urlhaus.Vet's clock-skew bound (store must not import it).
+func urlhausCandidateArgs(activeDays int, now time.Time) []any {
+	if activeDays <= 0 {
+		activeDays = 3
+	}
+	now = now.UTC()
+	cutoff := now.Add(-time.Duration(activeDays) * 24 * time.Hour).Format(time.RFC3339Nano)
+	notAfter := now.Add(time.Hour).Format(time.RFC3339Nano)
+	return []any{cutoff, cutoff, notAfter}
+}
+
 // urlhausCandidateWhere is the single WHERE clause shared by URLhausCandidates
 // and the Pending count in URLhausSubmissionStats. CLAUDE.md requires the two
 // to stay identical (they drifted once and the UI count disagreed with the
-// CLI's list); sharing one constant makes that structural. It takes the
-// freshness cutoff twice.
+// CLI's list); sharing one constant makes that structural.
 //
 // URLhaus is keyed by URL, but since v27 a URL can own several artifact rows
 // (a rotated payload gets the next fetch_epoch). The correlated subquery keeps
@@ -151,6 +158,13 @@ func (s *Store) ListURLhausSubmissions(limit int) ([]URLhausSubmission, error) {
 // tie-break — so a URL that served two binaries is one candidate and one
 // pending, not two. The subquery repeats the outer predicate on b so the row
 // it picks is itself eligible; the NOT IN is URL-level and need not repeat.
+// Rows fetched more than an hour in the future (the third parameter) rank
+// last: urlhaus.Vet refuses those as clock skew, so picking one would hide an
+// older row Vet accepts and the URL would be offered nowhere. They are ranked,
+// not excluded, so a URL whose only row is future-dated still appears and the
+// panel shows Vet's rejection reason instead of silently dropping it.
+//
+// Parameters, in order: cutoff, cutoff, notAfter (urlhausCandidateArgs).
 const urlhausCandidateWhere = `
 WHERE a.origin = 'quarantine_fetch'
   AND a.status = 'fetched'
@@ -167,7 +181,8 @@ WHERE a.origin = 'quarantine_fetch'
       AND b.sha256 IS NOT NULL AND b.sha256 != ''
       AND b.size_bytes >= 64
       AND julianday(b.last_successful_fetch_at) >= julianday(?)
-    ORDER BY julianday(b.last_successful_fetch_at) DESC, b.id DESC
+    ORDER BY julianday(b.last_successful_fetch_at) <= julianday(?) DESC,
+      julianday(b.last_successful_fetch_at) DESC, b.id DESC
     LIMIT 1)`
 
 // URLhausCandidateRow is an artifact considered for URL submission, shaped for
@@ -201,16 +216,12 @@ func (s *Store) URLhausCandidates(activeDays, limit int) ([]URLhausCandidateRow,
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
-	if activeDays <= 0 {
-		activeDays = 3
-	}
-	cutoff := time.Now().UTC().Add(-time.Duration(activeDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	q := `
 SELECT a.url, COALESCE(a.sha256,''), COALESCE(a.size_bytes,0), a.origin, a.status,
        a.last_successful_fetch_at, COALESCE(a.local_path,'')
 FROM artifacts a` + urlhausCandidateWhere + `
 ORDER BY julianday(a.last_successful_fetch_at) DESC`
-	args := []any{cutoff, cutoff}
+	args := urlhausCandidateArgs(activeDays, time.Now())
 	if limit > 0 {
 		q += ` LIMIT ?`
 		args = append(args, limit)

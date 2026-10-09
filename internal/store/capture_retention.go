@@ -112,11 +112,14 @@ type expiredArtifact struct {
 // Each page is bounded in both row count and field size. Preflight parses all
 // timestamps before any deletion; a malformed later page must not authorize
 // partially guessing chronological retention. Each deleting page revalidates.
+// The "live" (still queued) test is epoch-0 only: later epochs (v27 rotated
+// payloads) are inserted terminal by design, so a non-terminal later-epoch row
+// is never processed by the capture worker and must not be held forever.
 func artifactRetentionPageTx(q sqlQueryer, cursor int64, cutoff time.Time) ([]expiredArtifact, int64, int, error) {
 	rows, err := q.Query(`SELECT id,
 CASE WHEN length(CAST(COALESCE(last_seen_at,ts,created_at,'') AS BLOB))<=64 THEN COALESCE(last_seen_at,ts,created_at,'') END,
 CASE WHEN length(CAST(COALESCE(local_path,'') AS BLOB))<=4096 THEN COALESCE(local_path,'') END,
-COALESCE(origin='quarantine_fetch' AND (status='capturing' OR (status IN ('pending','failed') AND attempt_count<5)),0)
+COALESCE(origin='quarantine_fetch' AND fetch_epoch=0 AND (status='capturing' OR (status IN ('pending','failed') AND attempt_count<5)),0)
 OR (origin='cowrie_file_download' AND substr(url,1,13)='cowrie-event:' AND EXISTS(
  SELECT 1 FROM capture_file_jobs j WHERE j.event_id=CAST(substr(artifacts.url,14) AS INTEGER)
  AND j.state='archived' AND j.result_path=artifacts.local_path
