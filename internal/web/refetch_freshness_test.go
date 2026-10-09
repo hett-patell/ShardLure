@@ -28,7 +28,7 @@ func TestRefetchedOldSampleIsNotBazaarPending(t *testing.T) {
 	}
 	// A schedule row whose window covers the next hour; the re-fetch returns
 	// the same bytes.
-	if err := s.st.SeedRefetch(u, now.Add(-2*time.Hour), sha); err != nil {
+	if err := s.st.SeedRefetchUnchecked(u, now.Add(-2*time.Hour), sha); err != nil {
 		t.Fatal(err)
 	}
 	at := now.Add(61 * time.Minute)
