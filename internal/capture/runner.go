@@ -98,8 +98,10 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 		// Second-stage harvesting reads fetched scripts as text and only
 		// queues rows (the ArtifactWorker fetches them later), so like
 		// discovery it runs while the space gate is paused.
-		// A failed harvest (an unreadable file keeps the cursor and is retried)
-		// must not stop the Cowrie syncs below, so only cancellation ends Run.
+		// An unreadable source is skipped (logged by id and hash); only an
+		// unusable evidence root or a store error keeps the cursor. Either
+		// way a failed harvest must not stop the Cowrie syncs below, so only
+		// cancellation ends Run.
 		if r.cfg.Capture.HarvestScripts {
 			_, err := r.harvestScripts(ctx)
 			if ctxErr := ctx.Err(); ctxErr != nil {
