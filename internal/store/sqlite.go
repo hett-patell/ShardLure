@@ -1569,8 +1569,16 @@ func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) 
 	}
 	// Finished re-fetch schedules age out with the artifacts they served.
 	// refetch_schedule is created by the v27 rung, so no ensure* is needed.
-	if err := s.purgeRefetchSchedule(ctx, cutoffTime); err != nil {
-		return err
+	// Like the campaign-derived purge below, a failure here is scheduling
+	// state only: it must not skip event retention or the orphan-actor sweep,
+	// so it is joined into the result (a cancellation still stops at once).
+	if refetchErr := s.purgeRefetchSchedule(ctx, cutoffTime); refetchErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		defer func() {
+			retErr = errors.Join(retErr, fmt.Errorf("refetch-schedule retention: %w", refetchErr))
+		}()
 	}
 
 	// Events — the largest table. Delete in bounded chunks, each its own
