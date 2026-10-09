@@ -32,6 +32,28 @@ const (
 	harvestMaxLineBytes  = 64 << 10
 )
 
+// binaryMagics are the executable and archive signatures: ELF, PE (MZ), zip,
+// gzip, bzip2, xz and 7z. tar is checked separately (its magic is at 257).
+var binaryMagics = [][]byte{
+	[]byte("\x7fELF"),
+	[]byte("MZ"),
+	[]byte("PK\x03\x04"),
+	[]byte("\x1f\x8b"),
+	[]byte("BZh"),
+	[]byte("\xfd7zXZ\x00"),
+	[]byte("7z\xbc\xaf\x27\x1c"),
+}
+
+// hasBinaryMagic reports whether head starts like an executable or archive.
+func hasBinaryMagic(head []byte) bool {
+	for _, magic := range binaryMagics {
+		if bytes.HasPrefix(head, magic) {
+			return true
+		}
+	}
+	return len(head) >= 262 && string(head[257:262]) == "ustar"
+}
+
 // isTextScript reports whether head (the file's first bytes, up to 8 KiB)
 // looks like a text script: no known binary/archive magic, no NUL, and at
 // least 90% printable bytes (tab, LF, CR, 0x20-0x7e, and any byte >= 0x80
@@ -43,20 +65,7 @@ func isTextScript(head []byte) bool {
 	if len(head) == 0 {
 		return false
 	}
-	for _, magic := range [][]byte{
-		[]byte("\x7fELF"),
-		[]byte("MZ"),
-		[]byte("PK\x03\x04"),
-		[]byte("\x1f\x8b"),
-		[]byte("BZh"),
-		[]byte("\xfd7zXZ\x00"),
-		[]byte("7z\xbc\xaf\x27\x1c"),
-	} {
-		if bytes.HasPrefix(head, magic) {
-			return false
-		}
-	}
-	if len(head) >= 262 && string(head[257:262]) == "ustar" {
+	if hasBinaryMagic(head) {
 		return false
 	}
 	printable := 0

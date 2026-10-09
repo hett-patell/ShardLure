@@ -150,13 +150,15 @@ func TestSeedRefetchFromSeedTime(t *testing.T) {
 			t.Errorf("%s: %s %s want %s %s", c.u, state, next, c.wantState, captureTime(first.Add(c.wantNext)))
 		}
 	}
-	if j, err := st.ClaimRefetch(first.Add(30*d), time.Minute); err != nil || j == nil || j.URL != "http://198.51.100.1/a" {
+	// Claimed inside the 10-day window (ClaimRefetch never returns a row
+	// first seen 10 or more days ago).
+	if j, err := st.ClaimRefetch(first.Add(3*d), time.Minute); err != nil || j == nil || j.URL != "http://198.51.100.1/a" {
 		t.Fatalf("claim = %+v %v", j, err)
 	}
-	if j, err := st.ClaimRefetch(first.Add(30*d), time.Minute); err != nil || j == nil || j.URL != "http://198.51.100.1/b" {
+	if j, err := st.ClaimRefetch(first.Add(3*d), time.Minute); err != nil || j == nil || j.URL != "http://198.51.100.1/b" {
 		t.Fatalf("claim = %+v %v", j, err)
 	}
-	if j, err := st.ClaimRefetch(first.Add(30*d), time.Minute); err != nil || j != nil {
+	if j, err := st.ClaimRefetch(first.Add(3*d), time.Minute); err != nil || j != nil {
 		t.Fatalf("a done seed was claimed: %+v %v", j, err)
 	}
 }
@@ -217,14 +219,15 @@ func TestCompleteRefetchSameSHA(t *testing.T) {
 		t.Fatalf("same sha: %v %v", newPayload, err)
 	}
 	var rows int
-	var lastOK, lastSeen string
-	if err := st.db.QueryRow(`SELECT COUNT(*), MAX(last_successful_fetch_at), MAX(last_seen_at) FROM artifacts WHERE url=?`, u).Scan(&rows, &lastOK, &lastSeen); err != nil {
+	var lastOK, lastSeen, lastRefetch string
+	if err := st.db.QueryRow(`SELECT COUNT(*), MAX(last_successful_fetch_at), MAX(last_seen_at), MAX(last_refetch_at) FROM artifacts WHERE url=?`, u).Scan(&rows, &lastOK, &lastSeen, &lastRefetch); err != nil {
 		t.Fatal(err)
 	}
-	// Our own re-fetch moves only the fetch clock; last_seen_at records
-	// attacker sightings.
-	if rows != 1 || lastOK != captureTime(now) || lastSeen != captureTime(first) {
-		t.Fatalf("rows=%d lastOK=%s lastSeen=%s", rows, lastOK, lastSeen)
+	// Our own re-fetch moves only the re-fetch liveness clock:
+	// last_successful_fetch_at is write-once (share freshness reads it) and
+	// last_seen_at records attacker sightings.
+	if rows != 1 || lastRefetch != captureTime(now) || lastOK != captureTime(first) || lastSeen != captureTime(first) {
+		t.Fatalf("rows=%d lastRefetch=%s lastOK=%s lastSeen=%s", rows, lastRefetch, lastOK, lastSeen)
 	}
 	state, failures, checks, next, last, sha, leased := refetchRow(t, st, u)
 	if state != "active" || failures != 0 || checks != 1 || sha != "aa" || leased || last != captureTime(now) || next != captureTime(now.Add(time.Hour)) {
@@ -414,7 +417,26 @@ func TestCompleteRefetchStaleChecks(t *testing.T) {
 	}
 }
 
-func TestCompleteArtifactCaptureSeedsRefetch(t *testing.T) {
+// completeCapture claims and completes an epoch-0 pending row as fetched.
+func completeCapture(t *testing.T, st *Store, u string, first time.Time, sha string) {
+	t.Helper()
+	if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,origin,status,created_at,attempt_count,first_observed_at) VALUES(?,?,'quarantine_fetch','pending',?,0,?)`,
+		captureTime(first), u, captureTime(first), captureTime(first)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := st.ClaimArtifactCapture(u, now, now.Add(time.Minute), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteArtifactCapture(u, 1, "fetched", "", "/e/q/"+sha, sha, 100, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Completion no longer seeds (the ArtifactWorker decides: capture.refetch
+// and the payload shape); SeedRefetchForCapture seeds only a URL whose
+// epoch-0 row is fetched with that very sha, measured from first sighting.
+func TestSeedRefetchForCapture(t *testing.T) {
 	st := newTestStore(t, "capseed.db")
 	if err := st.ensureArtifactsTable(); err != nil {
 		t.Fatal(err)
@@ -422,14 +444,13 @@ func TestCompleteArtifactCaptureSeedsRefetch(t *testing.T) {
 	now := time.Now().UTC()
 	first := now.Add(-5 * time.Minute)
 	for _, u := range []string{"http://198.51.100.7/a.sh", "cowrie-download:deadbeef"} {
-		if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,origin,status,created_at,attempt_count,first_observed_at) VALUES(?,?,'quarantine_fetch','pending',?,0,?)`,
-			captureTime(first), u, captureTime(first), captureTime(first)); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.ClaimArtifactCapture(u, now, now.Add(time.Minute), 0); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.CompleteArtifactCapture(u, 1, "fetched", "", "/e/q/aa", "aa", 100, nil); err != nil {
+		completeCapture(t, st, u, first, "aa")
+	}
+	if n := countRefetch(t, st); n != 0 {
+		t.Fatalf("CompleteArtifactCapture seeded %d schedule rows; seeding belongs to the worker", n)
+	}
+	for _, u := range []string{"http://198.51.100.7/a.sh", "cowrie-download:deadbeef"} {
+		if err := st.SeedRefetchForCapture(u, "aa"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -440,43 +461,39 @@ func TestCompleteArtifactCaptureSeedsRefetch(t *testing.T) {
 	if state != "active" || sha != "aa" || next < captureTime(now.Add(time.Hour)) || next > captureTime(time.Now().Add(time.Hour)) {
 		t.Fatalf("seeded row: %s %s %s", state, sha, next)
 	}
+	var firstSeen string
+	if err := st.db.QueryRow(`SELECT first_seen_at FROM refetch_schedule WHERE url=?`, "http://198.51.100.7/a.sh").Scan(&firstSeen); err != nil || firstSeen != captureTime(first) {
+		t.Fatalf("first_seen_at=%s want %s (%v)", firstSeen, captureTime(first), err)
+	}
 
-	// A failed completion seeds nothing; a stale completion seeds nothing.
+	// A sha the epoch-0 row does not hold, or a row that is not fetched,
+	// seeds nothing.
 	u := "http://198.51.100.7/b.sh"
-	if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,origin,status,created_at,attempt_count) VALUES(?,?,'quarantine_fetch','pending',?,0)`,
-		captureTime(first), u, captureTime(first)); err != nil {
+	completeCapture(t, st, u, first, "bb")
+	if err := st.SeedRefetchForCapture(u, "zz"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ClaimArtifactCapture(u, now, now.Add(time.Minute), 0); err != nil {
+	pending := "http://198.51.100.7/c.sh"
+	if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,origin,status,created_at,attempt_count,sha256) VALUES(?,?,'quarantine_fetch','failed',?,1,'cc')`,
+		captureTime(first), pending, captureTime(first)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CompleteArtifactCapture(u, 1, "failed", "x", "", "", 0, nil); err != nil {
+	if err := st.SeedRefetchForCapture(pending, "cc"); err != nil {
 		t.Fatal(err)
-	}
-	if err := st.CompleteArtifactCapture(u, 1, "fetched", "", "/e", "bb", 1, nil); !errors.Is(err, ErrClaimStale) {
-		t.Fatalf("stale: %v", err)
 	}
 	if n := countRefetch(t, st); n != 1 {
 		t.Fatalf("schedule rows=%d want 1", n)
 	}
 }
 
-func TestCompleteArtifactCaptureSeedsLateCaptureDone(t *testing.T) {
+func TestSeedRefetchForCaptureLateCaptureDone(t *testing.T) {
 	st := newTestStore(t, "late.db")
 	if err := st.ensureArtifactsTable(); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	first := now.Add(-11 * 24 * time.Hour)
 	u := "http://198.51.100.7/late.sh"
-	if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,origin,status,created_at,attempt_count,first_observed_at) VALUES(?,?,'quarantine_fetch','pending',?,0,?)`,
-		captureTime(first), u, captureTime(first), captureTime(first)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.ClaimArtifactCapture(u, now, now.Add(time.Minute), 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.CompleteArtifactCapture(u, 1, "fetched", "", "/e/q/aa", "aa", 100, nil); err != nil {
+	completeCapture(t, st, u, time.Now().UTC().Add(-11*24*time.Hour), "aa")
+	if err := st.SeedRefetchForCapture(u, "aa"); err != nil {
 		t.Fatal(err)
 	}
 	if state, _, _, _, _, _, _ := refetchRow(t, st, u); state != "done" {
@@ -570,7 +587,9 @@ func TestMaintenancePurgeDropsOldDoneRefetchRows(t *testing.T) {
 		}
 		got = append(got, u)
 	}
-	want := []string{"http://x/old-active", "http://x/old-first-recent-check", "http://x/old-offline", "http://x/recent-done"}
+	// Every row first seen before the cutoff and over 10 days ago goes,
+	// whatever its state or last check: it can never be fetched again (I1).
+	want := []string{"http://x/recent-done"}
 	if len(got) != len(want) {
 		t.Fatalf("kept %v want %v", got, want)
 	}
@@ -595,36 +614,42 @@ func TestReleaseRefetchFenced(t *testing.T) {
 		t.Fatal(job, err)
 	}
 	// A hand-built job carries no lease token and is refused.
-	if err := st.ReleaseRefetch(RefetchJob{URL: u, Checks: job.Checks, FirstSeen: job.FirstSeen}); !errors.Is(err, ErrClaimStale) {
+	if err := st.ReleaseRefetch(RefetchJob{URL: u, Checks: job.Checks, FirstSeen: job.FirstSeen}, now); !errors.Is(err, ErrClaimStale) {
 		t.Fatalf("hand-built release: %v", err)
 	}
 	if _, _, _, _, _, _, leased := refetchRow(t, st, u); !leased {
 		t.Fatal("a refused release must leave the lease")
 	}
-	if err := st.ReleaseRefetch(*job); err != nil {
+	if err := st.ReleaseRefetch(*job, now); err != nil {
 		t.Fatal(err)
 	}
+	// Only the lease clears and next_check_at moves one worker tick out, so
+	// the next claim takes another host's due row first (M1).
 	state, failures, checks, next, last, sha, leased := refetchRow(t, st, u)
-	if leased || state != "active" || failures != 0 || checks != 0 || next != nextBefore || last != "" || sha != "aa" {
+	if leased || state != "active" || failures != 0 || checks != 0 || next != captureTime(now.Add(RefetchReleaseDelay)) || next == nextBefore || last != "" || sha != "aa" {
 		t.Fatalf("after release: %s %d %d %s %s %s %v", state, failures, checks, next, last, sha, leased)
 	}
 	// Released twice: the lease is gone, so the second is stale.
-	if err := st.ReleaseRefetch(*job); !errors.Is(err, ErrClaimStale) {
+	if err := st.ReleaseRefetch(*job, now); !errors.Is(err, ErrClaimStale) {
 		t.Fatalf("double release: %v", err)
 	}
-	// Claimable again straight away; the old job cannot free the new lease.
-	job2, err := st.ClaimRefetch(now.Add(time.Second), time.Minute)
+	// Not claimable inside the push; claimable once it passes. The old job
+	// cannot free the new lease.
+	if j, err := st.ClaimRefetch(now.Add(time.Second), time.Minute); err != nil || j != nil {
+		t.Fatalf("claimed inside the release delay: %+v %v", j, err)
+	}
+	job2, err := st.ClaimRefetch(now.Add(RefetchReleaseDelay+time.Second), time.Minute)
 	if err != nil || job2 == nil {
 		t.Fatal(job2, err)
 	}
-	if err := st.ReleaseRefetch(*job); !errors.Is(err, ErrClaimStale) {
+	if err := st.ReleaseRefetch(*job, now); !errors.Is(err, ErrClaimStale) {
 		t.Fatalf("superseded release: %v", err)
 	}
 	if _, _, _, _, _, _, leased := refetchRow(t, st, u); !leased {
 		t.Fatal("a superseded holder freed the live lease")
 	}
 	// The released claim cannot complete either.
-	if _, err := st.CompleteRefetch(*job, now.Add(time.Second), RefetchOutcome{OK: true, SHA256: "bb"}); !errors.Is(err, ErrClaimStale) {
+	if _, err := st.CompleteRefetch(*job, now.Add(RefetchReleaseDelay+time.Second), RefetchOutcome{OK: true, SHA256: "bb"}); !errors.Is(err, ErrClaimStale) {
 		t.Fatalf("released job completed: %v", err)
 	}
 }

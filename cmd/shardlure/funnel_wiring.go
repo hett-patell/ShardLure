@@ -72,10 +72,13 @@ func wireCapturePause(runner *capture.Runner, m *observability.Monitor) {
 
 // newURLWorker builds the quarantine-fetch retry worker. It shares the
 // runner's SpaceGate, so a pause stops URL fetches as well as file copies.
-func newURLWorker(st *store.Store, runner *capture.Runner, m *observability.Monitor) *capture.ArtifactWorker {
+// refetch is capture.refetch: only then does a first capture seed the
+// re-fetch schedule.
+func newURLWorker(st *store.Store, runner *capture.Runner, m *observability.Monitor, refetch bool) *capture.ArtifactWorker {
 	w := capture.NewArtifactWorker(st, runner.Fetch(), 5, 2*time.Minute)
 	w.Space = runner.SpaceGate()
 	w.Hosts = runner.HostGate()
+	w.Refetch = refetch
 	w.OnCycle = workerCycle(m, observability.CaptureURL, 2*time.Minute)
 	return w
 }

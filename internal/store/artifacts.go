@@ -1057,30 +1057,49 @@ func (s *Store) CompleteArtifactCapture(url string, attempt int, status, detail,
 	}
 	// Claim increments attempt_count. It is a monotonically increasing fencing
 	// token; an expired/reclaimed worker cannot overwrite the current result.
-	// A fetched completion seeds the re-fetch schedule in the same
-	// transaction, so a payload-serving URL is never captured without one.
-	return s.WithTx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`
+	// Completion no longer seeds the re-fetch schedule: the ArtifactWorker
+	// does (SeedRefetchForCapture), only when capture.refetch is on and the
+	// payload is payload-shaped, which the store cannot judge (final review
+	// I1/I3).
+	res, err := s.execWrite(`
 UPDATE artifacts
 SET status=?, detail=?, local_path=?, sha256=?, size_bytes=?, next_attempt_at=?,
     lease_until=NULL, last_successful_fetch_at=COALESCE(?, last_successful_fetch_at)
 WHERE url=? AND fetch_epoch=0 AND attempt_count=? AND status='capturing'
   AND julianday(lease_until)>julianday(?)`,
-			status, detail, localPath, sha256, sizeBytes, nextTS, fetched, url, attempt, captureTime(now))
-		if err != nil {
-			return err
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return ErrClaimStale
-		}
-		if status != "fetched" || !refetchableURL(url) {
+		status, detail, localPath, sha256, sizeBytes, nextTS, fetched, url, attempt, captureTime(now))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrClaimStale
+	}
+	return nil
+}
+
+// SeedRefetchForCapture schedules re-fetches for a URL whose first capture
+// just completed. The caller (the ArtifactWorker) decides eligibility:
+// capture.refetch on, no query string, a payload-shaped body. This only
+// checks what the store knows: the URL's epoch-0 row must be fetched with
+// exactly this sha (a stale or foreign call seeds nothing), and the schedule
+// is measured from the URL's first sighting (first_observed_at, then ts, then
+// now for a legacy row with neither). INSERT OR IGNORE, as SeedRefetch.
+func (s *Store) SeedRefetchForCapture(url, sha256 string) error {
+	if !refetchableURL(url) || sha256 == "" {
+		return nil
+	}
+	if err := s.ensureArtifactsTable(); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	return s.WithTx(func(tx *sql.Tx) error {
+		var first, ts sql.NullString
+		err := tx.QueryRow(`SELECT first_observed_at, ts FROM artifacts
+WHERE url=? AND fetch_epoch=0 AND status='fetched' AND sha256=?`, url, sha256).Scan(&first, &ts)
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
-		// The schedule is measured from the URL's first sighting; a legacy
-		// row without one falls back to its ts, then to now.
-		var first, ts sql.NullString
-		if err := tx.QueryRow(`SELECT first_observed_at, ts FROM artifacts WHERE url=? AND fetch_epoch=0`, url).Scan(&first, &ts); err != nil {
+		if err != nil {
 			return err
 		}
 		firstSeen := now

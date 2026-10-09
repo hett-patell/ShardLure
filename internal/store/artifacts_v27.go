@@ -17,6 +17,16 @@ import (
 // INSERT OR IGNORE writers that omit fetch_epoch get the default 0, so the
 // (url, fetch_epoch) unique index keeps deduplicating first sightings exactly
 // as UNIQUE(url) did.
+//
+// last_refetch_at is the re-fetch liveness clock: a scheduled re-fetch that
+// returns a payload this URL already holds sets it on that row and nothing
+// else. last_successful_fetch_at stays write-once (the row's first fetch),
+// because MalwareBazaar freshness, the share pool and the funnel read it as
+// "when this sample was first captured"; moving it on every re-fetch kept a
+// 16-day-old sample shareable (final review C1). Nothing on a share path
+// reads last_refetch_at. v27 was amended to add it before release: the only
+// database stamped 27 was a throwaway rehearsal copy, and healV27Columns
+// covers any branch build that stamped 27 without it.
 const artifactsV27Table = `CREATE TABLE artifacts_v27 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -40,7 +50,8 @@ const artifactsV27Table = `CREATE TABLE artifacts_v27 (
   lease_until TEXT,
   fetch_epoch INTEGER NOT NULL DEFAULT 0,
   parent_sha256 TEXT,
-  depth INTEGER NOT NULL DEFAULT 0
+  depth INTEGER NOT NULL DEFAULT 0,
+  last_refetch_at TEXT
 )`
 
 // artifactsTableDDL is the same shape under the real name, for
@@ -60,6 +71,34 @@ func mustRenameDDL(ddl, from, to string) string {
 }
 
 const artifactsV27Columns = `id,ts,src_ip,session_id,actor_id,url,local_path,sha256,size_bytes,origin,status,detail,created_at,attempt_count,next_attempt_at,first_observed_at,last_seen_at,last_fetch_attempt_at,last_successful_fetch_at,lease_until`
+
+// addLastRefetchColumn adds artifacts.last_refetch_at when an earlier build
+// of the (then unreleased) v27 rung created the table without it.
+func addLastRefetchColumn(tx *sql.Tx) error {
+	has, err := columnExistsIn(tx, "artifacts", "last_refetch_at")
+	if err != nil || has {
+		return err
+	}
+	_, err = tx.Exec(`ALTER TABLE artifacts ADD COLUMN last_refetch_at TEXT`)
+	return err
+}
+
+// healV27Columns runs after the ladder on every Open. v27 was amended in
+// place (last_refetch_at) before release, so a database a branch build
+// already stamped 27 never re-runs the rung; without the column every
+// CompleteRefetch would fail. The check is a PRAGMA read; only a database
+// missing the column takes writeMu, once.
+func (s *Store) healV27Columns() error {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name IN ('fetch_epoch','last_refetch_at')`).Scan(&n); err != nil {
+		return err
+	}
+	if n != 1 {
+		// 0: no v27 artifacts table (nothing to heal); 2: healthy.
+		return nil
+	}
+	return s.WithTx(addLastRefetchColumn)
+}
 
 // The schedule for re-fetching a quarantine URL that has served a payload:
 // hourly for 24 h after first sighting, every 6 h to day 7, daily once
@@ -117,6 +156,11 @@ func migrateArtifactsV27(tx *sql.Tx, now string) error {
 		return err
 	}
 	if rebuilt {
+		// A pre-amendment v27 build's output has fetch_epoch but not
+		// last_refetch_at.
+		if err := addLastRefetchColumn(tx); err != nil {
+			return err
+		}
 		for _, q := range append([]string{refetchScheduleTable}, artifactsV27Indexes()...) {
 			if _, err := tx.Exec(q); err != nil {
 				return err

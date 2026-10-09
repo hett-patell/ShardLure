@@ -196,7 +196,13 @@ func TestCaptureSpaceWiring(t *testing.T) {
 	if !m.Snapshot().CapturePaused {
 		t.Fatal("the gate's OnChange must reach this monitor")
 	}
-	urlWorker := newURLWorker(st, runner, m)
+	if newURLWorker(st, runner, m, false).Refetch {
+		t.Fatal("with capture.refetch off the URL worker must not seed re-fetches")
+	}
+	urlWorker := newURLWorker(st, runner, m, true)
+	if !urlWorker.Refetch {
+		t.Fatal("with capture.refetch on the URL worker must seed re-fetches")
+	}
 	if urlWorker.Space != runner.SpaceGate() {
 		t.Fatal("the URL worker must share the runner's SpaceGate")
 	}
@@ -275,7 +281,7 @@ func TestRuntimeWiresSpaceGateBeforeWorkers(t *testing.T) {
 			t.Fatalf("wireCapturePause must precede %s (wire at %d, it at %d)", name, wire, p)
 		}
 	}
-	if pos(`capture\.NewArtifactWorker\(`) >= 0 || pos(`urlWorker\s*:=\s*newURLWorker\(\s*st\s*,\s*runner\s*,\s*m\s*\)`) < 0 {
+	if pos(`capture\.NewArtifactWorker\(`) >= 0 || pos(`urlWorker\s*:=\s*newURLWorker\(\s*st\s*,\s*runner\s*,\s*m\s*,\s*cfg\.Capture\.Refetch\s*\)`) < 0 {
 		t.Fatal("the live URL worker must be built by newURLWorker so it shares the runner's SpaceGate")
 	}
 	// The re-fetch worker likewise: built by newRefetchWorker (which sets

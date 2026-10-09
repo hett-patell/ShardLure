@@ -816,7 +816,11 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 	// After the ladder, on every Open: the v26 rung was amended in place
 	// after branch builds had already stamped databases 26 (see v26Objects),
 	// and `current < 26` never lets those databases see the later objects.
-	return s.healV26Objects()
+	// v27 was amended the same way before release (healV27Columns).
+	if err := s.healV26Objects(); err != nil {
+		return err
+	}
+	return s.healV27Columns()
 }
 
 // v26Objects is the v26 rung's DDL, one idempotent statement per object.

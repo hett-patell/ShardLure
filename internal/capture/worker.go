@@ -20,7 +20,12 @@ type ArtifactWorker struct {
 	Space *SpaceGate
 	// Hosts, when set, allows one in-flight fetch per payload host across
 	// this worker and the re-fetch worker (see HostGate).
-	Hosts       *HostGate
+	Hosts *HostGate
+	// Refetch, when set (capture.refetch), seeds the re-fetch schedule after
+	// a first capture whose URL has no query string and whose body is
+	// payload-shaped (refetchSeedable). Off, nothing is seeded, so no
+	// schedule rows accrue while re-fetching is disabled.
+	Refetch     bool
 	st          *store.Store
 	fetch       *SafeFetcher
 	maxAttempts int
@@ -152,6 +157,15 @@ func (w *ArtifactWorker) tick(ctx context.Context) (cycleErr error) {
 		if fetchErr != nil {
 			cycleErr = fetchErr
 			log.Printf("capture-worker: complete failed url_id=%x", urlID[:8])
+			return
+		}
+		if w.Refetch && refetchSeedable(url, res.head) {
+			// After the completion committed: the store seeds only if the
+			// URL's epoch-0 row is fetched with this very sha.
+			if err := w.st.SeedRefetchForCapture(url, res.SHA256); err != nil {
+				cycleErr = err
+				log.Printf("capture-worker: refetch seed failed url_id=%x", urlID[:8])
+			}
 		}
 		return
 	}

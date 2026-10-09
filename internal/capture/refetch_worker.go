@@ -1,15 +1,47 @@
 package capture
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"log"
+	"net/url"
 	"sync"
 	"time"
 
 	"github.com/networkshard/shardlure/internal/store"
 )
+
+// payloadShaped reports whether a fetched body's head looks like a payload a
+// re-fetch could usefully yield again: an ELF, PE, zip/gzip/bzip2/xz/7z/tar
+// archive, or a text script starting with "#!". Everything else (HTML, API
+// JSON, an IP-echo answer, a Telegram sendMessage reply) is not re-fetched:
+// such bodies change on every request, so each check would mint a new
+// "sample", and a GET with side effects would be replayed ~50 times from the
+// sensor's address (final review I3).
+func payloadShaped(head []byte) bool {
+	if hasBinaryMagic(head) {
+		return true
+	}
+	return bytes.HasPrefix(head, []byte("#!")) && isTextScript(head)
+}
+
+// refetchSeedable reports whether a first capture may enter the re-fetch
+// schedule: the URL carries no query string (a query is the shape of an API
+// call or a tracking/exfiltration GET, not of a payload path) and the body is
+// payload-shaped. An unparsable URL is not seeded (fail closed).
+func refetchSeedable(rawURL string, head []byte) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.RawQuery != "" || u.ForceQuery {
+		return false
+	}
+	return payloadShaped(head)
+}
+
+// errNotPayloadShaped stops a re-fetch's publication: the body is dropped
+// with its temporary file and the check counts as a failure.
+var errNotPayloadShaped = errors.New("re-fetched body is not payload-shaped")
 
 // RefetchWorker drives the Phase C re-fetch schedule (store.NextRefetch):
 // URLs that already served a payload are fetched again so a server that
@@ -110,9 +142,10 @@ func (w *RefetchWorker) tick(ctx context.Context) (cycleErr error) {
 	}
 	release, ok := w.hosts.TryAcquire(job.URL)
 	if !ok {
-		// Another fetch holds this host. Hand the job back unchanged so it
-		// is retried next tick; a busy host is not the URL's failure.
-		if err := w.st.ReleaseRefetch(*job); err != nil && !errors.Is(err, store.ErrClaimStale) {
+		// Another fetch holds this host. Hand the job back, pushed one tick
+		// so other hosts' due rows go first; a busy host is not the URL's
+		// failure.
+		if err := w.st.ReleaseRefetch(*job, w.now()); err != nil && !errors.Is(err, store.ErrClaimStale) {
 			cycleErr = err
 			log.Printf("capture-refetch: release failed url_id=%x", urlID[:8])
 		}
@@ -126,7 +159,15 @@ func (w *RefetchWorker) tick(ctx context.Context) (cycleErr error) {
 
 	var completeErr error
 	completed := false
+	notShaped := false
 	res, fetchErr := w.fetch.fetchWithPublication(deadline, job.URL, func(res *FetchResult, publish func() error) error {
+		// Checked before publication, so a body that is not a payload
+		// never reaches the evidence tree: fetchWithPublication removes the
+		// temporary file when finalize refuses.
+		if !payloadShaped(res.head) {
+			notShaped = true
+			return errNotPayloadShaped
+		}
 		return w.st.WithCaptureFileAccess(deadline, func() error {
 			if err := publish(); err != nil {
 				return err
@@ -143,6 +184,12 @@ func (w *RefetchWorker) tick(ctx context.Context) (cycleErr error) {
 			cycleErr = completeErr
 			log.Printf("capture-refetch: complete failed url_id=%x", urlID[:8])
 		}
+		return
+	}
+	if notShaped {
+		// The URL now answers with something that is not a payload: a
+		// failed check (offline streak), never a new epoch.
+		w.complete(*job, store.RefetchOutcome{Detail: "not payload-shaped"}, urlID, &cycleErr)
 		return
 	}
 	if res != nil && res.Status == "fetched" {

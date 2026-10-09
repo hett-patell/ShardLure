@@ -100,3 +100,41 @@ func TestV27RebuildPreservesRowsIDsAndIndexes(t *testing.T) {
 		t.Fatalf("next id = %d, want 151", id)
 	}
 }
+
+// v27 was amended before release with artifacts.last_refetch_at. A database a
+// branch build already stamped 27 (or stamped 26 over a pre-amendment v27
+// table) gets the column on Open, and the copied rows read NULL.
+func TestV27AmendmentAddsLastRefetchAt(t *testing.T) {
+	for _, stamp := range []bool{true, false} {
+		path := filepath.Join(t.TempDir(), "amend.db")
+		st, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ensureArtifactsTable(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`INSERT INTO artifacts(ts,url,origin,status,created_at) VALUES('2026-10-01T00:00:00Z','http://198.51.100.1/a','quarantine_fetch','fetched','2026-10-01T00:00:00Z')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`ALTER TABLE artifacts DROP COLUMN last_refetch_at`); err != nil {
+			t.Fatal(err)
+		}
+		if !stamp {
+			// The intermediate shape: v27 table, stamp removed, so the rung re-runs.
+			if _, err := st.db.Exec(`DELETE FROM schema_migrations WHERE version=27`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		st.Close()
+		st, err = Open(path)
+		if err != nil {
+			t.Fatalf("stamped=%v: reopen: %v", stamp, err)
+		}
+		var v sql.NullString
+		if err := st.db.QueryRow(`SELECT last_refetch_at FROM artifacts`).Scan(&v); err != nil || v.Valid {
+			t.Fatalf("stamped=%v: last_refetch_at=%v err=%v", stamp, v, err)
+		}
+		st.Close()
+	}
+}

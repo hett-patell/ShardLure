@@ -302,7 +302,7 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				fileWorker.OnCycle = workerCycle(m, observability.CaptureFiles, 2*time.Minute)
 				start(func() { defer workerStopped(m, observability.CaptureFiles, false); fileWorker.Run(ctx) })
 				if cfg.Capture.QuarantineFetch {
-					urlWorker := newURLWorker(st, runner, m)
+					urlWorker := newURLWorker(st, runner, m, cfg.Capture.Refetch)
 					start(func() { defer workerStopped(m, observability.CaptureURL, false); urlWorker.Run(ctx) })
 					if cfg.Capture.Refetch {
 						refetchWorker := newRefetchWorker(st, runner, m)

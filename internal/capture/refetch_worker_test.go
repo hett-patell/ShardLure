@@ -39,7 +39,7 @@ func newRefetchFixture(t *testing.T) *refetchFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	fx := &refetchFixture{st: st, hosts: NewHostGate(), body: "payload-v1 #!/bin/sh echo one", status: 200}
+	fx := &refetchFixture{st: st, hosts: NewHostGate(), body: "#!/bin/sh\necho payload-v1\n", status: 200}
 	fx.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fx.mu.Lock()
 		fx.requests++
@@ -78,6 +78,7 @@ func (fx *refetchFixture) capture(t *testing.T, url string) {
 	}
 	w := NewArtifactWorker(fx.st, fx.fetch, 5, time.Minute)
 	w.Hosts = fx.hosts
+	w.Refetch = true
 	if err := w.tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -173,10 +174,10 @@ func TestRefetchWorkerFetchesDueURLOncePerSchedule(t *testing.T) {
 	if n := fx.rowsFor(t, url); n != 1 {
 		t.Fatalf("same body: rows=%d want 1", n)
 	}
-	var lastOK string
-	fx.query(t, `SELECT last_successful_fetch_at FROM artifacts WHERE url=? AND fetch_epoch=0`, []any{url}, &lastOK)
-	if got, err := time.Parse(time.RFC3339Nano, lastOK); err != nil || !got.Equal(clock) {
-		t.Fatalf("last_successful_fetch_at=%s want %s (%v)", lastOK, clock.Format(time.RFC3339Nano), err)
+	var lastRefetch string
+	fx.query(t, `SELECT last_refetch_at FROM artifacts WHERE url=? AND fetch_epoch=0`, []any{url}, &lastRefetch)
+	if got, err := time.Parse(time.RFC3339Nano, lastRefetch); err != nil || !got.Equal(clock) {
+		t.Fatalf("last_refetch_at=%s want %s (%v)", lastRefetch, clock.Format(time.RFC3339Nano), err)
 	}
 	// The same hash reuses quarantine/<sha256>: no second file.
 	if n := fx.quarantineFiles(t); n != 1 {
@@ -196,7 +197,7 @@ func TestRefetchWorkerFetchesDueURLOncePerSchedule(t *testing.T) {
 
 	// The server rotates its payload: the next due check records it at
 	// epoch 1 beside the first-sight row.
-	fx.set("payload-v2 #!/bin/sh echo two", 200)
+	fx.set("#!/bin/sh\necho payload-v2\n", 200)
 	clock = clock.Add(61 * time.Minute)
 	if err := w.tick(context.Background()); err != nil {
 		t.Fatal(err)
@@ -241,7 +242,7 @@ func TestRefetchWorkerServerErrorIsAFailure(t *testing.T) {
 }
 
 // (d) while another fetch holds the URL's host, a tick fetches nothing and
-// hands the job back: lease cleared, no check spent.
+// hands the job back: lease cleared, no check spent, next check one tick out.
 func TestRefetchWorkerBusyHostReleasesLease(t *testing.T) {
 	fx := newRefetchFixture(t)
 	url := fx.srv.URL + "/bins/x.sh"
@@ -259,11 +260,14 @@ func TestRefetchWorkerBusyHostReleasesLease(t *testing.T) {
 	if fx.count() != 1 {
 		t.Fatalf("busy host was fetched: requests=%d", fx.count())
 	}
-	if s := fx.schedule(t, url); s.leased || s.checks != 0 || s.failures != 0 || s.next != before.next || s.state != "active" {
-		t.Fatalf("busy host: schedule %+v (before %+v)", s, before)
+	// No check spent; next_check_at moves one tick out (M1).
+	wantNext := clock.Add(store.RefetchReleaseDelay).UTC().Format("2006-01-02T15:04:05.000000000Z")
+	if s := fx.schedule(t, url); s.leased || s.checks != 0 || s.failures != 0 || s.next == before.next || s.next != wantNext || s.state != "active" {
+		t.Fatalf("busy host: schedule %+v (before %+v, want next %s)", s, before, wantNext)
 	}
-	// Once the host is free, the very next tick takes the job.
+	// Once the host is free, the first tick after the push takes the job.
 	release()
+	clock = clock.Add(store.RefetchReleaseDelay + time.Second)
 	if err := w.tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}

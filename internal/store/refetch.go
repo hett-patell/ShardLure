@@ -95,24 +95,66 @@ type RefetchJob struct {
 	lease string
 }
 
+// refetchMaxAge is the schedule's hard stop: nothing is fetched at or after
+// day 10 from first sighting (MalwareBazaar's freshness window). NextRefetch
+// applies it when a row advances; ClaimRefetch applies it again at claim time,
+// because a row that never advanced (re-fetch disabled, daemon down) can sit
+// overdue for weeks.
+const refetchMaxAge = 10 * 24 * time.Hour
+
+// refetchSettleChunk bounds how many overdue rows one claim settles, so a
+// large backlog (re-fetch turned back on after weeks) costs each 30 s tick a
+// bounded write. The claim itself never returns an overdue row, so a backlog
+// still being settled is never fetched.
+const refetchSettleChunk = 500
+
+// RefetchMaxNewPayloads caps the distinct new payloads one URL may yield by
+// re-fetch (final review I3). The fourth new hash settles the schedule done.
+const RefetchMaxNewPayloads = 4
+
+// RefetchReleaseDelay is how far ReleaseRefetch pushes a busy host's job: one
+// re-fetch worker tick, so the next claim takes another host's due row first.
+const RefetchReleaseDelay = 30 * time.Second
+
 // ClaimRefetch leases the most overdue re-fetch, or returns nil, nil when
 // nothing is due. done rows are never claimed.
+//
+// Rows whose first sighting is 10 or more days old are settled to done in the
+// same transaction (at most refetchSettleChunk per call) and are never
+// returned: an active row seeded while capture.refetch was off, or left
+// overdue while the daemon was down, would otherwise be fetched once more on
+// re-enable, weeks after any capture could be shared (final review I1). The
+// claim query repeats the age bound, so a row the settle has not reached yet
+// (or one whose first_seen_at does not parse: julianday NULL) is skipped, not
+// fetched. A row under a live lease is left to its holder, whose completion
+// settles it through NextRefetch.
 func (s *Store) ClaimRefetch(now time.Time, lease time.Duration) (*RefetchJob, error) {
 	if lease <= 0 {
 		return nil, errors.New("refetch lease must be positive")
 	}
 	nowS := captureTime(now)
 	leaseS := captureTime(now.Add(lease))
+	maxAgeDays := refetchMaxAge.Hours() / 24
 	var job *RefetchJob
 	err := s.WithTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE refetch_schedule SET state='done', next_check_at=?, lease_until=NULL
+WHERE rowid IN (
+  SELECT rowid FROM refetch_schedule
+  WHERE state IN ('active','offline')
+    AND julianday(?) - julianday(first_seen_at) >= ?
+    AND (lease_until IS NULL OR julianday(lease_until) <= julianday(?))
+  LIMIT ?)`, nowS, nowS, maxAgeDays, nowS, refetchSettleChunk); err != nil {
+			return err
+		}
 		var url, first string
 		var checks int
 		err := tx.QueryRow(`SELECT url, first_seen_at, checks FROM refetch_schedule
 WHERE state IN ('active','offline')
   AND julianday(next_check_at) <= julianday(?)
   AND (lease_until IS NULL OR julianday(lease_until) <= julianday(?))
+  AND julianday(?) - julianday(first_seen_at) < ?
 ORDER BY julianday(next_check_at), url
-LIMIT 1`, nowS, nowS).Scan(&url, &first, &checks)
+LIMIT 1`, nowS, nowS, nowS, maxAgeDays).Scan(&url, &first, &checks)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -122,6 +164,11 @@ LIMIT 1`, nowS, nowS).Scan(&url, &first, &checks)
 		firstSeen, err := parseTime(first)
 		if err != nil {
 			return err
+		}
+		if now.Sub(firstSeen) >= refetchMaxAge {
+			// julianday and Go disagree only at the exact boundary; Go wins
+			// and the row is left for the next settle.
+			return nil
 		}
 		res, err := tx.Exec(`UPDATE refetch_schedule SET lease_until=?
 WHERE url=? AND checks=? AND state IN ('active','offline')
@@ -150,8 +197,9 @@ type RefetchOutcome struct {
 }
 
 // CompleteRefetch records a re-fetch in one transaction. A payload already
-// held for this URL (a fetched row at any epoch with the same sha) only
-// advances that row's freshness; a new sha becomes a new artifacts row at
+// held for this URL (a fetched row at any epoch with the same sha) only sets
+// that row's last_refetch_at (never last_successful_fetch_at, which share
+// freshness reads); a new sha becomes a new artifacts row at
 // the URL's next epoch, carrying epoch 0's provenance, and returns true.
 // The schedule then advances by NextRefetch. ErrClaimStale when the job's
 // checks moved or its lease is no longer the live one.
@@ -189,11 +237,15 @@ WHERE url=? AND checks=? AND lease_until IS NOT NULL AND julianday(lease_until) 
 		if out.OK {
 			failures = 0
 			lastSHA = out.SHA256
-			// Only the fetch clock moves. ts, first_observed_at and
-			// last_seen_at record attacker sightings: discovery drops a
+			// Only the re-fetch liveness clock moves. ts, first_observed_at
+			// and last_seen_at record attacker sightings: discovery drops a
 			// sighting older than last_seen_at and retention ages rows on
-			// it, so our own fetch cadence must never touch them.
-			res, err := tx.Exec(`UPDATE artifacts SET last_successful_fetch_at=?
+			// it. last_successful_fetch_at is write-once (the row's first
+			// fetch): MalwareBazaar freshness, the share pool and the funnel
+			// read it as when the sample was captured, so a re-fetch moving
+			// it kept an old sample looking fresh (final review C1). Our own
+			// fetch cadence must never touch any of them.
+			res, err := tx.Exec(`UPDATE artifacts SET last_refetch_at=?
 WHERE url=? AND status='fetched' AND sha256=?`, nowS, job.URL, out.SHA256)
 			if err != nil {
 				return err
@@ -222,6 +274,19 @@ FROM (SELECT 1) LEFT JOIN artifacts a ON a.url=? AND a.fetch_epoch=0`,
 			failures++
 		}
 		next, state := NextRefetch(firstSeen, now, failures)
+		if newPayload && state != "done" {
+			// A URL that has minted RefetchMaxNewPayloads distinct payloads
+			// by re-fetch (epochs 1..N) is a server returning a new body on
+			// every check, not a rotating build: stop, so it cannot fill
+			// the evidence disk one 50 MiB "sample" per check.
+			var rotated int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM artifacts WHERE url=? AND fetch_epoch>0`, job.URL).Scan(&rotated); err != nil {
+				return err
+			}
+			if rotated >= RefetchMaxNewPayloads {
+				state = "done"
+			}
+		}
 		if state == "done" {
 			// A finished row keeps its last check time (next_check_at is
 			// NOT NULL) and is never claimed again.
@@ -246,19 +311,22 @@ WHERE url=? AND checks=?`, nowS, lastSHA, failures, captureTime(next), state, jo
 }
 
 // ReleaseRefetch hands a claimed job back without checking it: the lease is
-// cleared and nothing else moves (checks, failures and next_check_at stay),
-// so the row is claimable again on the next tick. The re-fetch worker uses it
-// when the URL's host is busy with another fetch. Fenced exactly like
-// CompleteRefetch: only the live lease this claim wrote may be released, so a
-// holder whose lease lapsed and was reclaimed cannot free the new holder's
-// lease, and a hand-built job (no lease token) is refused.
-func (s *Store) ReleaseRefetch(job RefetchJob) error {
+// cleared and next_check_at moves to now + RefetchReleaseDelay (checks and
+// failures stay). The re-fetch worker uses it when the URL's host is busy
+// with another fetch. Without the push the same row, still the most overdue,
+// was claimed first on every tick while its host stayed busy, and every other
+// host's due re-fetches waited behind it (final review M1). Fenced exactly
+// like CompleteRefetch: only the live lease this claim wrote may be released,
+// so a holder whose lease lapsed and was reclaimed cannot free the new
+// holder's lease, and a hand-built job (no lease token) is refused.
+func (s *Store) ReleaseRefetch(job RefetchJob, now time.Time) error {
 	if job.lease == "" {
 		return ErrClaimStale
 	}
+	next := captureTime(now.Add(RefetchReleaseDelay))
 	return s.WithTx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE refetch_schedule SET lease_until=NULL
-WHERE url=? AND checks=? AND lease_until=?`, job.URL, job.Checks, job.lease)
+		res, err := tx.Exec(`UPDATE refetch_schedule SET lease_until=NULL, next_check_at=?
+WHERE url=? AND checks=? AND lease_until=?`, next, job.URL, job.Checks, job.lease)
 		if err != nil {
 			return err
 		}
@@ -269,15 +337,22 @@ WHERE url=? AND checks=? AND lease_until=?`, job.URL, job.Checks, job.lease)
 	})
 }
 
-// purgeRefetchSchedule deletes finished schedule rows whose last check (or,
-// never checked, first sighting) is older than the retention cutoff. Only
-// done rows go: active/offline rows are live work and all reach done by day
-// 10. Bounded chunks, each its own transaction, so writeMu is released
-// between them. A row with an unparsable time has a NULL julianday and is
-// kept (fail closed).
+// purgeRefetchSchedule deletes schedule rows retention no longer needs:
+//   - done rows whose last check (or, never checked, first sighting) is older
+//     than the retention cutoff;
+//   - rows in any state first seen more than 10 days ago and before the
+//     cutoff. Such a row can never be fetched again (ClaimRefetch settles it),
+//     but one seeded while capture.refetch was off is never claimed either, so
+//     without this it would stay active forever (final review I1).
+//
+// Bounded chunks, each its own transaction, so writeMu is released between
+// them. A row with an unparsable time has a NULL julianday and is kept (fail
+// closed; ClaimRefetch never fetches it either).
 func (s *Store) purgeRefetchSchedule(ctx context.Context, cutoff time.Time) error {
 	const chunk = 5000
 	cut := captureTime(cutoff)
+	nowS := captureTime(time.Now().UTC())
+	maxAgeDays := refetchMaxAge.Hours() / 24
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -286,8 +361,9 @@ func (s *Store) purgeRefetchSchedule(ctx context.Context, cutoff time.Time) erro
 		err := s.WithTx(func(tx *sql.Tx) error {
 			res, err := tx.Exec(`DELETE FROM refetch_schedule WHERE rowid IN (
   SELECT rowid FROM refetch_schedule
-  WHERE state='done' AND julianday(COALESCE(last_check_at, first_seen_at)) < julianday(?)
-  LIMIT ?)`, cut, chunk)
+  WHERE (state='done' AND julianday(COALESCE(last_check_at, first_seen_at)) < julianday(?))
+     OR (julianday(first_seen_at) < julianday(?) AND julianday(?) - julianday(first_seen_at) > ?)
+  LIMIT ?)`, cut, cut, nowS, maxAgeDays, chunk)
 			if err != nil {
 				return err
 			}
