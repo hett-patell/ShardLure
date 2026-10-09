@@ -312,7 +312,7 @@ func TestRefetchWorkerHoldsHostDuringFetch(t *testing.T) {
 func TestRefetchWorkerUnparsableURLFails(t *testing.T) {
 	fx := newRefetchFixture(t)
 	bad := "http://[bad/x.sh"
-	if err := fx.st.SeedRefetch(bad, time.Now().UTC().Add(-time.Minute), "aa"); err != nil {
+	if err := fx.st.SeedRefetchUnchecked(bad, time.Now().UTC().Add(-time.Minute), "aa"); err != nil {
 		t.Fatal(err)
 	}
 	clock := time.Now().UTC().Add(61 * time.Minute)

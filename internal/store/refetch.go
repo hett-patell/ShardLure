@@ -47,10 +47,14 @@ func refetchableURL(u string) bool {
 		(strings.HasPrefix(l, "https://") && len(l) > len("https://"))
 }
 
-// SeedRefetch schedules a URL that has served a payload for re-fetching.
+// SeedRefetchUnchecked schedules a URL for re-fetching WITHOUT the seeding
+// policy (capture.refetch on, no query string, payload-shaped first capture,
+// matching sha: final review I3). Test fixtures only; production seeds
+// through SeedRefetchForCapture, called by the ArtifactWorker. The name says
+// so because a new caller here would bypass that policy (final re-review N2).
 // INSERT OR IGNORE: a URL's schedule is anchored on its first sighting, so a
 // second seed (a re-capture, a duplicate completion) never resets it.
-func (s *Store) SeedRefetch(url string, firstSeen time.Time, sha string) error {
+func (s *Store) SeedRefetchUnchecked(url string, firstSeen time.Time, sha string) error {
 	if !refetchableURL(url) {
 		return nil
 	}
@@ -255,13 +259,17 @@ WHERE url=? AND status='fetched' AND sha256=?`, nowS, job.URL, out.SHA256)
 				// purged still records the payload: provenance stays empty
 				// and first_observed_at falls back to the schedule's
 				// first_seen_at (the URL's first sighting), never to now,
-				// which would re-anchor the sample's freshness.
+				// which would re-anchor the sample's freshness. With no
+				// first-sight row the depth is unknown, so it fails closed to
+				// 1 (treated as harvested): a harvested URL whose epoch-0 row
+				// a short retention purged must not come back as depth 0 and
+				// pass the share gates on provenance (final re-review N1).
 				if _, err := tx.Exec(`INSERT INTO artifacts(ts, src_ip, session_id, actor_id, url, local_path, sha256, size_bytes,
   origin, status, detail, created_at, attempt_count, first_observed_at, last_seen_at,
   last_fetch_attempt_at, last_successful_fetch_at, fetch_epoch, parent_sha256, depth)
 SELECT ?, a.src_ip, a.session_id, a.actor_id, ?, ?, ?, ?,
   'quarantine_fetch', 'fetched', ?, ?, 1, COALESCE(a.first_observed_at, ?), ?,
-  ?, ?, (SELECT COALESCE(MAX(fetch_epoch), -1) + 1 FROM artifacts WHERE url=?), a.parent_sha256, COALESCE(a.depth, 0)
+  ?, ?, (SELECT COALESCE(MAX(fetch_epoch), -1) + 1 FROM artifacts WHERE url=?), a.parent_sha256, COALESCE(a.depth, 1)
 FROM (SELECT 1) LEFT JOIN artifacts a ON a.url=? AND a.fetch_epoch=0`,
 					nowS, job.URL, out.LocalPath, out.SHA256, out.Size,
 					out.Detail, nowS, captureTime(firstSeen), nowS,
@@ -361,9 +369,12 @@ func (s *Store) purgeRefetchSchedule(ctx context.Context, cutoff time.Time) erro
 		err := s.WithTx(func(tx *sql.Tx) error {
 			res, err := tx.Exec(`DELETE FROM refetch_schedule WHERE rowid IN (
   SELECT rowid FROM refetch_schedule
-  WHERE (state='done' AND julianday(COALESCE(last_check_at, first_seen_at)) < julianday(?))
-     OR (julianday(first_seen_at) < julianday(?) AND julianday(?) - julianday(first_seen_at) > ?)
-  LIMIT ?)`, cut, cut, nowS, maxAgeDays, chunk)
+  WHERE ((state='done' AND julianday(COALESCE(last_check_at, first_seen_at)) < julianday(?))
+     OR (julianday(first_seen_at) < julianday(?) AND julianday(?) - julianday(first_seen_at) > ?))
+    -- A row mid-fetch keeps its schedule until its lease ends, or the
+    -- completion would publish a file no row accounts for (final re-review N3).
+    AND (lease_until IS NULL OR julianday(lease_until) <= julianday(?))
+  LIMIT ?)`, cut, cut, nowS, maxAgeDays, nowS, chunk)
 			if err != nil {
 				return err
 			}

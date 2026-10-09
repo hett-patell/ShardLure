@@ -89,7 +89,7 @@ func TestSeedRefetchOnlyHTTPAndIdempotent(t *testing.T) {
 	st := newTestStore(t, "seed.db")
 	first := time.Now().UTC().Add(-time.Minute)
 	for _, u := range []string{"cowrie-download:abc", "cowrie-event:1", "ftp://x/y", ""} {
-		if err := st.SeedRefetch(u, first, "aa"); err != nil {
+		if err := st.SeedRefetchUnchecked(u, first, "aa"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -98,11 +98,11 @@ func TestSeedRefetchOnlyHTTPAndIdempotent(t *testing.T) {
 	}
 	u := "HTTP://198.51.100.9/x"
 	before := time.Now().UTC()
-	if err := st.SeedRefetch(u, first, "aa"); err != nil {
+	if err := st.SeedRefetchUnchecked(u, first, "aa"); err != nil {
 		t.Fatal(err)
 	}
 	after := time.Now().UTC()
-	if err := st.SeedRefetch(u, first.Add(time.Hour), "bb"); err != nil {
+	if err := st.SeedRefetchUnchecked(u, first.Add(time.Hour), "bb"); err != nil {
 		t.Fatal(err)
 	}
 	if n := countRefetch(t, st); n != 1 {
@@ -521,13 +521,20 @@ func TestCompleteRefetchAfterArtifactsPurged(t *testing.T) {
 	if err != nil || !np {
 		t.Fatalf("complete: %v %v", np, err)
 	}
-	var n, epoch int
+	var n, epoch, depth int
 	var src, sess, actor, parent sql.NullString
 	var firstObs, lastOK string
 	if err := st.db.QueryRow(`SELECT COUNT(*), MAX(fetch_epoch), MAX(src_ip), MAX(session_id), MAX(actor_id), MAX(parent_sha256),
-  MAX(first_observed_at), MAX(last_successful_fetch_at) FROM artifacts WHERE url=?`, u).
-		Scan(&n, &epoch, &src, &sess, &actor, &parent, &firstObs, &lastOK); err != nil {
+  MAX(first_observed_at), MAX(last_successful_fetch_at), MAX(depth) FROM artifacts WHERE url=?`, u).
+		Scan(&n, &epoch, &src, &sess, &actor, &parent, &firstObs, &lastOK, &depth); err != nil {
 		t.Fatal(err)
+	}
+	// No first-sight row says how the URL was found, so the depth fails
+	// closed to 1 (harvested): a harvested URL whose rows a short retention
+	// purged must not come back as depth 0 and pass a share gate on
+	// provenance (final re-review N1).
+	if depth != 1 {
+		t.Fatalf("depth = %d with no first-sight row, want 1 (fail closed)", depth)
 	}
 	if n != 1 || epoch != 0 || src.Valid || sess.Valid || actor.Valid || parent.Valid {
 		t.Fatalf("row: n=%d epoch=%d provenance=%v %v %v %v", n, epoch, src, sess, actor, parent)
@@ -571,6 +578,13 @@ func TestMaintenancePurgeDropsOldDoneRefetchRows(t *testing.T) {
 	ins("http://x/recent-done", "done", recent, captureTime(recent))
 	ins("http://x/old-active", "active", old, captureTime(old))
 	ins("http://x/old-offline", "offline", old, captureTime(old))
+	// Old enough to purge, but mid-fetch: its lease is live, so the row stays
+	// until the holder completes (final re-review N3).
+	ins("http://x/old-leased", "active", old, captureTime(old))
+	if _, err := st.db.Exec(`UPDATE refetch_schedule SET lease_until=? WHERE url='http://x/old-leased'`,
+		captureTime(now.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.MaintenancePurgeContext(context.Background(), 30); err != nil {
 		t.Fatal(err)
 	}
@@ -589,7 +603,7 @@ func TestMaintenancePurgeDropsOldDoneRefetchRows(t *testing.T) {
 	}
 	// Every row first seen before the cutoff and over 10 days ago goes,
 	// whatever its state or last check: it can never be fetched again (I1).
-	want := []string{"http://x/recent-done"}
+	want := []string{"http://x/old-leased", "http://x/recent-done"}
 	if len(got) != len(want) {
 		t.Fatalf("kept %v want %v", got, want)
 	}
