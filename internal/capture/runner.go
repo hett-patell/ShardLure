@@ -22,6 +22,7 @@ type Runner struct {
 	fetch      *SafeFetcher
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
 	space      *SpaceGate
+	hosts      *HostGate
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
@@ -41,12 +42,18 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 			cfg.AdminIPs,
 		),
 		space: NewSpaceGate(evidence, uint64(capCfg.MinFreeBytes)),
+		hosts: NewHostGate(),
 	}
 }
 
 // SpaceGate is the runner's free-space guard, shared with the URL and file
 // workers so one pause covers every capture write path.
 func (r *Runner) SpaceGate() *SpaceGate { return r.space }
+
+// HostGate is the runner's per-host fetch gate, shared by the URL capture
+// worker and the re-fetch worker so the two never fetch from one attacker
+// server at the same time.
+func (r *Runner) HostGate() *HostGate { return r.hosts }
 
 // urlKeyDone reports whether key is already recorded in the DB.
 // The DB is the sole source of truth — the UNIQUE index on url makes

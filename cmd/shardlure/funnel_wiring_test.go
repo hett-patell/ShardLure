@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -202,6 +203,42 @@ func TestCaptureSpaceWiring(t *testing.T) {
 	if urlWorker.OnCycle == nil {
 		t.Fatal("the URL worker must report cycles to the monitor")
 	}
+	if urlWorker.Hosts == nil || urlWorker.Hosts != runner.HostGate() {
+		t.Fatal("the URL worker must share the runner's HostGate")
+	}
+	refetch := newRefetchWorker(st, runner, m)
+	if refetch.Space != runner.SpaceGate() {
+		t.Fatal("the re-fetch worker must share the runner's SpaceGate")
+	}
+	if refetch.OnCycle == nil {
+		t.Fatal("the re-fetch worker must report cycles to the monitor")
+	}
+	// It reports as capture_refetch and never gates readiness: a failing
+	// cycle shows in the monitor but leaves the worker optional.
+	refetch.OnCycle(true, nil)
+	refetch.OnCycle(false, errors.New("boom"))
+	state := m.Snapshot().Workers[observability.CaptureRefetch]
+	if !state.Enabled || state.Required || state.Failure == observability.FailureNone {
+		t.Fatalf("re-fetch worker state = %+v", state)
+	}
+	if observability.CaptureRefetch.String() != "capture_refetch" {
+		t.Fatalf("worker name = %q", observability.CaptureRefetch.String())
+	}
+}
+
+// TestRefetchConfigDefault pins capture.refetch: on by default, so a
+// deployment upgraded without touching its config re-fetches.
+func TestRefetchConfigDefault(t *testing.T) {
+	if !config.Default().Capture.Refetch {
+		t.Fatal("capture.refetch must default to true")
+	}
+	src, err := os.ReadFile(filepath.Join("..", "..", "shardlure.yaml.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^  refetch: true$`).Match(src) {
+		t.Fatal("shardlure.yaml.example must document capture.refetch: true")
+	}
 }
 
 // TestRuntimeWiresSpaceGateBeforeWorkers pins the call sites the helper test
@@ -240,5 +277,23 @@ func TestRuntimeWiresSpaceGateBeforeWorkers(t *testing.T) {
 	}
 	if pos(`capture\.NewArtifactWorker\(`) >= 0 || pos(`urlWorker\s*:=\s*newURLWorker\(\s*st\s*,\s*runner\s*,\s*m\s*\)`) < 0 {
 		t.Fatal("the live URL worker must be built by newURLWorker so it shares the runner's SpaceGate")
+	}
+	// The re-fetch worker likewise: built by newRefetchWorker (which sets
+	// Space and OnCycle before Run), only when capture.refetch is on, and
+	// after the gate is wired.
+	if pos(`capture\.NewRefetchWorker\(`) >= 0 {
+		t.Fatal("the live re-fetch worker must be built by newRefetchWorker so it shares the runner's gates")
+	}
+	build := pos(`if\s+cfg\.Capture\.Refetch\s*\{\s*refetchWorker\s*:=\s*newRefetchWorker\(\s*st\s*,\s*runner\s*,\s*m\s*\)`)
+	if build < 0 || build < wire {
+		t.Fatal("refetchWorker := newRefetchWorker(st, runner, m) must be gated on cfg.Capture.Refetch and follow wireCapturePause")
+	}
+	run := pos(`refetchWorker\.Run\(`)
+	if run < 0 || run < build {
+		t.Fatal("the re-fetch worker must be started after it is built")
+	}
+	urlCfg := pos(`if\s+cfg\.Capture\.QuarantineFetch\s*\{\s*urlWorker\s*:=`)
+	if urlCfg < 0 || build < urlCfg {
+		t.Fatal("the re-fetch worker must start inside the capture.quarantine_fetch block")
 	}
 }

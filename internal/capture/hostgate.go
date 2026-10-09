@@ -25,12 +25,8 @@ func NewHostGate() *HostGate {
 // release frees it; release is idempotent, so a stale second call can never
 // free a later holder. An unparsable URL, or one with no host, is refused.
 func (g *HostGate) TryAcquire(rawURL string) (release func(), ok bool) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, false
-	}
-	host := hostGateKey(u.Hostname())
-	if host == "" {
+	host, ok := hostGateKeyFor(rawURL)
+	if !ok {
 		return nil, false
 	}
 	g.mu.Lock()
@@ -47,6 +43,19 @@ func (g *HostGate) TryAcquire(rawURL string) (release func(), ok bool) {
 			g.mu.Unlock()
 		})
 	}, true
+}
+
+// hostGateKeyFor is the gate key for rawURL, or false when the URL can never
+// be gated (unparsable, or no host). TryAcquire refuses exactly these URLs,
+// so a caller checks it first to tell "never gateable" from "host busy":
+// the former must be settled as a failure, not retried forever.
+func hostGateKeyFor(rawURL string) (string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	host := hostGateKey(u.Hostname())
+	return host, host != ""
 }
 
 // hostGateKey canonicalises a URL hostname so every spelling of one server

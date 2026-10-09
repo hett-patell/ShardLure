@@ -245,6 +245,30 @@ WHERE url=? AND checks=?`, nowS, lastSHA, failures, captureTime(next), state, jo
 	return newPayload, nil
 }
 
+// ReleaseRefetch hands a claimed job back without checking it: the lease is
+// cleared and nothing else moves (checks, failures and next_check_at stay),
+// so the row is claimable again on the next tick. The re-fetch worker uses it
+// when the URL's host is busy with another fetch. Fenced exactly like
+// CompleteRefetch: only the live lease this claim wrote may be released, so a
+// holder whose lease lapsed and was reclaimed cannot free the new holder's
+// lease, and a hand-built job (no lease token) is refused.
+func (s *Store) ReleaseRefetch(job RefetchJob) error {
+	if job.lease == "" {
+		return ErrClaimStale
+	}
+	return s.WithTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE refetch_schedule SET lease_until=NULL
+WHERE url=? AND checks=? AND lease_until=?`, job.URL, job.Checks, job.lease)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrClaimStale
+		}
+		return nil
+	})
+}
+
 // purgeRefetchSchedule deletes finished schedule rows whose last check (or,
 // never checked, first sighting) is older than the retention cutoff. Only
 // done rows go: active/offline rows are live work and all reach done by day

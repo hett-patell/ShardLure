@@ -169,6 +169,10 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 			_ = m.SetWorker(observability.CaptureFiles, observability.WorkerState{Enabled: true, Required: true})
 			if cfg.Capture.QuarantineFetch {
 				_ = m.SetWorker(observability.CaptureURL, observability.WorkerState{Enabled: true, Required: true})
+				if cfg.Capture.Refetch {
+					// Optional: see newRefetchWorker.
+					_ = m.SetWorker(observability.CaptureRefetch, observability.WorkerState{Enabled: true})
+				}
 			}
 		}
 	}
@@ -300,6 +304,10 @@ func runRuntime(ctx context.Context, st *store.Store, keys *settings.Keystore, c
 				if cfg.Capture.QuarantineFetch {
 					urlWorker := newURLWorker(st, runner, m)
 					start(func() { defer workerStopped(m, observability.CaptureURL, false); urlWorker.Run(ctx) })
+					if cfg.Capture.Refetch {
+						refetchWorker := newRefetchWorker(st, runner, m)
+						start(func() { defer workerStopped(m, observability.CaptureRefetch, false); refetchWorker.Run(ctx) })
+					}
 				}
 			}
 			if opts.Journal {

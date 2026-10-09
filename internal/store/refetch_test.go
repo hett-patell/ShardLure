@@ -580,3 +580,51 @@ func TestMaintenancePurgeDropsOldDoneRefetchRows(t *testing.T) {
 		}
 	}
 }
+
+// ReleaseRefetch clears only the live lease this claim wrote and moves
+// nothing else, so a busy host's job is retried on the next tick unchanged.
+func TestReleaseRefetchFenced(t *testing.T) {
+	st := newTestStore(t, "release.db")
+	first := time.Now().UTC().Add(-2 * time.Hour)
+	u := "http://198.51.100.9/bins/x"
+	seedFetched(t, st, u, "aa", first)
+	_, _, _, nextBefore, _, _, _ := refetchRow(t, st, u)
+	now := first.Add(time.Hour + time.Second)
+	job, err := st.ClaimRefetch(now, time.Minute)
+	if err != nil || job == nil {
+		t.Fatal(job, err)
+	}
+	// A hand-built job carries no lease token and is refused.
+	if err := st.ReleaseRefetch(RefetchJob{URL: u, Checks: job.Checks, FirstSeen: job.FirstSeen}); !errors.Is(err, ErrClaimStale) {
+		t.Fatalf("hand-built release: %v", err)
+	}
+	if _, _, _, _, _, _, leased := refetchRow(t, st, u); !leased {
+		t.Fatal("a refused release must leave the lease")
+	}
+	if err := st.ReleaseRefetch(*job); err != nil {
+		t.Fatal(err)
+	}
+	state, failures, checks, next, last, sha, leased := refetchRow(t, st, u)
+	if leased || state != "active" || failures != 0 || checks != 0 || next != nextBefore || last != "" || sha != "aa" {
+		t.Fatalf("after release: %s %d %d %s %s %s %v", state, failures, checks, next, last, sha, leased)
+	}
+	// Released twice: the lease is gone, so the second is stale.
+	if err := st.ReleaseRefetch(*job); !errors.Is(err, ErrClaimStale) {
+		t.Fatalf("double release: %v", err)
+	}
+	// Claimable again straight away; the old job cannot free the new lease.
+	job2, err := st.ClaimRefetch(now.Add(time.Second), time.Minute)
+	if err != nil || job2 == nil {
+		t.Fatal(job2, err)
+	}
+	if err := st.ReleaseRefetch(*job); !errors.Is(err, ErrClaimStale) {
+		t.Fatalf("superseded release: %v", err)
+	}
+	if _, _, _, _, _, _, leased := refetchRow(t, st, u); !leased {
+		t.Fatal("a superseded holder freed the live lease")
+	}
+	// The released claim cannot complete either.
+	if _, err := st.CompleteRefetch(*job, now.Add(time.Second), RefetchOutcome{OK: true, SHA256: "bb"}); !errors.Is(err, ErrClaimStale) {
+		t.Fatalf("released job completed: %v", err)
+	}
+}

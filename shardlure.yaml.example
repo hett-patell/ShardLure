@@ -45,6 +45,11 @@ capture:
   # Pause new captures while the evidence filesystem has less free space than
   # this (bytes; 0 disables). Attackers decide how much the honeypot downloads.
   min_free_bytes: 2147483648
+  # Re-fetch URLs that already served a payload (hourly for the first day,
+  # every 6 h until day 7, never after day 10) so a server that rotates its
+  # binary yields every build. One fetch per host at a time. Needs enabled
+  # and quarantine_fetch.
+  refetch: true
 
 geoip:
   # Required for globe arcs / country stats (resolves attacker IPs).

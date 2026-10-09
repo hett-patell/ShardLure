@@ -17,7 +17,10 @@ import (
 type ArtifactWorker struct {
 	OnCycle func(bool, error)
 	// Space, when set, is consulted before every claim (see SpaceGate).
-	Space       *SpaceGate
+	Space *SpaceGate
+	// Hosts, when set, allows one in-flight fetch per payload host across
+	// this worker and the re-fetch worker (see HostGate).
+	Hosts       *HostGate
 	st          *store.Store
 	fetch       *SafeFetcher
 	maxAttempts int
@@ -100,6 +103,21 @@ func (w *ArtifactWorker) tick(ctx context.Context) (cycleErr error) {
 	// Raw URLs are evidence and can contain passwords or query credentials.
 	// Logs use a stable digest; upstream database errors are not safe text.
 	urlID := sha256.Sum256([]byte(url))
+
+	// One fetch per host at a time, checked before the claim so a busy host
+	// spends no attempt: the URL stays due and is retried next tick. A URL
+	// the gate can never key (unparsable, no host) is not gated: the fetch
+	// rejects it as invalid, which settles it, whereas waiting on the gate
+	// would leave it at the head of the due queue forever.
+	if w.Hosts != nil {
+		if _, gateable := hostGateKeyFor(url); gateable {
+			release, ok := w.Hosts.TryAcquire(url)
+			if !ok {
+				return
+			}
+			defer release()
+		}
+	}
 
 	// We don't know the current attempt_count from the query above, so read
 	// it from the row. If the row disappeared or changed, the claim will fail

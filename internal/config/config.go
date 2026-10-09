@@ -61,6 +61,11 @@ type Config struct {
 		// can make the honeypot download without bound, and on 2026-10-01 the
 		// ARM root disk reached 100%.
 		MinFreeBytes int64 `yaml:"min_free_bytes"`
+		// Refetch re-fetches URLs that already served a payload on the
+		// Phase C schedule (hourly for a day, every 6 h to day 7, never past
+		// day 10), so a server that rotates its binary yields every build.
+		// Needs enabled and quarantine_fetch too.
+		Refetch bool `yaml:"refetch"`
 	} `yaml:"capture"`
 
 	GeoIP struct {
@@ -246,6 +251,7 @@ func Default() Config {
 	c.Capture.QuarantineFetch = true
 	c.Capture.MaxBytes = 50 << 20
 	c.Capture.MinFreeBytes = 2 << 30
+	c.Capture.Refetch = true
 	c.Capture.TimeoutSec = 45
 	c.RetentionDays = 90
 	c.Intel.Bazaar.Endpoint = "https://mb-api.abuse.ch/api/v1/"
