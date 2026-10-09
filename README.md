@@ -473,6 +473,16 @@ capture:
   # claimed, so no retry attempt is spent, and it resumes on its own once
   # space returns. Separate from observability.min_free_bytes (readiness only).
   min_free_bytes: 2147483648
+  # Re-fetch URLs that already served a payload: hourly for the first day,
+  # every 6 h until day 7, daily after 6 straight failures, never after day
+  # 10. A different binary is kept as a new sample. Default true; needs
+  # enabled and quarantine_fetch.
+  refetch: true
+  # Read fetched text scripts (droppers, at most 1 MiB; never executed) and
+  # queue the URLs inside them for quarantine fetch: at most 32 per script,
+  # two levels deep, 32 a day per host. Default true; needs enabled and
+  # quarantine_fetch.
+  harvest_scripts: true
 
 # How long events, enrichment cache entries, artifacts and TTY transcripts are
 # kept before pruning. 0 disables purging (not recommended in production).
@@ -511,6 +521,8 @@ intel:
 Use `-config /path/shardlure.yaml` or `SHARDLURE_CONFIG` to override the path. API keys can also be set from the dashboard settings panel (stored in SQLite, takes precedence over env/config).
 
 Do not commit your real config. `admin_ips` may reveal private network details such as Tailscale IPs.
+
+**More payloads per attack.** A single fetch of the URL an attacker typed misses most of what they distribute, so `shardlure live` fetches more on its own, always through the same SSRF-hardened fetcher and size cap, and never executes anything. `capture.harvest_scripts` reads shell scripts that were already captured (as text, up to 1 MiB) and queues the URLs inside them, which is where droppers name their per-architecture binaries: up to 32 URLs per script, two levels deep, at most 32 new URLs a day per host. `capture.refetch` fetches each URL that served a payload again on a schedule (hourly for the first day, every 6 hours until day 7, daily once it has failed 6 times in a row, never after day 10, MalwareBazaar's age limit), so a server that swaps its binary yields every build: a different hash becomes a new sample, the same hash only records that the URL is still live. Only one fetch per host runs at a time. Files attackers upload over scp/SFTP are archived with their session, like downloads. None of this changes what is shared: every sample still passes the same MalwareBazaar, URLhaus and ThreatFox checks.
 
 ## Deployment
 
