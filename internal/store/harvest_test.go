@@ -10,12 +10,18 @@ import (
 // insertHarvestRow writes one artifacts row the way a capture would leave it.
 func insertHarvestRow(t *testing.T, st *Store, url, origin, status, sha string, size int64, depth int) int64 {
 	t.Helper()
+	return insertHarvestRowAt(t, st, url, origin, status, sha, size, depth, time.Now())
+}
+
+func insertHarvestRowAt(t *testing.T, st *Store, url, origin, status, sha string, size int64, depth int, created time.Time) int64 {
+	t.Helper()
 	if err := st.ensureArtifactsTable(); err != nil {
 		t.Fatal(err)
 	}
+	at := captureTime(created)
 	res, err := st.db.Exec(`INSERT INTO artifacts(ts,src_ip,session_id,actor_id,url,local_path,sha256,size_bytes,origin,status,created_at,attempt_count,depth)
-VALUES('2026-10-08T00:00:00Z','198.51.100.7','sess-1','cowrie:abc',?,?,?,?,?,?,'2026-10-08T00:00:00Z',1,?)`,
-		url, "/evidence/quarantine/"+sha, sha, size, origin, status, depth)
+VALUES(?,'198.51.100.7','sess-1','cowrie:abc',?,?,?,?,?,?,?,1,?)`,
+		at, url, "/evidence/quarantine/"+sha, sha, size, origin, status, at, depth)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,5 +217,37 @@ func TestHarvestCursorAdvancesWithoutURLs(t *testing.T) {
 	}
 	if cands, err := st.HarvestCandidates(ctx, 64); err != nil || len(cands) != 0 {
 		t.Fatalf("candidates=%+v err=%v", cands, err)
+	}
+}
+
+// First use backfills only the last HarvestBackfillDays: an older fetched
+// script is never harvested, a recent one is.
+func TestHarvestFirstUseBackfillsTenDays(t *testing.T) {
+	st := newTestStore(t, "harvest-backfill.db")
+	ctx := context.Background()
+	now := time.Now()
+	insertHarvestRowAt(t, st, "http://203.0.113.1/old.sh", "quarantine_fetch", "fetched", "o1", 10, 0, now.AddDate(0, 0, -20))
+	oldEdge := insertHarvestRowAt(t, st, "http://203.0.113.1/old2.sh", "quarantine_fetch", "fetched", "o2", 10, 0, now.AddDate(0, 0, -11))
+	recent := insertHarvestRowAt(t, st, "http://203.0.113.1/new.sh", "quarantine_fetch", "fetched", "n1", 10, 0, now.AddDate(0, 0, -9))
+	cands, err := st.HarvestCandidates(ctx, 64)
+	if err != nil || len(cands) != 1 || cands[0].ID != recent {
+		t.Fatalf("candidates=%+v err=%v (want only the 9-day-old row)", cands, err)
+	}
+	if c := harvestCursor(t, st); c != oldEdge {
+		t.Fatalf("initial cursor=%d want %d", c, oldEdge)
+	}
+	// Initialised once: a later old-dated row past the cursor is a candidate.
+	late := insertHarvestRowAt(t, st, "http://203.0.113.1/late.sh", "quarantine_fetch", "fetched", "l1", 10, 0, now.AddDate(0, 0, -30))
+	cands, err = st.HarvestCandidates(ctx, 64)
+	if err != nil || len(cands) != 2 || cands[1].ID != late {
+		t.Fatalf("after init candidates=%+v err=%v", cands, err)
+	}
+	// An empty database starts at 0.
+	st2 := newTestStore(t, "harvest-empty.db")
+	if _, err := st2.HarvestCandidates(ctx, 64); err != nil {
+		t.Fatal(err)
+	}
+	if c := harvestCursor(t, st2); c != 0 {
+		t.Fatalf("empty db cursor=%d", c)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -75,7 +76,7 @@ func isTextScript(head []byte) bool {
 // scanned with ExtractURLs, then so are the deobfuscator's final form and
 // every decoded layer, so a base64 `echo …|base64 -d|sh` line yields the URL
 // it hides. Capture's own `cowrie-` dedup pseudo-keys and non-http(s) forms
-// are dropped.
+// are dropped, and so is any URL still holding a shell expansion ($ or `).
 func HarvestURLs(text string, limit int) []string {
 	if limit <= 0 {
 		return nil
@@ -84,7 +85,11 @@ func HarvestURLs(text string, limit int) []string {
 	var out []string
 	add := func(urls []string) bool {
 		for _, u := range urls {
-			if strings.HasPrefix(u, "cowrie-") {
+			// A URL still holding shell expansion (`wget http://h/$a` in a
+			// per-arch loop) is not fetchable as written; it would spend an
+			// attempt and a slot of the host's daily cap on a 4xx. It is
+			// rejected, never expanded.
+			if strings.HasPrefix(u, "cowrie-") || strings.ContainsAny(u, "$`") {
 				continue
 			}
 			lower := strings.ToLower(u)
@@ -134,6 +139,15 @@ func HarvestURLs(text string, limit int) []string {
 // harvestScripts reads up to harvestSourcesPerRun fetched artifacts as text
 // and queues the URLs found in the scripts among them. Files are opened only
 // through the pinned evidence root (never os.Open on a DB path).
+//
+// Every source is settled in the run that reads it: a script queues its
+// URLs, anything else — not a script, gone, unsafe, outside the root, or any
+// open/read error — advances the cursor past it. Only cancellation (or a
+// failing store) leaves it. A read error used to keep the cursor and abort the
+// batch, so one permanently unreadable file (a sample restored as root 0600,
+// a bad sector, a sub-mount safefile refuses) stopped all harvesting forever.
+// A skipped script loses its second stage; that is the price of never
+// stalling the ones behind it.
 func (r *Runner) harvestScripts(ctx context.Context) (int, error) {
 	sources, err := r.st.HarvestCandidates(ctx, harvestSourcesPerRun)
 	if err != nil || len(sources) == 0 {
@@ -145,70 +159,114 @@ func (r *Runner) harvestScripts(ctx context.Context) (int, error) {
 	}
 	root, err := safefile.OpenRoot(rootPath)
 	if err != nil {
-		// Not mounted yet, or unsafe: leave the cursor, retry next run.
-		return 0, safeCaptureError(err, "capture harvest root failed")
+		// Not mounted yet, or unsafe: deployment state, not a property of a
+		// source, so the cursor stays and Run's streak log reports it.
+		return 0, &captureError{status: "failed", detail: "capture harvest root failed: " + safefile.Category(err)}
 	}
 	defer root.Close()
-	queued := 0
+	queued, outside := 0, 0
 	for _, src := range sources {
 		if err := ctx.Err(); err != nil {
 			return queued, err
 		}
-		text, ok, err := readHarvestScript(root, rootPath, src.LocalPath)
-		if err != nil {
-			return queued, err
-		}
-		if !ok {
-			if err := r.st.AdvanceHarvestCursor(ctx, src.ID); err != nil {
+		text, verdict := readHarvestScript(root, rootPath, src.LocalPath)
+		switch verdict {
+		case harvestScript:
+			n, err := r.st.QueueHarvestedURLs(ctx, src, HarvestURLs(text, harvestURLsPerScript), time.Now(), harvestPerHostDaily)
+			if err != nil {
 				return queued, err
 			}
+			if n > 0 {
+				// The parent's digest only: a harvested URL is attacker text.
+				log.Printf("capture: queued %d second-stage URL(s) from payload sha256=%s", n, src.SHA256)
+			}
+			queued += n
 			continue
+		case harvestOutsideRoot:
+			outside++
+		case harvestNotScript:
+		default:
+			log.Printf("capture: harvest skipped artifact id=%d sha256=%s: %s", src.ID, shaPrefix(src.SHA256), verdict)
 		}
-		n, err := r.st.QueueHarvestedURLs(ctx, src, HarvestURLs(text, harvestURLsPerScript), time.Now(), harvestPerHostDaily)
-		if err != nil {
+		if err := r.st.AdvanceHarvestCursor(ctx, src.ID); err != nil {
 			return queued, err
 		}
-		if n > 0 {
-			// The parent's digest only: a harvested URL is attacker text.
-			log.Printf("capture: queued %d second-stage URL(s) from payload sha256=%s", n, src.SHA256)
-		}
-		queued += n
 	}
+	r.reportHarvestOutside(outside, len(sources))
 	return queued, nil
 }
 
-// readHarvestScript returns the file's text when it is a script. ok=false
-// with a nil error means "skip this source for good": the path is outside the
-// evidence root, unsafe (symlink, hardlink, not regular), gone (retention), or
-// the content is not a text script. A transient error (permission, I/O) is
-// returned so the cursor stays and the source is retried.
-func readHarvestScript(root *safefile.Root, rootPath, localPath string) (string, bool, error) {
-	if !filepath.IsAbs(localPath) {
-		return "", false, nil
+func shaPrefix(sha string) string {
+	if len(sha) > 16 {
+		return sha[:16]
 	}
-	rel, err := filepath.Rel(rootPath, filepath.Clean(localPath))
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", false, nil
+	return sha
+}
+
+// reportHarvestOutside logs once per streak that recorded payload paths do
+// not map into the evidence root (a moved evidence_dir, a restored database),
+// and once when every source maps again. Fixed text only, never a path.
+func (r *Runner) reportHarvestOutside(outside, total int) {
+	switch {
+	case outside > 0 && !r.harvestOutside:
+		log.Printf("capture: harvest skipped %d of %d payload(s) whose recorded path is not under the evidence directory; their scripts are not harvested", outside, total)
+		r.harvestOutside = true
+	case outside == 0 && total > 0 && r.harvestOutside:
+		log.Print("capture: harvest payload paths map into the evidence directory again")
+		r.harvestOutside = false
 	}
-	f, err := root.OpenRegular(rel)
+}
+
+// Verdicts of readHarvestScript. Everything but harvestScript advances the
+// cursor; the remaining values are fixed error categories, safe to log.
+const (
+	harvestScript      = "script"
+	harvestNotScript   = "not_script"
+	harvestOutsideRoot = "outside_root"
+)
+
+// openHarvestFile is Root.OpenRegular; a variable so a test can inject an
+// error that a root-run test cannot produce with file modes.
+var openHarvestFile = func(root *safefile.Root, rel string) (*os.File, error) { return root.OpenRegular(rel) }
+
+// readHarvestScript returns the file's text and harvestScript when it is a
+// script. Otherwise the verdict says why it is skipped: harvestNotScript,
+// harvestOutsideRoot, or a fixed error category (safefile.Category of the
+// open error — ErrNotExist after retention, ErrUnsafePath, ErrNotRegular,
+// ErrPermission, ErrIO… — or "read_failed").
+func readHarvestScript(root *safefile.Root, rootPath, localPath string) (string, string) {
+	if localPath == "" {
+		return "", harvestOutsideRoot
+	}
+	// LocalPath is filepath.Join(EvidenceDir, …): relative when evidence_dir
+	// is, so it resolves against the same working directory as rootPath.
+	abs, err := filepath.Abs(localPath)
 	if err != nil {
-		if errors.Is(err, safefile.ErrNotExist) || errors.Is(err, safefile.ErrUnsafePath) || errors.Is(err, safefile.ErrNotRegular) {
-			return "", false, nil
+		return "", harvestOutsideRoot
+	}
+	rel, err := filepath.Rel(rootPath, abs)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", harvestOutsideRoot
+	}
+	f, err := openHarvestFile(root, rel)
+	if err != nil {
+		if cat := safefile.Category(err); cat != "unknown" {
+			return "", cat
 		}
-		return "", false, safeCaptureError(err, "capture harvest read failed")
+		return "", "open_failed"
 	}
 	defer f.Close()
 	br := bufio.NewReaderSize(f, harvestHeadBytes)
 	head, err := br.Peek(harvestHeadBytes)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
-		return "", false, safeCaptureError(err, "capture harvest read failed")
+		return "", "read_failed"
 	}
 	if !isTextScript(head) {
-		return "", false, nil
+		return "", harvestNotScript
 	}
 	data, err := io.ReadAll(io.LimitReader(br, store.HarvestMaxScriptBytes))
 	if err != nil {
-		return "", false, safeCaptureError(err, "capture harvest read failed")
+		return "", "read_failed"
 	}
-	return string(data), true, nil
+	return string(data), harvestScript
 }

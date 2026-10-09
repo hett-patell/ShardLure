@@ -26,6 +26,9 @@ type Runner struct {
 	// harvestErr is the last harvest failure's text, so a failure that
 	// repeats every 5 s run is logged once per streak, and recovery once.
 	harvestErr string
+	// harvestOutside is set while recorded payload paths fall outside the
+	// evidence root, so that is logged once per streak, and recovery once.
+	harvestOutside bool
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {

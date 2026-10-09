@@ -41,11 +41,24 @@ type HarvestSource struct {
 // script it fetches would never be harvested.
 const harvestInFlight = `fetch_epoch=0 AND origin='quarantine_fetch' AND status IN ('pending','capturing','failed')`
 
+// HarvestBackfillDays bounds the first harvest after the feature is enabled:
+// the cursor starts at the newest artifact created more than this many days
+// ago, so only the last 10 days of fetched scripts are read. It is
+// MalwareBazaar's freshness window: an older dropper's URLs are almost always
+// dead and whatever they served could no longer be shared, while starting at
+// 0 queued the whole history (each URL up to 5 attempts of up to 45 s) ahead
+// of every fresh command URL in the single FIFO capture worker.
+const HarvestBackfillDays = 10
+
 // HarvestCandidates returns up to limit fetched artifacts past the harvest
 // cursor, ordered by id. Rows at or beyond the oldest still in-flight capture
 // are held back (see harvestInFlight) so the cursor only ever moves over
-// settled rows.
+// settled rows. On first use the cursor is initialised (HarvestBackfillDays).
 func (s *Store) HarvestCandidates(ctx context.Context, limit int) ([]HarvestSource, error) {
+	return s.harvestCandidatesAt(ctx, limit, time.Now())
+}
+
+func (s *Store) harvestCandidatesAt(ctx context.Context, limit int, now time.Time) ([]HarvestSource, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -57,7 +70,20 @@ func (s *Store) HarvestCandidates(ctx context.Context, limit int) ([]HarvestSour
 	}
 	var cursor int64
 	err := s.db.QueryRowContext(ctx, "SELECT offset FROM ingest_state WHERE source='capture' AND path=?", harvestCursorKey).Scan(&cursor)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
+		err = s.WithTxContext(ctx, func(tx *sql.Tx) error {
+			// INSERT OR IGNORE: a concurrent first use keeps whichever row
+			// landed first; the read-back below is the one the scan uses.
+			cutoff := captureTime(now.AddDate(0, 0, -HarvestBackfillDays))
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ingest_state(source,path,inode,offset,head_sig,updated_at)
+VALUES('capture',?,0,(SELECT COALESCE(MAX(id),0) FROM artifacts WHERE julianday(created_at) < julianday(?)),'',?)`,
+				harvestCursorKey, cutoff, captureTime(now)); err != nil {
+				return err
+			}
+			return tx.QueryRowContext(ctx, "SELECT offset FROM ingest_state WHERE source='capture' AND path=?", harvestCursorKey).Scan(&cursor)
+		})
+	}
+	if err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(sha256,''), COALESCE(local_path,''), COALESCE(src_ip,''),
