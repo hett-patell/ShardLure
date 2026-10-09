@@ -630,3 +630,199 @@ func TestFileCaptureSourceProtectionUsesPartialIndex(t *testing.T) {
 		t.Fatalf("source hold lookup scans queue:\n%s", plan)
 	}
 }
+
+func fileUploadEvent(at time.Time, hash string) *models.Event {
+	// Cowrie's upload event: filename is the attacker's name for the file,
+	// url/destfile the fake-filesystem path; the bytes sit at <shasum>.
+	return &models.Event{TS: at, Source: models.SourceCowrie, Kind: models.KindFileUp, SrcIP: "198.51.100.7", SessionID: "inert-upload-session", ActorID: "cowrie:inert-upload", Filename: "sshd", Command: "/bin/sshd", SHA256: hash}
+}
+
+func fileJobRow(t *testing.T, s *Store, eventID int64) (source, expected, session, srcIP, actor, state, reason string) {
+	t.Helper()
+	if err := s.db.QueryRow("SELECT source_name,expected_sha256,session_id,src_ip,actor_id,state,reason FROM capture_file_jobs WHERE event_id=?", eventID).Scan(&source, &expected, &session, &srcIP, &actor, &state, &reason); err != nil {
+		t.Fatalf("job for event %d: %v", eventID, err)
+	}
+	return
+}
+
+func TestUploadDiscoveryQueuesTheContentAddressedSource(t *testing.T) {
+	s := newTestStore(t, "upload-discovery.db")
+	hash := strings.Repeat("b", 64)
+	up := fileUploadEvent(time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC), strings.ToUpper(hash))
+	// An attacker-chosen name longer than the filename bound must not reject
+	// an upload: its source is the hash, so the name is never read.
+	long := fileUploadEvent(up.TS, hash)
+	long.Filename = strings.Repeat("n", 5000)
+	if err := s.AppendEventsAndUpsertActorsAgg([]*models.Event{up, long}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil || n != 2 {
+		t.Fatalf("discover=%d err=%v", n, err)
+	}
+	for _, ev := range []*models.Event{up, long} {
+		source, expected, session, srcIP, actor, state, reason := fileJobRow(t, s, ev.ID)
+		if source != hash || expected != hash || state != FileCapturePending || reason != "" {
+			t.Fatalf("upload job source=%q expected=%q state=%q reason=%q", source, expected, state, reason)
+		}
+		if session != "inert-upload-session" || srcIP != "198.51.100.7" || actor != "cowrie:inert-upload" {
+			t.Fatalf("upload job lost its session binding: %q %q %q", session, srcIP, actor)
+		}
+	}
+	if held, err := s.CaptureFileProtected(context.Background(), hash); err != nil || !held {
+		t.Fatalf("queued upload source not held: %v %v", held, err)
+	}
+}
+
+func TestUploadDiscoveryRejectsAnUploadWithoutAHash(t *testing.T) {
+	s := newTestStore(t, "upload-nohash.db")
+	for _, hash := range []string{"", "not-a-hash"} {
+		if err := s.InsertEvent(fileUploadEvent(time.Now(), hash)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	for id := int64(1); id <= 2; id++ {
+		source, _, _, _, _, state, reason := fileJobRow(t, s, id)
+		if source != "" || state != FileCaptureRejected || reason != FileCaptureInvalidHash {
+			t.Fatalf("event %d: source=%q state=%q reason=%q", id, source, state, reason)
+		}
+	}
+	if held, err := s.CaptureFileProtected(context.Background(), "sshd"); err != nil || held {
+		t.Fatalf("the attacker's filename became a protected source: %v %v", held, err)
+	}
+}
+
+func TestUploadBackfillQueuesOnlyUploadsTheOldCursorPassed(t *testing.T) {
+	s := newTestStore(t, "upload-backfill.db")
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	oldDown := fileCaptureEvent(at, "/cowrie/downloads/old-download")
+	oldUp1 := fileUploadEvent(at, strings.Repeat("c", 64))
+	oldUp2 := fileUploadEvent(at, strings.Repeat("d", 64))
+	if err := s.AppendEventsAndUpsertActorsAgg([]*models.Event{oldDown, oldUp1, &models.Event{TS: at, Source: models.SourceCowrie, Kind: models.KindConnect}, oldUp2}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A database the downloads-only discovery already walked: the cursor is
+	// past all four events and the old download has its (finished) job.
+	if err := s.ensureFileCaptureTable(); err != nil {
+		t.Fatal(err)
+	}
+	stamp := captureTime(at)
+	if _, err := s.db.Exec("INSERT INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('capture',?,0,?,'',?)", fileCaptureDiscoveryPath, oldUp2.ID, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO capture_file_jobs(event_id,source_name,state,next_attempt_at,created_at,updated_at) VALUES(?,'old-download','archived',?,?,?)", oldDown.ID, stamp, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	newUp := fileUploadEvent(at.Add(time.Hour), strings.Repeat("e", 64))
+	if err := s.InsertEvent(newUp); err != nil {
+		t.Fatal(err)
+	}
+	// The upgraded discovery pins the ceiling at the old cursor and reads on.
+	if n, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil || n != 1 {
+		t.Fatalf("new discovery=%d err=%v", n, err)
+	}
+	var ceiling, progress int64
+	if err := s.db.QueryRow("SELECT inode,offset FROM ingest_state WHERE source='capture' AND path=?", fileUploadBackfillPath).Scan(&ceiling, &progress); err != nil || ceiling != oldUp2.ID || progress != 0 {
+		t.Fatalf("backfill row ceiling=%d progress=%d err=%v", ceiling, progress, err)
+	}
+	// limit 1: a full page resumes after its last row.
+	if n, err := s.BackfillUploadCaptures(context.Background(), 1); err != nil || n != 1 {
+		t.Fatalf("backfill page 1=%d err=%v", n, err)
+	}
+	if n, err := s.BackfillUploadCaptures(context.Background(), 1); err != nil || n != 1 {
+		t.Fatalf("backfill page 2=%d err=%v", n, err)
+	}
+	if n, err := s.BackfillUploadCaptures(context.Background(), 1); err != nil || n != 0 {
+		t.Fatalf("backfill page 3=%d err=%v", n, err)
+	}
+	if err := s.db.QueryRow("SELECT offset FROM ingest_state WHERE source='capture' AND path=?", fileUploadBackfillPath).Scan(&progress); err != nil || progress != ceiling {
+		t.Fatalf("backfill did not finish: %d of %d (%v)", progress, ceiling, err)
+	}
+	var total, uploads int
+	var downState string
+	if err := s.db.QueryRow("SELECT COUNT(*),SUM(expected_sha256 IN (?,?,?)) FROM capture_file_jobs", strings.Repeat("c", 64), strings.Repeat("d", 64), strings.Repeat("e", 64)).Scan(&total, &uploads); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow("SELECT state FROM capture_file_jobs WHERE event_id=?", oldDown.ID).Scan(&downState); err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || uploads != 3 || downState != "archived" {
+		t.Fatalf("jobs total=%d uploads=%d processed download=%q; want 4, 3, archived (never re-queued)", total, uploads, downState)
+	}
+	for _, ev := range []*models.Event{oldUp1, oldUp2} {
+		if _, _, session, _, _, state, _ := fileJobRow(t, s, ev.ID); session != "inert-upload-session" || state != FileCapturePending {
+			t.Fatalf("backfilled upload %d: session=%q state=%q", ev.ID, session, state)
+		}
+	}
+}
+
+func TestFreshDatabaseHasNothingToBackfill(t *testing.T) {
+	s := newTestStore(t, "upload-backfill-fresh.db")
+	if err := s.InsertEvent(fileUploadEvent(time.Now(), strings.Repeat("f", 64))); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil || n != 1 {
+		t.Fatalf("discover=%d err=%v", n, err)
+	}
+	if n, err := s.BackfillUploadCaptures(context.Background(), 10); err != nil || n != 0 {
+		t.Fatalf("backfill=%d err=%v", n, err)
+	}
+}
+
+func TestUploadBackfillHoldsSourceRetention(t *testing.T) {
+	s := newTestStore(t, "upload-backfill-hold.db")
+	s.SetCaptureRetentionPolicy(CaptureRetentionPolicy{FilesEnabled: true})
+	if err := s.InsertEvent(fileUploadEvent(time.Now(), strings.Repeat("a", 64))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE ingest_state SET inode=5,offset=0 WHERE source='capture' AND path=?", fileUploadBackfillPath); err != nil {
+		t.Fatal(err)
+	}
+	removed := false
+	ok, err := s.RemoveCaptureSourceIfSafe(context.Background(), strings.Repeat("9", 64), func() (bool, error) { removed = true; return true, nil })
+	if err != nil || ok || removed {
+		t.Fatalf("source removed while the upload backfill was pending: %v %v %v", ok, removed, err)
+	}
+	if _, err := s.db.Exec("UPDATE ingest_state SET offset=5 WHERE source='capture' AND path=?", fileUploadBackfillPath); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.RemoveCaptureSourceIfSafe(context.Background(), strings.Repeat("9", 64), func() (bool, error) { return true, nil }); err != nil || !ok {
+		t.Fatalf("finished backfill still holds: %v %v", ok, err)
+	}
+}
+
+func TestUploadMissingSourceFailsWithoutRetry(t *testing.T) {
+	s := newTestStore(t, "upload-missing.db")
+	now := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	up := fileUploadEvent(now.Add(-time.Hour), strings.Repeat("a", 64))
+	down := fileCaptureEvent(now.Add(-time.Hour), "inert-download")
+	if err := s.AppendEventsAndUpsertActorsAgg([]*models.Event{up, down}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := s.ClaimFileCaptures(context.Background(), now, 2, time.Minute)
+	if err != nil || len(jobs) != 2 {
+		t.Fatalf("claim=%+v err=%v", jobs, err)
+	}
+	for _, job := range jobs {
+		if err := s.CompleteFileCapture(context.Background(), job, now, FileCaptureResult{Status: FileCaptureRetry, Reason: FileCaptureMissingSource}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, _, _, _, state, reason := fileJobRow(t, s, up.ID); state != FileCaptureFailed || reason != FileCaptureMissingSource {
+		t.Fatalf("missing upload state=%q reason=%q; want terminal failed/missing_source", state, reason)
+	}
+	if _, _, _, _, _, state, reason := fileJobRow(t, s, down.ID); state != FileCaptureRetry || reason != FileCaptureMissingSource {
+		t.Fatalf("missing download state=%q reason=%q; want retry", state, reason)
+	}
+	if held, err := s.CaptureFileProtected(context.Background(), strings.Repeat("a", 64)); err != nil || held {
+		t.Fatalf("failed upload still holds its source: %v %v", held, err)
+	}
+}

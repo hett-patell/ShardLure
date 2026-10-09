@@ -91,6 +91,19 @@ func (s *Store) RemoveCaptureSourceIfSafe(ctx context.Context, name string, remo
 		if cursor < latest {
 			return false, nil
 		}
+		// Uploads the downloads-only cursor passed are still being queued by
+		// BackfillUploadCaptures. Cowrie never refreshes a deduplicated
+		// upload's mtime, so a payload uploaded yesterday can look older than
+		// retention; hold every source until the backfill has queued (and so
+		// protected) them all.
+		var ceiling, progress int64
+		err = s.db.QueryRowContext(ctx, "SELECT inode,offset FROM ingest_state WHERE source='capture' AND path=?", fileUploadBackfillPath).Scan(&ceiling, &progress)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+		if err == nil && progress < ceiling {
+			return false, nil
+		}
 	}
 	var held bool
 	if err := s.db.QueryRowContext(ctx, fileCaptureProtectionQuery, name).Scan(&held); err != nil {

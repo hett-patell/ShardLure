@@ -122,6 +122,11 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	if _, err := r.st.DiscoverFileCaptures(ctx, 2000); err != nil {
 		return n, err
 	}
+	// Bounded catch-up for uploads the downloads-only cursor passed; a no-op
+	// read once it reaches its ceiling.
+	if _, err := r.st.BackfillUploadCaptures(ctx, 2000); err != nil {
+		return n, err
+	}
 	// One-shot: backfill the sha->session index from all available
 	// cowrie.json (current + rotated) log files so the cowrie-tty
 	// artifacts captured before the index existed get bound to the

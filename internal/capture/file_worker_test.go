@@ -501,3 +501,139 @@ func TestFileArchiveDelayedSourceRetriesWithoutFalseSuccess(t *testing.T) {
 		t.Fatalf("delayed source not archived: %d %v", n, err)
 	}
 }
+
+// uploadFixture writes body where Cowrie keeps an scp/SFTP upload
+// (download_path/<sha256>) and logs the upload the way Cowrie does: the
+// event's filename is the attacker's name for the file, not its location.
+func uploadFixture(t *testing.T, body []byte, writeSource bool) (*store.Store, *FileWorker, *models.Event, string) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "capture.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	downloads := filepath.Join(dir, "downloads")
+	if err := os.Mkdir(downloads, 0700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	name := hex.EncodeToString(digest[:])
+	if writeSource {
+		if err := os.WriteFile(filepath.Join(downloads, name), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ev := &models.Event{TS: time.Now().Add(-time.Minute), Source: models.SourceCowrie, Kind: models.KindFileUp, SrcIP: "203.0.113.9", SessionID: "inert-scp-session", ActorID: "cowrie:inert-hassh", Filename: "sshd", Command: "/bin/sshd", SHA256: name}
+	if err := st.InsertEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	return st, NewFileWorker(st, downloads, filepath.Join(dir, "evidence"), 1<<20), ev, name
+}
+
+func TestFileWorkerArchivesUploadWithItsSession(t *testing.T) {
+	body := []byte(strings.Repeat("inert uploaded bytes ", 8))
+	st, w, ev, name := uploadFixture(t, body, true)
+	if n, err := w.tick(context.Background()); err != nil || n != 1 {
+		t.Fatalf("upload not archived: %d %v", n, err)
+	}
+	var origin, status, session, srcIP, actor, sum, local string
+	var size int64
+	err := st.QueryRows("SELECT origin,status,session_id,src_ip,actor_id,sha256,size_bytes,local_path FROM artifacts WHERE url=? AND fetch_epoch=0", []any{fmt.Sprint("cowrie-event:", ev.ID)}, func(scan func(...any) error) error {
+		return scan(&origin, &status, &session, &srcIP, &actor, &sum, &size, &local)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if origin != "cowrie_file_download" || status != "fetched" || sum != name || size != int64(len(body)) {
+		t.Fatalf("upload artifact origin=%q status=%q sha=%q size=%d", origin, status, sum, size)
+	}
+	if session != "inert-scp-session" || srcIP != "203.0.113.9" || actor != "cowrie:inert-hassh" {
+		t.Fatalf("upload artifact lost its session: session=%q ip=%q actor=%q", session, srcIP, actor)
+	}
+	if got, err := os.ReadFile(local); err != nil || !bytes.Equal(got, body) || filepath.Base(local) != name {
+		t.Fatalf("archived upload bytes: %q %v", local, err)
+	}
+}
+
+func TestFileWorkerUploadWithMissingFileFailsAtOnce(t *testing.T) {
+	st, w, ev, _ := uploadFixture(t, []byte(strings.Repeat("inert gone ", 8)), false)
+	now := time.Now().UTC()
+	w.now = func() time.Time { return now }
+	if n, err := w.tick(context.Background()); err != nil || n != 0 {
+		t.Fatalf("missing upload tick=%d %v", n, err)
+	}
+	if n := captureScalar(t, st, "SELECT COUNT(*) FROM capture_file_jobs WHERE event_id=? AND state='failed' AND reason='missing_source' AND attempts=1", ev.ID); n != 1 {
+		t.Fatalf("missing upload not terminally failed on its first attempt")
+	}
+	// Long past every backoff: nothing is claimed again.
+	now = now.Add(24 * time.Hour)
+	if n, err := w.tick(context.Background()); err != nil || n != 0 {
+		t.Fatalf("failed upload retried: %d %v", n, err)
+	}
+	if n := captureScalar(t, st, "SELECT attempts FROM capture_file_jobs WHERE event_id=?", ev.ID); n != 1 {
+		t.Fatalf("failed upload claimed again: attempts=%d", n)
+	}
+}
+
+// The ShardLure-side cause of uploads missing from the archive: Cowrie keeps
+// one content-addressed file per payload and never refreshes its mtime when
+// the same bytes are uploaded again, and the directory sync dated its
+// session-less row from that mtime. A payload first seen past retention and
+// re-uploaded yesterday therefore lost its source file, its row and its
+// evidence copy in one purge. An upload job dates its own row from the upload.
+func TestRedeliveredUploadSurvivesRetentionOfItsOldSource(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "capture.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Config{DataDir: dir}
+	cfg.Capture.Enabled = true
+	r := NewRunner(st, cfg)
+	if err := os.MkdirAll(r.cowrieDownloadsDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(strings.Repeat("inert long-lived dropper ", 8))
+	digest := sha256.Sum256(body)
+	name := hex.EncodeToString(digest[:])
+	source := filepath.Join(r.cowrieDownloadsDir(), name)
+	if err := os.WriteFile(source, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	firstSeen := time.Now().Add(-100 * 24 * time.Hour)
+	if err := os.Chtimes(source, firstSeen, firstSeen); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.syncCowrieDownloads(); err != nil || n != 1 {
+		t.Fatalf("directory sync=%d %v", n, err)
+	}
+	up := &models.Event{TS: time.Now().Add(-24 * time.Hour), Source: models.SourceCowrie, Kind: models.KindFileUp, SrcIP: "203.0.113.10", SessionID: "inert-redelivery", Filename: "sshd", SHA256: name}
+	if err := st.InsertEvent(up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DiscoverFileCaptures(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.FileWorker().tick(context.Background()); err != nil || n != 1 {
+		t.Fatalf("redelivered upload not archived: %d %v", n, err)
+	}
+	st.SetCaptureRetentionPolicy(store.CaptureRetentionPolicy{FilesEnabled: true, EvidenceRoot: r.fetch.EvidenceDir})
+	if err := st.MaintenancePurge(90); err != nil {
+		t.Fatal(err)
+	}
+	r.PurgeOldSourceFiles(90)
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("expired source kept (fixture no longer models retention): %v", err)
+	}
+	if n := captureScalar(t, st, "SELECT COUNT(*) FROM artifacts WHERE sha256=? AND origin='cowrie_file_download' AND session_id='inert-redelivery'", name); n != 1 {
+		t.Fatalf("redelivered upload lost its artifact row: %d", n)
+	}
+	if got, err := os.ReadFile(filepath.Join(r.fetch.EvidenceDir, "cowrie", name)); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("redelivered upload lost its evidence copy: %v", err)
+	}
+}
