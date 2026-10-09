@@ -50,6 +50,11 @@ capture:
   # binary yields every build. One fetch per host at a time. Needs enabled
   # and quarantine_fetch.
   refetch: true
+  # Read fetched text scripts (droppers, at most 1 MiB; never executed) and
+  # queue the URLs inside them as new quarantine fetches: at most 32 per
+  # script, two levels deep, 32 a day per host. Needs enabled and
+  # quarantine_fetch.
+  harvest_scripts: true
 
 geoip:
   # Required for globe arcs / country stats (resolves attacker IPs).

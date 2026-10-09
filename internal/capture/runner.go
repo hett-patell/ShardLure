@@ -23,6 +23,9 @@ type Runner struct {
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
 	space      *SpaceGate
 	hosts      *HostGate
+	// harvestErr is the last harvest failure's text, so a failure that
+	// repeats every 5 s run is logged once per streak, and recovery once.
+	harvestErr string
 }
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
@@ -89,6 +92,18 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 			return n, err
 		}
 		n += c
+		// Second-stage harvesting reads fetched scripts as text and only
+		// queues rows (the ArtifactWorker fetches them later), so like
+		// discovery it runs while the space gate is paused.
+		// A failed harvest (an unreadable file keeps the cursor and is retried)
+		// must not stop the Cowrie syncs below, so only cancellation ends Run.
+		if r.cfg.Capture.HarvestScripts {
+			_, err := r.harvestScripts(ctx)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return n, ctxErr
+			}
+			r.reportHarvestError(err)
+		}
 	}
 	// Discovery only writes database rows, so it keeps running while paused;
 	// the directory syncs copy bytes into evidence and wait for space.
@@ -118,6 +133,22 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	}
 	c3, err := r.syncCowrieSources(ctx, true)
 	return n + c3, err
+}
+
+// reportHarvestError logs a harvest failure once per streak, by its safe
+// category text only (never a path or URL), and once on recovery.
+func (r *Runner) reportHarvestError(err error) {
+	switch {
+	case err != nil:
+		msg := safeCaptureError(err, "capture harvest failed").detail
+		if msg != r.harvestErr {
+			log.Printf("capture: second-stage harvest failed: %s; retrying every run", msg)
+			r.harvestErr = msg
+		}
+	case r.harvestErr != "":
+		log.Print("capture: second-stage harvest recovered")
+		r.harvestErr = ""
+	}
 }
 
 // backfillCowrieTTYIndex scans the cowrie.json log (and rotated

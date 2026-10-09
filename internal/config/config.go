@@ -66,6 +66,11 @@ type Config struct {
 		// day 10), so a server that rotates its binary yields every build.
 		// Needs enabled and quarantine_fetch too.
 		Refetch bool `yaml:"refetch"`
+		// HarvestScripts reads already-fetched text scripts (droppers, at most
+		// 1 MiB, never executed) and queues the URLs inside them as new
+		// quarantine fetches: up to 32 per script, depth at most 2, at most 32
+		// a day per host. Needs enabled and quarantine_fetch too.
+		HarvestScripts bool `yaml:"harvest_scripts"`
 	} `yaml:"capture"`
 
 	GeoIP struct {
@@ -252,6 +257,7 @@ func Default() Config {
 	c.Capture.MaxBytes = 50 << 20
 	c.Capture.MinFreeBytes = 2 << 30
 	c.Capture.Refetch = true
+	c.Capture.HarvestScripts = true
 	c.Capture.TimeoutSec = 45
 	c.RetentionDays = 90
 	c.Intel.Bazaar.Endpoint = "https://mb-api.abuse.ch/api/v1/"
