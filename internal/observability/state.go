@@ -34,6 +34,7 @@ const (
 	Backfills
 	JournalSummaries
 	Campaigns
+	CaptureRefetch
 	workerCount
 )
 
@@ -106,7 +107,7 @@ const (
 
 var phaseNames = [...]string{"starting", "serving", "draining"}
 var sourceNames = [...]string{"journal", "cowrie"}
-var workerNames = [...]string{"journal_tail", "cowrie_ingest", "capture_url", "capture_files", "backfills", "journal_summaries", "campaigns"}
+var workerNames = [...]string{"journal_tail", "cowrie_ingest", "capture_url", "capture_files", "backfills", "journal_summaries", "campaigns", "capture_refetch"}
 var providerNames = [...]string{"abuseipdb", "virustotal", "greynoise", "shodan", "otx", "ipqualityscore", "ipinfo", "malwarebazaar", "urlhaus", "threatfox", "ip_api"}
 var operationNames = [...]string{"ip_lookup", "hash_lookup", "upload", "submit"}
 var outcomeNames = [...]string{"success", "unauthorized", "rate_limited", "transport_error", "invalid_response", "rejected", "canceled", "storage_error"}

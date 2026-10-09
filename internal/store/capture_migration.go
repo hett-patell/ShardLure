@@ -135,7 +135,7 @@ func (r *artifactTimeRepairRow) scan(row interface{ Scan(...any) error }) error 
 // replaces the legacy retry/lease fields. No ensure helpers belong here.
 func repairArtifactTimesForURL(ctx context.Context, tx *sql.Tx, url string) error {
 	var row artifactTimeRepairRow
-	err := row.scan(tx.QueryRowContext(ctx, `SELECT `+artifactTimeRepairColumns+` FROM artifacts WHERE url=? AND (first_observed_at IS NULL OR last_seen_at IS NULL)`, url))
+	err := row.scan(tx.QueryRowContext(ctx, `SELECT `+artifactTimeRepairColumns+` FROM artifacts WHERE url=? AND fetch_epoch=0 AND (first_observed_at IS NULL OR last_seen_at IS NULL)`, url))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

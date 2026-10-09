@@ -87,6 +87,10 @@ var benignKinds = map[string]bool{
 	"SSH key": true,
 }
 
+// ReasonHarvestedNoSignal is Vet's refusal of a harvested (depth > 0) sample
+// that only provenance would have accepted.
+const ReasonHarvestedNoSignal = "harvested second-stage sample without a family or behaviour signal"
+
 // VetOptions holds optional policy overrides for Vet.
 type VetOptions struct {
 	FreshnessDays int // 1..9 tightens policy; 0, 10, or invalid = hard default (10)
@@ -135,7 +139,15 @@ func Vet(c Candidate, cls Classification, now time.Time, opts ...VetOptions) (bo
 	// 2. Behavioural (novel-threat path): a non-benign file the attacker
 	//    FETCHED/UPLOADED during a session. Covers brand-new obfuscated
 	//    droppers with no recognisable family — malicious by provenance.
+	//    Only for depth 0: a harvested second stage (a URL ShardLure found
+	//    written in a captured script, which may be a fallback to a
+	//    legitimate tool, a comment or an echo) was not fetched by the
+	//    attacker, so provenance proves nothing about it. It needs a
+	//    family or behaviour signal (checked above) or it stays out.
 	if fetchedOrigins[c.Origin] && cls.FileKind != "" && cls.FileKind != "unknown" {
+		if c.Depth != 0 {
+			return false, ReasonHarvestedNoSignal
+		}
 		return true, ""
 	}
 

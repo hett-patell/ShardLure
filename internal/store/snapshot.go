@@ -66,9 +66,10 @@ var snapshotTables = [...]struct {
 	// Created by the v26 rung: the campaigns rc1 stamped v25 without it (see
 	// scriptVersionCarrySchema), so a v25 database may legitimately lack it.
 	{"script_version_carry", 26},
+	{"refetch_schedule", 27},
 }
 
-const latestSnapshotSchema = 26
+const latestSnapshotSchema = 27
 
 // LatestSnapshotSchema is the newest schema a snapshot can carry; backup
 // manifest validation uses it as the schema ceiling.

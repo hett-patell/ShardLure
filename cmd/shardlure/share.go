@@ -310,6 +310,7 @@ func artifactToCandidate(a store.Artifact) bazaar.Candidate {
 		CreatedAt:  a.CreatedAt,
 		Origin:     a.Origin,
 		ObservedAt: observed,
+		Depth:      a.Depth,
 	}
 }
 

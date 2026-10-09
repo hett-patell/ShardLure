@@ -83,6 +83,7 @@ func (s *Server) urlhausCandidates(activeDays int) ([]urlhaus.Candidate, []urlha
 			Status:    r.Status,
 			FetchedAt: r.FetchedAt,
 			FileKind:  kind,
+			Depth:     r.Depth,
 		}
 		ok, reason := urlhaus.Vet(c, now, urlhaus.VetOptions{ActiveDays: activeDays})
 		vr := urlhausCandidateRow{

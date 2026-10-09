@@ -72,9 +72,31 @@ func wireCapturePause(runner *capture.Runner, m *observability.Monitor) {
 
 // newURLWorker builds the quarantine-fetch retry worker. It shares the
 // runner's SpaceGate, so a pause stops URL fetches as well as file copies.
-func newURLWorker(st *store.Store, runner *capture.Runner, m *observability.Monitor) *capture.ArtifactWorker {
+// refetch is capture.refetch: only then does a first capture seed the
+// re-fetch schedule.
+func newURLWorker(st *store.Store, runner *capture.Runner, m *observability.Monitor, refetch bool) *capture.ArtifactWorker {
 	w := capture.NewArtifactWorker(st, runner.Fetch(), 5, 2*time.Minute)
 	w.Space = runner.SpaceGate()
+	w.Hosts = runner.HostGate()
+	w.Refetch = refetch
 	w.OnCycle = workerCycle(m, observability.CaptureURL, 2*time.Minute)
+	return w
+}
+
+// newRefetchWorker builds the Phase C re-fetch worker. It shares the runner's
+// fetcher (one evidence directory), SpaceGate (a pause stops re-fetches too)
+// and HostGate (never two fetches from one attacker server at once). Space
+// and OnCycle are set here, before the caller starts Run: both are read
+// unlocked by every tick.
+//
+// It reports as an optional worker (never gates /readyz): its 30 s tick is
+// longer than readiness's 15 s idle-progress limit, so a required worker
+// would read stalled between ticks, and re-fetching is extra yield on top of
+// first capture, not something collection depends on. Failures still show
+// in /metrics as worker_error{worker="capture_refetch"}.
+func newRefetchWorker(st *store.Store, runner *capture.Runner, m *observability.Monitor) *capture.RefetchWorker {
+	w := capture.NewRefetchWorker(st, runner.Fetch(), runner.HostGate())
+	w.Space = runner.SpaceGate()
+	w.OnCycle = workerCycleWith(m, observability.CaptureRefetch, 2*time.Minute, false)
 	return w
 }

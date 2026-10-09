@@ -188,5 +188,6 @@ func threatfoxCandidateFromRow(r store.ThreatFoxCandidateRow) threatfox.Candidat
 		FetchedAt: r.FetchedAt,
 		FileKind:  kind,
 		Family:    family,
+		Depth:     r.Depth,
 	}
 }

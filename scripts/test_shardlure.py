@@ -2008,6 +2008,10 @@ class PersonaRegenTests(unittest.TestCase):
         # account planted. Over a tree another account owns, both now run as
         # cowrie from the root-owned copy, like the unit; root runs them only
         # over a tree root owns (the fresh install).
+        if os.geteuid() == 0:
+            # Under real root (a container, the OSS Scanner image) the fixture
+            # tree is root-owned, so the drop is correctly not taken.
+            self.skipTest("needs a non-root owner for the fixture tree")
         with tempfile.TemporaryDirectory() as tmp:
             home = regen_tree(Path(tmp))  # owned by the test's (non-root) user
             lib = regen_lib(home)

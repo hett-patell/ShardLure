@@ -28,6 +28,28 @@ type FetchResult struct {
 	Size      int64
 	Status    string
 	Detail    string
+
+	// head is the body's first payloadHeadBytes bytes, kept in memory so the
+	// workers can judge the payload's shape (payloadShaped) before
+	// publication without reopening the quarantine file.
+	head []byte
+}
+
+// payloadHeadBytes is how much of a fetched body FetchResult keeps: enough
+// for every magic payloadShaped checks (tar's "ustar" sits at offset 257).
+const payloadHeadBytes = 512
+
+// headWriter keeps the first payloadHeadBytes bytes written to it.
+type headWriter struct{ b []byte }
+
+func (h *headWriter) Write(p []byte) (int, error) {
+	if room := payloadHeadBytes - len(h.b); room > 0 {
+		if len(p) < room {
+			room = len(p)
+		}
+		h.b = append(h.b, p[:room]...)
+	}
+	return len(p), nil
 }
 
 // SafeFetcher downloads attacker URLs into an evidence directory with strict limits.
@@ -268,7 +290,8 @@ func (f *SafeFetcher) fetchWithPublication(ctx context.Context, rawURL string, f
 	}()
 
 	h := sha256.New()
-	n, err := io.Copy(tmp, io.TeeReader(io.LimitReader(resp.Body, f.MaxBytes+1), h))
+	head := &headWriter{}
+	n, err := io.Copy(tmp, io.TeeReader(io.LimitReader(resp.Body, f.MaxBytes+1), io.MultiWriter(h, head)))
 	if err != nil {
 		return captureFailure(err, "cannot read or store response body")
 	}
@@ -298,6 +321,7 @@ func (f *SafeFetcher) fetchWithPublication(ctx context.Context, rawURL string, f
 		SHA256:    sum,
 		Size:      n,
 		Status:    "fetched",
+		head:      head.b,
 	}
 	err = finalize(result, func() error {
 		if err := ctx.Err(); err != nil {

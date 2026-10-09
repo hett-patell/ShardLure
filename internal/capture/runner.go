@@ -22,7 +22,22 @@ type Runner struct {
 	fetch      *SafeFetcher
 	ttyIndexed bool // one-shot backfill flag for the sha->session table
 	space      *SpaceGate
+	hosts      *HostGate
+	// harvestErr is the last harvest failure's text, so a failure that
+	// repeats every 5 s run is logged once per streak, and recovery once.
+	harvestErr string
+	// harvestOutside is set while recorded payload paths fall outside the
+	// evidence root, so that is logged once per streak, and recovery once.
+	harvestOutside bool
+	// uploadBackfillFailures counts consecutive failed upload-backfill runs;
+	// at uploadBackfillReleaseAfter the source-retention hold is released.
+	uploadBackfillFailures int
 }
+
+// uploadBackfillReleaseAfter consecutive failed runs (5 s apart, so about a
+// minute) release source retention's wait for the upload backfill: a stuck
+// backfill must never stop every Cowrie source from expiring.
+const uploadBackfillReleaseAfter = 10
 
 func NewRunner(st *store.Store, cfg config.Config) *Runner {
 	capCfg := cfg.Capture
@@ -41,12 +56,18 @@ func NewRunner(st *store.Store, cfg config.Config) *Runner {
 			cfg.AdminIPs,
 		),
 		space: NewSpaceGate(evidence, uint64(capCfg.MinFreeBytes)),
+		hosts: NewHostGate(),
 	}
 }
 
 // SpaceGate is the runner's free-space guard, shared with the URL and file
 // workers so one pause covers every capture write path.
 func (r *Runner) SpaceGate() *SpaceGate { return r.space }
+
+// HostGate is the runner's per-host fetch gate, shared by the URL capture
+// worker and the re-fetch worker so the two never fetch from one attacker
+// server at the same time.
+func (r *Runner) HostGate() *HostGate { return r.hosts }
 
 // urlKeyDone reports whether key is already recorded in the DB.
 // The DB is the sole source of truth — the UNIQUE index on url makes
@@ -82,6 +103,20 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 			return n, err
 		}
 		n += c
+		// Second-stage harvesting reads fetched scripts as text and only
+		// queues rows (the ArtifactWorker fetches them later), so like
+		// discovery it runs while the space gate is paused.
+		// An unreadable source is skipped (logged by id and hash); only an
+		// unusable evidence root or a store error keeps the cursor. Either
+		// way a failed harvest must not stop the Cowrie syncs below, so only
+		// cancellation ends Run.
+		if r.cfg.Capture.HarvestScripts {
+			_, err := r.harvestScripts(ctx)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return n, ctxErr
+			}
+			r.reportHarvestError(err)
+		}
 	}
 	// Discovery only writes database rows, so it keeps running while paused;
 	// the directory syncs copy bytes into evidence and wait for space.
@@ -95,6 +130,13 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	if _, err := r.st.DiscoverFileCaptures(ctx, 2000); err != nil {
 		return n, err
 	}
+	// Bounded catch-up for uploads the downloads-only cursor passed; a no-op
+	// read once it reaches its ceiling. A failure must not stop the TTY sync
+	// below, so it is reported with this run's result instead of ending it.
+	backfillErr := r.backfillUploads(ctx)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
 	// One-shot: backfill the sha->session index from all available
 	// cowrie.json (current + rotated) log files so the cowrie-tty
 	// artifacts captured before the index existed get bound to the
@@ -102,15 +144,56 @@ func (r *Runner) Run(ctx context.Context) (int, error) {
 	// looks at cowrie.log.closed) and idempotent.
 	if !r.ttyIndexed {
 		if err := r.backfillCowrieTTYIndexContext(ctx); err != nil {
-			return n, err
+			return n, errors.Join(err, backfillErr)
 		}
 		r.ttyIndexed = true
 	}
 	if !r.space.Allow() {
-		return n, nil
+		return n, backfillErr
 	}
 	c3, err := r.syncCowrieSources(ctx, true)
-	return n + c3, err
+	return n + c3, errors.Join(err, backfillErr)
+}
+
+// backfillUploads runs one bounded upload-backfill step and keeps the
+// failure streak. After uploadBackfillReleaseAfter consecutive failures it
+// releases source retention's hold on the backfill (logged once) and restores
+// it on the next success (logged once).
+func (r *Runner) backfillUploads(ctx context.Context) error {
+	_, err := r.st.BackfillUploadCaptures(ctx, 2000)
+	if err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		r.uploadBackfillFailures++
+		if r.uploadBackfillFailures == uploadBackfillReleaseAfter {
+			r.st.ReleaseUploadBackfillHold(true)
+			log.Printf("capture: upload backfill failed %d consecutive runs; source retention no longer waits for it", uploadBackfillReleaseAfter)
+		}
+		return safeCaptureError(err, "capture upload backfill failed")
+	}
+	if r.uploadBackfillFailures >= uploadBackfillReleaseAfter {
+		r.st.ReleaseUploadBackfillHold(false)
+		log.Print("capture: upload backfill recovered; source retention waits for it again")
+	}
+	r.uploadBackfillFailures = 0
+	return nil
+}
+
+// reportHarvestError logs a harvest failure once per streak, by its safe
+// category text only (never a path or URL), and once on recovery.
+func (r *Runner) reportHarvestError(err error) {
+	switch {
+	case err != nil:
+		msg := safeCaptureError(err, "capture harvest failed").detail
+		if msg != r.harvestErr {
+			log.Printf("capture: second-stage harvest failed: %s; retrying every run", msg)
+			r.harvestErr = msg
+		}
+	case r.harvestErr != "":
+		log.Print("capture: second-stage harvest recovered")
+		r.harvestErr = ""
+	}
 }
 
 // backfillCowrieTTYIndex scans the cowrie.json log (and rotated

@@ -86,6 +86,7 @@ func (s *Server) threatfoxCandidates(activeDays int) ([]threatfox.Candidate, []t
 			FetchedAt: r.FetchedAt,
 			FileKind:  kind,
 			Family:    family,
+			Depth:     r.Depth,
 		}
 		ok, malware, iocs, reason := threatfox.Vet(c, now, threatfox.VetOptions{ActiveDays: activeDays})
 		vr := threatfoxCandidateRow{

@@ -28,6 +28,17 @@ func (s *Store) SetCaptureRetentionPolicy(policy CaptureRetentionPolicy) {
 	s.capturePolicy = policy
 }
 
+// ReleaseUploadBackfillHold stops (released=true) or resumes source retention's
+// wait for the upload backfill. The capture runner releases it after the
+// backfill has failed on several consecutive runs: a stuck backfill must not
+// stop every Cowrie source from ever expiring. It is per process and resumes
+// when the backfill next succeeds.
+func (s *Store) ReleaseUploadBackfillHold(released bool) {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	s.uploadBackfillReleased = released
+}
+
 // WithCaptureFileAccess ties final file publication/adoption to its durable
 // record against retention. Long source copying/hashing stays outside it.
 func (s *Store) WithCaptureFileAccess(ctx context.Context, fn func() error) error {
@@ -91,6 +102,19 @@ func (s *Store) RemoveCaptureSourceIfSafe(ctx context.Context, name string, remo
 		if cursor < latest {
 			return false, nil
 		}
+		// Uploads the downloads-only cursor passed are still being queued by
+		// BackfillUploadCaptures. Cowrie never refreshes a deduplicated
+		// upload's mtime, so a payload uploaded yesterday can look older than
+		// retention; hold every source until the backfill has queued (and so
+		// protected) them all.
+		var ceiling, progress int64
+		err = s.db.QueryRowContext(ctx, "SELECT inode,offset FROM ingest_state WHERE source='capture' AND path=?", fileUploadBackfillPath).Scan(&ceiling, &progress)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+		if err == nil && progress < ceiling && !s.uploadBackfillReleased {
+			return false, nil
+		}
 	}
 	var held bool
 	if err := s.db.QueryRowContext(ctx, fileCaptureProtectionQuery, name).Scan(&held); err != nil {
@@ -112,11 +136,14 @@ type expiredArtifact struct {
 // Each page is bounded in both row count and field size. Preflight parses all
 // timestamps before any deletion; a malformed later page must not authorize
 // partially guessing chronological retention. Each deleting page revalidates.
+// The "live" (still queued) test is epoch-0 only: later epochs (v27 rotated
+// payloads) are inserted terminal by design, so a non-terminal later-epoch row
+// is never processed by the capture worker and must not be held forever.
 func artifactRetentionPageTx(q sqlQueryer, cursor int64, cutoff time.Time) ([]expiredArtifact, int64, int, error) {
 	rows, err := q.Query(`SELECT id,
 CASE WHEN length(CAST(COALESCE(last_seen_at,ts,created_at,'') AS BLOB))<=64 THEN COALESCE(last_seen_at,ts,created_at,'') END,
 CASE WHEN length(CAST(COALESCE(local_path,'') AS BLOB))<=4096 THEN COALESCE(local_path,'') END,
-COALESCE(origin='quarantine_fetch' AND (status='capturing' OR (status IN ('pending','failed') AND attempt_count<5)),0)
+COALESCE(origin='quarantine_fetch' AND fetch_epoch=0 AND (status='capturing' OR (status IN ('pending','failed') AND attempt_count<5)),0)
 OR (origin='cowrie_file_download' AND substr(url,1,13)='cowrie-event:' AND EXISTS(
  SELECT 1 FROM capture_file_jobs j WHERE j.event_id=CAST(substr(artifacts.url,14) AS INTEGER)
  AND j.state='archived' AND j.result_path=artifacts.local_path

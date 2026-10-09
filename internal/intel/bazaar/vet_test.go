@@ -84,6 +84,49 @@ func TestVet(t *testing.T) {
 			wantOK:  false,
 			wantSub: "unconfirmed",
 		},
+		// Harvested second stages (depth > 0): a URL found written in a
+		// captured script, not fetched by the attacker. Provenance alone no
+		// longer accepts; a family or behaviour tag still does, and hard
+		// rejects still win (final review I2).
+		{
+			name:    "harvested benign ELF rejects (provenance is not proof at depth 1)",
+			cand:    Candidate{SizeBytes: 1_500_000, Origin: "quarantine_fetch", ObservedAt: fresh, Depth: 1},
+			cls:     Classification{FileKind: "ELF", Tags: []string{"elf", "x86-64", "linux"}},
+			wantOK:  false,
+			wantSub: ReasonHarvestedNoSignal,
+		},
+		{
+			name:    "harvested script at depth 2 rejects without a signal",
+			cand:    Candidate{SizeBytes: 2048, Origin: "quarantine_fetch", ObservedAt: fresh, Depth: 2},
+			cls:     Classification{FileKind: "Shell script", Tags: []string{"bash", "script", "linux"}},
+			wantOK:  false,
+			wantSub: ReasonHarvestedNoSignal,
+		},
+		{
+			name:   "harvested sample with a family accepts",
+			cand:   Candidate{SizeBytes: 1_500_000, Origin: "quarantine_fetch", ObservedAt: fresh, Depth: 1},
+			cls:    Classification{FileKind: "ELF", Family: "XMRig", Tags: []string{"elf", "miner"}},
+			wantOK: true,
+		},
+		{
+			name:   "harvested sample with a behaviour tag accepts",
+			cand:   Candidate{SizeBytes: 2048, Origin: "quarantine_fetch", ObservedAt: fresh, Depth: 1},
+			cls:    Classification{FileKind: "Shell script", Tags: []string{"bash", "dropper"}},
+			wantOK: true,
+		},
+		{
+			name:    "harvested sample with a family still rejects when stale (hard reject wins)",
+			cand:    Candidate{SizeBytes: 1_500_000, Origin: "quarantine_fetch", ObservedAt: stale, Depth: 1},
+			cls:     Classification{FileKind: "ELF", Family: "XMRig", Tags: []string{"elf", "miner"}},
+			wantOK:  false,
+			wantSub: "stale",
+		},
+		{
+			name:   "depth 0 quarantine fetch keeps the provenance accept",
+			cand:   Candidate{SizeBytes: 1_500_000, Origin: "quarantine_fetch", ObservedAt: fresh, Depth: 0},
+			cls:    Classification{FileKind: "ELF", Tags: []string{"elf", "x86-64", "linux"}},
+			wantOK: true,
+		},
 		{
 			name:    "unknown ObservedAt treated as stale (fail-safe)",
 			cand:    Candidate{SizeBytes: 1_500_000, Origin: "cowrie_download"}, // zero ObservedAt

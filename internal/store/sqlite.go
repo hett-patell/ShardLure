@@ -32,6 +32,10 @@ type Store struct {
 	writeMu       sync.Mutex
 	captureMu     sync.Mutex
 	capturePolicy CaptureRetentionPolicy
+	// uploadBackfillReleased lifts the source-retention hold of an upload
+	// backfill that keeps failing (see ReleaseUploadBackfillHold). Guarded by
+	// captureMu, like capturePolicy.
+	uploadBackfillReleased bool
 
 	// Lazy-table creation guards. The artifacts / enrichment / bazaar / tty
 	// tables are created on first use (CREATE TABLE IF NOT EXISTS), but the
@@ -802,10 +806,21 @@ CREATE INDEX IF NOT EXISTS idx_cowrie_session_meta_observed_at ON cowrie_session
 			return err
 		}
 	}
+	// v27: artifacts keyed by (url, fetch_epoch) instead of UNIQUE(url), and
+	// refetch_schedule (payload yield Phase C). See artifacts_v27.go.
+	if current < 27 {
+		if err := s.WithTx(func(tx *sql.Tx) error { return migrateArtifactsV27(tx, now) }); err != nil {
+			return err
+		}
+	}
 	// After the ladder, on every Open: the v26 rung was amended in place
 	// after branch builds had already stamped databases 26 (see v26Objects),
 	// and `current < 26` never lets those databases see the later objects.
-	return s.healV26Objects()
+	// v27 was amended the same way before release (healV27Columns).
+	if err := s.healV26Objects(); err != nil {
+		return err
+	}
+	return s.healV27Columns()
 }
 
 // v26Objects is the v26 rung's DDL, one idempotent statement per object.
@@ -1559,6 +1574,19 @@ func (s *Store) MaintenancePurgeContext(ctx context.Context, retentionDays int) 
 	}
 	if err := s.purgeArtifacts(cutoffTime); err != nil {
 		return err
+	}
+	// Finished re-fetch schedules age out with the artifacts they served.
+	// refetch_schedule is created by the v27 rung, so no ensure* is needed.
+	// Like the campaign-derived purge below, a failure here is scheduling
+	// state only: it must not skip event retention or the orphan-actor sweep,
+	// so it is joined into the result (a cancellation still stops at once).
+	if refetchErr := s.purgeRefetchSchedule(ctx, cutoffTime); refetchErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		defer func() {
+			retErr = errors.Join(retErr, fmt.Errorf("refetch-schedule retention: %w", refetchErr))
+		}()
 	}
 
 	// Events — the largest table. Delete in bounded chunks, each its own

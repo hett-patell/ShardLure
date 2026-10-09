@@ -243,7 +243,10 @@ func TestIntermediateV26DatabaseHeals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, q := range shape.drop {
+			// Un-stamp the later rungs so the database really is stamped 26;
+			// reopening must then run v27+ on top of the healed v26 objects.
+			drop := append(append([]string{}, shape.drop...), "DELETE FROM schema_migrations WHERE version > 26")
+			for _, q := range drop {
 				if _, err := st.db.Exec(q); err != nil {
 					t.Fatalf("%s: %v", q, err)
 				}
@@ -256,8 +259,8 @@ func TestIntermediateV26DatabaseHeals(t *testing.T) {
 			}
 			defer st.Close()
 			var got int
-			if err := st.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&got); err != nil || got != 26 {
-				t.Fatalf("schema = %d, %v; the v26 stamp must stay", got, err)
+			if err := st.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&got); err != nil || got != latestSnapshotSchema {
+				t.Fatalf("schema = %d, %v; want the v26 database migrated to latest (%d)", got, err, latestSnapshotSchema)
 			}
 			gotObjects, gotColumns := schemaObjects(t, st.db)
 			compareSchema(t, "intermediate v26 "+shape.build, wantObjects, gotObjects, wantColumns, gotColumns)

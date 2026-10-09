@@ -31,24 +31,31 @@ var (
 // The bracket check is balance-aware rather than a blanket TrimRight because a
 // URL may legitimately end in ')' — trimming that would corrupt the real target
 // and lose the payload.
+//
+// The bracket counts are taken once and decremented as closers are trimmed,
+// so the pass is linear: recounting per trailing byte made a 64 KiB line of
+// ')' quadratic (~1.2 s per 1 MiB harvested script).
 func trimURLTail(u string) string {
+	open := [3]int{strings.Count(u, "("), strings.Count(u, "["), strings.Count(u, "{")}
+	closed := [3]int{strings.Count(u, ")"), strings.Count(u, "]"), strings.Count(u, "}")}
 	for len(u) > 0 {
+		k := -1
 		switch c := u[len(u)-1]; c {
 		case '.', ',', ':', '!', '?':
 		case ')':
-			if strings.Count(u, "(") >= strings.Count(u, ")") {
-				return u
-			}
+			k = 0
 		case ']':
-			if strings.Count(u, "[") >= strings.Count(u, "]") {
-				return u
-			}
+			k = 1
 		case '}':
-			if strings.Count(u, "{") >= strings.Count(u, "}") {
-				return u
-			}
+			k = 2
 		default:
 			return u
+		}
+		if k >= 0 {
+			if open[k] >= closed[k] {
+				return u
+			}
+			closed[k]--
 		}
 		u = u[:len(u)-1]
 	}

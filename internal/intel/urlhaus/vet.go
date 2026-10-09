@@ -86,7 +86,14 @@ type Candidate struct {
 	// FileKind is the classifier's verdict (script / ELF / ...). Used to
 	// confirm a real payload and to reject benign content.
 	FileKind string
+	// Depth is the URL's second-stage depth (store artifacts.depth): 0 when
+	// the attacker's own command named it, > 0 when ShardLure harvested it
+	// from a fetched script. Vet refuses depth > 0.
+	Depth int
 }
+
+// ReasonHarvestedURL is Vet's refusal of a harvested (depth > 0) URL.
+const ReasonHarvestedURL = "harvested URL (named in a script, not fetched by the attacker); not submitted until a legitimate-host check exists"
 
 // VetOptions holds optional policy overrides.
 type VetOptions struct {
@@ -137,6 +144,15 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (bool, string) {
 	// 2. Provenance: we must have fetched it ourselves.
 	if !fetchedOrigins[c.Origin] {
 		return false, "not a URL we fetched (origin " + c.Origin + ")"
+	}
+
+	// 2b. A harvested URL (depth > 0) was found written in a captured
+	//     script, not fetched by the attacker: it may be a fallback to a
+	//     legitimate host (busybox.net, a GitHub release), a comment or an
+	//     echo. Reporting it as malware infrastructure needs a
+	//     legitimate-host check that does not exist yet, so refuse it.
+	if c.Depth != 0 {
+		return false, ReasonHarvestedURL
 	}
 
 	// 3. Proof it was serving: a successful fetch with a real payload.

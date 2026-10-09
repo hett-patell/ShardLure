@@ -94,6 +94,8 @@ func TestVetHardRejects(t *testing.T) {
 		{"credentials in url", func(c *Candidate) { c.URL = "http://user:pw@45.155.205.230/x" }},
 		{"invalid port", func(c *Candidate) { c.URL = "http://45.155.205.230:99999/x" }},
 		{"wrong origin", func(c *Candidate) { c.Origin = "cowrie_download" }},
+		{"harvested depth 1", func(c *Candidate) { c.Depth = 1 }},
+		{"harvested depth 2", func(c *Candidate) { c.Depth = 2 }},
 		{"not fetched", func(c *Candidate) { c.Status = "failed" }},
 		{"no hash", func(c *Candidate) { c.SHA256 = "" }},
 		{"malformed hash (short)", func(c *Candidate) { c.SHA256 = "deadbeef" }},
@@ -190,5 +192,20 @@ func TestVetActiveDaysOnlyTightens(t *testing.T) {
 	c.FetchedAt = vetNow.Add(-10 * 24 * time.Hour)
 	if ok, _, _, _ := Vet(c, vetNow, VetOptions{ActiveDays: 30}); ok {
 		t.Error("ActiveDays=30 must be ignored (may only tighten); 10-day fetch should reject")
+	}
+}
+
+// A harvested URL (depth > 0) is refused with its own reason even when every
+// accept signal holds, including a resolvable Malpedia family (final review
+// I2): it was named in a script, not fetched by the attacker.
+func TestVetRejectsHarvestedURL(t *testing.T) {
+	c := goodCandidate()
+	if ok, _, _, reason := Vet(c, vetNow); !ok {
+		t.Fatalf("the depth-0 fixture must be accepted: %s", reason)
+	}
+	c.Depth = 1
+	ok, malware, iocs, reason := Vet(c, vetNow)
+	if ok || malware != "" || len(iocs) != 0 || reason != ReasonHarvestedURL {
+		t.Fatalf("harvested: ok=%v malware=%q iocs=%d reason=%q", ok, malware, len(iocs), reason)
 	}
 }

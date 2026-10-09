@@ -93,14 +93,39 @@ func (s *Store) migrateFileCaptures(now string) error {
 
 // Bound database text before it crosses into Go. Non-file rows must not copy
 // their command bodies at all just because discovery advances past them.
+//
+// Both Cowrie file events are capture jobs: file_download (wget/curl/tftp,
+// redirections) and file_upload (scp/SFTP into the honeypot). An upload's
+// `filename` is the attacker's own name for it (`sshd`), not the file Cowrie
+// kept: Cowrie stores every upload content-addressed as download_path/<sha256>
+// (scp logs outfile=<sha256>, SFTP the full path), so an upload's source is its
+// shasum. Its filename is therefore never read, and an oversized one cannot
+// reject the job.
+const fileCapturePredicate = "kind IN ('file_download','file_upload') AND source='cowrie'"
+const fileNamePredicate = "kind='file_download' AND source='cowrie'"
+
 func boundedFileField(column string, limit int) string {
-	return boundedCaptureField("kind='file_download' AND source='cowrie'", column, limit)
+	return boundedCaptureField(fileCapturePredicate, column, limit)
 }
 
-var fileDiscoveryQuery = "SELECT id,kind='file_download' AND source='cowrie'," +
-	boundedFileField("ts", 64) + "," + boundedFileField("filename", 4096) + "," + boundedFileField("command", 65536) + "," +
-	boundedFileField("src_ip", 64) + "," + boundedFileField("session_id", 1024) + "," + boundedFileField("actor_id", 1024) + "," + boundedFileField("sha256", 64) +
-	" FROM events WHERE id>? ORDER BY id LIMIT ?"
+const fileDiscoveryColumns = "id," + fileCapturePredicate + ",kind='file_upload',"
+
+var fileDiscoveryFields = boundedFileField("ts", 64) + "," + boundedCaptureField(fileNamePredicate, "filename", 4096) + "," + boundedFileField("command", 65536) + "," +
+	boundedFileField("src_ip", 64) + "," + boundedFileField("session_id", 1024) + "," + boundedFileField("actor_id", 1024) + "," + boundedFileField("sha256", 64)
+
+var fileDiscoveryQuery = "SELECT " + fileDiscoveryColumns + fileDiscoveryFields + " FROM events WHERE id>? ORDER BY id LIMIT ?"
+
+// The upload backfill reads only uploads inside one bounded id span, so it can
+// never re-queue a download the main cursor already processed.
+var uploadBackfillQuery = "SELECT " + fileDiscoveryColumns + fileDiscoveryFields +
+	" FROM events WHERE id>? AND id<=? AND kind='file_upload' AND source='cowrie' ORDER BY id LIMIT ?"
+
+// fileUploadBackfillPath records the one-shot backfill of upload events that
+// the main cursor passed before uploads were capture jobs. Its inode column is
+// the ceiling: the main cursor's position when the row was created (the last
+// event the downloads-only discovery could have skipped). offset is progress.
+const fileUploadBackfillPath = "file-uploads-backfill-v1"
+const uploadBackfillSpan = 20000
 
 func validCaptureHash(raw string) bool {
 	if len(raw) != 64 {
@@ -122,6 +147,88 @@ func fileSourceName(raw string) (string, bool) {
 	}
 	return name, true
 }
+
+// queueFileCaptureRows inserts one job per applicable row. It returns the last
+// id read (the new cursor), the jobs added and the rows read, and
+// errDiscoveryPageFull (with valid progress) when the byte budget stopped it.
+func queueFileCaptureRows(ctx context.Context, tx *sql.Tx, rows *sql.Rows, cursor int64, now string) (int64, int, int, error) {
+	end, used, queued, read := cursor, 0, 0, 0
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return cursor, 0, 0, err
+		}
+		var id int64
+		var applicable, upload bool
+		var fields [7]sql.NullString
+		if err := rows.Scan(&id, &applicable, &upload, &fields[0], &fields[1], &fields[2], &fields[3], &fields[4], &fields[5], &fields[6]); err != nil {
+			return cursor, 0, 0, err
+		}
+		end = id
+		read++
+		used += 64
+		if !applicable {
+			continue
+		}
+		reason := ""
+		for i, f := range fields {
+			used += len(f.String)
+			if !f.Valid || !utf8.ValidString(f.String) || (i != 1 && strings.ContainsRune(f.String, 0)) {
+				reason = FileCaptureInvalidMetadata
+			}
+		}
+		var observed any
+		at, parseErr := parseLedgerTimestamp(fields[0].String)
+		if reason == "" && (parseErr != nil || at.IsZero()) {
+			reason = FileCaptureInvalidTime
+		}
+		if parseErr == nil && !at.IsZero() {
+			observed = captureTime(at)
+		}
+		hash := strings.ToLower(fields[6].String)
+		var name string
+		if upload {
+			// The content-addressed name is the only source an upload has.
+			if reason == "" && !validCaptureHash(hash) {
+				reason = FileCaptureInvalidHash
+			}
+			if reason == "" {
+				name = hash
+			}
+		} else {
+			var valid bool
+			name, valid = fileSourceName(fields[1].String)
+			if reason == "" && !valid {
+				reason = FileCaptureInvalidSource
+			}
+			if reason == "" && hash != "" && !validCaptureHash(hash) {
+				reason = FileCaptureInvalidHash
+			}
+		}
+		state := FileCapturePending
+		if reason != "" {
+			state = FileCaptureRejected
+		}
+		res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO capture_file_jobs(event_id,source_name,delivery_url,src_ip,session_id,actor_id,expected_sha256,observed_at,state,next_attempt_at,reason,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, name, fields[2].String, fields[3].String, fields[4].String, fields[5].String, hash, observed, state, fileCaptureImmediate, reason, now, now)
+		if err != nil {
+			return cursor, 0, 0, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return cursor, 0, 0, err
+		}
+		queued += int(n)
+		if used >= captureDiscoveryPageBytes {
+			return end, queued, read, errDiscoveryPageFull
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return cursor, 0, 0, err
+	}
+	return end, queued, read, nil
+}
+
+var errDiscoveryPageFull = errors.New("file capture: discovery page full")
 
 func (s *Store) DiscoverFileCaptures(ctx context.Context, limit int) (int, error) {
 	if err := ctx.Err(); err != nil {
@@ -147,71 +254,24 @@ func (s *Store) DiscoverFileCaptures(ctx context.Context, limit int) (int, error
 		if err := tx.QueryRowContext(ctx, "SELECT offset FROM ingest_state WHERE source='capture' AND path=?", fileCaptureDiscoveryPath).Scan(&cursor); err != nil {
 			return err
 		}
+		// Uploads became jobs after this cursor had already passed history.
+		// Pin the backfill ceiling before the cursor moves again: every event
+		// above it is read by the query below, which now includes uploads.
+		// Progress starts just below the oldest retained event (an O(1) rowid
+		// read), so the walk never spans ids retention already purged.
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO ingest_state(source,path,inode,offset,head_sig,updated_at) VALUES('capture',?,?,MIN(?,(SELECT COALESCE(MIN(id),1)-1 FROM events)),'',?)", fileUploadBackfillPath, cursor, cursor, now); err != nil {
+			return err
+		}
 		rows, err := tx.QueryContext(ctx, fileDiscoveryQuery, cursor, limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
-		end, used := cursor, 0
-		for rows.Next() {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			var id int64
-			var applicable bool
-			var fields [7]sql.NullString
-			if err := rows.Scan(&id, &applicable, &fields[0], &fields[1], &fields[2], &fields[3], &fields[4], &fields[5], &fields[6]); err != nil {
-				return err
-			}
-			end = id
-			used += 64
-			if !applicable {
-				continue
-			}
-			reason := ""
-			for i, f := range fields {
-				used += len(f.String)
-				if !f.Valid || !utf8.ValidString(f.String) || (i != 1 && strings.ContainsRune(f.String, 0)) {
-					reason = FileCaptureInvalidMetadata
-				}
-			}
-			var observed any
-			at, parseErr := parseLedgerTimestamp(fields[0].String)
-			if reason == "" && (parseErr != nil || at.IsZero()) {
-				reason = FileCaptureInvalidTime
-			}
-			if parseErr == nil && !at.IsZero() {
-				observed = captureTime(at)
-			}
-			name, valid := fileSourceName(fields[1].String)
-			if reason == "" && !valid {
-				reason = FileCaptureInvalidSource
-			}
-			hash := strings.ToLower(fields[6].String)
-			if reason == "" && hash != "" && !validCaptureHash(hash) {
-				reason = FileCaptureInvalidHash
-			}
-			state := FileCapturePending
-			if reason != "" {
-				state = FileCaptureRejected
-			}
-			res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO capture_file_jobs(event_id,source_name,delivery_url,src_ip,session_id,actor_id,expected_sha256,observed_at,state,next_attempt_at,reason,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, name, fields[2].String, fields[3].String, fields[4].String, fields[5].String, hash, observed, state, fileCaptureImmediate, reason, now, now)
-			if err != nil {
-				return err
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			queued += int(n)
-			if used >= captureDiscoveryPageBytes {
-				break
-			}
-		}
-		if err := rows.Err(); err != nil {
+		end, n, _, err := queueFileCaptureRows(ctx, tx, rows, cursor, now)
+		if err != nil && !errors.Is(err, errDiscoveryPageFull) {
 			return err
 		}
+		queued = n
 		if err := rows.Close(); err != nil {
 			return err
 		}
@@ -219,6 +279,72 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, name, fields[2].String, fields[3].String
 			return nil
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE ingest_state SET offset=?,updated_at=? WHERE source='capture' AND path=?", end, now, fileCaptureDiscoveryPath)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return queued, nil
+}
+
+// BackfillUploadCaptures queues the file_upload events that the downloads-only
+// discovery (file-downloads-v1) passed before uploads were capture jobs. One
+// call reads at most uploadBackfillSpan event ids in its own transaction, and
+// only upload rows, so a download the main cursor processed is never queued
+// again (event_id is unique as well). When progress reaches the ceiling the
+// call is a single-row read. Only events still inside event retention can be
+// backfilled; a backfilled upload whose file Cowrie no longer has ends failed.
+func (s *Store) BackfillUploadCaptures(ctx context.Context, limit int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	if err := s.ensureFileCaptureTable(); err != nil {
+		return 0, err
+	}
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	var ceiling, cursor int64
+	err := s.db.QueryRowContext(ctx, "SELECT inode,offset FROM ingest_state WHERE source='capture' AND path=?", fileUploadBackfillPath).Scan(&ceiling, &cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil // created by DiscoverFileCaptures before its first read
+	}
+	if err != nil || cursor >= ceiling {
+		return 0, err
+	}
+	queued := 0
+	err = s.WithTx(func(tx *sql.Tx) error {
+		now := captureTime(time.Now())
+		// Re-read under the writer: another Store may have advanced it.
+		if err := tx.QueryRowContext(ctx, "SELECT inode,offset FROM ingest_state WHERE source='capture' AND path=?", fileUploadBackfillPath).Scan(&ceiling, &cursor); err != nil {
+			return err
+		}
+		if cursor >= ceiling {
+			return nil
+		}
+		top := min(ceiling, cursor+uploadBackfillSpan)
+		rows, err := tx.QueryContext(ctx, uploadBackfillQuery, cursor, top, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		end, n, read, err := queueFileCaptureRows(ctx, tx, rows, cursor, now)
+		full := errors.Is(err, errDiscoveryPageFull)
+		if err != nil && !full {
+			return err
+		}
+		queued = n
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		// A short page read the whole span; a full one (row limit or byte
+		// budget) resumes after its last row.
+		if !full && read < limit {
+			end = top
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE ingest_state SET offset=?,updated_at=? WHERE source='capture' AND path=?", end, now, fileUploadBackfillPath)
 		return err
 	})
 	if err != nil {
@@ -402,6 +528,26 @@ AND (lease_until<=? OR lease_started_at>? OR last_clock_at>?)`, key, key, key, k
 		}
 		state, reason := result.Status, result.Reason
 		next := key
+		if state == FileCaptureRetry && reason == FileCaptureMissingSource {
+			// The worker reports missing_source only for a missing file inside
+			// an open downloads root (a missing root is a retried
+			// read_failure). An upload whose file is not there when its job
+			// runs is not coming back: a later re-upload is its own event and
+			// job. Observed on prod: on the pre-v3.1.1 Cowrie pin one sha was
+			// logged as uploaded 26 times (from 2026-07-11 until the move)
+			// and never kept in downloads/ (no artifact row for any of
+			// them); since the Phase B move to v3.1.1 the same sha is kept
+			// and archived (2026-10-08). Fail it now
+			// rather than spend four backoff rounds on it. Downloads keep the
+			// retry ladder.
+			var upload bool
+			if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM events WHERE id=? AND kind='file_upload' AND source='cowrie')", stored.EventID).Scan(&upload); err != nil {
+				return err
+			}
+			if upload {
+				state = FileCaptureFailed
+			}
+		}
 		if state == FileCaptureRetry {
 			if stored.Attempts >= fileCaptureMaxAttempts {
 				state, reason = FileCaptureFailed, FileCaptureAttemptsExhausted
@@ -436,7 +582,7 @@ VALUES(?,?,?,?,?,?,?,?,'cowrie_file_download','fetched','',?,?,?,?)`, observed, 
 				// Recognize only the same existing result. Never overwrite old
 				// artifact keys, another origin's lease, or remote fetch freshness.
 				var same bool
-				if err := tx.QueryRowContext(ctx, "SELECT status='fetched' AND origin='cowrie_file_download' AND sha256=? AND size_bytes=? AND local_path=? FROM artifacts WHERE url=?", result.SHA256, result.SizeBytes, result.LocalPath, url).Scan(&same); err != nil {
+				if err := tx.QueryRowContext(ctx, "SELECT status='fetched' AND origin='cowrie_file_download' AND sha256=? AND size_bytes=? AND local_path=? FROM artifacts WHERE url=? AND fetch_epoch=0", result.SHA256, result.SizeBytes, result.LocalPath, url).Scan(&same); err != nil {
 					return err
 				}
 				if !same {

@@ -300,6 +300,7 @@ shardlure version
 - **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
 - **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
 - **Rolling back means restoring the backup.** The schema migrates on the first start, so don't point `shardlure.previous` at the upgraded database. Restore the pre-upgrade bundle into a new directory with `backup restore` (see [Backup And Recovery](#backup-and-recovery)), then point the old binary's config at it. `shardlure.previous` is kept for exactly that.
+- **Rolling back from the more-payloads release (schema 27):** restore the pre-upgrade bundle; don't run an older binary on the migrated database. Schema 27 lets one URL hold several samples, and older builds read every one of them as the URL's only row.
 - **Rolling back from v2.9 to an older build:** older binaries (v2.8 at schema 24, the v2.9 campaigns rc1 at schema 25) cannot create backups of the v26 database; restore the pre-upgrade bundle instead.
 - **Upgrading again after a rollback:** an older build writes bot-script lines in its own encoding and leaves the stored normaliser version alone, so the next upgrade would keep them and fingerprint the same script two ways. Run `shardlure scripts --rebuild` as the service account, then restart every `shardlure live` and `web` process on that database. Campaign names and IDs are kept.
 - **Cap Cowrie's downloads on existing installs (v2.10).** Cowrie reads `download_limit_size` only from the `[honeypot]` section of `cowrie.cfg`; earlier ShardLure persona configs put it under `[output_jsonlog]`, where it is ignored, so attackers' downloads were unbounded. A binary upgrade never touches `cowrie.cfg`, so add `download_limit_size = 52428800` under `[honeypot]` (or re-run `scripts/apply-stealth.sh`) and `sudo systemctl restart cowrie`. Fresh installs get it automatically. Separately, ShardLure now pauses new captures when the evidence filesystem drops below `capture.min_free_bytes` (2 GiB by default) and resumes on its own; a pause shows as `shardlure_capture_paused 1` and a Settings warning, never as a failed `/readyz`.
@@ -473,6 +474,16 @@ capture:
   # claimed, so no retry attempt is spent, and it resumes on its own once
   # space returns. Separate from observability.min_free_bytes (readiness only).
   min_free_bytes: 2147483648
+  # Re-fetch URLs that already served a payload: hourly for the first day,
+  # every 6 h until day 7, daily after 6 straight failures, never after day
+  # 10. A different binary is kept as a new sample. Default true; needs
+  # enabled and quarantine_fetch.
+  refetch: true
+  # Read fetched text scripts (droppers, at most 1 MiB; never executed) and
+  # queue the URLs inside them for quarantine fetch: at most 32 per script,
+  # two levels deep, 32 a day per host. Default true; needs enabled and
+  # quarantine_fetch.
+  harvest_scripts: true
 
 # How long events, enrichment cache entries, artifacts and TTY transcripts are
 # kept before pruning. 0 disables purging (not recommended in production).
@@ -511,6 +522,8 @@ intel:
 Use `-config /path/shardlure.yaml` or `SHARDLURE_CONFIG` to override the path. API keys can also be set from the dashboard settings panel (stored in SQLite, takes precedence over env/config).
 
 Do not commit your real config. `admin_ips` may reveal private network details such as Tailscale IPs.
+
+**More payloads per attack.** A single fetch of the URL an attacker typed misses most of what they distribute, so `shardlure live` fetches more on its own, always through the same SSRF-hardened fetcher and size cap, and never executes anything. `capture.harvest_scripts` reads shell scripts that were already captured (as text, up to 1 MiB) and queues the URLs inside them, which is where droppers name their per-architecture binaries: up to 32 URLs per script, two levels deep, at most 32 new URLs a day per host. `capture.refetch` fetches a URL that served a payload again on a schedule (hourly for the first day, every 6 hours until day 7, daily once it has failed 6 times in a row, never at or after day 10, MalwareBazaar's age limit), so a server that swaps its binary yields every build: a different hash becomes a new sample, the same hash only records that the URL is still live and never makes an old sample look new. Only URLs without a query string whose first download looked like a payload (an ELF or PE binary, an archive, or a `#!` script) are re-fetched, a re-fetch that returns anything else counts as a failure and is not kept, and a URL stops after 4 new samples. Only one fetch per host runs at a time. Files attackers upload over scp/SFTP are archived with their session, like downloads. What is shared is stricter, never looser: a sample found only through a URL written inside a script reaches MalwareBazaar only if the classifier names its family or a malware behaviour (the attacker never fetched it, so where it came from proves nothing), and such URLs are never submitted to URLhaus or ThreatFox. Everything else passes the same MalwareBazaar, URLhaus and ThreatFox checks as before.
 
 ## Deployment
 

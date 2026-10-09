@@ -61,7 +61,9 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (out OperationalSnapsho
 	if err != nil {
 		return out, err
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(status='pending' AND attempt_count<5),0),COALESCE(SUM(status='failed' AND attempt_count<5),0),COALESCE(SUM(status='capturing'),0) FROM artifacts WHERE origin='quarantine_fetch' AND status IN ('pending','failed','capturing')`).Scan(&out.URLPending, &out.URLRetry, &out.URLLeased)
+	// Only epoch-0 rows carry capture retry state (v27); later epochs are
+	// inserted terminal, so counting them would report work Due never runs.
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(status='pending' AND attempt_count<5),0),COALESCE(SUM(status='failed' AND attempt_count<5),0),COALESCE(SUM(status='capturing'),0) FROM artifacts WHERE fetch_epoch=0 AND origin='quarantine_fetch' AND status IN ('pending','failed','capturing')`).Scan(&out.URLPending, &out.URLRetry, &out.URLLeased)
 	if err != nil {
 		return out, err
 	}

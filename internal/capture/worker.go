@@ -17,7 +17,15 @@ import (
 type ArtifactWorker struct {
 	OnCycle func(bool, error)
 	// Space, when set, is consulted before every claim (see SpaceGate).
-	Space       *SpaceGate
+	Space *SpaceGate
+	// Hosts, when set, allows one in-flight fetch per payload host across
+	// this worker and the re-fetch worker (see HostGate).
+	Hosts *HostGate
+	// Refetch, when set (capture.refetch), seeds the re-fetch schedule after
+	// a first capture whose URL has no query string and whose body is
+	// payload-shaped (refetchSeedable). Off, nothing is seeded, so no
+	// schedule rows accrue while re-fetching is disabled.
+	Refetch     bool
 	st          *store.Store
 	fetch       *SafeFetcher
 	maxAttempts int
@@ -101,6 +109,21 @@ func (w *ArtifactWorker) tick(ctx context.Context) (cycleErr error) {
 	// Logs use a stable digest; upstream database errors are not safe text.
 	urlID := sha256.Sum256([]byte(url))
 
+	// One fetch per host at a time, checked before the claim so a busy host
+	// spends no attempt: the URL stays due and is retried next tick. A URL
+	// the gate can never key (unparsable, no host) is not gated: the fetch
+	// rejects it as invalid, which settles it, whereas waiting on the gate
+	// would leave it at the head of the due queue forever.
+	if w.Hosts != nil {
+		if _, gateable := hostGateKeyFor(url); gateable {
+			release, ok := w.Hosts.TryAcquire(url)
+			if !ok {
+				return
+			}
+			defer release()
+		}
+	}
+
 	// We don't know the current attempt_count from the query above, so read
 	// it from the row. If the row disappeared or changed, the claim will fail
 	// with ErrClaimStale and we move on.
@@ -134,6 +157,15 @@ func (w *ArtifactWorker) tick(ctx context.Context) (cycleErr error) {
 		if fetchErr != nil {
 			cycleErr = fetchErr
 			log.Printf("capture-worker: complete failed url_id=%x", urlID[:8])
+			return
+		}
+		if w.Refetch && refetchSeedable(url, res.head) {
+			// After the completion committed: the store seeds only if the
+			// URL's epoch-0 row is fetched with this very sha.
+			if err := w.st.SeedRefetchForCapture(url, res.SHA256); err != nil {
+				cycleErr = err
+				log.Printf("capture-worker: refetch seed failed url_id=%x", urlID[:8])
+			}
 		}
 		return
 	}
