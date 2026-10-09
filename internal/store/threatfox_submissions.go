@@ -122,6 +122,9 @@ func (s *Store) ThreatFoxSubmissionStats(activeDays int) (ThreatFoxStats, error)
 
 // threatfoxPendingSQL is the pending-count query, kept identical to the
 // candidate SELECT's WHERE so the UI count and the CLI list never disagree.
+// Unlike URLhaus it is deliberately not one-row-per-URL: an IOC set is per
+// payload hash, so a URL that served two binaries (two v27 epochs) is two
+// candidates (TestThreatFoxListsEachPayloadBehindAURL).
 const threatfoxPendingSQL = `
 SELECT COUNT(1) FROM artifacts a
 WHERE a.origin = 'quarantine_fetch'

@@ -139,12 +139,12 @@ VALUES(?,?,?,?,?,'quarantine_fetch','pending',?,?,?)`, ts, fields[1].String, fie
 							return err
 						}
 						var seen string
-						if err := tx.QueryRowContext(ctx, "SELECT COALESCE(last_seen_at,ts) FROM artifacts WHERE url=?", url).Scan(&seen); err != nil {
+						if err := tx.QueryRowContext(ctx, "SELECT COALESCE(last_seen_at,ts) FROM artifacts WHERE url=? AND fetch_epoch=0", url).Scan(&seen); err != nil {
 							return err
 						}
 						previous, err := parseTime(seen)
 						if err != nil || at.After(previous) {
-							if _, err := tx.ExecContext(ctx, "UPDATE artifacts SET ts=?,last_seen_at=?,first_observed_at=COALESCE(first_observed_at,?) WHERE url=?", ts, ts, ts, url); err != nil {
+							if _, err := tx.ExecContext(ctx, "UPDATE artifacts SET ts=?,last_seen_at=?,first_observed_at=COALESCE(first_observed_at,?) WHERE url=? AND fetch_epoch=0", ts, ts, ts, url); err != nil {
 								return err
 							}
 						}

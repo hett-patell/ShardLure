@@ -64,7 +64,7 @@ func (s *Store) ArtifactURLRecorded(url string) (bool, error) {
 		return false, err
 	}
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(1) FROM artifacts WHERE url=?`, url).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM artifacts WHERE url=? AND fetch_epoch=0`, url).Scan(&n)
 	return n > 0, err
 }
 
@@ -89,7 +89,7 @@ func (s *Store) TouchArtifactTS(url string, ts time.Time) error {
 		return nil
 	}
 	var cur sql.NullString
-	err := s.db.QueryRow(`SELECT ts FROM artifacts WHERE url = ?`, url).Scan(&cur)
+	err := s.db.QueryRow(`SELECT ts FROM artifacts WHERE url = ? AND fetch_epoch=0`, url).Scan(&cur)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // no row to touch; caller's dedup check was stale
 	}
@@ -109,7 +109,7 @@ func (s *Store) TouchArtifactTS(url string, ts time.Time) error {
 		if err := repairArtifactTimesForURL(context.Background(), tx, url); err != nil {
 			return err
 		}
-		res, err := tx.Exec(`UPDATE artifacts SET ts=?,last_seen_at=?,first_observed_at=COALESCE(first_observed_at,?) WHERE url=? AND ts IS ?`,
+		res, err := tx.Exec(`UPDATE artifacts SET ts=?,last_seen_at=?,first_observed_at=COALESCE(first_observed_at,?) WHERE url=? AND fetch_epoch=0 AND ts IS ?`,
 			captureTime(ts), captureTime(ts), captureTime(ts), url, cur)
 		if err != nil {
 			return err
@@ -175,7 +175,7 @@ func (s *Store) ArtifactCaptureRecord(url string) (exists bool, session string, 
 	if err := s.ensureArtifactsTable(); err != nil {
 		return false, "", err
 	}
-	err = s.db.QueryRow("SELECT COALESCE(session_id,'') FROM artifacts WHERE url=?", url).Scan(&session)
+	err = s.db.QueryRow("SELECT COALESCE(session_id,'') FROM artifacts WHERE url=? AND fetch_epoch=0", url).Scan(&session)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, "", nil
 	}
@@ -767,7 +767,7 @@ func (s *Store) SessionIDForCowrieTTYShasum(sha string) (string, error) {
 }
 
 // SetArtifactSessionByURL backfills the session_id of an existing
-// artifact row by its (unique) URL key. Used by the cowrie TTY sync
+// artifact row by its URL key (the epoch-0 row; v27). Used by the cowrie TTY sync
 // pass to bind a captured ttylog artifact to the session it belonged
 // to, once we can match the shasum against an ingested cowrie event.
 func (s *Store) SetArtifactSessionByURL(url, sessionID string) error {
@@ -777,7 +777,7 @@ func (s *Store) SetArtifactSessionByURL(url, sessionID string) error {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err
 	}
-	_, err := s.execWrite(`UPDATE artifacts SET session_id=? WHERE url=? AND (session_id IS NULL OR session_id='')`, sessionID, url)
+	_, err := s.execWrite(`UPDATE artifacts SET session_id=? WHERE url=? AND fetch_epoch=0 AND (session_id IS NULL OR session_id='')`, sessionID, url)
 	return err
 }
 
@@ -928,12 +928,14 @@ func (s *Store) DueArtifactCaptures(now time.Time, limit, maxAttempts int) ([]st
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
 	}
+	// Only epoch-0 rows carry capture retry state (v27); later epochs are
+	// rotated payloads inserted terminal, so both statements scope to epoch 0.
 	// A crash during the last allowed attempt must not leave a permanent
 	// in-flight row. Pre-v19 capturing rows kept their lease in next_attempt_at;
 	// honor it even before the background repair reaches this row.
 	if _, err := s.execWrite(`UPDATE artifacts SET status='failed_permanently',
 detail='capture attempt budget exhausted', lease_until=NULL, next_attempt_at=NULL
-WHERE origin='quarantine_fetch' AND status IN ('pending','failed','capturing')
+WHERE fetch_epoch=0 AND origin='quarantine_fetch' AND status IN ('pending','failed','capturing')
 AND attempt_count>=? AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))
 AND (status!='capturing' OR next_attempt_at IS NULL OR julianday(next_attempt_at)<=julianday(?))`,
 		captureBudget(maxAttempts), captureTime(now), captureTime(now)); err != nil {
@@ -941,7 +943,7 @@ AND (status!='capturing' OR next_attempt_at IS NULL OR julianday(next_attempt_at
 	}
 	rows, err := s.db.Query(`
 SELECT url FROM artifacts
-WHERE origin='quarantine_fetch' AND status IN ('pending','capturing','failed')
+WHERE fetch_epoch=0 AND origin='quarantine_fetch' AND status IN ('pending','capturing','failed')
   AND attempt_count < ?
   AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?))
   AND (lease_until IS NULL OR julianday(lease_until) <= julianday(?))
@@ -989,7 +991,7 @@ func (s *Store) ClaimArtifactCapture(url string, now, leaseUntil time.Time, expe
 UPDATE artifacts
 SET status='capturing', lease_until=?, next_attempt_at=NULL,
     attempt_count=attempt_count+1, last_fetch_attempt_at=?
-WHERE url=? AND attempt_count=? AND origin='quarantine_fetch'
+WHERE url=? AND fetch_epoch=0 AND attempt_count=? AND origin='quarantine_fetch'
   AND status IN ('pending','failed','capturing')
   AND (lease_until IS NULL OR julianday(lease_until)<=julianday(?))
   AND (next_attempt_at IS NULL OR julianday(next_attempt_at)<=julianday(?))`,
@@ -1059,7 +1061,7 @@ func (s *Store) CompleteArtifactCapture(url string, attempt int, status, detail,
 UPDATE artifacts
 SET status=?, detail=?, local_path=?, sha256=?, size_bytes=?, next_attempt_at=?,
     lease_until=NULL, last_successful_fetch_at=COALESCE(?, last_successful_fetch_at)
-WHERE url=? AND attempt_count=? AND status='capturing'
+WHERE url=? AND fetch_epoch=0 AND attempt_count=? AND status='capturing'
   AND julianday(lease_until)>julianday(?)`,
 		status, detail, localPath, sha256, sizeBytes, nextTS, fetched, url, attempt, captureTime(now))
 	if err != nil {
@@ -1078,5 +1080,5 @@ func (s *Store) ArtifactAttemptCount(url string, count *int) error {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return err
 	}
-	return s.db.QueryRow(`SELECT attempt_count FROM artifacts WHERE url=?`, url).Scan(count)
+	return s.db.QueryRow(`SELECT attempt_count FROM artifacts WHERE url=? AND fetch_epoch=0`, url).Scan(count)
 }

@@ -46,7 +46,18 @@ const artifactsV27Table = `CREATE TABLE artifacts_v27 (
 // artifactsTableDDL is the same shape under the real name, for
 // ensureArtifactsTable. The ladder normally creates the table (v17) and
 // rebuilds it (v27) first, so this only ever runs as a no-op guard.
-var artifactsTableDDL = strings.Replace(artifactsV27Table, "CREATE TABLE artifacts_v27", "CREATE TABLE IF NOT EXISTS artifacts", 1)
+var artifactsTableDDL = mustRenameDDL(artifactsV27Table, "CREATE TABLE artifacts_v27", "CREATE TABLE IF NOT EXISTS artifacts")
+
+// mustRenameDDL panics at package init when the prefix is absent. A silent
+// no-op Replace would leave ensureArtifactsTable running
+// "CREATE TABLE artifacts_v27" (no IF NOT EXISTS) the moment someone rewords
+// artifactsV27Table; failing every test binary is the loud alternative.
+func mustRenameDDL(ddl, from, to string) string {
+	if !strings.HasPrefix(ddl, from+" (") {
+		panic("store: artifacts DDL does not start with " + from)
+	}
+	return to + strings.TrimPrefix(ddl, from)
+}
 
 const artifactsV27Columns = `id,ts,src_ip,session_id,actor_id,url,local_path,sha256,size_bytes,origin,status,detail,created_at,attempt_count,next_attempt_at,first_observed_at,last_seen_at,last_fetch_attempt_at,last_successful_fetch_at,lease_until`
 
@@ -93,7 +104,27 @@ func artifactsV27Indexes() []string {
 // explicitly: copying explicit ids only advances the new table's sequence
 // to MAX(id), and the old sequence may be higher (deleted newest rows), so
 // without the carry a purged id could be handed out again.
+//
+// The rung is safe to re-run: a database stamped below 27 whose artifacts
+// table already has fetch_epoch (a v27 build's output with the stamp removed,
+// as the intermediate-v26 tests construct) skips the rebuild. Copying only the
+// 20 pre-v27 columns would otherwise drop fetch_epoch/parent_sha256/depth and,
+// with two epochs of one URL, fail on the new unique key so Open refuses.
+// refetch_schedule and the indexes are still asserted (IF NOT EXISTS).
 func migrateArtifactsV27(tx *sql.Tx, now string) error {
+	rebuilt, err := columnExistsIn(tx, "artifacts", "fetch_epoch")
+	if err != nil {
+		return err
+	}
+	if rebuilt {
+		for _, q := range append([]string{refetchScheduleTable}, artifactsV27Indexes()...) {
+			if _, err := tx.Exec(q); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(27,?)`, now)
+		return err
+	}
 	var oldSeq int64
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM sqlite_sequence WHERE name='artifacts'`).Scan(&oldSeq); err != nil {
 		return err
@@ -102,6 +133,8 @@ func migrateArtifactsV27(tx *sql.Tx, now string) error {
 		`DROP TABLE IF EXISTS artifacts_v27`,
 		artifactsV27Table,
 		`INSERT INTO artifacts_v27(` + artifactsV27Columns + `) SELECT ` + artifactsV27Columns + ` FROM artifacts`,
+		// A view or trigger on artifacts makes the DROP/RENAME fail (the
+		// transaction rolls back and Open refuses); acceptable, ShardLure creates none.
 		`DROP TABLE artifacts`,
 		`ALTER TABLE artifacts_v27 RENAME TO artifacts`,
 		refetchScheduleTable,
@@ -124,6 +157,6 @@ func migrateArtifactsV27(tx *sql.Tx, now string) error {
 			return err
 		}
 	}
-	_, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(27,?)`, now)
+	_, err = tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(27,?)`, now)
 	return err
 }

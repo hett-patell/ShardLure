@@ -436,7 +436,7 @@ VALUES(?,?,?,?,?,?,?,?,'cowrie_file_download','fetched','',?,?,?,?)`, observed, 
 				// Recognize only the same existing result. Never overwrite old
 				// artifact keys, another origin's lease, or remote fetch freshness.
 				var same bool
-				if err := tx.QueryRowContext(ctx, "SELECT status='fetched' AND origin='cowrie_file_download' AND sha256=? AND size_bytes=? AND local_path=? FROM artifacts WHERE url=?", result.SHA256, result.SizeBytes, result.LocalPath, url).Scan(&same); err != nil {
+				if err := tx.QueryRowContext(ctx, "SELECT status='fetched' AND origin='cowrie_file_download' AND sha256=? AND size_bytes=? AND local_path=? FROM artifacts WHERE url=? AND fetch_epoch=0", result.SHA256, result.SizeBytes, result.LocalPath, url).Scan(&same); err != nil {
 					return err
 				}
 				if !same {
