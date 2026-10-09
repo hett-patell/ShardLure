@@ -53,6 +53,10 @@ func TestVetHardRejects(t *testing.T) {
 
 		// Provenance / proof-of-serving.
 		{"wrong origin", func(c *Candidate) { c.Origin = "cowrie_download" }, "not a URL we fetched"},
+		// A URL harvested from a captured script, not fetched by the
+		// attacker (final review I2).
+		{"harvested depth 1", func(c *Candidate) { c.Depth = 1 }, ReasonHarvestedURL},
+		{"harvested depth 2", func(c *Candidate) { c.Depth = 2 }, ReasonHarvestedURL},
 		{"failed fetch", func(c *Candidate) { c.Status = "failed" }, "fetch did not succeed"},
 		{"pending fetch", func(c *Candidate) { c.Status = "pending" }, "fetch did not succeed"},
 		{"no payload hash", func(c *Candidate) { c.SHA256 = "" }, "no payload hash"},

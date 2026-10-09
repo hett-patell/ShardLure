@@ -84,24 +84,7 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 
 	cands := make([]urlhaus.Candidate, 0, len(rows))
 	for _, r := range rows {
-		// Classify off disk to get the file kind. Vet needs it to confirm the
-		// URL actually served a payload (and to reject SSH keys / unknown
-		// blobs). Reuses the bazaar classifier rather than duplicating it.
-		kind := ""
-		if r.LocalPath != "" {
-			if cls, cerr := bazaar.Classify(r.LocalPath); cerr == nil {
-				kind = cls.FileKind
-			}
-		}
-		cands = append(cands, urlhaus.Candidate{
-			URL:       r.URL,
-			SHA256:    r.SHA256,
-			SizeBytes: r.SizeBytes,
-			Origin:    r.Origin,
-			Status:    r.Status,
-			FetchedAt: r.FetchedAt,
-			FileKind:  kind,
-		})
+		cands = append(cands, urlhausCandidateFromRow(r))
 	}
 
 	ep := cfg.Intel.URLhaus.Endpoint
@@ -185,5 +168,28 @@ func fprintURLhausStatus(w io.Writer, rows []store.URLhausSubmission) {
 	for _, u := range rows {
 		fmt.Fprintf(w, "%-25s  %-14s  %s\n",
 			u.SubmittedAt.UTC().Format("2006-01-02 15:04:05"), termSafe(u.Status), termSafe(u.URL))
+	}
+}
+
+// urlhausCandidateFromRow classifies the payload off disk for the file kind:
+// Vet needs it to confirm the URL actually served a payload (and to reject
+// SSH keys / unknown blobs). Reuses the bazaar classifier rather than
+// duplicating it. Depth is carried so Vet refuses a harvested URL.
+func urlhausCandidateFromRow(r store.URLhausCandidateRow) urlhaus.Candidate {
+	kind := ""
+	if r.LocalPath != "" {
+		if cls, cerr := bazaar.Classify(r.LocalPath); cerr == nil {
+			kind = cls.FileKind
+		}
+	}
+	return urlhaus.Candidate{
+		URL:       r.URL,
+		SHA256:    r.SHA256,
+		SizeBytes: r.SizeBytes,
+		Origin:    r.Origin,
+		Status:    r.Status,
+		FetchedAt: r.FetchedAt,
+		FileKind:  kind,
+		Depth:     r.Depth,
 	}
 }

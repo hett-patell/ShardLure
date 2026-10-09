@@ -89,6 +89,9 @@ func (s *Server) bazaarShareCandidate(sha string) (bazaar.Candidate, error) {
 		// artifactToCandidate: CreatedAt is registration time, which is "now"
 		// for a re-imported archive and would wrongly look fresh.
 		Origin: art.Origin, ObservedAt: art.LastSuccessfulFetchAt,
+		// Depth is the sha's shallowest shareable row (GetArtifactForShareBySHA):
+		// Vet refuses a provenance-only accept for a harvested sample.
+		Depth: art.Depth,
 	}, nil
 }
 

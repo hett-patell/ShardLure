@@ -28,6 +28,13 @@ type Artifact struct {
 	Origin                string
 	Status                string
 	Detail                string
+	// Depth is the row's second-stage depth: 0 for a URL the attacker's own
+	// command named (or a Cowrie capture), 1..2 for a URL harvested from a
+	// fetched script. The share gates refuse provenance-only accepts for
+	// depth > 0 (final review I2). GetArtifactForShareBySHA lowers it to the
+	// minimum over the sha's share-policy rows, so a sample the attacker
+	// fetched directly keeps its provenance however else it was found.
+	Depth int
 }
 
 func (s *Store) ensureArtifactsTable() error {
@@ -282,7 +289,7 @@ FROM artifacts`)
 // stays in sync with scanArtifact below — the NULL-hardening commit had to
 // apply the identical COALESCE edit to four hand-written copies of this
 // list, which is exactly the drift this removes.
-const artifactColumns = `id, COALESCE(ts,''), COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), COALESCE(size_bytes,0), origin, status, COALESCE(detail,''), COALESCE(created_at,''), COALESCE(first_observed_at,''), COALESCE(last_seen_at,''), COALESCE(last_fetch_attempt_at,''), COALESCE(last_successful_fetch_at,'')`
+const artifactColumns = `id, COALESCE(ts,''), COALESCE(src_ip,''), COALESCE(session_id,''), COALESCE(actor_id,''), url, COALESCE(local_path,''), COALESCE(sha256,''), COALESCE(size_bytes,0), origin, status, COALESCE(detail,''), COALESCE(created_at,''), COALESCE(first_observed_at,''), COALESCE(last_seen_at,''), COALESCE(last_fetch_attempt_at,''), COALESCE(last_successful_fetch_at,''), COALESCE(depth,0)`
 
 // oneRowScanner abstracts *sql.Row / *sql.Rows for scanArtifact. (Distinct
 // from dashboard.go's rowScanner, which is a full rows-iterator interface.)
@@ -296,7 +303,7 @@ func scanArtifact(r oneRowScanner) (Artifact, error) {
 	var a Artifact
 	var ts, created, first, seen, attempted, fetched string
 	if err := r.Scan(&a.ID, &ts, &a.SrcIP, &a.SessionID, &a.ActorID, &a.URL, &a.LocalPath,
-		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created, &first, &seen, &attempted, &fetched); err != nil {
+		&a.SHA256, &a.SizeBytes, &a.Origin, &a.Status, &a.Detail, &created, &first, &seen, &attempted, &fetched, &a.Depth); err != nil {
 		return Artifact{}, err
 	}
 	a.TS, _ = parseTime(ts)
@@ -660,10 +667,7 @@ func (s *Store) GetArtifactForShareBySHA(sha256 string, policy SharePolicy) (*Ar
 		return nil, err
 	}
 	defer rows.Close()
-	allowed := func(a Artifact) bool {
-		if a.LocalPath == "" || a.SizeBytes < policy.MinBytes {
-			return false
-		}
+	originAllowed := func(a Artifact) bool {
 		if len(policy.Origins) == 0 {
 			return true
 		}
@@ -674,6 +678,17 @@ func (s *Store) GetArtifactForShareBySHA(sha256 string, policy SharePolicy) (*Ar
 		}
 		return false
 	}
+	allowed := func(a Artifact) bool {
+		if a.LocalPath == "" || a.SizeBytes < policy.MinBytes {
+			return false
+		}
+		return originAllowed(a)
+	}
+	// minDepth is the shallowest provenance among the sha's fetched rows of
+	// a shareable origin: a depth-0 row means the attacker's own command or
+	// upload delivered these bytes, whichever row is judged. It may only
+	// lower the judged row's depth, never raise it.
+	minDepth := -1
 	// Keep one best row in memory and compare parsed instants, including legacy
 	// offsets/nanoseconds; julianday and text ordering lose this information.
 	var best *Artifact
@@ -681,6 +696,9 @@ func (s *Store) GetArtifactForShareBySHA(sha256 string, policy SharePolicy) (*Ar
 		a, err := scanArtifact(rows)
 		if err != nil {
 			return nil, err
+		}
+		if originAllowed(a) && (minDepth < 0 || a.Depth < minDepth) {
+			minDepth = a.Depth
 		}
 		better := best == nil
 		if best != nil {
@@ -701,6 +719,9 @@ func (s *Store) GetArtifactForShareBySHA(sha256 string, policy SharePolicy) (*Ar
 	}
 	if best == nil {
 		return nil, sql.ErrNoRows
+	}
+	if minDepth >= 0 && minDepth < best.Depth {
+		best.Depth = minDepth
 	}
 	return best, nil
 }

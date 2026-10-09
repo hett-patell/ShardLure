@@ -77,6 +77,10 @@ type Candidate struct {
 	// Must resolve to a Malpedia label via MalpediaLabel or the candidate is
 	// unsubmittable.
 	Family string
+	// Depth is the URL's second-stage depth (store artifacts.depth): 0 when
+	// the attacker's own command named it, > 0 when ShardLure harvested it
+	// from a fetched script. Vet refuses depth > 0.
+	Depth int
 }
 
 // IOC is one indicator derived from a vetted candidate, ready for submission.
@@ -85,6 +89,9 @@ type IOC struct {
 	Type       string // IOCTypeURL / IOCTypeIPPort / IOCTypeDomain / IOCTypeSHA256
 	ThreatType string // ThreatPayloadDelivery or ThreatPayload
 }
+
+// ReasonHarvestedURL is Vet's refusal of a harvested (depth > 0) URL.
+const ReasonHarvestedURL = "harvested URL (named in a script, not fetched by the attacker); not submitted until a legitimate-host check exists"
 
 // VetOptions holds optional policy overrides (may only tighten).
 type VetOptions struct {
@@ -134,6 +141,15 @@ func Vet(c Candidate, now time.Time, opts ...VetOptions) (ok bool, malware strin
 	// 2. Provenance: we must have fetched it ourselves.
 	if !fetchedOrigins[c.Origin] {
 		return false, "", nil, "not a URL we fetched (origin " + c.Origin + ")"
+	}
+
+	// 2b. A harvested URL (depth > 0) was found written in a captured
+	//     script, not fetched by the attacker: it may be a fallback to a
+	//     legitimate host (busybox.net, a GitHub release), a comment or an
+	//     echo. Reporting it as malware infrastructure needs a
+	//     legitimate-host check that does not exist yet, so refuse it.
+	if c.Depth != 0 {
+		return false, "", nil, ReasonHarvestedURL
 	}
 
 	// 3. Proof it was serving: a successful fetch with a real payload.

@@ -38,6 +38,13 @@ type Candidate struct {
 	// CreatedAt, which is "now" for re-imported archives). Vet enforces MB's
 	// 10-day freshness rule against this.
 	ObservedAt time.Time
+	// Depth is the sample's second-stage depth (store artifacts.depth, the
+	// minimum over the sha's shareable rows): 0 means the attacker's own
+	// command or upload delivered it, > 0 that ShardLure fetched a URL it
+	// found written inside a captured script. Vet refuses the provenance
+	// accept for depth > 0: a script can name busybox.net or a GitHub
+	// release, and a benign ELF fetched from there is not malware.
+	Depth int
 }
 
 // UploadRecorder is the slice of *store.Store we depend on. Kept

@@ -173,6 +173,9 @@ type ThreatFoxCandidateRow struct {
 	Status    string
 	FetchedAt time.Time
 	LocalPath string
+	// Depth > 0 marks a URL harvested from a fetched script rather than
+	// named by the attacker; the gate refuses it (final review I2).
+	Depth int
 }
 
 // ThreatFoxCandidates returns artifacts that could be submitted, newest first.
@@ -195,7 +198,7 @@ func (s *Store) ThreatFoxCandidates(activeDays, limit int) ([]ThreatFoxCandidate
 	cutoff := time.Now().UTC().Add(-time.Duration(activeDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	q := `
 SELECT a.url, COALESCE(a.sha256,''), COALESCE(a.size_bytes,0), a.origin, a.status,
-       a.last_successful_fetch_at, COALESCE(a.local_path,'')
+       a.last_successful_fetch_at, COALESCE(a.local_path,''), COALESCE(a.depth,0)
 FROM artifacts a
 WHERE a.origin = 'quarantine_fetch'
   AND a.status = 'fetched'
@@ -219,7 +222,7 @@ ORDER BY julianday(a.last_successful_fetch_at) DESC`
 	for rows.Next() {
 		var r ThreatFoxCandidateRow
 		var ts string
-		if err := rows.Scan(&r.URL, &r.SHA256, &r.SizeBytes, &r.Origin, &r.Status, &ts, &r.LocalPath); err != nil {
+		if err := rows.Scan(&r.URL, &r.SHA256, &r.SizeBytes, &r.Origin, &r.Status, &ts, &r.LocalPath, &r.Depth); err != nil {
 			return nil, err
 		}
 		if t, perr := time.Parse(time.RFC3339Nano, ts); perr == nil {
