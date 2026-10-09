@@ -1057,21 +1057,44 @@ func (s *Store) CompleteArtifactCapture(url string, attempt int, status, detail,
 	}
 	// Claim increments attempt_count. It is a monotonically increasing fencing
 	// token; an expired/reclaimed worker cannot overwrite the current result.
-	res, err := s.execWrite(`
+	// A fetched completion seeds the re-fetch schedule in the same
+	// transaction, so a payload-serving URL is never captured without one.
+	return s.WithTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`
 UPDATE artifacts
 SET status=?, detail=?, local_path=?, sha256=?, size_bytes=?, next_attempt_at=?,
     lease_until=NULL, last_successful_fetch_at=COALESCE(?, last_successful_fetch_at)
 WHERE url=? AND fetch_epoch=0 AND attempt_count=? AND status='capturing'
   AND julianday(lease_until)>julianday(?)`,
-		status, detail, localPath, sha256, sizeBytes, nextTS, fetched, url, attempt, captureTime(now))
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrClaimStale
-	}
-	return nil
+			status, detail, localPath, sha256, sizeBytes, nextTS, fetched, url, attempt, captureTime(now))
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ErrClaimStale
+		}
+		if status != "fetched" || !refetchableURL(url) {
+			return nil
+		}
+		// The schedule is measured from the URL's first sighting; a legacy
+		// row without one falls back to its ts, then to now.
+		var first, ts sql.NullString
+		if err := tx.QueryRow(`SELECT first_observed_at, ts FROM artifacts WHERE url=? AND fetch_epoch=0`, url).Scan(&first, &ts); err != nil {
+			return err
+		}
+		firstSeen := now
+		for _, raw := range []sql.NullString{first, ts} {
+			if !raw.Valid || raw.String == "" {
+				continue
+			}
+			if t, perr := parseTime(raw.String); perr == nil {
+				firstSeen = t.UTC()
+				break
+			}
+		}
+		return seedRefetchTx(tx, url, firstSeen, sha256)
+	})
 }
 
 // ArtifactAttemptCount reads the attempt_count for a single artifact URL.
