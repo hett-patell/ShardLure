@@ -1,0 +1,7 @@
+/usr/bin/ls
+/bin/ls
+/usr/bin/ls
+rc=1
+Illegal option -x
+Usage: /usr/bin/which [-a] args
+rc=2

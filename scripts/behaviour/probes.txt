@@ -1,0 +1,203 @@
+# Detection probes seen on prod (factsheet-phaseB 3, last 30 days, ranked by
+# sessions), verbatim. Format: <case-name><TAB><command>; the expected
+# stdout+stderr lives in expected/<case-name>.out ("real 22.04 + persona").
+# Each runs on its own exec channel, as sshd would hand it to "bash -c".
+# Probes with no planned Phase B fix carry a "#harness: skip=" directive in
+# their expected file rather than being dropped, so the gap stays visible.
+uname-srvm	uname -s -v -n -r -m
+uname-a	uname -a
+uname-a-vt	uname -a ; echo 'vT'
+bin-dot-uname	/bin/./uname -s -v -n -r -m
+hostname	hostname
+hostname-id-whoami	hostname; id; whoami
+echo-shell-test	echo SHELL_TEST
+command-v-curl-gate	if ! command -v curl &> /dev/null; then apt-get update -y && apt-get install -y curl || yum install -y curl; fi
+command-v-python3-gate	command -v python3 >/dev/null 2>&1 || (apt-get update -y && apt-get install -y python3) || yum install -y python3
+which-or-command-v	which wget curl 2>/dev/null || command -v wget curl 2>/dev/null
+echo-e-auth-ok	echo -e "\x61\x75\x74\x68\x5F\x6F\x6B\x0A"
+whoami	whoami
+id	id
+cpuinfo-name-count	cat /proc/cpuinfo | grep name | wc -l
+cpuinfo-model-name-count	cat /proc/cpuinfo | grep model | grep name | wc -l
+free-m-awk	free -m | grep Mem | awk '{print $2 ,$3, $4, $5, $6, $7}'
+cpuinfo-name-awk	cat /proc/cpuinfo | grep name | head -n 1 | awk '{print $4,$5,$6,$7,$8,$9;}'
+ls-which-ls	ls -lh $(which ls)
+crontab-l	crontab -l
+w	w
+uptime	uptime
+lscpu-model	lscpu | grep Model
+df-h-awk	df -h | head -n 2 | awk 'FNR == 2 {print $2;}'
+ifconfig	ifconfig
+ps-grep-miner	ps | grep '[Mm]iner'
+ps-ef-grep-miner	ps -ef | grep '[Mm]iner'
+mikrotik-ip-cloud	/ip cloud print
+echo-cat-n	echo Hi | cat -n
+param-expansion-c1	c1=$(uname -s -v -n -r 2>/dev/null); c1=${c1:-Unknown}; c2=$(grep "model name" /proc/cpuinfo 2>/dev/null | cut -d ' ' -f3- | awk '{print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10}' | head -1); c2=${c2:-Unknown}; c3=$(nproc --all 2>/dev/null); c3=${c3:-Unknown}; echo "$c1|$c2|$c3"
+no-such-command	xyzabc987_no_such_command
+var-assign-echo	X_ABC=val987; echo $X_ABC
+os-release-pretty	cat /etc/os-release | grep 'PRETTY_NAME'
+cat-os-release	cat /etc/os-release
+proc-uptime-advances	cat /proc/uptime; sleep 2; cat /proc/uptime
+# Persona patches re-anchored on v3.1.1 (Phase B Task 3). command/type gate the
+# download stage (482 failed probes on prod); v3.1.1 ships neither, and the
+# pin-era patch hung the session on the new getCommand(cmd, paths, cwd).
+command-v-wget	command -v wget
+type-wget	type wget
+# The bot family that scp-uploads its own ELF and runs it as a liveness test
+# (exec-emulation). Cowrie must never run it: a real box runs the matching-arch
+# binary silently, rc 0. Upload and run share one channel here ("#harness:
+# scp-stdin"); the cross-channel cases below are the bot's real shape.
+scp-upload-run	scp -t /root/x >/dev/null; ./x
+# echo -e "new\nnew" | passwd: unpatched v3.1.1 waits on stdin forever.
+passwd-stdin	echo -e "p\np" | passwd
+# The same bot's real shape (Task 3b): `scp -t <path>` on one channel, then run
+# <path> on the next channel of the same connection. Stock v3.1.1 fails both
+# halves: each channel gets a fresh fake filesystem (connection-shared-fs.py),
+# and the upload is saved under the C-record's name (hw) instead of the -t
+# path (scp-sink-target.py). A directory target
+# keeps the record's name, as OpenSSH's sink does. Nothing is ever executed:
+# exec-emulation answers the run (rc 0, no output).
+scp-cross-channel	ls -l /tmp/x; /tmp/x; echo rc=$?
+scp-cross-channel-dir	ls -l /tmp/hw; /tmp/hw; echo rc=$?
+# A file written by a redirection on one channel, read and appended on the
+# next. With one fake filesystem per connection, the channel close that
+# finalises the redirection must leave the node readable (connection-shared-fs
+# re-points it; it used to hang the session with FileNotFoundError).
+redirect-cross-channel	cat /tmp/m; echo more >> /tmp/m; cat /tmp/m
+# Concurrent channels on one connection (Task 3b review). I-1: a redirection
+# into a file whose SFTP upload is still open must neither truncate nor
+# rename the upload's temp file; the upload must still close and be captured
+# byte for byte (needs --downloads-dir). I-2: /proc/uptime must keep working
+# on a channel after a later-opened channel closes (the persona value itself
+# is proc-uptime-advances' job).
+sftp-inflight-redirect	echo X > /tmp/up; echo rc=$?
+proc-uptime-overlap	sleep 2; cat /proc/uptime | wc -w
+# grep options (Phase B Task 4). v3.1.1's grep parses -i -q -c -v -l -o and
+# ignores them: the profiler's `lspci | grep -i vga` never matches (GPU field
+# empty), its `grep -q lm` arch fallback prints every flags line, and its
+# `grep -c ^processor` cpus fallback prints lines instead of a count.
+grep-i-vga	printf 'VGA x\n' | grep -i vga
+grep-q-lm	grep -q "lm" /proc/cpuinfo && echo x86_64
+grep-q-no-match	grep -q zzz_no_match /proc/cpuinfo
+grep-c-processor	grep -c "^processor" /proc/cpuinfo
+grep-c-no-match	printf 'a\n' | grep -c zzz
+grep-v	printf 'a\nb\nc\n' | grep -v b
+grep-l	grep -l processor /proc/cpuinfo /etc/hostname
+grep-o	printf 'model E5-2676 v3\n' | grep -o 'E5-[0-9]*'
+grep-no-match	printf 'a\n' | grep zzz
+# Hardware realism (Phase B Task 6). v3.1.1's lspci is a registered command
+# that shadows the persona txtcmd with a desktop AMD/GeForce list; its free
+# reads the Cowrie host's real /proc/meminfo (arm's 24 GB on an 8 GB persona);
+# its uname prints the platform once where -a, -m -p -i print it three times.
+lspci	lspci
+free	free
+free-h	free -h
+uname-mpi	uname -m -p -i
+# grep pattern dialects and --color (Task 4 review I1/I2): GNU's default BRE
+# makes \| \( \{ \+ \? the operators (`grep 'model name\|Hardware'` is a recon
+# idiom), -E is ERE, -F is literal; stock compiled every pattern as Python re
+# and refused --color=auto.
+grep-bre-alternation	grep 'model name\|Hardware' /proc/cpuinfo
+grep-ere-alternation	printf 'a\nb\nc\n' | grep -E 'a|b'
+grep-bre-plus-literal	printf 'a+\naa\n' | grep 'a+'
+grep-fixed-string	printf 'a.b\naxb\n' | grep -F 'a.b'
+grep-bre-interval	printf '1 23\n4 5\n' | grep '[[:digit:]]\{2\}'
+grep-bre-unmatched	grep '\(' /proc/cpuinfo
+grep-color	printf 'foo\n' | grep --color=auto foo; printf 'bar\n' | grep --colour bar
+# grep under a SIGALRM budget (Task 4 re-review R1): Python's re backtracks
+# where GNU's DFA does not, and this 40-byte line held Cowrie's one reactor
+# thread for hours, freezing every session. Run once on an earlier channel,
+# then again with a liveness check, all within 3 s. And -f FILE reads its
+# patterns from the fake filesystem (it used to wait on stdin forever).
+grep-redos-budget	printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!\n' | grep -E '(a+)+$'; echo rc=$?; echo alive
+grep-f-file	printf 'model name\nHardware\n' > /tmp/pats; grep -c -f /tmp/pats /proc/cpuinfo; grep -f /tmp/nope /proc/cpuinfo; echo rc=$?
+# Persona time (Phase B Task 5). v3.1.1's last lists the caller's own exec
+# session (sshd writes no wtmp row without a pty) and nothing of the persona's
+# admin history; uptime and w hard-code load 0.00 and print the caller's row.
+# The second case runs every time source on one channel: /proc/uptime, uptime,
+# w and last must name one boot and one admin login, as on a real box.
+last	last
+time-persona-consistent	cat /proc/uptime; uptime; w; last
+# Command resolution and filesystem realism (Phase B Task 7). cat exits 0 on a
+# missing file, so `cat /x || fallback` chains never fall back; bash's own
+# builtins and keywords (`command -v echo`, `type if`) were reported as
+# /usr/bin files; which printed every PATH hit (`ls -lh $(which ls)` got two
+# words); /usr/bin/<x> ran nothing for commands registered only as /bin/<x>
+# although 22.04 is usr-merged; who printed the caller, where w and last name
+# the persona's ubuntu session; the stock Cowrie user phil was in passwd,
+# group and shadow with a /home/phil, while the persona's ubuntu and deploy
+# homes had no users. Expected outputs are ubuntu:22.04 `bash -c` runs; the
+# users, groups and home modes are the 22.04 cloud image's (cloud-init's
+# default ubuntu user, HOME_MODE 0750) plus the persona's deploy.
+cat-missing-fallback	cat /nope || echo fb
+cat-missing-rc	cat /nope /etc/hostname; echo rc=$?; cat /etc; echo rc=$?
+command-type-builtin	command -v echo cd if ls; type echo if ls; type -t echo if ls; command -V nope; echo rc=$?
+type-a-echo	type -a echo; type -p ls; type -P echo
+which-first	which -a ls; which ls nope; echo rc=$?; which -x ls; echo rc=$?
+usr-bin-alias	/usr/bin/uname -s -r; /bin/uname -m; /usr/bin/bash -c 'echo ok'
+crontab-l-stderr	crontab -l 2>/dev/null; echo rc=$?
+bin-df-h	/bin/df -h | head -n 2
+who-last	who; last
+home-users	grep -c phil /etc/passwd /etc/group /etc/shadow; ls -d /home/phil; ls -ld /home/deploy /home/ubuntu | awk '{print $1, $3, $4, $9}'; grep -E '^(ubuntu|deploy):' /etc/passwd
+os-release-size	ls -l /usr/lib/os-release | awk '{print $1, $5}'; cat /etc/os-release | wc -c
+# awk comparison patterns (Task 7): v3.1.1's awk parses only /regex/ patterns,
+# so `df -h | head -n 2 | awk 'FNR == 2 {print $2;}'` printed nothing. mawk
+# (22.04's awk) compares numerically when both sides look numeric, else as
+# strings ("b" > 9).
+awk-patterns	printf 'a b\nc 10\ne 9\n' | awk 'FNR == 2 {print $2;}'; printf 'a b\nc 10\ne 9\n' | awk 'NR>1'; printf 'a b\nc 10\ne 9\n' | awk '$1 == "c" {print $2}'; printf 'a b\nc 10\ne 9\n' | awk '$2 > 9 {print FNR, $1}'
+# Absent tools end to end (Task 7 review I-2): 22.04 ships no gcc, php, yum
+# or python2, and command -v already says so; running one must not print
+# Cowrie's Debian banners. killall (psmisc) is present.
+absent-tools	command -v gcc python php yum; echo rc=$?; gcc -v; echo rc=$?; python -V; echo rc=$?; php -v; echo rc=$?; yum install -y x; echo rc=$?; /usr/bin/gcc --version; echo rc=$?; command -v killall
+# python3 (Task 7 controller ruling): `command -v python3` passes the bots'
+# gate, and the next `python3 -c` must not fail with "No such file or
+# directory". Fake success, never execution (python3-emulation.py). The real
+# side is ubuntu:22.04 with python3-minimal. A -c that would print is not
+# here: it prints nothing on Cowrie, the accepted cost of never running it.
+python3-fake	command -v python3 python3.10; python3 --version; python3 -V; python3 -c 'import sys; sys.exit(0)'; echo rc=$?; echo 'import os' | python3; echo rc=$?; python3 /nope.py; echo rc=$?; python3 -z; echo rc=$?
+# command/type need an execute bit, as bash's lookup does (Task 7 review m-1).
+command-exec-bit	command -v /etc/passwd; echo rc=$?; type /etc/passwd; echo rc=$?; PATH=/etc:$PATH command -v passwd
+# awk && / || and awk's own numeric test (Task 7 review m-2): a truncated
+# parse ran `NR >= 2` for `NR >= 2 && NR <= 2`; float() made nan/inf/1_000
+# numbers.
+awk-boolean	printf '1\n2\n3\n' | awk 'NR >= 2 && NR <= 2'; printf '1\n2\n3\n' | awk 'NR == 1 || NR == 3 {print $1}'; printf 'nan\ninf\n1_000\n1e5\n0x1A\n+3\n.5\n' | awk '$1 > 5'
+# lsb_release and hostnamectl have persona txtcmds but had no node, so they
+# answered `command not found` (Task 7 review m-7).
+lsb-hostnamectl-present	command -v lsb_release hostnamectl; hostnamectl | head -1
+# A script exactly at Cowrie's [shell] max_input_size (Task 8): 16384 bytes,
+# uploaded on an earlier channel as scp droppers do, must run, well inside
+# the deadline. The cap stays v3.1.1's 16384 (cowrie-stealth.cfg records the
+# arm measurement: the Earley parse runs on Cowrie's one reactor thread at
+# 0.25-0.43 ms/byte for ordinary shapes, so a larger cap stalls every session
+# up to the 10 s parse timeout, then answers a syntax error); this case
+# catches a cap set below it or a regression in whole-script execution.
+# Its limits: the script is the cheapest shape (plain assignments, 0.76 s
+# offline), so it says nothing about the reactor-stall budget, and it cannot
+# see a cap raised above 16384 on a live box (the cfg pin tests cover only
+# the shipped value).
+script-16k	sh /tmp/big.sh; echo rc=$?
+# Shell parse bounds (Task 8b): Cowrie parses each input line with an Earley
+# parser on its one reactor thread, and v3.1.1 re-parsed every $(...) body,
+# so deep nesting or a substitution-heavy loop stalled every session on the
+# box (a 200-iteration loop took 22 s). shell-parse-bounds.py refuses groups
+# nested deeper than 16 with bash's own syntax-error answer and reuses the
+# outer parse for a substitution body. Refusing is a deliberate divergence:
+# real bash runs parse-nest-deep and parse-nest-paren; no probe on prod nests
+# past 6. The loop avoids seq (no Cowrie command; unused on prod, 30 days).
+# Review round 1: a "#" after "$(...)" continues the word, so it must not
+# hide the rest of the line from the scan (parse-nest-hash); any case head
+# word counts (parse-nest-case-quoted); a backtick body is remembered rather
+# than parsed every pass (parse-loop-backtick); nesting the scan does not
+# count fails one parse at the recursion limit (parse-nest-brace). Round 2:
+# subshells, pipelines and substitutions run in new shells, so the memo is
+# kept per connection (parse-loop-backtick-subshell).
+parse-nest-deep	echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo x))))))))))))))))))))
+parse-nest-paren	( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( echo x ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) )
+parse-nest-6	echo $(echo $(echo $(echo $(echo $(echo ok)))))
+parse-loop-subst	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200; do x=$(true w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19); done; echo done
+parse-loop-overlap	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200; do x=$(true w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19); done; echo done
+parse-nest-hash	echo $(true)# $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo x))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+parse-nest-case-quoted	case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) case "a b" in a) echo ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac ;; esac
+parse-loop-backtick	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200; do x=`true w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19`; done; echo done
+parse-nest-brace	{ { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { { echo x; } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } }
+parse-loop-backtick-subshell	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200; do ( x=`true w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19` ); done; echo done

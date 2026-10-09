@@ -60,7 +60,7 @@ def mount_id(fd: int) -> int:
 
 
 @contextlib.contextmanager
-def directory(path: Path, *, owners: set[int] | None = None, create: bool = False):
+def directory(path: Path, *, owners: set[int] | None = None, create: bool = False, mode: int = 0o700):
     path = checked_absolute(path)
     allowed = {0, os.geteuid()} if owners is None else {0, os.geteuid(), *owners}
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -72,8 +72,9 @@ def directory(path: Path, *, owners: set[int] | None = None, create: bool = Fals
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(part, 0o700, dir_fd=fd)
+                os.mkdir(part, mode, dir_fd=fd)
                 child = os.open(part, flags, dir_fd=fd)
+                os.fchmod(child, mode)  # mkdir's mode is subject to the umask
                 os.fsync(child)
                 os.fsync(fd)
             os.close(fd)
@@ -154,6 +155,38 @@ def atomic_create(path: Path, data: bytes, mode: int = 0o600, *, replace: os.sta
                     os.unlink(name, dir_fd=parent)
             except FileNotFoundError:
                 pass
+
+
+def install_root_files(dest: Path, files: dict[str, bytes], *, dir_mode: int = 0o755, file_mode: int = 0o644) -> None:
+    """Publish `files` (name -> bytes) into `dest`, a directory nobody but
+    root (the caller) can change: every component from / down is owned by
+    root or the caller and writable by nobody else (sticky dirs excepted), or
+    this refuses. Missing components are created `dir_mode`; `dest` itself is
+    set to it. Each file is written to a fresh O_EXCL|O_NOFOLLOW name and
+    renamed over its final name relative to the pinned directory descriptor,
+    so neither a planted symlink nor a hard link at that name is ever written
+    through: rename replaces the entry, never its target."""
+    for name in files:
+        if not name or name in (".", "..") or "/" in name or "\0" in name:
+            raise SafetyError(f"unsupported file name: {name!r}")
+    with directory(dest, create=True, mode=dir_mode) as fd:
+        os.fchmod(fd, dir_mode)
+        for name, data in files.items():
+            tmp = ".shardlure-write-" + uuid.uuid4().hex
+            tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+            try:
+                with os.fdopen(tfd, "wb") as stream:
+                    os.fchmod(stream.fileno(), file_mode)
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(tmp, dir_fd=fd)
+                raise
+        os.fsync(fd)
+        verify_directory(dest, fd)
 
 
 def dedicated_data_path(path: Path) -> Path:

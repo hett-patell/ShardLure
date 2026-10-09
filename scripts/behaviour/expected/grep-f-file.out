@@ -1,0 +1,3 @@
+4
+grep: /tmp/nope: No such file or directory
+rc=2

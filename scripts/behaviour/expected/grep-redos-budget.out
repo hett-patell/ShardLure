@@ -1,0 +1,4 @@
+#harness: before=printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!\n' | grep -E '(a+)+$'; true
+#harness: within=3
+rc=1
+alive

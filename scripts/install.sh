@@ -327,7 +327,66 @@ preflight_installation() {
     [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || err "ports must be integers from 1 to 65535"
   done
   command -v python3 >/dev/null || err "python3 is required for safe ownership preflight (no third-party packages needed)"
+  require_cowrie_python
   validate_existing_accounts
+}
+
+# The pinned Cowrie (v3.1.1) declares requires-python >=3.11 (v3.1 dropped
+# 3.10, which Ubuntu 22.04 ships), and its venv is built from python3. Refuse
+# here, before any package, account or checkout is touched, rather than fail
+# in pip halfway through. --no-cowrie needs no such interpreter.
+require_cowrie_python() {
+  [[ "$COWRIE" == 1 ]] || return 0
+  local version status=0
+  version="$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3]); sys.exit(sys.version_info < (3, 11))')" || status=$?
+  [[ "$status" == 0 ]] || err "the pinned Cowrie (v3.1.1) needs Python 3.11 or newer, but python3 is ${version:-unknown}; Ubuntu 22.04 ships 3.10. Use Ubuntu 24.04 or newer, make python3 a 3.11+ interpreter with its venv module, or pass --no-cowrie. Nothing was changed."
+}
+
+# Per-start persona regeneration: the same two ExecStartPre= lines as
+# shardlure.py persona_regen_prestart (a test pins the text). They run as the
+# unit's User=cowrie (no +/! prefix), from the root-owned copy apply-stealth.sh
+# installs outside the Cowrie tree (PERSONA_REGEN_LIB, default
+# /usr/local/lib/shardlure/persona, SHARDLURE_PERSONA_LIB overrides it in both
+# installers); this installer deploys no persona, so until apply-stealth.sh
+# has run the copy is absent and each line exits 0 without doing anything.
+# The `-` prefix keeps a failed regeneration from keeping Cowrie down; see
+# PERSONA_REGEN_LIB in shardlure.py for the reasoning.
+render_persona_regen_prestart() {
+  local regen_sh='test -f "$$2" || exit 0; timeout 30 "$$@" && exit 0; rc=$$?; echo "persona regeneration: $$2 exited $$rc; Cowrie starts with its existing persona files" >&2; exit $$rc'
+  local py regen home
+  py="$(systemd_exec_arg "$COWRIE_HOME/venv/bin/python")" || return
+  regen="${SHARDLURE_PERSONA_LIB:-/usr/local/lib/shardlure/persona}"
+  home="$(systemd_exec_arg "$COWRIE_HOME")" || return
+  printf "ExecStartPre=-/bin/sh -c '%s' persona-regen %s %s %s\n" \
+    "$regen_sh" "$py" "$(systemd_exec_arg "$regen/gen-time-persona.py")" "$home"
+  printf "ExecStartPre=-/bin/sh -c '%s' persona-regen %s %s persona-fs %s\n" \
+    "$regen_sh" "$py" "$(systemd_exec_arg "$regen/shardlure.py")" "$home"
+}
+
+render_cowrie_service() {
+  local prestart
+  prestart="$(render_persona_regen_prestart)" || return
+  cat <<SVC
+[Unit]
+Description=Cowrie SSH honeypot (ShardLure)
+After=network.target
+[Service]
+Type=simple
+User=cowrie
+Group=cowrie
+WorkingDirectory=$(systemd_path "$COWRIE_HOME")
+# TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
+# 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
+# host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.
+Environment=TZ=UTC
+UMask=0027
+$prestart
+$COWRIE_EXEC
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+SVC
 }
 
 render_live_service() {
@@ -637,6 +696,11 @@ $CFG_MARKER
 [honeypot]
 download_limit_size = 52428800
 
+[shell]
+# == install/persona/cowrie-stealth.cfg (measured on arm; see its comment):
+# v3.1.1's own default, pinned so a pin bump cannot move it unnoticed.
+max_input_size = 16384
+
 [ssh]
 listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0
 
@@ -677,26 +741,7 @@ if [[ "$COWRIE" -eq 1 ]]; then
   if [[ -z "$COWRIE_EXEC" ]]; then
     err "could not locate cowrie entry point at $COWRIE_HOME/venv/bin/cowrie or $COWRIE_HOME/bin/cowrie. The checkout may have failed or upstream layout changed again."
   fi
-  cat > "$DL_COWRIE_UNIT" <<SVC
-[Unit]
-Description=Cowrie SSH honeypot (ShardLure)
-After=network.target
-[Service]
-Type=simple
-User=cowrie
-Group=cowrie
-WorkingDirectory=$(systemd_path "$COWRIE_HOME")
-# TZ=UTC is load-bearing: cowrie's jsonlog output stamps 'timestamp' with a
-# 'Z' (Zulu) suffix only when TZ=UTC at process start; without it a non-UTC
-# host logs LOCAL time mislabeled as UTC and skews all ShardLure analytics.
-Environment=TZ=UTC
-UMask=0027
-$COWRIE_EXEC
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-SVC
+  render_cowrie_service > "$DL_COWRIE_UNIT"
   log "cowrie systemd unit written"
 fi
 

@@ -1,0 +1,3 @@
+/usr/bin/lsb_release
+/usr/bin/hostnamectl
+ Static hostname: prod-app-server-01

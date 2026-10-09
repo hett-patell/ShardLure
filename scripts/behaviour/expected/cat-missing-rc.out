@@ -1,0 +1,5 @@
+cat: /nope: No such file or directory
+prod-app-server-01
+rc=1
+cat: /etc: Is a directory
+rc=1

@@ -1,0 +1,4 @@
+#harness: no-host-memtotal
+               total        used        free      shared  buff/cache   available
+Mem:           7.7Gi       1.5Gi       4.0Gi       0.0Ki       2.2Gi       6.0Gi
+Swap:             0B          0B          0B

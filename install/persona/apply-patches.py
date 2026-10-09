@@ -9,15 +9,96 @@ from pathlib import Path
 
 
 PATCHES = (
-    "bashparse-subshell-pipe.py",
-    "grep-case-insensitive.py",
-    "honeypot-capture-redirect.py",
+    # Pinned Cowrie is v3.1.1 (install/cowrie.commit). Two former patches are
+    # gone for good because upstream fixed the same faults: the grammar rewrite
+    # in #40611 gave real subshell pipelines (bashparse-subshell-pipe), and
+    # f6f5f9fb routes command-not-found through the shell's stderr, so
+    # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect).
+    #
     # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
     # live log analysis so bots proceed to payload delivery.
+    # command-type-builtins is re-anchored on v3.1.1's getCommand(cmd, paths,
+    # cwd): the pin-era text applied cleanly and then raised TypeError, hanging
+    # every `command -v` session (scripts/behaviour command-v-wget catches it).
     "command-type-builtins.py",
+    # which printed every PATH hit; 22.04 is usr-merged, so `which ls` gave
+    # /usr/bin/ls and /bin/ls and `ls -lh $(which ls)` failed. Shares
+    # which.py with command-type-builtins on a disjoint anchor (class body).
+    "which-first.py",
     "passwd-stdin.py",
+    # v3.1.1 folds "too large" and "binary" into one refusal; only an
+    # attacker's own binary, run directly, is answered with a silent exit 0.
     "exec-emulation.py",
+    # scp droppers upload on one channel and run on the next; v3.1.1 rebuilt
+    # the fake filesystem per channel, so the run found nothing (26 of 26 prod
+    # scp sessions).
+    "connection-shared-fs.py",
+    # ...and v3.1.1 saved the upload under the C-record's name, ignoring the
+    # `scp -t <path>` target the bot then runs.
+    "scp-sink-target.py",
+    # GNU ls -l dates: v3.1.1 prints the --time-style=long-iso form, a tell on
+    # any `ls -l`, including a dropper listing the file it just uploaded.
+    "ls-date-format.py",
+    # ls -lh rounded to one decimal at every scale (135.0K); GNU rounds up
+    # and drops the decimal from 10 on (135K). Disjoint from ls-date-format.
+    "ls-human-size.py",
+    # Persona commands (payload-yield Phase B). grep honours -i -q -c -v -l -o
+    # and GNU's exit status (supersedes grep-case-insensitive, whose anchor
+    # v3.1.1 refactored away): the profiler's `lspci | grep -i vga` GPU probe.
+    "grep-options.py",
+    # lspci is a registered command that shadows txtcmds/usr/bin/lspci with a
+    # desktop AMD/GeForce board; the profiler's GPU field reads it (and
+    # `busybox lspci`, which BusyBox 1.20.2 has no applet for).
+    "lspci-persona.py",
+    # free read the Cowrie host's real /proc/meminfo (arm's 24 GB behind an
+    # 8 GB persona); it now ports procps 3.3.17 over the fake filesystem's.
+    "free-meminfo.py",
+    # uname folded -m -p -i into one flag; GNU prints three fields, so a real
+    # `uname -a` ends "x86_64 x86_64 x86_64 GNU/Linux" (~720 sessions/30d).
+    "uname-a.py",
+    # Persona time (Phase B Task 5): last printed the caller's own exec
+    # session and none of the box's history; it now prints the persona's wtmp,
+    # sessions anchored to now, reboot and wtmp begins at boot_time().
+    "last-persona.py",
+    # uptime and w: procps format, the fake /proc/loadavg, and w's rows from
+    # last-persona's admin_session (so it must come after last-persona).
+    # Command_w shares commands/base.py with passwd-stdin; disjoint anchors.
+    "uptime-loadavg.py",
+    # who printed the caller where w and last name the persona's ubuntu
+    # session; it reads last-persona's helpers too (after last-persona).
+    # A third disjoint block in commands/base.py.
+    "who-persona.py",
+    # 22.04 is usr-merged: /usr/bin/uname and /bin/uname are one file, but
+    # Cowrie registers one spelling, so the other ran the pickle's ELF node
+    # ("cannot execute binary file"). Shares shell/protocol.py with
+    # connection-shared-fs; disjoint anchors.
+    "usr-bin-aliases.py",
+    # cat exited 0 on a missing file, so `cat /x || fallback` never fell
+    # back; `cat -n` wrote two spaces where coreutils writes a TAB.
+    "cat-exit.py",
+    # crontab -l printed "no crontab for root" on stdout with exit 0; cron
+    # writes it to stderr and exits 1 (it ended up inside droppers' crontabs).
+    "crontab-list.py",
+    # awk parsed only /regex/ patterns: `df -h | awk 'FNR == 2 {print $2;}'`
+    # printed nothing. Comparison patterns and FNR, compared as mawk does.
+    "awk-patterns.py",
+    # `command -v python3` passes the bots' gate, then `python3 -c` hit "No
+    # such file or directory". python3 answers as 22.04's: fake success,
+    # never execution (the patch's docstring and test_python3_fake.py).
+    "python3-emulation.py",
+    # The shell parses on the single reactor thread: a $(...) body was parsed
+    # again on every evaluation (a 116-byte `while` line held every session
+    # 22 s; nested $( froze all sessions 189 s live), and ~200 levels of
+    # nesting raised RecursionError out of the protocol. $(...) bodies now
+    # reuse their line's tree, each parser remembers recent results (backtick
+    # bodies have no tree to reuse), nesting past 16 is refused before the
+    # grammar runs, and a RecursionError fails one parse (production nests at
+    # most 6).
+    "shell-parse-bounds.py",
     # The live daemon uses a separate account with read access via this group.
+    # scripts/install.sh fetches this one file standalone, so it must stay in
+    # PATCHES and apply on the pin (test_release_contracts and
+    # check-cowrie-patches.sh's install_sh_patches enforce both).
     "sftp-capture-permissions.py",
 )
 

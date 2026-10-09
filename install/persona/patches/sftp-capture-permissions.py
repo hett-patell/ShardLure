@@ -4,28 +4,34 @@
 Cowrie's SFTP open() masks requested permissions independently of umask. The
 separate shardlure user needs group read access after close(), including when
 dedup keeps an existing SHA-named file. Never grant execute or other access.
+
+v3.1.1 port (payload-yield Phase B Task 3): close() now closes the descriptor
+before hashing (Windows refuses a rename of an open file) and lost one
+indentation level, so the anchor moved; the chmod still goes after the
+rename/remove and before update_realfile and the upload event, so the
+published capture is never briefly unreadable to the live daemon.
 """
 import sys
 from pathlib import Path
 
 
 OLD = """\
-            if os.path.exists(shasumfile):
-                os.remove(self.tempfiles[fd])
-            else:
-                os.rename(self.tempfiles[fd], shasumfile)
-            self.update_realfile(self.getfile(self.filenames[fd]), shasumfile)
+        if os.path.exists(shasumfile):
+            os.remove(self.tempfiles[fd])
+        else:
+            os.rename(self.tempfiles[fd], shasumfile)
+        self.update_realfile(self.getfile(self.filenames[fd]), shasumfile)
 """
 
 NEW = """\
-            if os.path.exists(shasumfile):
-                os.remove(self.tempfiles[fd])
-            else:
-                os.rename(self.tempfiles[fd], shasumfile)
-            # ShardLure reads finalized captures through the Cowrie group.
-            # Normalize the retained destination even when dedup kept an old file.
-            os.chmod(shasumfile, 0o640)
-            self.update_realfile(self.getfile(self.filenames[fd]), shasumfile)
+        if os.path.exists(shasumfile):
+            os.remove(self.tempfiles[fd])
+        else:
+            os.rename(self.tempfiles[fd], shasumfile)
+        # ShardLure reads finalized captures through the Cowrie group.
+        # Normalize the retained destination even when dedup kept an old file.
+        os.chmod(shasumfile, 0o640)
+        self.update_realfile(self.getfile(self.filenames[fd]), shasumfile)
 """
 
 

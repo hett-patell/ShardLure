@@ -11,6 +11,15 @@ fi
 
 echo "[stealth] cowrie=$COWRIE_HOME persona=$PERSONA"
 
+# Preflight the source patches (read-only) before touching the persona: on a
+# Cowrie checkout at another pin the orchestrator refuses, and once the steps
+# below had run, the next restart served the new persona over unpatched
+# Cowrie (final review M-3). Move the checkout to install/cowrie.commit first.
+if [[ -f "$PERSONA/apply-patches.py" ]] && ! sudo python3 "$PERSONA/apply-patches.py" "$COWRIE_HOME" --check; then
+  echo "[stealth] ERROR: Cowrie at $COWRIE_HOME does not take this patch set (pin: $(cat "$PERSONA/../cowrie.commit" 2>/dev/null || echo unknown)); nothing changed" >&2
+  exit 1
+fi
+
 # --- honeyfs persona (looks like a boring prod Ubuntu box) ---
 if [[ -d "$PERSONA/honeyfs" ]]; then
   echo "[stealth] syncing honeyfs persona"
@@ -28,17 +37,66 @@ if [[ -d "$PERSONA/txtcmds" ]]; then
   TXTCMDS_DST="$COWRIE_HOME/share/cowrie/txtcmds"
   sudo mkdir -p "$TXTCMDS_DST"
   sudo rsync -a "$PERSONA/txtcmds/" "$TXTCMDS_DST/"
+  # rsync only adds: retire the stubs the persona no longer ships (the
+  # static bin/uname shadowed Cowrie's uname for /bin/./uname; same list as
+  # shardlure.py RETIRED_TXTCMDS).
+  sudo rm -f "$TXTCMDS_DST/bin/uname"
 else
   echo "[stealth] no txtcmds dir in persona — skipping"
+fi
+
+SHARDLURE_PY="${SCRIPT_DIR}/shardlure.py"
+[[ -f "$SHARDLURE_PY" ]] || SHARDLURE_PY="${PERSONA}/../../scripts/shardlure.py"
+
+# The rsyncs above keep the checkout's owner: hand honeyfs and share back to
+# the cowrie account before the persona steps, which run as that account.
+early_owned=()
+for d in "$COWRIE_HOME/honeyfs" "$COWRIE_HOME/share"; do [[ -d "$d" ]] && early_owned+=("$d"); done
+if (( ${#early_owned[@]} )); then sudo chown -R cowrie:cowrie "${early_owned[@]}"; fi
+
+# --- per-start persona regeneration (cowrie.service ExecStartPre) ---
+# The unit re-runs gen-time-persona and persona-fs as the cowrie account before
+# every start, from a root-owned copy outside the Cowrie tree
+# (${SHARDLURE_PERSONA_LIB:-/usr/local/lib/shardlure/persona}; the account
+# cannot read the checkout). shardlure.py installs it (PERSONA_REGEN_FILES,
+# PERSONA_REGEN_LIB): root writes only into a directory no other account can
+# change, never through the Cowrie tree, and removes the copy older versions
+# kept in $COWRIE_HOME/shardlure-persona without following anything there.
+# Without it a restart leaves the motd's "Last login" naming a session last
+# no longer shows. Inert under a unit rendered before Task 8 until the unit is.
+# The two steps below run from the same copy.
+if [[ -f "$SHARDLURE_PY" ]]; then
+  echo "[stealth] deploying per-start persona regeneration"
+  sudo python3 "$SHARDLURE_PY" persona-regen-install "$COWRIE_HOME" \
+    || echo "[stealth] WARN: persona regeneration not installed; a restart will not refresh the time persona"
+else
+  echo "[stealth] WARN: scripts/shardlure.py not found; a restart will not refresh the time persona"
 fi
 
 # --- time persona: regenerate time-sensitive files against the live clock ---
 # Frozen uptime/last/who + /proc/uptime are a honeypot tell vs Cowrie's live
 # `date`. Runs AFTER the txtcmds rsync so it overwrites the just-synced stubs.
-if [[ -f "$PERSONA/gen-time-persona.py" ]]; then
+# shardlure.py runs the generator as the cowrie account over the tree that
+# account owns (never root writing through it; Task 8 review m-3).
+if [[ -f "$SHARDLURE_PY" ]]; then
   echo "[stealth] refreshing time-sensitive persona against live clock"
-  sudo python3 "$PERSONA/gen-time-persona.py" "$COWRIE_HOME" \
+  sudo python3 "$SHARDLURE_PY" time-persona "$COWRIE_HOME" \
     || echo "[stealth] WARN: time-persona generator failed; time files may be stale (fingerprintable)"
+fi
+
+# --- persona filesystem nodes (fs.pickle) ---
+# The same edits plant_bait_files makes on a fresh install, after the time
+# persona so the regenerated motd's node is sized from the final file: the 22.04 tool
+# nodes `command -v`/`type` resolve against, phil's home dropped, the persona
+# users' homes, node sizes from honeyfs. Without them the patched resolver
+# reports sudo/crontab/ping absent (Task 7 review I-1). Idempotent. Like the
+# time persona it runs as the cowrie account over that account's tree.
+if [[ -f "$SHARDLURE_PY" ]]; then
+  echo "[stealth] applying persona filesystem nodes"
+  sudo python3 "$SHARDLURE_PY" persona-fs "$COWRIE_HOME" \
+    || echo "[stealth] WARN: persona filesystem nodes not applied (fingerprintable)"
+else
+  echo "[stealth] WARN: scripts/shardlure.py not found; persona filesystem nodes not applied"
 fi
 
 # --- userdb: realistic weak creds, no *:* honeypot catch-alls ---
@@ -69,6 +127,7 @@ stealth = persona_cfg.read_text() if persona_cfg.exists() else """
 hostname = prod-app-server-01
 sensor_name = prod-app-server-01
 download_limit_size = 52428800
+boot_offset = 3640620
 
 [shell]
 arch = linux-x64-lsb
@@ -78,6 +137,9 @@ kernel_build_string = #104-Ubuntu SMP Tue Jan 9 15:25:40 UTC 2024
 hardware_platform = x86_64
 operating_system = GNU/Linux
 ssh_version = OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022
+# == cowrie-stealth.cfg (measured on arm; see its comment): a larger cap stalls
+# every session for up to the 10 s parse timeout, then answers a syntax error.
+max_input_size = 16384
 
 [ssh]
 version = SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6
@@ -141,7 +203,11 @@ sudo ssh-keygen -t rsa -b 4096 -f "$KEYDIR/ssh_host_rsa_key" -N "" -q
 sudo chown cowrie:cowrie "$KEYDIR"/ssh_host_*key "$KEYDIR"/ssh_host_*key.pub 2>/dev/null || true
 sudo chmod 600 "$KEYDIR"/ssh_host_*key
 
-sudo chown -R cowrie:cowrie "$COWRIE_HOME/honeyfs" "$COWRIE_HOME/etc" "$COWRIE_HOME/var"
+# share too (the txtcmds rsync keeps the checkout's owner): cowrie.service
+# rewrites the time txtcmds as the cowrie account.
+owned=("$COWRIE_HOME/honeyfs" "$COWRIE_HOME/etc" "$COWRIE_HOME/var")
+[[ -d "$COWRIE_HOME/share" ]] && owned+=("$COWRIE_HOME/share")
+sudo chown -R cowrie:cowrie "${owned[@]}"
 
 # --- Cowrie source patches (anti-fingerprint shell fixes) ---
 ORCHESTRATOR="$PERSONA/apply-patches.py"

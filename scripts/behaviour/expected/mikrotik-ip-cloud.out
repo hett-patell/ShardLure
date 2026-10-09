@@ -1,0 +1,2 @@
+#harness: rc=127
+bash: line 1: /ip: No such file or directory

@@ -113,6 +113,27 @@ def ensure_cowrie_checkout(
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
+# The pinned Cowrie (install/cowrie.commit, v3.1.1) declares requires-python
+# >=3.11: v3.1 dropped 3.10, which is what Ubuntu 22.04 ships. Its venv is
+# built from the interpreter running this installer, so an older one gives a
+# pip failure halfway through the install, after the SSH migration.
+COWRIE_MIN_PYTHON = (3, 11)
+
+
+def require_cowrie_python(version: tuple = tuple(sys.version_info[:3]),
+                          executable: str = sys.executable) -> None:
+    """Refuse, before anything is changed, to install the pinned Cowrie with a
+    Python it does not support."""
+    if tuple(version[:2]) >= COWRIE_MIN_PYTHON:
+        return
+    have = ".".join(str(part) for part in version)
+    want = ".".join(str(part) for part in COWRIE_MIN_PYTHON)
+    die(f"the pinned Cowrie (v3.1.1) needs Python {want} or newer, but this installer runs "
+        f"under Python {have} ({executable}); Ubuntu 22.04 ships 3.10. Use Ubuntu 24.04 or "
+        f"newer, or install python{want} with its venv module and rerun with it "
+        f"(sudo python{want} scripts/shardlure.py run). Nothing was changed")
+
+
 def need_root() -> None:
     if os.geteuid() != 0:
         die("run as root: sudo python3 scripts/shardlure.py run")
@@ -382,6 +403,7 @@ def setup_authbind(honeypot_port: int) -> None:
 
 
 def install_cowrie(honeypot_port: int) -> None:
+    require_cowrie_python()
     try:
         pin = read_cowrie_pin(COWRIE_PIN_FILE)
     except (OSError, ValueError) as exc:
@@ -538,7 +560,13 @@ def apply_stealth_persona(honeypot_port: int) -> None:
     ensure_cowrie_filesystem()
     plant_bait_files()
     deploy_txtcmds()
+    # Before the two persona steps: over a tree the Cowrie account already
+    # owns they run as that account from this root-owned copy.
+    deploy_persona_regen()
     deploy_time_persona()
+    # gen-time-persona rewrites honeyfs/etc/motd after plant_bait_files sized
+    # its node; size it (and embed it) again from the final file.
+    cmd_persona_fs(COWRIE_HOME)
     deploy_patches()
     keydir = COWRIE_HOME / "var/lib/cowrie"
     keydir.mkdir(parents=True, exist_ok=True)
@@ -559,6 +587,22 @@ def ensure_cowrie_filesystem() -> None:
         shutil.copy2(src, dst)
     if not src.exists() and not dst.exists():
         die(f"missing cowrie filesystem pickle: {src}")
+
+
+def cowrie_owned_prefix(*paths: Path) -> list[str]:
+    """`runuser -u <cowrie> --` when root is about to run code or parse data
+    that a non-root account can write (any of `paths` not owned by root),
+    else []. Unprivileged callers need no prefix."""
+    if os.geteuid() != 0:
+        return []
+    for path in paths:
+        try:
+            owner = os.lstat(path).st_uid
+        except OSError:
+            continue
+        if owner != 0:
+            return ["runuser", "-u", COWRIE_USER, "--"]
+    return []
 
 
 def plant_bait_files() -> None:
@@ -584,6 +628,15 @@ def plant_bait_files() -> None:
         return
 
     python = COWRIE_HOME / "venv/bin/python"
+    # fsctl is Cowrie's own tool: it pickle.loads the fs.pickle, and it runs
+    # from the venv. On a fresh install both are root's (the tree is handed to
+    # the Cowrie account afterwards, prepare_cowrie_tree); on `plant-bait`
+    # over an installed tree both belong to the account that handles attacker
+    # input, so root running them would execute whatever that account planted
+    # (Task 7 re-review N-2). Run it as that account then: it can only edit a
+    # pickle it could already write.
+    as_owner = cowrie_owned_prefix(COWRIE_HOME / "venv", COWRIE_HOME / "venv/bin",
+                                   fsctl, pickle_path.parent, pickle_path)
 
     def fs(cmd: str) -> None:
         # mkdir on an existing dir (and similar) is a benign non-zero exit;
@@ -593,7 +646,7 @@ def plant_bait_files() -> None:
         # path without escaping `"`, `$` or `\`, so on such a data path every
         # call failed "not found" and the bait silently never loaded. This is
         # the same way cowrie.service starts twistd.
-        run([str(python), str(fsctl), str(pickle_path), cmd])
+        run([*as_owner, str(python), str(fsctl), str(pickle_path), cmd])
 
     for d in (
         "/opt", "/opt/app", "/opt/app/config", "/opt/app/secrets",
@@ -613,8 +666,511 @@ def plant_bait_files() -> None:
         if dst.is_file():
             fs(f"load {vpath} {dst}")
     dst_pickle = COWRIE_HOME / "var/lib/cowrie/fs.pickle"
+    if persona_tree_prefix(COWRIE_HOME):
+        # Over a tree the Cowrie account owns, the pickle edit and the copy
+        # run as that account (final review I-1): root reading, rewriting and
+        # copying pickles in the account's directories is what let it
+        # redirect root's writes. cmd_persona_fs re-runs itself as the
+        # account and covers the var/lib copy too (cowrie_fs_pickles).
+        prefix = persona_tree_prefix(COWRIE_HOME)
+        if pickle_path.exists() and run([*prefix, "cp", "--", str(pickle_path), str(dst_pickle)]).returncode != 0:
+            log(f"warning: copying {pickle_path} to {dst_pickle} failed; Cowrie may load a pickle without the bait")
+        if cmd_persona_fs(COWRIE_HOME) != 0:
+            log("warning: persona filesystem nodes not applied after planting bait (fingerprintable)")
+        return
+    apply_persona_fs(pickle_path, honeyfs)
     if pickle_path.exists():
         shutil.copy2(pickle_path, dst_pickle)
+
+
+# Cowrie's fs.pickle node layout (cowrie/shell/fs.py A_NAME..A_REALFILE) and
+# node types. A node is a 10-item list; a directory's A_CONTENTS is its list of
+# children, a symlink's target is A_TARGET.
+_FS_NAME, _FS_TYPE, _FS_UID, _FS_GID, _FS_SIZE, _FS_MODE, _FS_CTIME, _FS_CONTENTS, _FS_TARGET = range(9)
+_FS_LINK, _FS_DIR, _FS_FILE = 0, 1, 2
+# The persona is a 22.04.4 cloud image built in early 2024 (os-release, kernel
+# 5.15.0-94); a node newer than that would date the box. The pickle stamps its
+# own /etc/os-release with this instant.
+PERSONA_IMAGE_TIME = 1706476800
+
+# Files a 22.04 server cloud image ships that Cowrie runs (it registers these
+# commands) but whose pickle has no node, so `ls -l /usr/bin/sudo`, `[ -x
+# /usr/bin/crontab ]` and `command -v sudo` said the box lacks them. Path,
+# size, mode, gid and time are the jammy cloud rootfs's (ubuntu-22.04-server-
+# cloudimg-amd64-root.tar.xz), times clamped to PERSONA_IMAGE_TIME; crontab is
+# setgid crontab (104 in the persona's /etc/group), sudo setuid root. Where
+# the package was updated after the persona image, the time is a plausible
+# pre-image jammy-updates build of it, not the image instant for all (seven
+# nodes sharing one minute looked like a cluster; review m-6). The
+# names 22.04 does not ship (python, php, gcc, yum, ifconfig, netstat...) stay
+# absent, as on the real box.
+PERSONA_FS_FILES = (
+    ("/usr/bin/busybox", 2193272, 0o100755, 0, 1648118592),
+    ("/usr/bin/crontab", 39568, 0o102755, 104, 1648063140),
+    ("/usr/bin/dig", 154448, 0o100755, 0, 1697212300),
+    ("/usr/bin/git", 3710360, 0o100755, 0, 1689171362),
+    # The persona ships txtcmds for these two, but with no node they answered
+    # `command not found` (review m-7): lsb-release 11.1.0ubuntu4 and systemd.
+    ("/usr/bin/hostnamectl", 31104, 0o100755, 0, 1699965993),
+    ("/usr/bin/lsb_release", 3638, 0o100755, 0, 1566787260),
+    # psmisc 23.4-2build3; Cowrie registers killall (Task 7 review I-2).
+    ("/usr/bin/killall", 32096, 0o100755, 0, 1648139377),
+    ("/usr/bin/lspci", 94288, 0o100755, 0, 1630311300),
+    ("/usr/bin/nc.openbsd", 39560, 0o100755, 0, 1645634340),
+    ("/usr/bin/ping", 76680, 0o100755, 0, 1643876571),
+    ("/usr/bin/sudo", 232416, 0o104755, 0, 1680595879),
+    ("/usr/bin/systemctl", 1119856, 0o100755, 0, 1699965993),
+    ("/usr/sbin/ethtool", 564712, 0o100755, 0, 1645855964),
+    ("/usr/sbin/xtables-nft-multi", 224296, 0o100755, 0, 1705459440),
+    # python3.10 3.10.12-1~22.04.3 (built Nov 20 2023, the build python3 -VV
+    # and its REPL banner print; install/persona/patches/python3-emulation.py).
+    # The pickle shipped Debian's python3.11, which 22.04 does not have.
+    ("/usr/bin/python3.10", 5941864, 0o100755, 0, 1700493240),
+    ("/usr/bin/pydoc3.10", 79, 0o100755, 0, 1700493240),
+)
+# Their symlinks, as 22.04 lays them out. Targets are absolute: Cowrie resolves
+# a relative target from / rather than from the link's directory, so the real
+# `xtables-nft-multi` (relative) would dangle.
+PERSONA_FS_LINKS = (
+    ("/etc/alternatives/nc", "/bin/nc.openbsd"),
+    ("/etc/alternatives/netcat", "/bin/nc.openbsd"),
+    ("/usr/bin/nc", "/etc/alternatives/nc"),
+    ("/usr/bin/netcat", "/etc/alternatives/netcat"),
+    ("/etc/alternatives/iptables", "/usr/sbin/iptables-nft"),
+    ("/usr/sbin/iptables-nft", "/usr/sbin/xtables-nft-multi"),
+    ("/usr/sbin/iptables", "/etc/alternatives/iptables"),
+    ("/usr/sbin/halt", "/bin/systemctl"),
+    ("/usr/sbin/poweroff", "/bin/systemctl"),
+    ("/usr/sbin/reboot", "/bin/systemctl"),
+    ("/usr/sbin/shutdown", "/bin/systemctl"),
+    ("/usr/bin/python3", "/usr/bin/python3.10"),
+    ("/usr/bin/pydoc3", "/usr/bin/pydoc3.10"),
+)
+# Directories renamed in place (contents kept): the stdlib directory follows
+# the interpreter version.
+PERSONA_FS_RENAMES = (
+    ("/usr/lib/python3.11", "python3.10"),
+)
+# Real 22.04 sizes for binaries whose pickle node carries another build's:
+# `ls -lh $(which ls)` (35 sessions in 30 days) prints this one, `135K` on
+# coreutils 8.32-4.1ubuntu1 (the pickle's Debian ls is 151344, `148K`).
+PERSONA_FS_SIZES = (
+    ("/usr/bin/ls", 138216),
+)
+# Stock Cowrie's demo user: phil (uid 1000) is in the pickle's passwd, group
+# and shadow with a /home/phil, a known Cowrie fingerprint (the IMC 2025
+# study saw >90% of phil logins disconnect at once). The persona's honeyfs
+# passwd/group/shadow drop him; this drops his home.
+PERSONA_FS_REMOVE = ("/home/phil", "/usr/bin/python3.11", "/usr/bin/pydoc3.11")
+# The persona's users own their homes (honeyfs/etc/passwd: cloud-init's ubuntu
+# 1000, the operator's deploy 1001); fsctl made them root's. 22.04's
+# login.defs HOME_MODE is 0750.
+PERSONA_HOMES = (
+    ("/home/ubuntu", 1000, 1000),
+    ("/home/deploy", 1001, 1001),
+)
+# The account files were last written when the operator added deploy (its
+# shadow change day, 19790 = 2024-03-08); the pickle stamped them with one
+# instant every v3.1.1 install shares (May  4 20:16, review m-6).
+PERSONA_ACCOUNTS_TIME = 1709906557
+PERSONA_FS_STAMPS = tuple((f"/etc/{name}", PERSONA_ACCOUNTS_TIME)
+                          for name in ("passwd", "group", "shadow", "gshadow"))
+# Modes the owning tool would have set; fsctl gives a node its parent's mode,
+# so the bait key was -rwxr-xr-x inside a world-readable .ssh.
+PERSONA_FS_MODES = (
+    ("/root/.bash_history", 0o100600),
+    ("/home/ubuntu/.bash_history", 0o100600),
+    ("/home/ubuntu/.aws/credentials", 0o100600),
+    ("/home/deploy/.ssh", 0o40700),
+    ("/home/deploy/.ssh/id_rsa", 0o100600),
+)
+
+
+def _fs_dir(tree: list, path: str) -> list | None:
+    """The directory node at an absolute path, following no symlinks."""
+    node = tree
+    for part in [p for p in path.split("/") if p]:
+        if node[_FS_TYPE] != _FS_DIR:
+            return None
+        node = next((c for c in node[_FS_CONTENTS] if c[_FS_NAME] == part), None)
+        if node is None:
+            return None
+    return node if node[_FS_TYPE] == _FS_DIR else None
+
+
+def _fs_put(tree: list, path: str, node: list) -> bool:
+    """Link node at path, replacing any entry of the same name. False when the
+    parent directory is missing (the node is then skipped, never invented)."""
+    parent_path, _, name = path.rpartition("/")
+    parent = _fs_dir(tree, parent_path or "/")
+    if parent is None:
+        return False
+    node[_FS_NAME] = name
+    parent[_FS_CONTENTS][:] = [c for c in parent[_FS_CONTENTS] if c[_FS_NAME] != name] + [node]
+    return True
+
+
+def _fs_entry(tree: list, path: str) -> list | None:
+    """The node at an absolute path itself (a final symlink is not followed;
+    nor is any on the way, the persona's paths cross none)."""
+    parent_path, _, name = path.rpartition("/")
+    parent = _fs_dir(tree, parent_path or "/")
+    if parent is None:
+        return None
+    return next((c for c in parent[_FS_CONTENTS] if c[_FS_NAME] == name), None)
+
+
+def persona_fs_edit(tree: list, honeyfs_sizes: dict[str, int | bytes] | None = None,
+                    now: float = PERSONA_IMAGE_TIME) -> list[str]:
+    """Apply the persona's node changes to an unpickled fs tree in place.
+
+    honeyfs_sizes maps each file the persona serves from honeyfs (bait and
+    persona overlays, "/etc/hostname" -> bytes) to its size: Cowrie reads such
+    a file's contents from disk but lists the node's own size, so `ls -l
+    /etc/hostname` said 13 bytes beside 19 bytes of content, and fsctl's
+    bait nodes all said 4096. Each node takes its file's size; a file with no
+    node gets one (Cowrie serves honeyfs only onto an existing node, so the
+    persona's /home/ubuntu/.bash_history was never visible), stamped `now`.
+    These are data files: a node fsctl created with its parent's x bits
+    loses them (every bait file was -rwxr-xr-x). A value given as bytes is
+    the file's content and is also embedded in the node (fsctl `load`'s
+    effect), so the pickle itself serves the persona's /etc/passwd, group
+    and shadow: its stock copies carry phil and Cowrie's root hash, masked
+    only while contents_path points at honeyfs (review m-4).
+
+    Idempotent: every change replaces a node by name or sets attributes, so a
+    second `plant-bait` run leaves the tree as the first left it. Returns the
+    paths it could not place (a missing parent directory).
+    """
+    skipped = []
+    for path, data in sorted((honeyfs_sizes or {}).items()):
+        size = len(data) if isinstance(data, bytes) else data
+        node = _fs_entry(tree, path)
+        if node is None:
+            parent = _fs_dir(tree, path.rpartition("/")[0] or "/")
+            if parent is None:
+                skipped.append(path)
+                continue
+            node = [None, _FS_FILE, parent[_FS_UID], parent[_FS_GID], size, 0o100644, now,
+                    [], None, None]
+            _fs_put(tree, path, node)
+        elif node[_FS_TYPE] == _FS_FILE:
+            node[_FS_SIZE] = size
+        if node[_FS_TYPE] == _FS_FILE:
+            node[_FS_MODE] &= ~0o111
+            if isinstance(data, bytes):
+                node[_FS_CONTENTS] = data
+    for path, size in PERSONA_FS_SIZES:
+        node = _fs_entry(tree, path)
+        if node is None or node[_FS_TYPE] != _FS_FILE:
+            skipped.append(path)
+            continue
+        node[_FS_SIZE] = size
+    for path, new_name in PERSONA_FS_RENAMES:
+        parent_path, _, name = path.rpartition("/")
+        parent = _fs_dir(tree, parent_path or "/")
+        if parent is None or any(c[_FS_NAME] == new_name for c in parent[_FS_CONTENTS]):
+            continue
+        for child in parent[_FS_CONTENTS]:
+            if child[_FS_NAME] == name:
+                child[_FS_NAME] = new_name
+    for path in PERSONA_FS_REMOVE:
+        parent_path, _, name = path.rpartition("/")
+        parent = _fs_dir(tree, parent_path or "/")
+        if parent is not None:
+            parent[_FS_CONTENTS][:] = [c for c in parent[_FS_CONTENTS] if c[_FS_NAME] != name]
+    for path, uid, gid in PERSONA_HOMES:
+        home = _fs_dir(tree, path)
+        if home is None:
+            skipped.append(path)
+            continue
+        home[_FS_MODE] = 0o40750
+        stack = [home]
+        while stack:
+            node = stack.pop()
+            node[_FS_UID], node[_FS_GID] = uid, gid
+            if node[_FS_TYPE] == _FS_DIR:
+                stack.extend(node[_FS_CONTENTS])
+    for path, ctime in PERSONA_FS_STAMPS:
+        node = _fs_entry(tree, path)
+        if node is not None and node[_FS_TYPE] == _FS_FILE:
+            node[_FS_CTIME] = ctime
+    for path, mode in PERSONA_FS_MODES:
+        node = _fs_entry(tree, path)
+        if node is not None and node[_FS_TYPE] in (_FS_FILE, _FS_DIR):
+            node[_FS_MODE] = mode
+    for path, size, mode, gid, ctime in PERSONA_FS_FILES:
+        node = [None, _FS_FILE, 0, gid, size, mode, ctime, [], None, None]
+        if not _fs_put(tree, path, node):
+            skipped.append(path)
+    for path, target in PERSONA_FS_LINKS:
+        node = [None, _FS_LINK, 0, 0, len(target), 0o120777, PERSONA_IMAGE_TIME, [], target, None]
+        if not _fs_put(tree, path, node):
+            skipped.append(path)
+    return skipped
+
+
+def honeyfs_files(honeyfs: Path) -> dict[str, bytes]:
+    """Virtual path -> content of every regular file under honeyfs, except
+    /proc: a real /proc lists every file as 0 bytes, and so does the pickle
+    (and Cowrie generates /proc/uptime)."""
+    files = {}
+    if honeyfs.is_dir():
+        for f in honeyfs.rglob("*"):
+            rel = f.relative_to(honeyfs).as_posix()
+            if f.is_file() and not f.is_symlink() and rel.split("/")[0] != "proc":
+                files["/" + rel] = f.read_bytes()
+    return files
+
+
+class FsPickleRefused(ValueError):
+    """A file named fs.pickle that is not a plain Cowrie filesystem tree."""
+
+
+# Cowrie's node layout (cowrie/shell/fs.py, v3.1.1): exactly ten fields,
+# A_NAME..A_REALFILE, and node types T_LINK..T_FIFO (0..6). The pinned
+# pickle, inspected: 28,966 nodes, every one of length 10; name str; type,
+# uid, gid, size, mode int; ctime int (one float); contents a list of child
+# nodes for a directory and otherwise an empty list or, for a file, the
+# bytes fsctl `load` embedded; target a str for a link and None otherwise;
+# realfile None (Cowrie sets it in memory, a str when it is kept). What
+# persona_fs_edit writes is the same shape with float times. Exact types: a
+# bool or a subclass is not a filesystem field.
+_FS_NODE_FIELDS = 10
+_FS_NODE_TYPES = range(7)
+
+
+def _fs_tree_problem(tree: object) -> str | None:
+    """Why `tree` is not a Cowrie filesystem tree, or None when it is.
+
+    A pickle of allowed types can still be shaped wrong (["/",1,0,0,0,0,0,
+    [["etc"]],None,None] passed the type check, and persona_fs_edit then
+    died with an IndexError traceback, aborting a root installer run instead
+    of refusing; Task 8 review I-2). Every node is checked against the
+    layout above before anything indexes into it, and a node reachable twice
+    (a loop, or one node shared by two directories, which the pickle memo
+    can express) is refused too: the edits walk the tree and would never end
+    or would edit two places at once."""
+    if type(tree) is not list:
+        return "the top level is not a node"
+    seen: set[int] = set()
+    stack: list[tuple[object, str]] = [(tree, "/")]
+    while stack:
+        node, where = stack.pop()
+        if type(node) is not list or len(node) != _FS_NODE_FIELDS:
+            return f"{where}: a node is a list of {_FS_NODE_FIELDS} fields"
+        if id(node) in seen:
+            return f"{where}: a node is reachable twice"
+        seen.add(id(node))
+        name, kind, uid, gid, size, mode, ctime, contents, target, realfile = node
+        if type(name) is not str:
+            return f"{where}: the name is not a str"
+        if type(kind) is not int or kind not in _FS_NODE_TYPES:
+            return f"{where}: the type is not one of Cowrie's node types"
+        if any(type(v) is not int for v in (uid, gid, size, mode)):
+            return f"{where}: uid, gid, size and mode must be int"
+        if type(ctime) not in (int, float):
+            return f"{where}: the ctime is not a number"
+        if not (type(target) is str if kind == _FS_LINK else target is None or type(target) is str):
+            return f"{where}: the link target is malformed"
+        if realfile is not None and type(realfile) is not str:
+            return f"{where}: the real file is not a str"
+        if kind == _FS_DIR:
+            if type(contents) is not list or id(contents) in seen:
+                return f"{where}: a directory's contents must be its own list of nodes"
+            seen.add(id(contents))
+            for child in contents:
+                child_name = child[_FS_NAME] if type(child) is list and child and type(child[_FS_NAME]) is str else "?"
+                stack.append((child, where.rstrip("/") + "/" + ascii(child_name)[1:-1][:64]))
+        elif not ((type(contents) is bytes and kind == _FS_FILE) or (type(contents) is list and not contents)):
+            return f"{where}: a non-directory's contents must be empty or a file's bytes"
+    if tree[_FS_TYPE] != _FS_DIR:
+        return "the root is not a directory"
+    return None
+
+
+def load_fs_pickle(data: bytes) -> list:
+    """Unpickle a Cowrie fs.pickle without letting it run anything.
+
+    fs.pickle lives in the tree the cowrie account owns, and that account
+    handles attacker input; root runs persona-fs and plant-bait over it (Task
+    7 re-review N-2). pickle.load would call whatever callable the file names
+    (`__reduce__` -> os.system) as root. Cowrie's tree needs no global at all,
+    so find_class refuses every one (that is what GLOBAL, STACK_GLOBAL, INST,
+    OBJ and EXT* resolve through; without a callable REDUCE/NEWOBJ/BUILD have
+    nothing to call), persistent ids are refused, and the result must have
+    Cowrie's node layout exactly (_fs_tree_problem), so the edits that follow
+    can index any node without failing."""
+    import io  # noqa: PLC0415
+    import pickle  # noqa: PLC0415
+
+    class _Unpickler(pickle.Unpickler):
+        def find_class(self, module: str, name: str):  # noqa: ANN202
+            raise FsPickleRefused(
+                f"refusing a pickle that references {module}.{name}: a Cowrie fs.pickle "
+                "holds only lists, str, int, float, bytes and None")
+
+        def persistent_load(self, pid):  # noqa: ANN001, ANN202
+            raise FsPickleRefused("refusing a pickle with a persistent id")
+
+    try:
+        tree = _Unpickler(io.BytesIO(data)).load()
+    except FsPickleRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any parse failure is "not a tree"
+        raise FsPickleRefused(f"not a Cowrie filesystem pickle ({type(exc).__name__}: {exc})") from None
+    problem = _fs_tree_problem(tree)
+    if problem is not None:
+        raise FsPickleRefused(f"not a Cowrie filesystem tree ({problem})")
+    return tree
+
+
+PICKLE_TEMP_PREFIX = ".fs.pickle.persona-"
+STALE_TEMP_SECONDS = 60
+
+
+def remove_stale_pickle_temps(directory: Path, now: float | None = None) -> None:
+    """Delete PICKLE_TEMP_PREFIX regular files in directory older than
+    STALE_TEMP_SECONDS, older than any run, so never a concurrent run's live
+    temp (unlink never follows a link)."""
+    import time  # noqa: PLC0415
+
+    cutoff = (time.time() if now is None else now) - STALE_TEMP_SECONDS
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if (entry.name.startswith(PICKLE_TEMP_PREFIX) and entry.is_file(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime < cutoff):
+                os.unlink(entry.path)
+        except OSError:
+            continue
+
+
+def apply_persona_fs(pickle_path: Path, honeyfs: Path | None = None) -> bool:
+    """Edit Cowrie's fs.pickle for the persona: what fsctl cannot express
+    (setuid modes, symlinks, real sizes). The pickle is the pinned Cowrie
+    checkout's own file, the one Cowrie itself unpickles; it is read through
+    load_fs_pickle (never pickle.load: root runs this over a file the Cowrie
+    account can write) and rewritten via a temporary file and an atomic
+    rename. False when the pickle was refused or unreadable."""
+    import pickle  # noqa: PLC0415 - only the installer's bait step needs it
+    import time  # noqa: PLC0415
+
+    try:
+        tree = load_fs_pickle(pickle_path.read_bytes())
+    except (OSError, FsPickleRefused) as exc:
+        log(f"warning: cannot edit {pickle_path} for the persona ({exc}); "
+            "persona filesystem nodes not applied (fingerprintable)")
+        return False
+    files = honeyfs_files(honeyfs) if honeyfs is not None else {}
+    try:
+        skipped = persona_fs_edit(tree, files, time.time())
+    except (IndexError, KeyError, TypeError, ValueError, RecursionError) as exc:
+        # load_fs_pickle validated the layout, so this is a gap in that
+        # check, never an expected path: still refuse by name, not by
+        # traceback, and write nothing.
+        log(f"warning: cannot edit {pickle_path} for the persona (not a Cowrie filesystem tree: "
+            f"{type(exc).__name__}); persona filesystem nodes not applied (fingerprintable)")
+        return False
+    if skipped:
+        log(f"warning: persona filesystem nodes without a parent directory: {', '.join(skipped)}")
+    # The directory belongs to the Cowrie account and this runs as root: a
+    # fixed temp name could be a planted symlink (review m-3). mkstemp opens
+    # a fresh name with O_EXCL; the result keeps the pickle's mode and owner.
+    # A SIGTERM (cowrie.service's `timeout`) unwinds through the cleanup
+    # below (main turns it into SystemExit); a SIGKILL cannot, so temps older
+    # than any run are removed first (review m-2).
+    remove_stale_pickle_temps(pickle_path.parent)
+    st = pickle_path.stat()
+    fd, tmp_name = tempfile.mkstemp(dir=pickle_path.parent, prefix=PICKLE_TEMP_PREFIX)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(tree, f)
+            # On the descriptor, never by name: the directory is the Cowrie
+            # account's, so between mkstemp and a by-name chown it could swap
+            # the temp for a symlink and have root chown any root file to it
+            # (final review I-1). A swap before os.replace only moves the
+            # account's own file into the account's own directory.
+            os.fchmod(f.fileno(), stat.S_IMODE(st.st_mode))
+            if os.geteuid() == 0:
+                os.fchown(f.fileno(), st.st_uid, st.st_gid)
+        os.replace(tmp_name, pickle_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return True
+
+
+def cowrie_fs_pickles(cowrie_home: Path) -> list[Path]:
+    """Every fs.pickle an installed Cowrie may load: the cfg's [shell]
+    filesystem (patch_cowrie_cfg points it at src/cowrie/data/fs.pickle; an
+    older or hand-edited cfg may not), the checkout's own, and the
+    var/lib/cowrie copy plant_bait_files keeps. Existing files only."""
+    import configparser  # noqa: PLC0415
+
+    found: list[Path] = []
+    cfg = cowrie_home / "etc/cowrie.cfg"
+    if cfg.is_file():
+        # Cowrie reads its cfg with ExtendedInterpolation (`$$` is a literal `$`).
+        parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        try:
+            parser.read_string(cfg.read_text())
+            name = parser.get("shell", "filesystem", fallback="")
+        except (configparser.Error, UnicodeDecodeError):
+            name = ""
+        if name:
+            path = Path(name)
+            found.append(path if path.is_absolute() else cowrie_home / path)
+    found += [cowrie_home / "src/cowrie/data/fs.pickle", cowrie_home / "var/lib/cowrie/fs.pickle"]
+    unique: list[Path] = []
+    for path in found:
+        if path.is_file() and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def cmd_persona_fs(cowrie_home: Path) -> int:
+    """`shardlure.py persona-fs [COWRIE_HOME]`: apply the persona's pickle
+    edits to an installed Cowrie. apply-stealth.sh (the re-apply path for an
+    existing box) calls it after syncing honeyfs: without it such a box got
+    the new command/type resolver, which answers from the fake PATH alone,
+    over a stock pickle with no sudo/crontab/ping nodes, and kept /home/phil
+    (Task 7 review I-1). Idempotent; Cowrie must be restarted to load it.
+
+    Run by root over a tree the Cowrie account owns, it re-runs itself as
+    that account from the root-owned PERSONA_REGEN_LIB copy (as
+    cowrie.service does before every start): the pickles, their directories
+    and honeyfs are the account's, so root would read and write through paths
+    the account can redirect (Task 8 fix round, the same rule as
+    deploy_time_persona)."""
+    prefix = persona_tree_prefix(cowrie_home)
+    if prefix:
+        copy = PERSONA_REGEN_LIB / "shardlure.py"
+        if not copy.is_file():
+            log(f"warning: {copy} missing (run persona-regen-install); persona filesystem not applied")
+            return 1
+        return run([*prefix, sys.executable, str(copy), "persona-fs", str(cowrie_home)]).returncode
+    pickles = cowrie_fs_pickles(cowrie_home)
+    if not pickles:
+        log(f"warning: no Cowrie fs.pickle under {cowrie_home}; persona filesystem not applied")
+        return 1
+    ok = True
+    for pickle_path in pickles:
+        log(f"applying persona filesystem nodes to {pickle_path}")
+        ok = apply_persona_fs(pickle_path, cowrie_home / "honeyfs") and ok
+    return 0 if ok else 1
+
+
+# txtcmds the persona used to ship, removed from a deployed share dir on every
+# deploy (the copy below only adds). bin/uname printed the static `uname -a`
+# line for every option set and won over Cowrie's own uname for any path that
+# resolves to /bin/uname, e.g. `/bin/./uname -s -v -n -r -m` (130 sessions in
+# 30 days); Cowrie's uname reads the persona cfg and answers each option.
+# apply-stealth.sh retires the same list (test_shardlure pins the two).
+RETIRED_TXTCMDS = ("bin/uname",)
 
 
 def deploy_txtcmds() -> None:
@@ -625,6 +1181,8 @@ def deploy_txtcmds() -> None:
     txtcmds_dst = COWRIE_HOME / "share" / "cowrie" / "txtcmds"
     txtcmds_dst.mkdir(parents=True, exist_ok=True)
     log("deploying txtcmds anti-fingerprint stubs")
+    for rel in RETIRED_TXTCMDS:
+        (txtcmds_dst / rel).unlink(missing_ok=True)
     for src_file in txtcmds_src.rglob("*"):
         if not src_file.is_file():
             continue
@@ -634,7 +1192,14 @@ def deploy_txtcmds() -> None:
         shutil.copy2(src_file, dst)
 
 
-def deploy_time_persona() -> None:
+def persona_tree_prefix(cowrie_home: Path) -> list[str]:
+    """`runuser -u <cowrie> --` when the tree the persona steps write is not
+    root's own (cowrie_owned_prefix), else []."""
+    return cowrie_owned_prefix(cowrie_home, cowrie_home / "honeyfs", cowrie_home / "share/cowrie/txtcmds",
+                               cowrie_home / "src/cowrie/data", cowrie_home / "var/lib/cowrie")
+
+
+def deploy_time_persona(cowrie_home: Path | None = None) -> None:
     """Regenerate time-sensitive persona files against the live clock.
 
     The txtcmds/honeyfs files are otherwise frozen at a fixed date, which is a
@@ -643,16 +1208,185 @@ def deploy_time_persona() -> None:
     the past. The generator rewrites uptime/w/who/last and /proc/uptime so they
     track "now" and agree with each other. Must run AFTER deploy_txtcmds() (it
     overwrites files that step just planted).
+
+    Root runs it only over a tree root owns (a fresh install, before
+    prepare_cowrie_tree hands it over). Over a tree the Cowrie account owns
+    (a re-run, apply-stealth.sh) it runs as that account, from the root-owned
+    PERSONA_REGEN_LIB copy, exactly as cowrie.service runs it before every
+    start (Task 8 review m-3): the generator opens paths inside that tree, and
+    as root it wrote persona text through any symlink the account planted
+    there. As the account it can only write what the account could already
+    write. That is simpler than making every write in the generator
+    descriptor-pinned and no-follow, and it is the same code path and the same
+    privileges as the per-start run, so the two cannot diverge.
     """
-    gen = ROOT / "install" / "persona" / "gen-time-persona.py"
+    home = COWRIE_HOME if cowrie_home is None else cowrie_home
+    prefix = persona_tree_prefix(home)
+    gen = (PERSONA_REGEN_LIB if prefix else ROOT / "install" / "persona") / "gen-time-persona.py"
     if not gen.is_file():
+        log(f"warning: {gen} missing; persona time files may be stale (fingerprintable)")
         return
     log("refreshing time-sensitive persona against live clock")
-    proc = run([sys.executable, str(gen), str(COWRIE_HOME)])
+    proc = run([*prefix, sys.executable, str(gen), str(home)])
     if proc.returncode != 0:
         # Non-fatal: a stale-but-planted persona still works, just fingerprintable.
         log(f"warning: time-persona generator exited {proc.returncode}; "
             "persona time files may be stale (fingerprintable)")
+
+
+# Per-start persona regeneration (Task 8). gen-time-persona anchors the motd's
+# "Last login" and the txtcmd/proc time files to the clock it runs at, and
+# Cowrie's patched last/w anchor the same persona history to its own process
+# start: run only at deploy, every later restart (a crash, a reboot, a
+# Restart=always) left the motd naming a login that last no longer shows
+# (Task 5 residual). cowrie.service therefore re-runs both generators before
+# every start, gen-time-persona first and persona-fs second (it sizes the
+# motd node from the rewritten file).
+#
+# They run as the Cowrie account, never root: the unit's User= applies (no
+# `+`/`!` prefix) and everything they write is in the tree that account
+# owns (honeyfs, share/cowrie/txtcmds, the fs.pickle files and their
+# directories). They run from a root-owned copy outside that tree,
+# PERSONA_REGEN_LIB (/usr/local/lib/shardlure/persona: root 0755, files
+# 0644), because the checkout the installer ran from (often /root/...) is not
+# readable by the account. The copy lives outside the Cowrie tree on purpose
+# (Task 8 review I-1): it used to sit in COWRIE_HOME/shardlure-persona, owned
+# by the account, so on every re-run root's copyfile/cp wrote through any
+# symlink the account had planted there (shardlure.py ->
+# /usr/local/bin/shardlure). Now root writes only into a directory nobody
+# else can change (installer_safety.install_root_files), and the account
+# cannot tamper with the code it runs before every start either.
+# SHARDLURE_PERSONA_LIB overrides the location (rehearsals under /srv); both
+# installers and apply-stealth.sh read the same variable and default.
+# The prefix `-` keeps a failed regeneration from keeping Cowrie down: a
+# honeypot that does not answer loses every capture, while a stale persona
+# is the residual tell the box ran with before this. `timeout` keeps both
+# steps inside systemd's 90 s start budget, so a hung step cannot turn into
+# a start-timeout restart loop. A missing copy (a box whose persona was never
+# deployed, e.g. install.sh without apply-stealth.sh) is a silent no-op.
+PERSONA_REGEN_LIB = Path(os.environ.get("SHARDLURE_PERSONA_LIB") or "/usr/local/lib/shardlure/persona")
+# Where the copy lived before; removed (never written) on every deploy.
+LEGACY_PERSONA_REGEN_DIR = "shardlure-persona"
+PERSONA_REGEN_TIMEOUT = 30
+PERSONA_REGEN_FILES = {
+    "gen-time-persona.py": ROOT / "install/persona/gen-time-persona.py",
+    "cowrie-stealth.cfg": ROOT / "install/persona/cowrie-stealth.cfg",
+    "shardlure.py": ROOT / "scripts/shardlure.py",
+    "installer_safety.py": ROOT / "scripts/installer_safety.py",
+    "ssh_transition.py": ROOT / "scripts/ssh_transition.py",
+}
+# The /bin/sh program both installers put in front of each step ($$ is
+# systemd's escape for a literal $). The paths are positional arguments, never
+# shell syntax; install.sh renders the same text (a test pins the two).
+PERSONA_REGEN_SH = (
+    'test -f "$$2" || exit 0; '
+    f'timeout {PERSONA_REGEN_TIMEOUT} "$$@" && exit 0; rc=$$?; '
+    'echo "persona regeneration: $$2 exited $$rc; Cowrie starts with its existing persona files" >&2; '
+    "exit $$rc"
+)
+
+
+def persona_regen_prestart(cowrie_home: Path) -> str:
+    """cowrie.service's ExecStartPre= lines for the per-start regeneration."""
+    py = cowrie_home / "venv/bin/python"
+    lib = PERSONA_REGEN_LIB
+    steps = (
+        [py, lib / "gen-time-persona.py", cowrie_home],
+        [py, lib / "shardlure.py", "persona-fs", cowrie_home],
+    )
+    return "".join(
+        f"ExecStartPre=-/bin/sh -c '{PERSONA_REGEN_SH}' persona-regen "
+        # Paths are quoted and escaped; the literal subcommand is not.
+        + " ".join(systemd_exec_arg(str(arg)) if isinstance(arg, Path) else arg for arg in step)
+        + "\n"
+        for step in steps
+    )
+
+
+def remove_legacy_persona_regen(cowrie_home: Path) -> None:
+    """Delete the pre-fix copy in the Cowrie tree, following nothing: a
+    symlink there is unlinked itself, a directory is removed by rmtree's
+    descriptor-based walk (it never descends through a symlink)."""
+    legacy = cowrie_home / LEGACY_PERSONA_REGEN_DIR
+    try:
+        info = os.lstat(legacy)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode) and shutil.rmtree.avoids_symlink_attacks:
+        shutil.rmtree(legacy)
+    elif not stat.S_ISDIR(info.st_mode):
+        legacy.unlink()
+
+
+def deploy_persona_regen(cowrie_home: Path | None = None) -> None:
+    """Install the per-start regeneration scripts root-owned outside the
+    Cowrie tree (see PERSONA_REGEN_LIB) and drop the old in-tree copy."""
+    files = {}
+    for name, src in PERSONA_REGEN_FILES.items():
+        if not src.is_file():
+            die(f"persona regeneration source missing: {src}")
+        files[name] = src.read_bytes()
+    try:
+        installer_safety.install_root_files(PERSONA_REGEN_LIB, files)
+    except (OSError, installer_safety.SafetyError) as exc:
+        die(f"cannot install the persona regeneration scripts into {PERSONA_REGEN_LIB}: {exc}")
+    remove_legacy_persona_regen(COWRIE_HOME if cowrie_home is None else cowrie_home)
+
+
+def remove_persona_regen() -> list[str]:
+    """Uninstall PERSONA_REGEN_LIB. It is code, like the binary and the
+    units, so every uninstall removes it, not only --purge: left behind,
+    a reinstall's cowrie.service would run whatever stale copy sits there.
+
+    Only what deploy_persona_regen creates is deleted: the PERSONA_REGEN_FILES
+    names and install_root_files' interrupted `.shardlure-write-*` temps, each
+    a regular, single-link file owned by us, unlinked relative to a pinned
+    descriptor of a directory nobody else can change (installer_safety.
+    directory refuses one another account could). Nothing is followed: a
+    symlink at the directory or at a file name is kept. The directory, then
+    its `shardlure` parent (the default /usr/local/lib/shardlure), is
+    rmdir'ed only when that leaves it empty, so an operator's file keeps
+    both. Returns what was retained, for the log; never raises, because SSH
+    is already restored and the remaining steps must still run."""
+    lib = PERSONA_REGEN_LIB
+    retained: list[str] = []
+    try:
+        info = os.lstat(lib)
+    except FileNotFoundError:
+        return retained
+    except OSError as exc:
+        return [f"{lib} ({exc})"]
+    if not stat.S_ISDIR(info.st_mode):
+        return [f"{lib} (not a directory)"]
+    names = set(PERSONA_REGEN_FILES)
+    try:
+        with installer_safety.directory(lib) as fd:
+            if not installer_safety.same_object(info, os.fstat(fd)):
+                raise installer_safety.SafetyError("directory replaced before removal")
+            for name in sorted(os.listdir(fd)):
+                if name not in names and not name.startswith(".shardlure-write-"):
+                    retained.append(str(lib / name))
+                    continue
+                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_uid != os.geteuid():
+                    retained.append(str(lib / name))
+                    continue
+                os.unlink(name, dir_fd=fd)
+            os.fsync(fd)
+        if retained:
+            return retained
+        dirs = [lib] + ([lib.parent] if lib.parent.name == "shardlure" else [])
+        for d in dirs:
+            with installer_safety.directory(d.parent) as parent:
+                try:
+                    os.rmdir(d.name, dir_fd=parent)
+                except OSError:  # not empty: something else lives there
+                    retained.append(str(d))
+                    break
+                os.fsync(parent)
+    except (OSError, installer_safety.SafetyError) as exc:
+        retained.append(f"{lib} ({exc})")
+    return retained
 
 
 def deploy_patches() -> None:
@@ -743,6 +1477,10 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             # Bounded downloads (== capture.max_bytes). Cowrie reads it only
             # from [honeypot]; without it an attacker can fill the disk.
             ("download_limit_size", "52428800"),
+            # The persona's 42d 3h17m (== cowrie-stealth.cfg). Unset, v3.1.1
+            # picks a random 1-90 day boot per process, and /proc/uptime,
+            # uptime, w and last stop agreeing with the persona.
+            ("boot_offset", "3640620"),
         ],
         "shell": [
             ("arch", "linux-x64-lsb"),
@@ -753,6 +1491,11 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             ("operating_system", "GNU/Linux"),
             ("ssh_version", "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022"),
             ("filesystem", f"{home}/src/cowrie/data/fs.pickle"),
+            # (== cowrie-stealth.cfg, which records the measurement.) v3.1.1's
+            # own default, pinned so a change is deliberate: a higher cap
+            # makes big scripts stall every session for up to the 10 s parse
+            # timeout and then answer a syntax error instead of running.
+            ("max_input_size", "16384"),
         ],
         "output_jsonlog": [
             ("enabled", "true"),
@@ -795,6 +1538,24 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
                     rebuilt.append(f"{key} = {val}")
                     have.add(key)
     out = rebuilt
+
+    # The persona's last history spans 4d23h before the Cowrie start
+    # (last-persona.py); a smaller kept boot_offset puts sessions before boot.
+    cur = ""
+    for line in out:
+        sec = section_of(line)
+        if sec is not None:
+            cur = sec
+            continue
+        key, _, val = line.partition("=")
+        if cur == "honeypot" and key.strip().lower() == "boot_offset":
+            try:
+                kept = int(val.strip())
+            except ValueError:
+                kept = -1
+            if kept < 604800:
+                log(f"warning: [honeypot] boot_offset = {val.strip()} is under 7 days; the"
+                    " persona's login history (last/w) would predate the boot")
 
     # Append any required section that was entirely absent.
     joined_secs = {section_of(l) for l in out if section_of(l) is not None}
@@ -1032,7 +1793,7 @@ Environment={systemd_environment("PYTHONPATH",str(COWRIE_HOME / "src"))}
 Environment={systemd_environment("PATH",str(COWRIE_HOME / "venv/bin")+":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
 Environment=TZ=UTC
 UMask=0027
-ExecStart={cowrie_exec}
+{persona_regen_prestart(COWRIE_HOME)}ExecStart={cowrie_exec}
 Restart=always
 RestartSec=5
 
@@ -1301,6 +2062,7 @@ def verify_admin_ssh_gate(admin_port: int, *, key_only: bool = True) -> None:
 
 def cmd_run() -> None:
     need_root()
+    require_cowrie_python()
     validate_existing_accounts()
     validate_installation()
     intro()
@@ -1435,11 +2197,18 @@ def cmd_uninstall() -> None:
     log("step 2/5: stop + remove systemd services")
     remove_services()
 
-    log("step 3/5: remove the shardlure binary")
+    log("step 3/5: remove the shardlure binary and the persona regeneration scripts")
     binp = BIN_DIR / "shardlure"
     if binp.exists():
         installation_state().remove(binp)
         log(f"removed {binp}")
+    # After remove_services: cowrie.service no longer runs these before start.
+    regen_present = os.path.lexists(PERSONA_REGEN_LIB)
+    kept = remove_persona_regen()
+    for path in kept:
+        log(f"retained {path}; not empty, not created by this installer, or not safely removable")
+    if regen_present and not os.path.lexists(PERSONA_REGEN_LIB):
+        log(f"removed {PERSONA_REGEN_LIB}")
 
     log("step 4/5: remove authbind byport file (if any)")
     if honeypot < 1024:
@@ -1496,16 +2265,45 @@ def main() -> None:
         cmd_start()
     elif cmd == "finish":
         cmd_finish()
+    elif cmd == "persona-fs":
+        # An option-shaped argument is a usage error, not a Cowrie home
+        # (`persona-fs --bogus` used to look for a pickle under ./--bogus;
+        # Task 7 re-review N-1): unknown flags are fatal here.
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
+            die("usage: python3 scripts/shardlure.py persona-fs [COWRIE_HOME]")
+        # cowrie.service's `timeout` sends SIGTERM: unwind through
+        # apply_persona_fs's temp cleanup instead of dying mid-write.
+        import signal  # noqa: PLC0415
+        signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+        sys.exit(cmd_persona_fs(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME))
+    elif cmd == "time-persona":
+        # apply-stealth.sh's entry to deploy_time_persona: the same
+        # run-as-the-tree's-owner rule as the installer.
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
+            die("usage: sudo python3 scripts/shardlure.py time-persona [COWRIE_HOME]")
+        deploy_time_persona(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME)
+    elif cmd == "persona-regen-install":
+        # apply-stealth.sh's way to (re)install PERSONA_REGEN_LIB with the
+        # same checks as the installer; COWRIE_HOME locates the legacy copy.
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2].startswith("-")):
+            die("usage: sudo python3 scripts/shardlure.py persona-regen-install [COWRIE_HOME]")
+        deploy_persona_regen(Path(sys.argv[2]) if len(sys.argv) == 3 else COWRIE_HOME)
+        log(f"persona regeneration scripts installed in {PERSONA_REGEN_LIB}")
     elif cmd in ("plant-bait", "bait"):
         need_root()
         plant_bait_files()
+        # The bait copy runs as root; hand the tree back to the Cowrie account
+        # (as install does), or the per-start regeneration, which runs as that
+        # account, can no longer rewrite the honeyfs files root just wrote.
+        installer_safety.prepare_cowrie_tree(DATA_DIR, COWRIE_USER)
         run(["systemctl", "restart", "cowrie.service"]).check_returncode()
         log("bait planted — test: ssh root@<public-ip> then cat /opt/app/.env")
     elif cmd in ("uninstall", "remove"):
         cmd_uninstall()
     else:
         die("usage: sudo python3 scripts/shardlure.py "
-            "{run|finish|start|stop|status|plant-bait|uninstall [--purge]}")
+            "{run|finish|start|stop|status|plant-bait|persona-fs [COWRIE_HOME]|"
+            "persona-regen-install [COWRIE_HOME]|time-persona [COWRIE_HOME]|uninstall [--purge]}")
 
 
 if __name__ == "__main__":

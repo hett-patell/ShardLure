@@ -1,0 +1,3 @@
+#harness: overlap=echo alive
+#harness: within=4
+done

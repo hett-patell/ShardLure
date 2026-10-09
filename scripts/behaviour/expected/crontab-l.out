@@ -1,0 +1,2 @@
+#harness: rc=1
+no crontab for root

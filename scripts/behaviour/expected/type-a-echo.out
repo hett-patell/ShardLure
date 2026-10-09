@@ -1,0 +1,5 @@
+echo is a shell builtin
+echo is /usr/bin/echo
+echo is /bin/echo
+/usr/bin/ls
+/usr/bin/echo

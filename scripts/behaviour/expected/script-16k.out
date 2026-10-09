@@ -1,0 +1,4 @@
+#harness: upload-script=/tmp/big.sh 16384
+#harness: within=8
+script-ok 16384
+rc=0

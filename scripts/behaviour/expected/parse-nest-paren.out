@@ -1,0 +1,3 @@
+#harness: rc=2
+#harness: within=2
+bash: -c: line 2: syntax error: unexpected end of file

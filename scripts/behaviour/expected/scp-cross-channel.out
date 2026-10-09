@@ -1,0 +1,3 @@
+#harness: upload-channel=/tmp/x hw
+-rwxr-xr-x 1 root root {{UPLOAD_SIZE}} {{LSDATE_RECENT}} /tmp/x
+rc=0

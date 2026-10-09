@@ -2,8 +2,8 @@
   System information as of Mon May 19 07:05:00 UTC 2026
 
   System load:    0.38                Processes:           287
-  Usage of /:     61.2% of 96.73GB    Users logged in:     0
-  Memory usage:   22%                 IPv4 address for ens3: 10.0.0.14
+  Usage of /:     61.2% of 94.43GB    Users logged in:     1
+  Memory usage:   22%                 IPv4 address for eth0: 10.0.0.14
   Swap usage:     0%                  Uptime:              42 days
 
   23 updates can be applied immediately.

@@ -1,0 +1,14 @@
+{{UPTIME_SECS}} {{IDLE_SECS}}
+ {{NOW_HMS}} {{UPTIME_HUMAN}},  1 user,  load average: 0.38, 0.42, 0.45
+ {{NOW_HMS}} {{UPTIME_HUMAN}},  1 user,  load average: 0.38, 0.42, 0.45
+USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT
+ubuntu   pts/0    10.0.0.8         {{W_LOGIN}}{{W_IDLE}}  0.04s  0.01s -bash
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN_CURRENT}}   still logged in
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (02:43)
+ubuntu   pts/1        10.0.0.12        {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (00:43)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:48)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:26)
+ubuntu   pts/0        10.0.0.8         {{LAST_LOGIN}}   - {{LOGOUT_HM}}  (01:23)
+reboot   system boot  5.15.0-94-generi {{BOOT_HM}}   still running
+
+wtmp begins {{BOOT_FULL}}

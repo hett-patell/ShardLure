@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -10,9 +11,12 @@ import re
 import grp
 import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,7 +24,7 @@ from unittest import mock
 from scripts import shardlure
 
 
-EXPECTED_PIN = "65ded95b2d2b6555be8e4eb95315036a4db361f9"
+EXPECTED_PIN = "c17c9b73d6af0972334ea1e90b20d974cb24eeca"
 
 
 def tailscale_fixture(root: Path) -> tuple[Path, dict[str, str]]:
@@ -117,6 +121,12 @@ class CowriePinTests(unittest.TestCase):
             path = Path(tmp) / "cowrie.commit"
             path.write_text(EXPECTED_PIN + "\n", encoding="utf-8")
             self.assertEqual(read_cowrie_pin(path), EXPECTED_PIN)
+
+    def test_repository_pin_is_the_tested_cowrie_commit(self) -> None:
+        # The persona patches are anchored on exact upstream text, so the
+        # shipped pin must be the commit the patch set was validated against
+        # (v3.1.1). check-cowrie-patches.sh asserts the same value.
+        self.assertEqual(read_cowrie_pin(shardlure.COWRIE_PIN_FILE), EXPECTED_PIN)
 
     def test_read_cowrie_pin_rejects_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -670,6 +680,130 @@ class ServiceSafetyTests(unittest.TestCase):
         parser.read_string(merged)
         self.assertEqual(parser.getint("honeypot", "download_limit_size"), 52428800)
 
+    def test_boot_offset_is_one_constant_everywhere(self):
+        # The persona's 42d 3h17m uptime (Phase B Task 5). v3.1.1 picks a
+        # random 1-90 day boot_offset per process unless [honeypot] sets one,
+        # and every time source must agree with it: Cowrie's /proc/uptime,
+        # uptime, w and last (boot_time()), the deploy-time files
+        # gen-time-persona writes (motd "Uptime: 42 days"), and the anchor the
+        # behavioural harness checks against.
+        import importlib.util
+        root = Path(__file__).resolve().parent.parent
+        anchor = 42 * 86400 + 3 * 3600 + 17 * 60
+        template = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        template.read_string((root / "install" / "persona" / "cowrie-stealth.cfg").read_text())
+        self.assertEqual(template.getint("honeypot", "boot_offset"), anchor)
+        # A required key: a cfg without it still gets it (fresh install from
+        # cowrie.cfg.dist, or a stealth template that lost the line).
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+        patched = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        patched.read_string(text)
+        self.assertEqual(patched.getint("honeypot", "boot_offset"), anchor)
+        # ...and an operator's own value is kept, not duplicated.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nboot_offset = 864000\n", 2222)
+        self.assertEqual(text.count("boot_offset"), 1)
+        # gen-time-persona derives its anchor from the template, not a copy.
+        spec = importlib.util.spec_from_file_location(
+            "gen_time_persona_t5", root / "install" / "persona" / "gen-time-persona.py")
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        self.assertEqual(int(gen.UPTIME.total_seconds()), anchor)
+        source = (root / "install" / "persona" / "gen-time-persona.py").read_text()
+        self.assertNotIn("timedelta(days=42", source)
+        # The harness's anchor and the apply-stealth.sh inline fallback.
+        hspec = importlib.util.spec_from_file_location(
+            "cowrie_behaviour_test_t5", root / "scripts" / "cowrie-behaviour-test.py")
+        harness = importlib.util.module_from_spec(hspec)
+        sys.modules[hspec.name] = harness  # dataclasses resolve through sys.modules
+        try:
+            hspec.loader.exec_module(harness)
+        finally:
+            del sys.modules[hspec.name]
+        self.assertEqual(harness.UPTIME_ANCHOR, anchor)
+        script = (root / "scripts" / "apply-stealth.sh").read_text()
+        start = script.index('stealth = persona_cfg.read_text() if persona_cfg.exists() else """')
+        body = script[script.index('"""', start) + 3:]
+        body = body[:body.index('"""')]
+        fallback = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        fallback.read_string(body)
+        self.assertEqual(fallback.getint("honeypot", "boot_offset"), anchor)
+
+    def test_max_input_size_is_pinned_at_the_measured_16k_everywhere(self):
+        # Phase B Task 8: [shell] max_input_size stays v3.1.1's 16384, pinned
+        # explicitly (the cfg comment records the arm measurement: a larger
+        # cap stalls every session up to the 10 s parse timeout and then
+        # answers a syntax error). The template, the patch_cowrie_cfg
+        # injection and the apply-stealth.sh inline fallback must agree, and
+        # an operator's own value must be kept rather than duplicated.
+        root = Path(__file__).resolve().parent.parent
+        template = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        template.read_string((root / "install" / "persona" / "cowrie-stealth.cfg").read_text())
+        self.assertEqual(template.getint("shell", "max_input_size"), 16384)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+            kept = shardlure.patch_cowrie_cfg("[shell]\nmax_input_size = 32768\n", 2222)
+        patched = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        patched.read_string(text)
+        self.assertEqual(patched.getint("shell", "max_input_size"), 16384)
+        self.assertEqual(kept.count("max_input_size"), 1)
+        self.assertIn("max_input_size = 32768", kept)
+        script = (root / "scripts" / "apply-stealth.sh").read_text()
+        start = script.index('stealth = persona_cfg.read_text() if persona_cfg.exists() else """')
+        body = script[script.index('"""', start) + 3:]
+        body = body[:body.index('"""')]
+        fallback = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        fallback.read_string(body)
+        self.assertEqual(fallback.getint("shell", "max_input_size"), 16384)
+        self.assertIn("# == cowrie-stealth.cfg", body)
+        # install.sh's managed cfg, the fourth writer, pins it too (an
+        # install.sh-only box gets no persona merge).
+        installer = (root / "scripts" / "install.sh").read_text()
+        start = installer.index('cat > "$COWRIE_CFG" <<CFG\n') + len('cat > "$COWRIE_CFG" <<CFG\n')
+        managed = installer[start:installer.index("\nCFG\n", start)]
+        managed = (managed.replace("$CFG_MARKER", "# managed").replace("$HONEYPOT_PORT", "2222")
+                   .replace("$COWRIE_CFG_HOME", "/x"))
+        heredoc = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+        heredoc.read_string(managed)
+        self.assertEqual(heredoc.getint("shell", "max_input_size"), 16384)
+        self.assertEqual(heredoc.getint("honeypot", "download_limit_size"), 52428800)
+
+    def test_operator_boot_offset_reaches_the_motd_and_short_ones_warn(self):
+        # Review m-5: patch_cowrie_cfg keeps an operator's boot_offset, so
+        # gen-time-persona must read the deployed cfg, not only the template.
+        root = Path(__file__).resolve().parent.parent
+        gen = root / "install" / "persona" / "gen-time-persona.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "etc").mkdir()
+            (home / "honeyfs/etc").mkdir(parents=True)
+            (home / "etc/cowrie.cfg").write_text("[honeypot]\nboot_offset = 864000\nlog_path = $$x\n")
+            # A non-UTC host (arm is IST) must still get a UTC persona clock.
+            env = dict(os.environ, TZ="Asia/Kolkata")
+            subprocess.run([sys.executable, str(gen), str(home)], check=True,
+                           capture_output=True, env=env)
+            motd = (home / "honeyfs/etc/motd").read_text()
+            stamp = re.search(r"System information as of (.+) UTC (\d{4})", motd)
+            when = datetime.datetime.strptime(f"{stamp.group(1)} {stamp.group(2)}",
+                                              "%a %b %d %H:%M:%S %Y")
+            utcnow = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            self.assertLess(abs((utcnow - when).total_seconds()), 120)
+            self.assertIn("Uptime:              10 days", motd)
+            self.assertIn("Users logged in:     1", motd)
+            (home / "etc/cowrie.cfg").write_text("[honeypot]\nhostname = x\n")
+            subprocess.run([sys.executable, str(gen), str(home)], check=True, capture_output=True)
+            self.assertIn("Uptime:              42 days", (home / "honeyfs/etc/motd").read_text())
+        logs = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)), \
+                mock.patch.object(shardlure, "log", side_effect=logs.append):
+            shardlure.patch_cowrie_cfg("[honeypot]\nboot_offset = 3600\n", 2222)
+            self.assertTrue(any("boot_offset = 3600 is under 7 days" in m for m in logs), logs)
+            logs.clear()
+            shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+            self.assertFalse(any("boot_offset" in m for m in logs), logs)
+
     def test_apply_stealth_fallback_template_caps_downloads(self):
         # apply-stealth.sh writes an inline fallback when cowrie-stealth.cfg
         # is missing; it must not be the one managed cfg left unbounded.
@@ -1093,6 +1227,1108 @@ class ServiceSafetyTests(unittest.TestCase):
             [call.args[0] for call in fake_run.call_args_list],
             [["ufw", "status"], ["ufw", "allow", "2222/tcp"]],
         )
+
+
+def _fs_node(name, kind, children=None, target=None, uid=0, gid=0, size=4096, mode=0o40755):
+    return [name, kind, uid, gid, size, mode, 0, children if children is not None else [],
+            target, None]
+
+
+def persona_fs_tree():
+    """A small fs.pickle-shaped tree: / with usr/{bin,sbin,lib}, etc, home,
+    and the usr-merge links bin -> usr/bin, sbin -> usr/sbin (root-relative,
+    as the pinned pickle stores them)."""
+    d = lambda n, c=None: _fs_node(n, shardlure._FS_DIR, c)  # noqa: E731
+    f = lambda n, size=10: _fs_node(n, shardlure._FS_FILE, size=size, mode=0o100755)  # noqa: E731
+    return d("/", [
+        d("usr", [d("bin", [f("ls", 151344), f("echo"), f("python3.11", 6831736),
+                            _fs_node("python3", shardlure._FS_LINK, target="usr/bin/python3.11",
+                                     mode=0o120777)]),
+                  d("sbin"), d("lib", [f("os-release", 267), d("python3.11", [f("os.py")])])]),
+        d("etc", [d("alternatives")]),
+        d("home", [d("phil"), d("ubuntu", [d(".aws", [f("credentials")])]),
+                   d("deploy", [d(".ssh", [f("id_rsa")])])]),
+        d("root"),
+        _fs_node("bin", shardlure._FS_LINK, target="usr/bin", mode=0o120777),
+        _fs_node("sbin", shardlure._FS_LINK, target="usr/sbin", mode=0o120777),
+    ])
+
+
+def fs_lookup(tree, path, depth=0):
+    """Cowrie's HoneyPotFilesystem.getfile: follow links, a relative target
+    resolved from / (shell/fs.py)."""
+    if depth > 16:
+        return None
+    node = tree
+    for part in [p for p in path.split("/") if p]:
+        if node[shardlure._FS_TYPE] == shardlure._FS_LINK:
+            node = fs_lookup(tree, "/" + node[shardlure._FS_TARGET].lstrip("/"), depth + 1)
+        if node is None or node[shardlure._FS_TYPE] != shardlure._FS_DIR:
+            return None
+        node = next((c for c in node[shardlure._FS_CONTENTS] if c[0] == part), None)
+        if node is None:
+            return None
+    if node[shardlure._FS_TYPE] == shardlure._FS_LINK:
+        return fs_lookup(tree, "/" + node[shardlure._FS_TARGET].lstrip("/"), depth + 1)
+    return node
+
+
+class PersonaFsTests(unittest.TestCase):
+    """plant_bait_files' pickle edits (payload-yield Phase B Task 7)."""
+
+    def test_server_tools_exist_with_their_modes(self):
+        tree = persona_fs_tree()
+        self.assertEqual(shardlure.persona_fs_edit(tree), [])
+        sudo = fs_lookup(tree, "/usr/bin/sudo")
+        self.assertEqual((sudo[shardlure._FS_SIZE], sudo[shardlure._FS_MODE]), (232416, 0o104755))
+        crontab = fs_lookup(tree, "/bin/crontab")
+        self.assertEqual((crontab[shardlure._FS_GID], crontab[shardlure._FS_MODE]), (104, 0o102755))
+        for path in ("/usr/bin/busybox", "/usr/bin/lspci", "/usr/bin/ping", "/usr/bin/git"):
+            with self.subTest(path=path):
+                self.assertEqual(fs_lookup(tree, path)[shardlure._FS_TYPE], shardlure._FS_FILE)
+
+    def test_every_link_resolves_to_a_file(self):
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree)
+        for path, _ in shardlure.PERSONA_FS_LINKS:
+            with self.subTest(link=path):
+                node = fs_lookup(tree, path)
+                self.assertIsNotNone(node, f"{path} dangles")
+                self.assertEqual(node[shardlure._FS_TYPE], shardlure._FS_FILE)
+        self.assertEqual(fs_lookup(tree, "/usr/sbin/reboot")[shardlure._FS_SIZE], 1119856)
+        self.assertEqual(fs_lookup(tree, "/usr/bin/nc")[shardlure._FS_SIZE], 39560)
+
+    def test_systemctl_node_has_a_silent_txtcmd(self):
+        # Cowrie registers no systemctl command: without a txtcmd the new node
+        # would answer `systemctl enable x` with "cannot execute binary file"
+        # where the pickle used to say "command not found". Both usr-merged
+        # spellings resolve to their own txtcmd path.
+        txtcmds = Path(shardlure.ROOT) / "install/persona/txtcmds"
+        for rel in ("usr/bin/systemctl", "bin/systemctl"):
+            with self.subTest(rel=rel):
+                self.assertEqual((txtcmds / rel).read_bytes(), b"")
+
+    def test_python3_is_22_04s_3_10(self):
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree)
+        node = fs_lookup(tree, "/usr/bin/python3")
+        self.assertEqual((node[shardlure._FS_NAME], node[shardlure._FS_SIZE]), ("python3.10", 5941864))
+        self.assertIsNone(fs_lookup(tree, "/usr/bin/python3.11"))
+        self.assertIsNotNone(fs_lookup(tree, "/usr/lib/python3.10/os.py"))
+        self.assertIsNone(fs_lookup(tree, "/usr/lib/python3.11"))
+        again = persona_fs_tree()
+        shardlure.persona_fs_edit(again)
+        shardlure.persona_fs_edit(again)
+        self.assertEqual(tree, again)
+
+    def test_no_node_is_newer_than_the_persona_image(self):
+        for path, *_, ctime in shardlure.PERSONA_FS_FILES:
+            with self.subTest(path=path):
+                self.assertLessEqual(ctime, shardlure.PERSONA_IMAGE_TIME)
+        # Review m-6: no cluster of nodes at one instant.
+        times = [ctime for *_, ctime in shardlure.PERSONA_FS_FILES]
+        self.assertLessEqual(max(times.count(t) for t in times), 2)
+
+    def test_account_files_carry_the_persona_time(self):
+        tree = persona_fs_tree()
+        etc = fs_lookup(tree, "/etc")
+        etc[shardlure._FS_CONTENTS].append(_fs_node("passwd", shardlure._FS_FILE, size=1, mode=0o100644))
+        shardlure.persona_fs_edit(tree)
+        self.assertEqual(fs_lookup(tree, "/etc/passwd")[shardlure._FS_CTIME],
+                         shardlure.PERSONA_ACCOUNTS_TIME)
+
+    def test_edit_is_idempotent(self):
+        once = persona_fs_tree()
+        shardlure.persona_fs_edit(once)
+        twice = persona_fs_tree()
+        shardlure.persona_fs_edit(twice)
+        shardlure.persona_fs_edit(twice)
+        self.assertEqual(once, twice)
+
+    def test_missing_parent_is_reported_not_invented(self):
+        tree = persona_fs_tree()
+        tree[shardlure._FS_CONTENTS] = [c for c in tree[shardlure._FS_CONTENTS] if c[0] != "etc"]
+        skipped = shardlure.persona_fs_edit(tree)
+        self.assertIn("/etc/alternatives/nc", skipped)
+        self.assertIsNone(fs_lookup(tree, "/etc"))
+
+    def test_unreadable_pickle_is_a_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(b"inert")
+            with mock.patch.object(shardlure, "log") as log:
+                shardlure.apply_persona_fs(path)
+            self.assertIn("persona filesystem nodes not applied", log.call_args[0][0])
+            self.assertEqual(path.read_bytes(), b"inert")
+
+    def test_pickle_round_trip_keeps_mode(self):
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(pickle.dumps(persona_fs_tree()))
+            path.chmod(0o640)
+            shardlure.apply_persona_fs(path)
+            tree = pickle.loads(path.read_bytes())
+            self.assertEqual(stat_mode(path), 0o640)
+            self.assertIsNotNone(fs_lookup(tree, "/usr/bin/sudo"))
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["fs.pickle"])
+
+    def test_pickle_mode_and_owner_are_set_on_the_descriptor(self):
+        # The pickle's directory belongs to the Cowrie account: a by-name
+        # chmod/chown on the temp lets it swap in a symlink and have root
+        # chown any root file to it (final review I-1).
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(pickle.dumps(persona_fs_tree()))
+            path.chmod(0o640)
+            with mock.patch.object(shardlure.os, "chmod", side_effect=AssertionError("by-name chmod")), \
+                    mock.patch.object(shardlure.os, "chown", side_effect=AssertionError("by-name chown")), \
+                    mock.patch.object(shardlure.os, "geteuid", return_value=0), \
+                    mock.patch.object(shardlure.os, "fchown") as fchown:
+                self.assertTrue(shardlure.apply_persona_fs(path))
+            st = path.stat()
+            fchown.assert_called_once_with(mock.ANY, st.st_uid, st.st_gid)
+            self.assertEqual(stat_mode(path), 0o640)
+
+    def test_honeyfs_files_list_their_own_size(self):
+        tree = persona_fs_tree()
+        sizes = {"/usr/lib/os-release": 386, "/root/notes": 5}
+        self.assertEqual(shardlure.persona_fs_edit(tree, sizes, now=1234.0), [])
+        self.assertEqual(fs_lookup(tree, "/usr/lib/os-release")[shardlure._FS_SIZE], 386)
+        created = fs_lookup(tree, "/root/notes")
+        self.assertEqual((created[shardlure._FS_TYPE], created[shardlure._FS_SIZE],
+                          created[shardlure._FS_CTIME]), (shardlure._FS_FILE, 5, 1234.0))
+        self.assertEqual(shardlure.persona_fs_edit(tree, {"/nope/x": 1}), ["/nope/x"])
+
+    def test_ls_is_the_22_04_build(self):
+        # `ls -lh $(which ls)`: 135K on a real 22.04 box (Task 1 ruling).
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree)
+        self.assertEqual(fs_lookup(tree, "/bin/ls")[shardlure._FS_SIZE], 138216)
+
+    def test_honeyfs_bytes_are_embedded(self):
+        # Review m-4: the pickle's own copy is what Cowrie serves when
+        # contents_path is unset; it must not keep phil.
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree, {"/usr/lib/os-release": b"ID=ubuntu\n"})
+        node = fs_lookup(tree, "/usr/lib/os-release")
+        self.assertEqual((node[shardlure._FS_CONTENTS], node[shardlure._FS_SIZE]), (b"ID=ubuntu\n", 10))
+
+    def test_honeyfs_sizes_skip_proc_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "proc").mkdir()
+            (root / "proc/uptime").write_text("1.00 2.00\n")
+            (root / "etc").mkdir()
+            (root / "etc/hostname").write_text("prod-app-server-01\n")
+            (root / "etc/link").symlink_to("hostname")
+            self.assertEqual(shardlure.honeyfs_files(root), {"/etc/hostname": b"prod-app-server-01\n"})
+
+    def test_os_release_lives_behind_its_usr_lib_symlink(self):
+        # 22.04's /etc/os-release is a symlink to ../usr/lib/os-release, and
+        # the pickle keeps that link; an overlay at etc/os-release was never
+        # served (Cowrie overlays only regular-file nodes). The file goes
+        # where the link points, with the pickle's node sized to match.
+        honeyfs = Path(shardlure.ROOT) / "install/persona/honeyfs"
+        expected = Path(shardlure.ROOT) / "scripts/behaviour/expected"
+        self.assertFalse((honeyfs / "etc/os-release").exists())
+        text = (honeyfs / "usr/lib/os-release").read_text()
+        self.assertEqual(text, (expected / "cat-os-release.out").read_text())
+        self.assertEqual(len(text.encode()), 386)
+        self.assertEqual((expected / "os-release-size.out").read_text(), "-rw-r--r-- 386\n386\n")
+        self.assertIn((expected / "os-release-pretty.out").read_text(), text)
+
+    def test_phil_is_gone_and_the_persona_users_own_their_homes(self):
+        tree = persona_fs_tree()
+        sizes = {"/home/ubuntu/.bash_history": 355, "/home/deploy/.ssh/id_rsa": 615,
+                 "/home/ubuntu/.aws/credentials": 170}
+        self.assertEqual(shardlure.persona_fs_edit(tree, sizes), [])
+        self.assertIsNone(fs_lookup(tree, "/home/phil"))
+        F = shardlure  # noqa: N806
+        for home, uid in (("/home/ubuntu", 1000), ("/home/deploy", 1001)):
+            with self.subTest(home=home):
+                node = fs_lookup(tree, home)
+                self.assertEqual((node[F._FS_UID], node[F._FS_GID], node[F._FS_MODE]),
+                                 (uid, uid, 0o40750))
+        hist = fs_lookup(tree, "/home/ubuntu/.bash_history")
+        self.assertEqual((hist[F._FS_UID], hist[F._FS_MODE], hist[F._FS_SIZE]), (1000, 0o100600, 355))
+        self.assertEqual(fs_lookup(tree, "/home/deploy/.ssh")[F._FS_MODE], 0o40700)
+        key = fs_lookup(tree, "/home/deploy/.ssh/id_rsa")
+        self.assertEqual((key[F._FS_UID], key[F._FS_MODE]), (1001, 0o100600))
+        self.assertEqual(fs_lookup(tree, "/home/ubuntu/.aws/credentials")[F._FS_MODE], 0o100600)
+
+    def test_bait_data_files_are_not_executable(self):
+        # fsctl gives a touched file its parent directory's mode (0755).
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree, {"/usr/lib/os-release": 386, "/root/.env": 9})
+        self.assertEqual(fs_lookup(tree, "/usr/lib/os-release")[shardlure._FS_MODE], 0o100644)
+        self.assertEqual(fs_lookup(tree, "/root/.env")[shardlure._FS_MODE], 0o100644)
+
+
+class _ReducePayload:
+    """Pickles as `posix.system(<cmd>)`: what a compromised cowrie account
+    would plant in fs.pickle for root's next persona-fs or plant-bait."""
+
+    def __init__(self, cmd: str) -> None:
+        self.cmd = cmd
+
+    def __reduce__(self):
+        return (os.system, (self.cmd,))
+
+
+class FsPickleLoaderTests(unittest.TestCase):
+    """Task 7 re-review N-2: root never unpickles fs.pickle with pickle.load."""
+
+    def test_reduce_payload_is_refused_and_runs_nothing(self):
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "ran"
+            tree = persona_fs_tree()
+            # Hidden inside an otherwise valid tree, as a planted file would be.
+            tree[shardlure._FS_CONTENTS].append(_ReducePayload(f"touch {shlex.quote(str(marker))}"))
+            data = pickle.dumps(tree)
+            with self.assertRaises(shardlure.FsPickleRefused) as caught:
+                shardlure.load_fs_pickle(data)
+            self.assertIn("system", str(caught.exception))
+            self.assertFalse(marker.exists(), "the pickle's payload ran")
+            path = Path(tmp) / "fs.pickle"
+            path.write_bytes(data)
+            with mock.patch.object(shardlure, "log") as log:
+                self.assertFalse(shardlure.apply_persona_fs(path))
+            self.assertFalse(marker.exists(), "the pickle's payload ran")
+            self.assertIn("refusing a pickle that references", log.call_args[0][0])
+            self.assertEqual(path.read_bytes(), data)
+            # The same file through the installed CLI: refused, rc 1.
+            home = Path(tmp) / "cowrie"
+            (home / "src/cowrie/data").mkdir(parents=True)
+            shutil.copy2(path, home / "src/cowrie/data/fs.pickle")
+            with mock.patch.object(shardlure, "log"):
+                self.assertEqual(shardlure.cmd_persona_fs(home), 1)
+            self.assertFalse(marker.exists(), "the pickle's payload ran")
+
+    def test_type_valid_but_malformed_tree_is_refused_by_name(self):
+        # Task 8 review I-2: only allowed types, broken node layout. It used
+        # to load, then persona_fs_edit died with an IndexError traceback,
+        # aborting a root installer run instead of refusing.
+        import pickle
+        looped = persona_fs_tree()
+        home = fs_lookup(looped, "/home")
+        home[shardlure._FS_CONTENTS].append(home)
+        shared = persona_fs_tree()
+        fs_lookup(shared, "/root")[shardlure._FS_CONTENTS].append(fs_lookup(shared, "/etc"))
+        dangling = persona_fs_tree()
+        next(c for c in dangling[shardlure._FS_CONTENTS]
+             if c[shardlure._FS_NAME] == "bin")[shardlure._FS_TARGET] = None
+        bad_kind = persona_fs_tree()
+        fs_lookup(bad_kind, "/usr/bin/ls")[shardlure._FS_TYPE] = 9
+        file_children = persona_fs_tree()
+        fs_lookup(file_children, "/usr/bin/ls")[shardlure._FS_CONTENTS] = [["x"]]
+        cases = {
+            "review": ["/", 1, 0, 0, 0, 0, 0, [["etc"]], None, None],
+            "nine-fields": ["/", 1, 0, 0, 4096, 0o40755, 0, [], None],
+            "string-uid": ["/", 1, "0", 0, 4096, 0o40755, 0, [], None, None],
+            "root-file": ["/", 2, 0, 0, 0, 0o100644, 0, [], None, None],
+            "loop": looped, "shared-node": shared, "link-without-target": dangling,
+            "unknown-type": bad_kind, "file-with-children": file_children,
+        }
+        for label, tree in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                data = pickle.dumps(tree)
+                with self.assertRaises(shardlure.FsPickleRefused) as caught:
+                    shardlure.load_fs_pickle(data)
+                self.assertIn("not a Cowrie filesystem tree", str(caught.exception))
+                path = Path(tmp) / "fs.pickle"
+                path.write_bytes(data)
+                with mock.patch.object(shardlure, "log") as log:
+                    self.assertFalse(shardlure.apply_persona_fs(path))
+                self.assertIn("not a Cowrie filesystem tree", log.call_args[0][0])
+                self.assertEqual(path.read_bytes(), data)
+                self.assertEqual(os.listdir(tmp), ["fs.pickle"])
+        # The review's tree through the CLI root runs: a named refusal, rc 1,
+        # no traceback.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie"
+            (home / "src/cowrie/data").mkdir(parents=True)
+            (home / "src/cowrie/data/fs.pickle").write_bytes(pickle.dumps(cases["review"]))
+            proc = subprocess.run([sys.executable, str(Path(shardlure.ROOT) / "scripts/shardlure.py"),
+                                   "persona-fs", str(home)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertNotIn("Traceback", proc.stdout + proc.stderr)
+            self.assertIn("not a Cowrie filesystem tree", proc.stdout + proc.stderr)
+
+    def test_an_edit_failure_is_a_named_refusal(self):
+        # Defence in depth behind the layout check: an edit that still trips
+        # over the tree refuses by name and writes nothing.
+        import pickle
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fs.pickle"
+            data = pickle.dumps(persona_fs_tree())
+            path.write_bytes(data)
+            with (mock.patch.object(shardlure, "persona_fs_edit", side_effect=IndexError("x")),
+                  mock.patch.object(shardlure, "log") as log):
+                self.assertFalse(shardlure.apply_persona_fs(path))
+            self.assertIn("not a Cowrie filesystem tree: IndexError", log.call_args[0][0])
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_every_global_and_persistent_id_is_refused(self):
+        import pickle
+        for data in (pickle.dumps(Path("/x")), pickle.dumps(len),
+                     b"\x80\x02P0\n.", pickle.dumps([1, {"a": 1}]), pickle.dumps([True]),
+                     pickle.dumps((1, 2)), b"not a pickle"):
+            with self.subTest(data=data[:40]):
+                with self.assertRaises(shardlure.FsPickleRefused):
+                    shardlure.load_fs_pickle(data)
+
+    def test_a_cowrie_tree_loads_in_every_bytes_protocol(self):
+        # Protocols 0-2 spell bytes as a _codecs.encode call, a global, and
+        # stay refused; Cowrie and fsctl write the default protocol (5 on the
+        # pin's pickle) and persona-fs keeps it.
+        import pickle
+        tree = persona_fs_tree()
+        shardlure.persona_fs_edit(tree, {"/etc/hostname": b"prod\n"}, now=1.5)
+        for protocol in range(3, pickle.HIGHEST_PROTOCOL + 1):
+            with self.subTest(protocol=protocol):
+                self.assertEqual(shardlure.load_fs_pickle(pickle.dumps(tree, protocol)), tree)
+
+    def test_unknown_persona_fs_option_is_a_usage_error(self):
+        for argv in (["--bogus"], ["-h"], ["a", "b"]):
+            with self.subTest(argv=argv):
+                proc = subprocess.run([sys.executable, str(Path(shardlure.__file__)), "persona-fs", *argv],
+                                      capture_output=True, text=True, timeout=30)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn("usage:", proc.stderr)
+                self.assertNotIn("fs.pickle under", proc.stdout)
+
+    def test_plant_bait_runs_fsctl_as_the_cowrie_account_over_its_tree(self):
+        # Root running fsctl from a venv the Cowrie account owns would
+        # execute what that account planted; the tool runs as that account.
+        if os.geteuid() == 0:
+            self.skipTest("needs a non-root owner for the fixture tree")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie"
+            (home / "venv/bin").mkdir(parents=True)
+            (home / "src/cowrie/data").mkdir(parents=True)
+            (home / "var/lib/cowrie").mkdir(parents=True)
+            (home / "src/cowrie/data/fs.pickle").write_bytes(b"inert")
+            (home / "venv/bin/fsctl").write_text("inert")
+            calls = []
+            real_copy2 = shutil.copy2
+
+            def refuse_pickle_copy(src, dst, *a, **k):
+                if Path(dst).name == "fs.pickle":
+                    raise AssertionError("root pickle copy")
+                return real_copy2(src, dst, *a, **k)
+
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure.os, "geteuid", return_value=0),
+                  mock.patch.object(shardlure, "log"),
+                  mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0)),
+                  # Root must not rewrite or copy the account's pickles
+                  # itself either (final review I-1): persona-fs re-runs as
+                  # the account, and the var/lib copy is the account's cp.
+                  mock.patch.object(shardlure, "apply_persona_fs", side_effect=AssertionError("root pickle edit")),
+                  mock.patch.object(shardlure.shutil, "copy2", side_effect=refuse_pickle_copy),
+                  mock.patch.object(shardlure, "cmd_persona_fs", return_value=0) as persona_fs):
+                shardlure.plant_bait_files()
+            persona_fs.assert_called_once_with(home)
+            self.assertTrue(calls)
+            for args in calls:
+                self.assertEqual(args[:4], ["runuser", "-u", shardlure.COWRIE_USER, "--"])
+            self.assertIn(["runuser", "-u", shardlure.COWRIE_USER, "--", "cp", "--",
+                           str(home / "src/cowrie/data/fs.pickle"), str(home / "var/lib/cowrie/fs.pickle")], calls)
+        with mock.patch.object(shardlure.os, "geteuid", return_value=0):
+            self.assertEqual(shardlure.cowrie_owned_prefix(Path("/usr/bin"), Path("/nonexistent")), [])
+        self.assertEqual(shardlure.cowrie_owned_prefix(Path(tempfile.gettempdir())), [])
+
+
+def prestart_commands(unit: str) -> list[tuple[str, list[str]]]:
+    """(prefix, argv) of every ExecStartPre= line, in unit order."""
+    out = []
+    for line in unit.splitlines():
+        if line.startswith("ExecStartPre="):
+            value = line.partition("=")[2]
+            prefix = value[:len(value) - len(value.lstrip("-+!@:"))]
+            words = shlex.split(value[len(prefix):])
+            out.append((prefix, [w.replace("%%", "%").replace("$$", "$") for w in words]))
+    return out
+
+
+def regen_lib(home: Path) -> Path:
+    """Where regen_tree installs the root-owned regeneration copy (the test's
+    stand-in for /usr/local/lib/shardlure/persona)."""
+    return home.parent.parent / "lib" / "persona"
+
+
+def regen_tree(root: Path) -> Path:
+    """A deployed Cowrie tree as the per-start regeneration finds it: the
+    regeneration copy (outside the tree, regen_lib), a venv python, a cfg,
+    honeyfs and txtcmd dirs, and the pickle the cfg names."""
+    import pickle
+    home = root / 'data "q" $VALUE %n a\'s' / "cowrie"
+    for d in ("venv/bin", "etc", "honeyfs/etc", "honeyfs/proc", "share/cowrie/txtcmds/usr/bin",
+              "src/cowrie/data", "var/lib/cowrie"):
+        (home / d).mkdir(parents=True, exist_ok=True)
+    (home / "venv/bin/python").symlink_to(sys.executable)
+    (home / "etc/cowrie.cfg").write_text(
+        "[honeypot]\nboot_offset = 3640620\n[shell]\nfilesystem = "
+        + shardlure.cowrie_cfg_value(home / "src/cowrie/data/fs.pickle") + "\n")
+    (home / "honeyfs/etc/motd").write_text("stale\n")
+    (home / "src/cowrie/data/fs.pickle").write_bytes(pickle.dumps(persona_fs_tree()))
+    with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+          mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home))):
+        shardlure.deploy_persona_regen()
+    return home
+
+
+class PersonaRegenTests(unittest.TestCase):
+    """Task 8: cowrie.service regenerates the time persona and the persona
+    filesystem before every start, as the Cowrie account, fail-safe."""
+
+    def render(self, home: Path) -> str:
+        with (mock.patch.object(shardlure, "DATA_DIR", home.parent),
+              mock.patch.object(shardlure, "COWRIE_HOME", home),
+              mock.patch.object(shardlure, "COWRIE_LOG", home / "var/log/cowrie/cowrie.json"),
+              mock.patch.object(shardlure, "CONFIG_FILE", home.parent / "shardlure.yaml"),
+              mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home)),
+              mock.patch.object(shardlure, "_tailscale_iface", return_value="")):
+            return shardlure.render_services(2222, 8080)["cowrie.service"]
+
+    def test_unit_regenerates_as_the_cowrie_account_before_starting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            unit = self.render(home)
+            pre = prestart_commands(unit)
+            self.assertEqual(len(pre), 2)
+            for prefix, argv in pre:
+                with self.subTest(argv=argv[-3:]):
+                    # `-` only: no `+`/`!`/`!!`, so User= applies and a
+                    # failure never keeps Cowrie from starting.
+                    self.assertEqual(prefix, "-")
+                    self.assertEqual(argv[:2], ["/bin/sh", "-c"])
+            lib = regen_lib(home)
+            self.assertEqual(pre[0][1][4:], [str(home / "venv/bin/python"),
+                                             str(lib / "gen-time-persona.py"), str(home)])
+            self.assertEqual(pre[1][1][4:], [str(home / "venv/bin/python"),
+                                             str(lib / "shardlure.py"), "persona-fs", str(home)])
+            # The code it runs lives outside the tree the account owns.
+            self.assertFalse(lib.is_relative_to(home))
+            self.assertIn(f"User={shardlure.COWRIE_USER}\n", unit)
+            self.assertLess(unit.index("ExecStartPre="), unit.index("ExecStart="))
+            check_service_unit(self, Path(tmp), unit)
+
+    def test_prestart_rewrites_motd_and_sizes_its_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            env = {"PATH": "/usr/bin:/bin", "TZ": "UTC", "PYTHONPATH": str(home / "src")}
+            for _, argv in prestart_commands(self.render(home)):
+                proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            motd = (home / "honeyfs/etc/motd").read_bytes()
+            self.assertIn(b"System information as of", motd)
+            self.assertIn(b"Last login:", motd)
+            tree = shardlure.load_fs_pickle((home / "src/cowrie/data/fs.pickle").read_bytes())
+            node = fs_lookup(tree, "/etc/motd")
+            self.assertEqual((node[shardlure._FS_SIZE], node[shardlure._FS_CONTENTS]), (len(motd), motd))
+            self.assertIsNotNone(fs_lookup(tree, "/usr/bin/sudo"))
+
+    def test_prestart_without_the_copy_is_a_silent_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            shutil.rmtree(regen_lib(home))
+            for _, argv in prestart_commands(self.render(home)):
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+            self.assertEqual((home / "honeyfs/etc/motd").read_text(), "stale\n")
+
+    def test_a_failed_step_is_logged_and_the_next_still_runs(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes a read-only file")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            (home / "honeyfs/proc/uptime").write_text("0 0\n")
+            # Files are replaced by rename, so what the account cannot write
+            # is a directory (left root-owned by a manual step).
+            (home / "honeyfs/proc").chmod(0o555)  # TemporaryDirectory restores it
+            first, second = prestart_commands(self.render(home))
+            proc = subprocess.run(first[1], capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("honeyfs/proc/uptime", proc.stderr)
+            self.assertIn("Cowrie starts with its existing persona files", proc.stderr)
+            # Every other file was still refreshed.
+            self.assertIn("System information as of", (home / "honeyfs/etc/motd").read_text())
+            self.assertEqual(subprocess.run(second[1], capture_output=True, timeout=60).returncode, 0)
+
+    def test_persona_writes_are_whole_or_absent(self):
+        # Task 8 review m-2: `timeout` kills a step mid-run. gen-time-persona
+        # replaces each file by rename and removes its temp on SIGTERM, and
+        # both steps sweep temps a SIGKILL left behind.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "gen_time_persona_m2", Path(shardlure.ROOT) / "install/persona/gen-time-persona.py")
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            motd = d / "motd"
+            motd.write_text("old complete motd\n")
+            motd.chmod(0o640)
+            # Killed between writing the temp and the rename: the old file
+            # stays whole and no temp is left.
+            with mock.patch.object(gen.os, "replace", side_effect=SystemExit(143)):
+                with self.assertRaises(SystemExit):
+                    gen.write_atomic(motd, "new motd\n")
+            self.assertEqual(motd.read_text(), "old complete motd\n")
+            self.assertEqual(sorted(os.listdir(d)), ["motd"])
+            gen.write_atomic(motd, "new motd\n")
+            self.assertEqual((motd.read_text(), stat.S_IMODE(motd.stat().st_mode)), ("new motd\n", 0o640))
+            # A link at the name is replaced, never written through.
+            victim = d / "victim"
+            victim.write_text("v\n")
+            link = d / "uptime"
+            link.symlink_to(victim)
+            gen.write_atomic(link, "1 1\n")
+            self.assertEqual((victim.read_text(), link.is_symlink()), ("v\n", False))
+            # SIGTERM becomes SystemExit, so the cleanup above runs.
+            old = signal.signal(signal.SIGTERM, gen._terminate)
+            try:
+                with self.assertRaises(SystemExit) as caught:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(1)
+                self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+            finally:
+                signal.signal(signal.SIGTERM, old)
+            # SIGKILL leftovers: only temps older than any run are removed.
+            stale, fresh = d / ".motd.persona-stale", d / ".motd.persona-fresh"
+            for p in (stale, fresh):
+                p.write_text("x")
+            os.utime(stale, (time.time() - 3600,) * 2)
+            gen.remove_stale_temps(d, "motd")
+            self.assertEqual((stale.exists(), fresh.exists()), (False, True))
+            pstale, pfresh = d / ".fs.pickle.persona-stale", d / ".fs.pickle.persona-fresh"
+            for p in (pstale, pfresh):
+                p.write_text("x")
+            os.utime(pstale, (time.time() - 3600,) * 2)
+            shardlure.remove_stale_pickle_temps(d)
+            self.assertEqual((pstale.exists(), pfresh.exists()), (False, True))
+        # Both steps sweep on every run.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            left = [home / "honeyfs/etc/.motd.persona-killed", home / "src/cowrie/data/.fs.pickle.persona-killed"]
+            for p in left:
+                p.write_text("partial")
+                os.utime(p, (time.time() - 3600,) * 2)
+            for _, argv in prestart_commands(self.render(home)):
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual([p.exists() for p in left], [False, False])
+            names = [p.name for p in home.rglob("*") if ".persona-" in p.name]
+            self.assertEqual(names, [])
+
+    def test_regen_copy_is_the_scripts_the_steps_need(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            lib = regen_lib(home)
+            names = sorted(p.name for p in lib.iterdir())
+            self.assertEqual(names, sorted(shardlure.PERSONA_REGEN_FILES))
+            # Readable by the account, writable by nobody but its owner.
+            self.assertEqual(stat.S_IMODE(lib.stat().st_mode), 0o755)
+            for p in lib.iterdir():
+                self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o644, p.name)
+            self.assertFalse((home / shardlure.LEGACY_PERSONA_REGEN_DIR).exists())
+        # Every writer uses the same location, and apply-stealth.sh installs
+        # it through shardlure.py (same file list, same checks) instead of cp.
+        default = "/usr/local/lib/shardlure/persona"
+        self.assertEqual(str(shardlure.PERSONA_REGEN_LIB), os.environ.get("SHARDLURE_PERSONA_LIB") or default)
+        script = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
+        self.assertIn('sudo python3 "$SHARDLURE_PY" persona-regen-install "$COWRIE_HOME"', script)
+        self.assertNotIn("sudo cp \"${regen_src", script)
+        self.assertIn("${SHARDLURE_PERSONA_LIB:-" + default + "}", script)
+        installer = (Path(shardlure.ROOT) / "scripts/install.sh").read_text()
+        self.assertIn('regen="${SHARDLURE_PERSONA_LIB:-' + default + '}"', installer)
+
+    def test_root_never_follows_a_symlink_where_the_old_copy_went(self):
+        # Task 8 review I-1: the copy used to be root's copyfile/cp into the
+        # cowrie-owned COWRIE_HOME/shardlure-persona, following whatever the
+        # account planted there. Plant both shapes: the directory itself as a
+        # symlink, and a file symlink inside a real directory.
+        for shape in ("dir-link", "file-link"):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                home = regen_tree(Path(tmp))
+                victim_dir = Path(tmp) / "victim"
+                victim_dir.mkdir()
+                victim = victim_dir / "shardlure.py"
+                victim.write_text("root-owned original\n")
+                legacy = home / shardlure.LEGACY_PERSONA_REGEN_DIR
+                if shape == "dir-link":
+                    legacy.symlink_to(victim_dir)
+                else:
+                    legacy.mkdir()
+                    for name in shardlure.PERSONA_REGEN_FILES:
+                        (legacy / name).symlink_to(victim)
+                with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                      mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home))):
+                    shardlure.deploy_persona_regen()
+                self.assertEqual(victim.read_text(), "root-owned original\n")
+                self.assertEqual(sorted(p.name for p in victim_dir.iterdir()), ["shardlure.py"])
+                self.assertFalse(os.path.lexists(legacy))
+                self.assertEqual((regen_lib(home) / "shardlure.py").read_bytes(),
+                                 shardlure.PERSONA_REGEN_FILES["shardlure.py"].read_bytes())
+
+    def test_regen_lib_refuses_a_location_another_account_can_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            shared = Path(tmp) / "shared"
+            shared.mkdir()
+            shared.chmod(0o777)  # not sticky: anyone could swap the next name
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure, "PERSONA_REGEN_LIB", shared / "persona"),
+                  mock.patch.object(shardlure, "die", side_effect=SystemExit) as died):
+                with self.assertRaises(SystemExit):
+                    shardlure.deploy_persona_regen()
+            self.assertIn("replaceable", died.call_args[0][0])
+            self.assertFalse((shared / "persona").exists())
+
+    def test_regen_lib_replaces_a_link_never_its_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))
+            victim = Path(tmp) / "victim"
+            victim.write_text("original\n")
+            target = regen_lib(home) / "shardlure.py"
+            target.unlink()
+            target.symlink_to(victim)
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure, "PERSONA_REGEN_LIB", regen_lib(home))):
+                shardlure.deploy_persona_regen()
+            self.assertEqual(victim.read_text(), "original\n")
+            self.assertFalse(target.is_symlink())
+
+    def deployed_lib(self, tmp: str) -> Path:
+        """The default layout under tmp: .../usr/local/lib/shardlure/persona."""
+        lib = Path(tmp) / "usr/local/lib/shardlure/persona"
+        home = Path(tmp) / "data/cowrie"
+        home.mkdir(parents=True)
+        with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+              mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib)):
+            shardlure.deploy_persona_regen()
+        self.assertEqual(sorted(p.name for p in lib.iterdir()), sorted(shardlure.PERSONA_REGEN_FILES))
+        return lib
+
+    def test_uninstall_removes_the_regen_lib_and_its_empty_parent(self):
+        # Task 9: uninstall left /usr/local/lib/shardlure/persona behind.
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self.deployed_lib(tmp)
+            (lib / ".shardlure-write-0123abcd").write_bytes(b"interrupted temp")
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                self.assertEqual(shardlure.remove_persona_regen(), [])
+                self.assertFalse(os.path.lexists(lib))
+                self.assertFalse(os.path.lexists(lib.parent))
+                self.assertTrue((Path(tmp) / "usr/local/lib").is_dir())
+                # Idempotent: a second uninstall finds nothing to do.
+                self.assertEqual(shardlure.remove_persona_regen(), [])
+
+    def test_uninstall_keeps_what_the_installer_did_not_create(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self.deployed_lib(tmp)
+            (lib / "operator-notes.txt").write_text("mine\n")
+            sibling = lib.parent / "other-tool"
+            sibling.mkdir()
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                kept = shardlure.remove_persona_regen()
+            self.assertEqual(kept, [str(lib / "operator-notes.txt")])
+            self.assertEqual([p.name for p in lib.iterdir()], ["operator-notes.txt"])
+            self.assertTrue(sibling.is_dir())
+            # Our files gone, the foreign one kept, so lib stays: and with an
+            # empty lib but a foreign sibling, the shardlure parent stays.
+            (lib / "operator-notes.txt").unlink()
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                self.assertEqual(shardlure.remove_persona_regen(), [str(lib.parent)])
+            self.assertFalse(os.path.lexists(lib))
+            self.assertTrue(sibling.is_dir())
+
+    def test_uninstall_follows_no_symlink_in_the_regen_lib(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            victim_dir = Path(tmp) / "victim"
+            victim_dir.mkdir()
+            victim = victim_dir / "shardlure.py"
+            victim.write_text("original\n")
+            # A link at a managed name, and a hard link to a foreign file.
+            lib = self.deployed_lib(tmp)
+            (lib / "shardlure.py").unlink()
+            (lib / "shardlure.py").symlink_to(victim)
+            (lib / "ssh_transition.py").unlink()
+            os.link(victim, lib / "ssh_transition.py")
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                kept = shardlure.remove_persona_regen()
+            self.assertEqual(sorted(kept), [str(lib / "shardlure.py"), str(lib / "ssh_transition.py")])
+            self.assertEqual(victim.read_text(), "original\n")
+            self.assertTrue((lib / "shardlure.py").is_symlink())
+            # The directory itself as a symlink: neither it nor its target is touched.
+            link = Path(tmp) / "linked/persona"
+            link.parent.mkdir()
+            link.symlink_to(victim_dir)
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", link):
+                self.assertEqual(shardlure.remove_persona_regen(), [f"{link} (not a directory)"])
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(sorted(p.name for p in victim_dir.iterdir()), ["shardlure.py"])
+
+    def test_uninstall_refuses_a_regen_lib_another_account_can_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self.deployed_lib(tmp)
+            lib.chmod(0o777)  # not sticky: refused, nothing deleted
+            with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                kept = shardlure.remove_persona_regen()
+            self.assertEqual(len(kept), 1)
+            self.assertIn("replaceable", kept[0])
+            self.assertEqual(sorted(p.name for p in lib.iterdir()), sorted(shardlure.PERSONA_REGEN_FILES))
+
+    def test_every_uninstall_removes_the_regen_lib_after_the_services(self):
+        for argv in (["shardlure", "uninstall"], ["shardlure", "uninstall", "--purge"]):
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp:
+                calls = []
+                with (mock.patch.object(shardlure, "need_root"),
+                      mock.patch.object(shardlure, "validate_purge_target"),
+                      mock.patch.object(shardlure, "installation_state"),
+                      mock.patch.object(shardlure, "BIN_DIR", Path(tmp)),
+                      mock.patch.object(shardlure, "DATA_DIR", Path(tmp) / "absent-data"),
+                      mock.patch.object(shardlure, "load_ports_from_config", return_value=(2222, 2200, 8080)),
+                      mock.patch.object(shardlure, "restore_sshd", side_effect=lambda: calls.append("ssh") or {2200}),
+                      mock.patch.object(shardlure, "remove_services", side_effect=lambda: calls.append("units")),
+                      mock.patch.object(shardlure, "remove_persona_regen", side_effect=lambda: calls.append("regen") or []),
+                      mock.patch.object(shardlure, "remove_firewall_rules"),
+                      mock.patch.object(shardlure, "log"),
+                      mock.patch("builtins.print"),
+                      mock.patch.object(sys, "argv", argv)):
+                    shardlure.cmd_uninstall()
+                self.assertEqual(calls, ["ssh", "units", "regen"])
+
+    def test_root_runs_the_persona_steps_as_cowrie_over_its_tree(self):
+        # Task 8 review m-3: root ran gen-time-persona (and persona-fs) over
+        # the cowrie-owned honeyfs/share, writing through any symlink the
+        # account planted. Over a tree another account owns, both now run as
+        # cowrie from the root-owned copy, like the unit; root runs them only
+        # over a tree root owns (the fresh install).
+        with tempfile.TemporaryDirectory() as tmp:
+            home = regen_tree(Path(tmp))  # owned by the test's (non-root) user
+            lib = regen_lib(home)
+            calls = []
+            fake_run = lambda argv, **k: calls.append(argv) or subprocess.CompletedProcess(argv, 0)  # noqa: E731
+            with (mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib),
+                  mock.patch.object(shardlure.os, "geteuid", return_value=0),
+                  mock.patch.object(shardlure, "run", side_effect=fake_run),
+                  mock.patch.object(shardlure, "log")):
+                shardlure.deploy_time_persona(home)
+                self.assertEqual(shardlure.cmd_persona_fs(home), 0)
+            drop = ["runuser", "-u", shardlure.COWRIE_USER, "--", sys.executable]
+            self.assertEqual(calls, [drop + [str(lib / "gen-time-persona.py"), str(home)],
+                                     drop + [str(lib / "shardlure.py"), "persona-fs", str(home)]])
+            # A root-owned tree (fresh install): root runs the checkout's own copy.
+            calls.clear()
+            with (mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib),
+                  mock.patch.object(shardlure, "persona_tree_prefix", return_value=[]),
+                  mock.patch.object(shardlure, "run", side_effect=fake_run),
+                  mock.patch.object(shardlure, "log")):
+                shardlure.deploy_time_persona(home)
+            self.assertEqual(calls, [[sys.executable,
+                                      str(Path(shardlure.ROOT) / "install/persona/gen-time-persona.py"),
+                                      str(home)]])
+            # No copy to drop to: refuse rather than fall back to root.
+            calls.clear()
+            shutil.rmtree(lib)
+            with (mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib),
+                  mock.patch.object(shardlure.os, "geteuid", return_value=0),
+                  mock.patch.object(shardlure, "run", side_effect=fake_run),
+                  mock.patch.object(shardlure, "log")):
+                shardlure.deploy_time_persona(home)
+                self.assertEqual(shardlure.cmd_persona_fs(home), 1)
+            self.assertEqual(calls, [])
+        # apply-stealth.sh goes through those entry points, never root python
+        # on the generator itself, and hands the rsynced trees back first.
+        script = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
+        self.assertNotIn('sudo python3 "$PERSONA/gen-time-persona.py"', script)
+        steps = [script.index(s) for s in ('sudo chown -R cowrie:cowrie "${early_owned[@]}"',
+                                            'persona-regen-install "$COWRIE_HOME"',
+                                            'time-persona "$COWRIE_HOME"', 'persona-fs "$COWRIE_HOME"')]
+        self.assertEqual(steps, sorted(steps))
+
+    def test_install_sh_renders_the_same_prestart(self):
+        for override in (None, '/srv/lib "q" $V %n'):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp) / 'data "q" $VALUE %n a\'s' / "cowrie"
+                env = dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", TEST_HOME=str(home),
+                           INSTALLER=str(Path(shardlure.ROOT) / "scripts/install.sh"))
+                env.pop("SHARDLURE_PERSONA_LIB", None)
+                lib = Path("/usr/local/lib/shardlure/persona")
+                if override:
+                    env["SHARDLURE_PERSONA_LIB"] = override
+                    lib = Path(override)
+                proc = subprocess.run(
+                    ["bash", "-c", 'source "$INSTALLER"; COWRIE_HOME="$TEST_HOME"; '
+                     'COWRIE_EXEC="ExecStart=/bin/true"; render_cowrie_service'],
+                    env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines = [line + "\n" for line in proc.stdout.splitlines() if line.startswith("ExecStartPre=")]
+                with mock.patch.object(shardlure, "PERSONA_REGEN_LIB", lib):
+                    self.assertEqual("".join(lines), shardlure.persona_regen_prestart(home))
+            self.assertIn("User=cowrie\n", proc.stdout)
+            self.assertLess(proc.stdout.index("ExecStartPre="), proc.stdout.index("ExecStart="))
+
+    def test_plant_bait_hands_the_tree_back_to_cowrie(self):
+        calls = []
+        with (mock.patch.object(shardlure, "need_root"),
+              mock.patch.object(shardlure, "plant_bait_files", side_effect=lambda: calls.append("plant")),
+              mock.patch.object(shardlure.installer_safety, "prepare_cowrie_tree",
+                                side_effect=lambda d, u: calls.append(("prepare", d, u))),
+              mock.patch.object(shardlure, "run", side_effect=lambda a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0)),
+              mock.patch.object(shardlure, "log"),
+              mock.patch.object(sys, "argv", ["shardlure.py", "plant-bait"])):
+            shardlure.main()
+        self.assertEqual(calls, ["plant", ("prepare", shardlure.DATA_DIR, shardlure.COWRIE_USER),
+                                 ["systemctl", "restart", "cowrie.service"]])
+
+
+class CowriePythonPreflightTests(unittest.TestCase):
+    """Task 8: v3.1.1 needs Python >= 3.11 (22.04 ships 3.10); both installers
+    refuse an older interpreter before changing anything."""
+
+    def test_shardlure_refuses_python_3_10(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+            shardlure.require_cowrie_python((3, 10, 12), "/usr/bin/python3")
+        self.assertEqual(caught.exception.code, 1)
+        message = err.getvalue()
+        for part in ("needs Python 3.11 or newer", "Python 3.10.12 (/usr/bin/python3)",
+                     "Ubuntu 22.04 ships 3.10", "Nothing was changed"):
+            self.assertIn(part, message)
+
+    def test_shardlure_accepts_python_3_11_and_newer(self):
+        for version in ((3, 11, 0), (3, 12, 3), (3, 14, 0), (4, 0, 0)):
+            with self.subTest(version=version):
+                shardlure.require_cowrie_python(version, "/usr/bin/python3")
+        shardlure.require_cowrie_python()  # the interpreter running these tests
+
+    def test_run_checks_python_before_changing_anything(self):
+        calls = []
+        def refuse():
+            calls.append("python")
+            raise SystemExit(1)
+        with (mock.patch.object(shardlure, "need_root", side_effect=lambda: calls.append("root")),
+              mock.patch.object(shardlure, "require_cowrie_python", side_effect=refuse),
+              mock.patch.object(shardlure, "install_deps", side_effect=lambda: calls.append("deps")),
+              mock.patch.object(shardlure, "validate_existing_accounts", side_effect=lambda: calls.append("accounts")),
+              mock.patch.object(shardlure, "validate_installation", side_effect=lambda: calls.append("install"))):
+            with self.assertRaises(SystemExit):
+                shardlure.cmd_run()
+        self.assertEqual(calls, ["root", "python"])
+        with mock.patch.object(shardlure, "require_cowrie_python", side_effect=refuse), \
+                mock.patch.object(shardlure, "ensure_cowrie_checkout") as checkout:
+            with self.assertRaises(SystemExit):
+                shardlure.install_cowrie(2222)
+        checkout.assert_not_called()
+
+    def run_install_sh(self, python_stub: str | None, cowrie: str = "1"):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.environ["PATH"]
+            if python_stub is not None:
+                stub = Path(tmp) / "python3"
+                stub.write_text(python_stub)
+                stub.chmod(0o755)
+                path = f"{tmp}:{path}"
+            return subprocess.run(
+                ["bash", "-c", f'source "$INSTALLER"; COWRIE={cowrie}; require_cowrie_python; echo passed'],
+                env=dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", PATH=path,
+                         INSTALLER=str(Path(shardlure.ROOT) / "scripts/install.sh")),
+                capture_output=True, text=True, timeout=30)
+
+    def test_install_sh_refuses_python_3_10(self):
+        # The stub answers as 22.04's python3 does to the preflight's program:
+        # its version, then exit 1 (sys.exit(True)).
+        proc = self.run_install_sh("#!/bin/sh\necho 3.10.12\nexit 1\n")
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("passed", proc.stdout)
+        for part in ("needs Python 3.11 or newer", "python3 is 3.10.12", "Ubuntu 22.04 ships 3.10",
+                     "--no-cowrie", "Nothing was changed"):
+            self.assertIn(part, proc.stderr)
+
+    def test_install_sh_accepts_python_3_11_and_skips_without_cowrie(self):
+        proc = self.run_install_sh(None)  # the real python3 (>= 3.11 here)
+        self.assertEqual((proc.returncode, proc.stdout), (0, "passed\n"), proc.stderr)
+        proc = self.run_install_sh("#!/bin/sh\necho 3.11.0\nexit 0\n")
+        self.assertEqual((proc.returncode, proc.stdout), (0, "passed\n"), proc.stderr)
+        proc = self.run_install_sh("#!/bin/sh\nexit 99\n", cowrie="0")
+        self.assertEqual((proc.returncode, proc.stdout), (0, "passed\n"), proc.stderr)
+
+    def test_install_sh_preflight_runs_the_check_before_any_change(self):
+        script = (Path(shardlure.ROOT) / "scripts/install.sh").read_text()
+        body = script[script.index("preflight_installation() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("\n  require_cowrie_python\n", body)
+        main = script[script.index("# -- parse CLI overrides"):]
+        self.assertLess(main.index("\npreflight_installation\n"), main.index("apt-get"))
+
+
+class ApplyStealthPersonaFsTests(unittest.TestCase):
+    """Task 7 review I-1: the existing-box path (apply-stealth.sh) applies the
+    same pickle edits as a fresh install."""
+
+    def test_apply_stealth_applies_the_persona_filesystem(self):
+        import pickle
+        root = Path(shardlure.ROOT)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            home = tmp / "cowrie"
+            (home / "src/cowrie/data").mkdir(parents=True)
+            (home / "etc").mkdir()
+            (home / "var/lib/cowrie").mkdir(parents=True)
+            pickle_path = home / "src/cowrie/data/fs.pickle"
+            pickle_path.write_bytes(pickle.dumps(persona_fs_tree()))
+            # A copy of the persona whose patch orchestrator does nothing:
+            # this test is about the filesystem step, not Cowrie's source.
+            persona = tmp / "persona"
+            shutil.copytree(root / "install/persona", persona,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            (persona / "apply-patches.py").write_text("raise SystemExit(0)\n")
+            # The script runs privileged steps through sudo and restarts the
+            # service; stand those in, keep everything else real.
+            stubs = tmp / "bin"
+            stubs.mkdir()
+            for name, body in (("sudo", 'exec "$@"'), ("chown", "exit 0"),
+                               ("systemctl", "echo active")):
+                (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
+                (stubs / name).chmod(0o755)
+            lib = tmp / "lib" / "persona"
+            env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}",
+                       COWRIE_HOME=str(home), PERSONA_DIR=str(persona),
+                       SHARDLURE_PERSONA_LIB=str(lib))
+            proc = subprocess.run(["bash", str(root / "scripts/apply-stealth.sh")],
+                                  env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("applying persona filesystem nodes", proc.stdout)
+            tree = pickle.loads(pickle_path.read_bytes())
+            self.assertIsNone(fs_lookup(tree, "/home/phil"))
+            for path in ("/usr/bin/sudo", "/usr/bin/crontab", "/usr/bin/ping", "/usr/bin/nc"):
+                with self.subTest(path=path):
+                    self.assertIsNotNone(fs_lookup(tree, path))
+            ubuntu = fs_lookup(tree, "/home/ubuntu")
+            self.assertEqual((ubuntu[shardlure._FS_UID], ubuntu[shardlure._FS_MODE]),
+                             (1000, 0o40750))
+            served = (home / "honeyfs/etc/passwd").read_text()
+            self.assertNotIn("phil", served)
+            self.assertIn("deploy:x:1001:1001:", served)
+            # The per-start regeneration copy (Task 8) lands outside the tree.
+            self.assertEqual(sorted(p.name for p in lib.iterdir()), sorted(shardlure.PERSONA_REGEN_FILES))
+            self.assertFalse((home / shardlure.LEGACY_PERSONA_REGEN_DIR).exists())
+
+    def test_persona_fs_finds_the_pickle_the_cfg_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie $x"
+            (home / "etc").mkdir(parents=True)
+            (home / "custom").mkdir()
+            (home / "custom/fs.pickle").write_bytes(b"x")
+            (home / "etc/cowrie.cfg").write_text(
+                "[shell]\nfilesystem = " + shardlure.cowrie_cfg_value(home / "custom/fs.pickle") + "\n")
+            self.assertEqual(shardlure.cowrie_fs_pickles(home), [home / "custom/fs.pickle"])
+            self.assertEqual(shardlure.cowrie_fs_pickles(Path(tmp) / "none"), [])
+
+
+class PersonaUsersTests(unittest.TestCase):
+    """honeyfs/etc/{passwd,group,shadow,gshadow}: the 22.04 cloud image's
+    accounts, cloud-init's ubuntu and the persona's deploy, no phil."""
+
+    ETC = Path(shardlure.ROOT) / "install/persona/honeyfs/etc"
+
+    def rows(self, name):
+        text = (self.ETC / name).read_text(encoding="ascii")  # Cowrie reads ASCII
+        return [line.split(":") for line in text.splitlines()]
+
+    def test_no_stock_cowrie_user(self):
+        for name in ("passwd", "group", "shadow", "gshadow"):
+            with self.subTest(file=name):
+                self.assertNotIn("phil", (self.ETC / name).read_text())
+
+    def test_persona_users_match_their_homes(self):
+        users = {r[0]: r for r in self.rows("passwd")}
+        for home, uid, gid in shardlure.PERSONA_HOMES:
+            name = home.rsplit("/", 1)[1]
+            with self.subTest(user=name):
+                self.assertEqual(users[name][2:4], [str(uid), str(gid)])
+                self.assertEqual(users[name][5:], [home, "/bin/bash"])
+        expected = (Path(shardlure.ROOT) / "scripts/behaviour/expected/home-users.out").read_text()
+        for name in ("ubuntu", "deploy"):
+            self.assertIn(":".join(users[name]) + "\n", expected)
+
+    def test_password_login_users_are_not_locked(self):
+        # Review m-5: the userdb admits ubuntu and deploy by password, so a
+        # locked `!` in shadow contradicts the login the attacker just made.
+        # Their hashes are yescrypt of random, discarded passwords.
+        shadow = {r[0]: r[1] for r in self.rows("shadow")}
+        for user in ("root", "ubuntu", "deploy"):
+            with self.subTest(user=user):
+                self.assertTrue(shadow[user].startswith("$y$j9T$"), shadow[user])
+        self.assertEqual(len({shadow[u] for u in ("root", "ubuntu", "deploy")}), 3)
+
+    def test_files_agree_with_each_other(self):
+        passwd, shadow = self.rows("passwd"), self.rows("shadow")
+        group, gshadow = self.rows("group"), self.rows("gshadow")
+        self.assertTrue(all(len(r) == 7 for r in passwd))
+        self.assertEqual([r[0] for r in passwd], [r[0] for r in shadow])
+        self.assertEqual([r[0] for r in group], [r[0] for r in gshadow])
+        self.assertEqual({r[0]: r[3] for r in group}, {r[0]: r[3] for r in gshadow})
+        gids = {r[0]: int(r[2]) for r in group}
+        self.assertTrue({int(r[3]) for r in passwd} <= set(gids.values()))
+        crontab = next(gid for path, _, _, gid, _ in shardlure.PERSONA_FS_FILES
+                       if path == "/usr/bin/crontab")
+        self.assertEqual(gids["crontab"], crontab)
+        # cloud-init's default_user groups.
+        for g in ("adm", "sudo", "lxd", "netdev"):
+            self.assertIn("ubuntu", {r[0]: r[3] for r in group}[g].split(","))
+
+
+class PersonaTxtcmdTests(unittest.TestCase):
+    """txtcmds (payload-yield Phase B Task 7)."""
+
+    TXTCMDS = Path(shardlure.ROOT) / "install/persona/txtcmds"
+
+    def test_df_answers_on_both_usr_merged_paths(self):
+        # PATH finds /usr/bin/df first; the stub used to sit at bin/df only,
+        # so `df -h` ran the pickle's ELF node ("cannot execute binary file").
+        self.assertEqual((self.TXTCMDS / "usr/bin/df").read_bytes(),
+                         (self.TXTCMDS / "bin/df").read_bytes())
+
+    def test_df_is_the_h_form_with_root_on_line_two(self):
+        # Task 1 ruling: `df -h | head -n 2 | awk 'FNR == 2 {print $2;}'` is
+        # 95G, the root fs's 99014048 1K-blocks under df's ceiling rounding
+        # (94.43 GiB, the motd's "94.43GB").
+        lines = (self.TXTCMDS / "usr/bin/df").read_text().splitlines()
+        self.assertEqual(lines[0], "Filesystem      Size  Used Avail Use% Mounted on")
+        self.assertEqual(lines[1].split(), ["/dev/sda1", "95G", "58G", "32G", "65%", "/"])
+        self.assertEqual(-(-99014048 // (1024 * 1024)), 95)
+        expected = Path(shardlure.ROOT) / "scripts/behaviour/expected"
+        self.assertEqual((expected / "df-h-awk.out").read_text(), "95G\n")
+        self.assertEqual((expected / "bin-df-h.out").read_text().splitlines(), lines[:2])
+
+    def test_retired_txtcmds_are_not_shipped_and_both_writers_remove_them(self):
+        stealth = (Path(shardlure.ROOT) / "scripts/apply-stealth.sh").read_text()
+        for rel in shardlure.RETIRED_TXTCMDS:
+            with self.subTest(rel=rel):
+                self.assertFalse((self.TXTCMDS / rel).exists())
+                self.assertIn(f'sudo rm -f "$TXTCMDS_DST/{rel}"', stealth)
+
+    def test_deploy_removes_a_retired_stub_left_by_an_older_deploy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cowrie"
+            stale = home / "share/cowrie/txtcmds/bin/uname"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("Linux static\n")
+            with mock.patch.object(shardlure, "COWRIE_HOME", home), \
+                    mock.patch.object(shardlure, "log"):
+                shardlure.deploy_txtcmds()
+            self.assertFalse(stale.exists())
+            self.assertTrue((home / "share/cowrie/txtcmds/usr/bin/df").is_file())
+
+
+def stat_mode(path: Path) -> int:
+    return path.stat().st_mode & 0o7777
 
 
 if __name__ == "__main__":

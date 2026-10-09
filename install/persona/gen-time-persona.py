@@ -28,14 +28,53 @@ while `date` tracked the real clock. It is regenerated here from the same
 UPTIME / LOAD / SESSIONS constants so load, uptime, and the last-login line all
 agree with who/w/last/uptime.
 
+The 42d 3h17m is not a constant here: it is [honeypot] boot_offset in the
+sibling cowrie-stealth.cfg, the value Cowrie v3.1.1 itself uses for
+boot_time() (its live /proc/uptime, uptime, w and last). One source of truth,
+so the deploy-time files cannot drift from what Cowrie answers.
+
 Usage: gen-time-persona.py COWRIE_HOME
 """
+import configparser
+import os
+import signal
+import stat
 import sys
-from datetime import datetime, timedelta
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+STEALTH_CFG = Path(__file__).resolve().parent / "cowrie-stealth.cfg"
+
+
+def _boot_offset() -> int:
+    """[honeypot] boot_offset from the persona template, in seconds."""
+    cfg = configparser.ConfigParser(interpolation=None)
+    try:
+        with STEALTH_CFG.open(encoding="utf-8") as fh:
+            cfg.read_file(fh)
+        return cfg.getint("honeypot", "boot_offset")
+    except (OSError, configparser.Error, ValueError) as exc:
+        raise SystemExit(f"  [FAIL] time-persona: no [honeypot] boot_offset in {STEALTH_CFG}: {exc}")
+
+
+def deployed_boot_offset(cowrie_home: Path) -> int | None:
+    """The boot_offset the deployed Cowrie will use: COWRIE_HOME/etc/cowrie.cfg
+    [honeypot] boot_offset, which patch_cowrie_cfg keeps when an operator set
+    their own (Task 5 review m-5), else None. Reading only the template made
+    the motd's "Uptime: N days" disagree with Cowrie under an override."""
+    cfg = configparser.ConfigParser(interpolation=None)
+    try:
+        with (cowrie_home / "etc/cowrie.cfg").open(encoding="utf-8") as fh:
+            cfg.read_file(fh)
+        return cfg.getint("honeypot", "boot_offset")
+    except (OSError, configparser.Error, ValueError):
+        return None
+
+
 # Canonical uptime the persona advertises. Boot slides so this stays constant.
-UPTIME = timedelta(days=42, hours=3, minutes=17)
+UPTIME = timedelta(seconds=_boot_offset())
 NCPU = 4                      # must match persona nproc/lscpu/cpuinfo
 LOAD = "0.38, 0.42, 0.45"     # must match honeyfs/proc/loadavg
 KERNEL = "5.15.0-94-generic"
@@ -52,6 +91,24 @@ SESSIONS = [
     (timedelta(days=3, hours=20, minutes=1), timedelta(hours=1, minutes=26), "pts/0", "10.0.0.8"),
     (timedelta(days=4, hours=22, minutes=43), timedelta(hours=1, minutes=23), "pts/0", "10.0.0.8"),
 ]
+
+# The still-logged-in admin's last keystroke, after its login: w shows that
+# session idle in its login shell (-bash), not running `w` at 0.00s idle, which
+# only the caller's own row could (Task 1 review I-4). Cowrie's patched w
+# (uptime-loadavg.py) uses the same constant via last-persona.py.
+ACTIVE_FOR = timedelta(minutes=41)
+
+
+def _ival7(delta: timedelta) -> str:
+    """procps print_time_ival7, w's 7-column IDLE cell."""
+    t = int(delta.total_seconds())
+    if t >= 48 * 3600:
+        return f" {t // 86400:2d}days"
+    if t >= 3600:
+        return f" {t // 3600:2d}:{t // 60 % 60:02d}m"
+    if t > 60:
+        return f" {t // 60:2d}:{t % 60:02d} "
+    return f" {t:2d}.00s"
 
 
 def _hm(delta: timedelta) -> str:
@@ -86,7 +143,7 @@ def build(now: datetime) -> dict[str, str]:
         uptime_line + "\n"
         "USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n"
         f"{ADMIN_USER:<8} {SESSIONS[0][2]:<8} {SESSIONS[0][3]:<16} "
-        f"{cur_login:%H:%M}    0.00s  0.04s  0.00s w\n"
+        f"{cur_login:%H:%M}  {_ival7(SESSIONS[0][0] - ACTIVE_FOR)}  0.04s  0.01s -bash\n"
     )
 
     # --- who ---
@@ -126,7 +183,11 @@ def build(now: datetime) -> dict[str, str]:
     # agrees with uptime/w/last (load's first field, the "42 days" uptime). The
     # "Last login" line is the newest COMPLETED admin session, i.e. the one
     # before the current still-logged-in one (SESSIONS[1]), which is what a real
-    # motd shows the operator on this login.
+    # motd shows the operator on this login. Cowrie's last lays the same
+    # history out from its process start, which follows this script at deploy,
+    # so the two name the same session (to within the deploy-to-start gap).
+    # "Users logged in: 1" is the still-logged-in admin that uptime/w count
+    # (landscape-sysinfo counts utmp at login).
     load1 = LOAD.split(",")[0].strip()
     prev_login = now - SESSIONS[1][0]
     motd_txt = (
@@ -134,8 +195,8 @@ def build(now: datetime) -> dict[str, str]:
         f"  System information as of {now:%a %b %e %H:%M:%S} UTC {now:%Y}\n"
         f"\n"
         f"  System load:    {load1}                Processes:           287\n"
-        f"  Usage of /:     61.2% of 96.73GB    Users logged in:     0\n"
-        f"  Memory usage:   22%                 IPv4 address for ens3: 10.0.0.14\n"
+        f"  Usage of /:     61.2% of 94.43GB    Users logged in:     1\n"
+        f"  Memory usage:   22%                 IPv4 address for eth0: 10.0.0.14\n"
         f"  Swap usage:     0%                  Uptime:              {days} days\n"
         f"\n"
         f"  23 updates can be applied immediately.\n"
@@ -154,7 +215,65 @@ def build(now: datetime) -> dict[str, str]:
     }
 
 
+# Temp files sit beside their target as `.<name>.persona-XXXX`. A SIGTERM
+# (cowrie.service's `timeout 30`) unwinds through write_atomic's cleanup; a
+# SIGKILL (systemd's start timeout) cannot, so each run first removes
+# leftovers older than STALE_TEMP_SECONDS: older than any run, so never a
+# concurrent run's live temp.
+STALE_TEMP_SECONDS = 60
+
+
+def _terminate(signum, frame):  # noqa: ANN001, ARG001
+    raise SystemExit(128 + signum)
+
+
+def remove_stale_temps(directory: Path, name: str, now: float | None = None) -> None:
+    """Delete `.<name>.persona-*` regular files in directory older than
+    STALE_TEMP_SECONDS (unlink never follows a link)."""
+    prefix = f".{name}.persona-"
+    cutoff = (time.time() if now is None else now) - STALE_TEMP_SECONDS
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if (entry.name.startswith(prefix) and entry.is_file(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime < cutoff):
+                os.unlink(entry.path)
+        except OSError:
+            continue
+
+
+def write_atomic(dst: Path, text: str) -> None:
+    """Replace dst whole, never in place: write a fresh temp file (O_EXCL)
+    in the same directory and rename it over dst. A run killed mid-write
+    leaves the previous complete file (a stale persona is the accepted
+    residual; a truncated motd or txtcmd is a tell of its own). The new file
+    keeps dst's mode; rename replaces a link at dst, never its target."""
+    try:
+        st = os.lstat(dst)
+        mode = stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else 0o644
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.persona-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def main() -> int:
+    signal.signal(signal.SIGTERM, _terminate)
     if len(sys.argv) != 2:
         print("usage: gen-time-persona.py COWRIE_HOME", file=sys.stderr)
         return 2
@@ -162,16 +281,37 @@ def main() -> int:
     if not cowrie_home.is_dir():
         print(f"  [FAIL] COWRIE_HOME not a directory: {cowrie_home}", file=sys.stderr)
         return 1
-    files = build(datetime.now())
+    global UPTIME
+    deployed = deployed_boot_offset(cowrie_home)
+    if deployed is not None and deployed >= 0:
+        UPTIME = timedelta(seconds=deployed)
+    # The persona's clock is UTC ([honeypot] timezone = UTC; the motd says
+    # "UTC"). datetime.now() is the host's local time: on the arm box (IST) the
+    # motd's "Last login" sat 5h30m off the session Cowrie's last prints.
+    files = build(datetime.now(timezone.utc).replace(tzinfo=None))
     written = 0
+    failed = []
     for rel, text in files.items():
         dst = cowrie_home / rel
         if not dst.parent.is_dir():
             # Only write where the persona already placed the tree; a missing
             # parent means that command/proc file was never deployed here.
             continue
-        dst.write_text(text)
+        remove_stale_temps(dst.parent, dst.name)
+        try:
+            write_atomic(dst, text)
+        except OSError as exc:
+            # cowrie.service runs this as the Cowrie account before every
+            # start: one file it cannot write (left root-owned by a manual
+            # step) must not keep the motd and the rest stale, so carry on and
+            # report every failure at the end.
+            failed.append(f"{rel} ({exc.strerror or type(exc).__name__})")
+            continue
         written += 1
+    if failed:
+        print(f"  [FAIL] time-persona: refreshed {written}/{len(files)} files; "
+              f"not written: {', '.join(failed)}", file=sys.stderr)
+        return 1
     print(f"  [ok] time-persona: refreshed {written}/{len(files)} files against live clock")
     return 0
 

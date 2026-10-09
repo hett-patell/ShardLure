@@ -1,0 +1,12 @@
+rc=1
+bash: line 1: gcc: command not found
+rc=127
+bash: line 1: python: command not found
+rc=127
+bash: line 1: php: command not found
+rc=127
+bash: line 1: yum: command not found
+rc=127
+bash: line 1: /usr/bin/gcc: No such file or directory
+rc=127
+/usr/bin/killall

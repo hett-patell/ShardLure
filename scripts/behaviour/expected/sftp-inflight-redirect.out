@@ -1,0 +1,2 @@
+#harness: sftp-during=/tmp/up
+rc=0

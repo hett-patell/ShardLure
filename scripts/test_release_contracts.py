@@ -107,6 +107,114 @@ class ReleaseContractTests(unittest.TestCase):
                     "install/persona/patches/sftp-capture-permissions.py", call["args"],
                 )
 
+    def test_every_patch_install_sh_fetches_is_an_active_pinned_patch(self) -> None:
+        # Task 2 of payload-yield Phase B moved the pin to Cowrie v3.1.1 and
+        # parked sftp-capture-permissions while it was re-anchored. install.sh
+        # kept fetching it from the release tag and running it standalone, so a
+        # tag cut in that window would have failed every fresh install after
+        # cloning Cowrie, and no test noticed. Every patch install.sh fetches
+        # must be in PATCHES (check-cowrie-patches.sh then proves the chain
+        # applies to the pin) and in the check script's install.sh list, which
+        # also applies each one alone to a pristine pin as install.sh does.
+        import ast  # noqa: PLC0415
+
+        installer = INSTALLER_PATH.read_text()
+        fetched = re.findall(r"install/persona/patches/([A-Za-z0-9_.-]+\.py)", installer)
+        self.assertTrue(fetched, "install.sh no longer fetches a persona patch; update this test")
+        orchestrator = ROOT / "install/persona/apply-patches.py"
+        tree = ast.parse(orchestrator.read_text())
+        patches = next(
+            ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "PATCHES"
+        )
+        check_script = (ROOT / "scripts/check-cowrie-patches.sh").read_text()
+        standalone = check_script[check_script.index("install_sh_patches=("):]
+        standalone = standalone[:standalone.index(")")]
+        for name in sorted(set(fetched)):
+            with self.subTest(patch=name):
+                self.assertTrue((ROOT / "install/persona/patches" / name).is_file())
+                self.assertIn(name, patches)
+                self.assertIn(f'"{name}"', standalone)
+        for name in patches:
+            with self.subTest(patch=name):
+                self.assertIn(f'"$ROOT/install/persona/patches/{name}"', check_script,
+                              "every active patch must be in check-cowrie-patches.sh's arg loop")
+
+    def test_every_shipped_patch_is_active(self) -> None:
+        # A patch file left out of PATCHES is never applied, yet it still ships
+        # and reads as live hardening (grep-case-insensitive sat parked like
+        # that from Task 2 until Task 4 replaced it with grep-options). Each
+        # active patch also needs the OLD constant check-cowrie-patches.sh's
+        # drift fixture reads.
+        import ast  # noqa: PLC0415
+
+        tree = ast.parse((ROOT / "install/persona/apply-patches.py").read_text())
+        patches = next(
+            ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "PATCHES"
+        )
+        shipped = sorted(p.name for p in (ROOT / "install/persona/patches").glob("*.py"))
+        self.assertEqual(sorted(patches), shipped)
+        self.assertEqual(len(set(patches)), len(patches))
+        for name in patches:
+            with self.subTest(patch=name):
+                body = ast.parse((ROOT / "install/persona/patches" / name).read_text()).body
+                names = {n.targets[0].id for n in body if isinstance(n, ast.Assign)
+                         and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+                self.assertIn("OLD", names)
+                self.assertIn("NEW", names)
+
+    def test_w_reads_its_admin_session_from_last_persona(self) -> None:
+        # uptime-loadavg's w imports last-persona's helpers at run time, so w
+        # and last name one login. Nothing checks that import until a session
+        # runs w: pin the names and the order here.
+        import ast  # noqa: PLC0415
+        import re  # noqa: PLC0415
+
+        def constants(name):
+            body = ast.parse((ROOT / "install/persona/patches" / name).read_text()).body
+            return {n.targets[0].id: n.value.value for n in body if isinstance(n, ast.Assign)
+                    and isinstance(getattr(n.targets[0], "id", None), str)
+                    and isinstance(n.value, ast.Constant)}
+
+        last = constants("last-persona.py")["NEW"]
+        uptime = constants("uptime-loadavg.py")
+        who = constants("who-persona.py")["NEW"]
+        imported = set()
+        # who (who-persona.py, Task 7) reads the same helpers, so who, w and
+        # last name one login.
+        for block in (uptime["NEW_UPTIME"], uptime["NEW"], who):
+            for names in re.findall(r"from cowrie\.commands\.last import ([\w, ]+)", block):
+                imported |= {n.strip() for n in names.split(",")}
+        self.assertEqual(imported, {"CALLER_TTY", "PERSONA_USER", "admin_session", "caller_has_utmp"})
+        for name in imported:
+            self.assertRegex(last, rf"(?m)^(def {name}\(|{name} = )")
+        self.assertIn("from cowrie.commands.uptime import procps_uptime_line", uptime["NEW"])
+        self.assertIn("def procps_uptime_line(", uptime["NEW_UPTIME"])
+        tree = ast.parse((ROOT / "install/persona/apply-patches.py").read_text())
+        patches = next(
+            ast.literal_eval(node.value) for node in tree.body
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "PATCHES"
+        )
+        self.assertLess(patches.index("last-persona.py"), patches.index("uptime-loadavg.py"))
+        self.assertLess(patches.index("last-persona.py"), patches.index("who-persona.py"))
+        self.assertIn("from cowrie.commands.last import CALLER_TTY, PERSONA_USER, "
+                      "admin_session, caller_has_utmp", who)
+
+    def test_lspci_patch_emits_the_persona_txtcmd(self) -> None:
+        # One device list, two copies: the registered command (patched) and
+        # the txtcmd it shadows. They must never disagree.
+        import ast  # noqa: PLC0415
+
+        body = ast.parse((ROOT / "install/persona/patches/lspci-persona.py").read_text()).body
+        new = next(n.value.value for n in body if isinstance(n, ast.Assign)
+                   and getattr(n.targets[0], "id", "") == "NEW")
+        listing = new[new.index('return """') + len('return """'):new.rindex('\\n"""')] + "\n"
+        self.assertEqual(listing, (ROOT / "install/persona/txtcmds/usr/bin/lspci").read_text())
+        self.assertIn("00:02.0 VGA compatible controller: Cirrus Logic GD 5446\n", listing)
+
     def test_installer_rejects_incompatible_capture_code_without_modifying_it(self) -> None:
         patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
         with tempfile.TemporaryDirectory() as tmp:

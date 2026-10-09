@@ -1,0 +1,3 @@
+#harness: rc=0
+/usr/bin/wget
+/usr/bin/curl
