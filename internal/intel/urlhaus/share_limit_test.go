@@ -48,7 +48,7 @@ func TestShareLimitBoundsSubmissionsNotCandidates(t *testing.T) {
 	}
 	var limitHit int
 	submitted, skipped, err := Share(context.Background(), rec, cands, Options{
-		APIKey: "k", Endpoint: srv.URL, RateLimit: time.Millisecond,
+		APIKey: "k", Endpoint: srv.URL, LookupEndpoint: srv.lookupEndpoint(), LookupRateLimit: time.Millisecond, RateLimit: time.Millisecond,
 		MaxSubmissions: 2, Now: vetNow,
 		OnLimitReached: func(unexamined int) { limitHit = unexamined },
 	})
@@ -79,7 +79,7 @@ func TestShareZeroLimitIsUnbounded(t *testing.T) {
 	cands := []Candidate{freshCandidate(0), freshCandidate(1), freshCandidate(2)}
 	limitFired := false
 	submitted, _, err := Share(context.Background(), rec, cands, Options{
-		APIKey: "k", Endpoint: srv.URL, RateLimit: time.Millisecond,
+		APIKey: "k", Endpoint: srv.URL, LookupEndpoint: srv.lookupEndpoint(), LookupRateLimit: time.Millisecond, RateLimit: time.Millisecond,
 		MaxSubmissions: 0, Now: vetNow,
 		OnLimitReached: func(int) { limitFired = true },
 	})
@@ -95,7 +95,9 @@ func TestShareZeroLimitIsUnbounded(t *testing.T) {
 }
 
 // TestShareLimitCountsDryRunPreviews pins that --dry-run --limit N previews
-// exactly the N URLs a real run would submit.
+// exactly the N URLs a real run would queue. A real run's duplicate pre-check
+// can still skip an already-listed URL from that set (a dry run contacts
+// nothing, by contract).
 func TestShareLimitCountsDryRunPreviews(t *testing.T) {
 	rec := newFakeRecorder()
 	cands := []Candidate{

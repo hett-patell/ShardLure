@@ -62,6 +62,8 @@ const (
 	HashLookup
 	Upload
 	Submit
+	// Lookup is a read-only provider query (URLhaus's duplicate pre-check).
+	Lookup
 	operationCount
 )
 
@@ -109,7 +111,7 @@ var phaseNames = [...]string{"starting", "serving", "draining"}
 var sourceNames = [...]string{"journal", "cowrie"}
 var workerNames = [...]string{"journal_tail", "cowrie_ingest", "capture_url", "capture_files", "backfills", "journal_summaries", "campaigns", "capture_refetch"}
 var providerNames = [...]string{"abuseipdb", "virustotal", "greynoise", "shodan", "otx", "ipqualityscore", "ipinfo", "malwarebazaar", "urlhaus", "threatfox", "ip_api"}
-var operationNames = [...]string{"ip_lookup", "hash_lookup", "upload", "submit"}
+var operationNames = [...]string{"ip_lookup", "hash_lookup", "upload", "submit", "lookup"}
 var outcomeNames = [...]string{"success", "unauthorized", "rate_limited", "transport_error", "invalid_response", "rejected", "canceled", "storage_error"}
 var failureNames = [...]string{"none", "storage", "io", "canceled", "unexpected"}
 var reasonNames = [...]string{"ready", "starting", "draining", "sample_unavailable", "database_unavailable", "data_unavailable", "evidence_unavailable", "low_space", "worker_unavailable", "worker_stalled"}

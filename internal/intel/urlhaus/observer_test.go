@@ -36,12 +36,18 @@ func TestObserverClassifiesActualResponses(t *testing.T) {
 }
 
 func TestObserverSeparatesUpstreamAndDurableOutcomes(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/lookup" {
+			_, _ = w.Write([]byte(`{"query_status":"no_results"}`))
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
 	defer server.Close()
 	m := observability.New(time.Now, 0)
 	ctx := observability.WithMonitor(context.Background(), m)
 	candidate := Candidate{URL: "http://8.8.8.8/inert", SHA256: strings.Repeat("a", 64), SizeBytes: 128, Origin: "quarantine_fetch", Status: "fetched", FetchedAt: time.Now(), FileKind: "script"}
-	sent, _, err := Share(ctx, observerLedger{}, []Candidate{candidate}, Options{APIKey: "inert", Endpoint: server.URL})
+	sent, _, err := Share(ctx, observerLedger{}, []Candidate{candidate}, Options{APIKey: "inert", Endpoint: server.URL, LookupEndpoint: server.URL + "/lookup"})
 	if err == nil || sent != 0 {
 		t.Fatal("failed ledger reported success")
 	}

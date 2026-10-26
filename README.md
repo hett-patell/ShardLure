@@ -384,7 +384,7 @@ sudo ./shardlure run
 | `status` | Print event and actor counts |
 | `ioc` | Export a small IOC slice |
 | `share bazaar [--dry-run] [--limit N] [--sha SHA] [--since DURATION] [--anonymous] [--status]` | Upload captured payloads to MalwareBazaar (abuse.ch) |
-| `share urlhaus [--dry-run] [--limit N] [--active-days N] [--anonymous] [--status]` | Submit the malware-distribution URLs those payloads came from to URLhaus (abuse.ch) |
+| `share urlhaus [--dry-run] [--limit N] [--active-days N] [--anonymous] [--status] [--lookup-endpoint URL]` | Submit the malware-distribution URLs those payloads came from to URLhaus (abuse.ch) |
 | `share threatfox [--dry-run] [--limit N] [--active-days N] [--status]` | Submit malware-delivery IOCs for Malpedia-labelled payloads to ThreatFox (abuse.ch) |
 | `report abuseipdb [--dry-run] [--limit N] [--min-probe N] [--rewindow N] [--status]` | Report confirmed brute-forcers to AbuseIPDB |
 | `-config CONFIG backup create --output NEW_BUNDLE [--include-file FILE] [--timeout 30m]` | Write a verified, owner-only backup bundle of the database, config and evidence. See [Backup And Recovery](#backup-and-recovery). |
@@ -676,6 +676,8 @@ abuse.ch issues **one Auth-Key per account** for both services. Setting the Malw
 | fetched within `active_days` (default 3) | URLhaus does not want dead URLs |
 
 Re-running is safe: submitted URLs are recorded in `urlhaus_submissions` and skipped next run. That ledger is **never purged** (unlike caches) — dropping a row would mean re-submitting the same URL upstream.
+
+Before a URL is submitted, ShardLure also asks URLhaus's **read-only query API** whether it already lists it. Other reporters are often faster, and a batch containing duplicates is refused by the submission endpoint in a shape the client cannot parse — the whole batch fails. A URL found already listed is recorded as `already_listed` and skipped: it never reaches the submission endpoint, costs no `--limit` slot, and is not counted as a submission of yours (the panel still shows it in the log so the reason is visible). A lookup failure skips that URL rather than submitting something unchecked. The lookup endpoint is separate from the submission endpoint and can be overridden with `--lookup-endpoint`; the Settings/live `urlhaus.endpoint` knob applies to submission only. `--dry-run` promises not to contact URLhaus, so it cannot see already-listed URLs and may preview slightly more than a real run submits.
 
 ### Dashboard panel (Blue Team)
 

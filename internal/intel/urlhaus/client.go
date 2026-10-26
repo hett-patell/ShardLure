@@ -34,21 +34,35 @@ const DefaultEndpoint = "https://urlhaus.abuse.ch/api/"
 // submissions ("must be malware_download" per the submission docs).
 const ThreatMalwareDownload = "malware_download"
 
-// Client posts URL submissions to URLhaus.
+// Client posts URL submissions to URLhaus and queries its read-only listing
+// API.
 type Client struct {
-	endpoint string
-	hc       *http.Client
+	endpoint       string
+	lookupEndpoint string
+	hc             *http.Client
 }
 
 // NewClient returns a client targeting endpoint (DefaultEndpoint when empty).
-// 30 s is ample: unlike a MalwareBazaar file upload this is a small JSON POST.
-func NewClient(endpoint string) *Client {
+// Its lookup endpoint is DefaultLookupEndpoint.
+func NewClient(endpoint string) *Client { return NewClientWithLookup(endpoint, "") }
+
+// NewClientWithLookup is NewClient with the read-only URL query endpoint
+// overridden (DefaultLookupEndpoint when empty). Tests and alternate
+// deployments point both at their own server; a caller that only needs
+// submission can use NewClient.
+//
+// 30 s is ample: unlike a MalwareBazaar file upload these are small POSTs.
+func NewClientWithLookup(endpoint, lookupEndpoint string) *Client {
 	if strings.TrimSpace(endpoint) == "" {
 		endpoint = DefaultEndpoint
 	}
+	if strings.TrimSpace(lookupEndpoint) == "" {
+		lookupEndpoint = DefaultLookupEndpoint
+	}
 	return &Client{
-		endpoint: endpoint,
-		hc:       &http.Client{Timeout: 30 * time.Second},
+		endpoint:       endpoint,
+		lookupEndpoint: lookupEndpoint,
+		hc:             &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -68,8 +82,10 @@ type submitBody struct {
 
 // Result is the parsed URLhaus response for one batch.
 type Result struct {
-	// Status is "ok" for an accepted response or "unknown" for an
-	// unrecognised provider status. Arbitrary provider text is never retained.
+	// Status is "ok" for an accepted response, "already_queued" when URLhaus
+	// says it already had the URL, "rejected" when entries were refused, or
+	// "unknown" for an unrecognised provider status. Arbitrary provider text
+	// is never retained.
 	Status string
 	// Rejected counts entries URLhaus refused, when reported.
 	Rejected int
@@ -123,7 +139,11 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 	resp, err := c.hc.Do(req)
 	observability.HTTPResult(ctx, resp, err)
 	if err != nil {
-		return nil, intelutil.SafeRequestError("urlhaus", "post", err)
+		serr := intelutil.SafeRequestError("urlhaus", "post", err)
+		if errors.Is(serr, context.Canceled) || errors.Is(serr, context.DeadlineExceeded) {
+			return nil, serr
+		}
+		return nil, &ProviderError{Operation: "submit", Kind: ProviderErrorTransport}
 	}
 	defer resp.Body.Close()
 
@@ -131,14 +151,20 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 	// into the decoder. URLhaus replies with a small JSON object.
 	raw, err := intelutil.ReadBoundedResponse("urlhaus", resp.Body, 256<<10)
 	if err != nil {
-		return nil, err
+		// The size error keeps its own safe message; a read failure is a
+		// transport failure, not a local one.
+		if errors.Is(err, intelutil.ErrResponseTooLarge) ||
+			errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, &ProviderError{Operation: "submit", Kind: ProviderErrorTransport}
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, ErrUnauthorized
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("urlhaus: submission returned HTTP %d", resp.StatusCode)
+		return nil, &ProviderError{Operation: "submit", Kind: ProviderErrorHTTP, HTTPStatus: resp.StatusCode}
 	}
 
 	var parsed struct {
@@ -162,7 +188,7 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 			strings.TrimSpace(text[len(queuedPrefix):]) == entries[0].URL {
 			return &Result{Status: "already_queued"}, nil
 		}
-		return nil, errors.New("urlhaus: invalid submission response")
+		return nil, &ProviderError{Operation: "submit", Kind: ProviderErrorInvalidResponse}
 	}
 
 	status := strings.ToLower(strings.TrimSpace(parsed.QueryStatus))
@@ -170,10 +196,12 @@ func (c *Client) Submit(ctx context.Context, apiKey string, entries []Entry, ano
 		return nil, ErrUnauthorized
 	}
 	if status != "ok" {
-		return &Result{Status: "unknown"}, errors.New("urlhaus: submission rejected")
+		return &Result{Status: "unknown"}, &ProviderError{
+			Operation: "submit", Kind: ProviderErrorRejected,
+		}
 	}
 	if len(parsed.Rejected) > 0 {
-		return &Result{Status: "rejected", Rejected: len(parsed.Rejected)}, errors.New("urlhaus: submission contained rejected entries")
+		return &Result{Status: "rejected", Rejected: len(parsed.Rejected)}, ErrRejectedEntries
 	}
 	return &Result{Status: "ok"}, nil
 }

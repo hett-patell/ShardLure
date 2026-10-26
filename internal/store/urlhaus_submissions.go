@@ -6,10 +6,33 @@ import (
 	"time"
 )
 
-// URLhausSubmission records a single URL submitted to abuse.ch URLhaus.
-// The URL is the natural key: URLhaus dedupes on it. Since v27 one URL may own
-// several artifact rows (one per payload it served), so the candidate queries
-// pick one row per URL (urlhausCandidateWhere) to match the ledger.
+// URLhausStatusAlreadyListed is the ledger status for a URL URLhaus's own
+// read-only lookup found already on record. It is terminal for dedup (later
+// runs skip the URL without a network round trip) but is not a submission of
+// ours, so the funnel's shared_urlhaus count and the panel's submitted total
+// exclude it, exactly as bazaar excludes file_already_known. Mirrors
+// urlhaus.StatusAlreadyListed — store never imports the intel packages, so the
+// literal is the contract.
+const URLhausStatusAlreadyListed = "already_listed"
+
+// URLhausStatusAlreadyQueued is the ledger status builds before the duplicate
+// pre-check wrote for the submission API's plaintext already_queued answer.
+// Current Share normalises that answer to URLhausStatusAlreadyListed; both
+// statuses stay out of the "submitted" figures so historical rows are not
+// counted as contributions of ours.
+const URLhausStatusAlreadyQueued = "already_queued"
+
+// urlhausNotSubmittedWhere is the SQL predicate for ledger rows that are not a
+// submission of ours (a listing check, a resolved dedup note). Private
+// constants only, never caller input.
+const urlhausNotSubmittedWhere = "status NOT IN ('" + URLhausStatusAlreadyListed + "','" + URLhausStatusAlreadyQueued + "')"
+
+// URLhausSubmission records what the ledger knows about one URL: a submission
+// of ours (status "ok"/"submitted") or a duplicate pre-check that found it
+// already listed (already_listed). The URL is the natural key: URLhaus dedupes
+// on it. Since v27 one URL may own several artifact rows (one per payload it
+// served), so the candidate queries pick one row per URL
+// (urlhausCandidateWhere) to match the ledger.
 type URLhausSubmission struct {
 	URL         string
 	SubmittedAt time.Time
@@ -26,8 +49,9 @@ func (s *Store) ensureURLhausTable() error {
 	return s.errURLhaus
 }
 
-// URLhausSubmitted reports whether we already submitted this URL, so a repeat
-// run doesn't re-POST it. Satisfies urlhaus.SubmitRecorder.
+// URLhausSubmitted reports whether the ledger already settled this URL —
+// submitted by us, or found already listed upstream — so a repeat run neither
+// re-POSTs it nor repeats the lookup. Satisfies urlhaus.SubmitRecorder.
 func (s *Store) URLhausSubmitted(url string) (bool, error) {
 	if url == "" {
 		return false, nil
@@ -40,9 +64,14 @@ func (s *Store) URLhausSubmitted(url string) (bool, error) {
 	return n > 0, err
 }
 
-// RecordURLhausSubmission upserts the row for a submitted URL. Only successful
-// submissions are recorded — network failures and auth rejections are left
+// RecordURLhausSubmission upserts the row for a URL that was submitted or
+// found already listed. Network failures and auth rejections are left
 // unrecorded so the next run retries them, matching RecordBazaarUpload.
+//
+// An already_listed write never updates an existing row: the CLI and a
+// dashboard button can check the ledger concurrently, and without the guard a
+// listing check could overwrite a real "ok" submission (and decrement the
+// funnel's shared count and the submitted total).
 func (s *Store) RecordURLhausSubmission(url, status string, at time.Time) error {
 	if url == "" {
 		return nil
@@ -63,12 +92,16 @@ VALUES (?, ?, ?, ?)
 ON CONFLICT(url) DO UPDATE SET
   submitted_at=excluded.submitted_at,
   submitted_at_key=excluded.submitted_at_key,
-  status=excluded.status`,
-		url, ts, status, formatFixedUTC(at))
+  status=excluded.status
+WHERE excluded.status <> ?`,
+		url, ts, status, formatFixedUTC(at), URLhausStatusAlreadyListed)
 	return err
 }
 
 // URLhausStats holds aggregate counts for the URLhaus sharing widget.
+// TotalSubmitted and LastSubmittedAt cover submissions of ours only: rows
+// recorded as already listed (a duplicate pre-check, or a historical
+// plaintext already_queued answer) are excluded.
 type URLhausStats struct {
 	TotalSubmitted  int
 	Pending         int
@@ -91,7 +124,10 @@ func (s *Store) URLhausSubmissionStats(activeDays int) (URLhausStats, error) {
 	}
 	var st URLhausStats
 	var lastTS sql.NullString
-	if err := s.db.QueryRow("SELECT COUNT(*), ("+latestLedgerTimeSQL(urlhausLedger)+") FROM urlhaus_submissions").Scan(&st.TotalSubmitted, &lastTS); err != nil {
+	// already_listed/already_queued rows are URLhaus's own records, not
+	// submissions of ours: they keep URLs out of the candidate list but must
+	// not inflate the total or move the "last submitted" clock.
+	if err := s.db.QueryRow("SELECT COUNT(*), ("+latestLedgerTimeSQL(urlhausLedger, urlhausNotSubmittedWhere)+") FROM urlhaus_submissions WHERE "+urlhausNotSubmittedWhere).Scan(&st.TotalSubmitted, &lastTS); err != nil {
 		return st, err
 	}
 	if lastTS.Valid {

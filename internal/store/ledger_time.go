@@ -129,13 +129,22 @@ func orderedLedgerQuery(ledger submissionLedger, columns string, limit int) (str
 	return q, nil
 }
 
-// The native latest value is one index lookup, not MAX(scalar(all history)).
-// MAX on the legacy side visits every remaining row so malformed values cannot
+// latestLedgerTimeSQL builds the "most recent ledger time" subquery. The
+// native latest value is one index lookup, not MAX(scalar(all history)); MAX on
+// the legacy side visits every remaining row so malformed values cannot
 // disappear behind a LIMIT. Embedded by Stats in the same database snapshot.
-func latestLedgerTimeSQL(ledger submissionLedger) string {
+// An optional extra is AND-ed into both branches — urlhaus uses it to keep
+// already_listed rows (a listing check, not a submission of ours) out of the
+// "last submitted" clock. The filter comes from a private constant, never
+// caller input.
+func latestLedgerTimeSQL(ledger submissionLedger, extra ...string) string {
 	d := submissionLedgers[ledger]
+	and := ""
+	if len(extra) > 0 && extra[0] != "" {
+		and = " AND (" + extra[0] + ")"
+	}
 	return "SELECT MAX(exact_time) FROM (SELECT CASE WHEN " + d.key + "=shardlure_time_key(" + d.timestamp + ") THEN " + d.key +
 		" ELSE shardlure_time_key(NULL) END AS exact_time FROM (SELECT " + d.timestamp + "," + d.key + " FROM " + d.table +
-		" INDEXED BY idx_" + d.prefix + "_time_key WHERE " + d.key + " IS NOT NULL ORDER BY " + d.key + " DESC LIMIT 1)" +
-		" UNION ALL SELECT MAX(shardlure_time_key(" + d.timestamp + ")) FROM " + d.table + " INDEXED BY idx_" + d.prefix + "_legacy_time WHERE " + d.key + " IS NULL)"
+		" INDEXED BY idx_" + d.prefix + "_time_key WHERE " + d.key + " IS NOT NULL" + and + " ORDER BY " + d.key + " DESC LIMIT 1)" +
+		" UNION ALL SELECT MAX(shardlure_time_key(" + d.timestamp + ")) FROM " + d.table + " INDEXED BY idx_" + d.prefix + "_legacy_time WHERE " + d.key + " IS NULL" + and + ")"
 }
