@@ -20,6 +20,7 @@ import (
 
 	"github.com/networkshard/shardlure/internal/actor"
 	"github.com/networkshard/shardlure/internal/hostsvc"
+	"github.com/networkshard/shardlure/internal/intel/urlhaus"
 	"github.com/networkshard/shardlure/internal/intel/vt"
 	"github.com/networkshard/shardlure/internal/netmatch"
 	"github.com/networkshard/shardlure/internal/observability"
@@ -37,12 +38,21 @@ func httpError(w http.ResponseWriter, where string, err error, code int) {
 
 // Only source-owned operation tags and a closed failure category reach logs.
 // Raw errors can carry SQL values, private paths and credentials.
-func logOperationError(operation string, err error) {
+// logOperationError logs a fixed category, never the raw error (which may carry
+// paths, SQL or attacker text). A caller that can supply its own bounded,
+// provider-safe detail passes it as the optional cause — urlhaus does, so a
+// submit failure is diagnosable from the journal instead of only reading
+// "operation_failed".
+func logOperationError(operation string, err error, cause ...string) {
 	reason := "operation_failed"
 	if errors.Is(err, context.Canceled) {
 		reason = "canceled"
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		reason = "deadline_exceeded"
+	}
+	if len(cause) > 0 && cause[0] != "" {
+		log.Printf("web: %s: %s (%s)", operation, reason, cause[0])
+		return
 	}
 	log.Printf("web: %s: %s", operation, reason)
 }
@@ -144,6 +154,11 @@ type Server struct {
 	urlhausTagsDefault       []string
 	urlhausActiveDaysDefault int
 	urlhausAnonymousDefault  bool
+	// urlhausLookupEndpointDefault points the read-only duplicate pre-check at
+	// a fake upstream in tests; empty means urlhaus.DefaultLookupEndpoint.
+	// Deliberately not a keystore setting: the lookup is a fixed abuse.ch API,
+	// and a second URL knob would only drift from the submit endpoint.
+	urlhausLookupEndpointDefault string
 
 	// countriesCache memoizes the full-table hits-by-country aggregation shared
 	// by /api/dashboard and /api/intel. It is a lifetime distribution, so it uses
@@ -888,6 +903,15 @@ func (s *Server) bazaarTagsLive() []string {
 
 func (s *Server) urlhausEndpointLive() string {
 	return s.keys.GetOr(settings.KeyURLhausEndpoint, s.urlhausEndpointDefault)
+}
+
+// urlhausLookupEndpoint is the read-only URL query endpoint Share checks each
+// candidate against before submitting it.
+func (s *Server) urlhausLookupEndpoint() string {
+	if s.urlhausLookupEndpointDefault != "" {
+		return s.urlhausLookupEndpointDefault
+	}
+	return urlhaus.DefaultLookupEndpoint
 }
 
 func (s *Server) urlhausTagsLive() []string {

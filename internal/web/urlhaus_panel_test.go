@@ -1,15 +1,19 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/networkshard/shardlure/internal/intel/urlhaus"
 	"github.com/networkshard/shardlure/internal/settings"
 	"github.com/networkshard/shardlure/internal/store"
 )
@@ -233,6 +237,12 @@ func TestURLhausSubmitRejectsIneligibleURL(t *testing.T) {
 func TestURLhausSubmitAllSendsOnlyVettedURLs(t *testing.T) {
 	var bodies []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The duplicate pre-check shares the fake upstream; answer it so the
+		// test never reaches the real URLhaus lookup API.
+		if r.URL.Path == "/lookup" {
+			_, _ = w.Write([]byte(`{"query_status":"no_results"}`))
+			return
+		}
 		buf := make([]byte, 1<<16)
 		n, _ := r.Body.Read(buf)
 		bodies = append(bodies, string(buf[:n]))
@@ -244,6 +254,7 @@ func TestURLhausSubmitAllSendsOnlyVettedURLs(t *testing.T) {
 		settings.KeyBazaar:          "k",
 		settings.KeyURLhausEndpoint: upstream.URL,
 	})
+	s.urlhausLookupEndpointDefault = upstream.URL + "/lookup"
 	dir := t.TempDir()
 	seedURLhausArtifact(t, s, dir, "ddd4", "http://evil.tld/good.sh", shellPayload, time.Hour)
 	seedURLhausArtifact(t, s, dir, "eee5", "http://127.0.0.1/bad.sh", shellPayload, time.Hour)
@@ -286,6 +297,106 @@ func TestURLhausSubmitAllSendsOnlyVettedURLs(t *testing.T) {
 	}
 	if len(bodies) != 1 {
 		t.Errorf("upstream saw %d batches after re-run, want 1", len(bodies))
+	}
+}
+
+// A URL URLhaus already lists is not a failure: the pre-check records it in
+// the ledger as already_listed, nothing reaches the submission endpoint, and
+// the response tells the operator why.
+func TestURLhausSubmitReportsAlreadyListed(t *testing.T) {
+	var submitHits int
+	var mu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/lookup" {
+			_, _ = w.Write([]byte(`{"query_status":"ok"}`))
+			return
+		}
+		mu.Lock()
+		submitHits++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"query_status":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	s := newIntelTestServer(t, map[string]string{
+		settings.KeyBazaar:          "k",
+		settings.KeyURLhausEndpoint: upstream.URL,
+	})
+	s.urlhausLookupEndpointDefault = upstream.URL + "/lookup"
+	seedURLhausArtifact(t, s, t.TempDir(), "fff6", "http://evil.tld/already.sh", shellPayload, time.Hour)
+
+	w := httptest.NewRecorder()
+	s.handleURLhausSubmit(w, httptest.NewRequest(http.MethodPost, "/api/intel/urlhaus/submit", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d: %s", w.Code, w.Body.String())
+	}
+	var out urlhausSubmitResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Status != "ok" || out.Submitted != 0 || out.Listed != 1 {
+		t.Fatalf("response = %+v, want status ok, submitted 0, listed 1", out)
+	}
+	mu.Lock()
+	hits := submitHits
+	mu.Unlock()
+	if hits != 0 {
+		t.Errorf("already-listed URL reached the submission endpoint (%d POSTs)", hits)
+	}
+	if got, _ := s.st.URLhausSubmitted("http://evil.tld/already.sh"); !got {
+		t.Error("already-listed URL must be recorded in the ledger so later runs skip it")
+	}
+}
+
+// A failed submission must surface a safe cause, not just "see server logs" —
+// in the response and in the server log.
+func TestURLhausSubmitErrorNamesSafeCause(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/lookup" {
+			_, _ = w.Write([]byte(`{"query_status":"no_results"}`))
+			return
+		}
+		http.Error(w, "provider-secret-body", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	var logged bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(old)
+
+	s := newIntelTestServer(t, map[string]string{
+		settings.KeyBazaar:          "k",
+		settings.KeyURLhausEndpoint: upstream.URL,
+	})
+	s.urlhausLookupEndpointDefault = upstream.URL + "/lookup"
+	seedURLhausArtifact(t, s, t.TempDir(), strings.Repeat("7", 64), "http://evil.tld/x.sh", shellPayload, time.Hour)
+
+	w := httptest.NewRecorder()
+	s.handleURLhausSubmit(w, httptest.NewRequest(http.MethodPost, "/api/intel/urlhaus/submit", nil))
+	var out urlhausSubmitResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out.Status != "error" || !strings.Contains(out.Error, "HTTP 503") {
+		t.Fatalf("response = %+v, want an error naming HTTP 503", out)
+	}
+	if strings.Contains(out.Error, "provider-secret-body") {
+		t.Errorf("provider body leaked into the response: %q", out.Error)
+	}
+	if !strings.Contains(logged.String(), "HTTP 503") {
+		t.Errorf("server log missing the safe cause: %q", logged.String())
+	}
+	if strings.Contains(logged.String(), "provider-secret-body") {
+		t.Errorf("provider body leaked into the log: %q", logged.String())
+	}
+}
+
+// The ledger literals are duplicated by contract (intel packages never import
+// store). A drift would silently break the funnel/stats exclusions and the
+// panel's already_listed rendering, so pin them where both are importable.
+func TestURLhausLedgerStatusAgreesAcrossPackages(t *testing.T) {
+	if urlhaus.StatusAlreadyListed != store.URLhausStatusAlreadyListed {
+		t.Fatalf("urlhaus.StatusAlreadyListed = %q, store.URLhausStatusAlreadyListed = %q",
+			urlhaus.StatusAlreadyListed, store.URLhausStatusAlreadyListed)
 	}
 }
 

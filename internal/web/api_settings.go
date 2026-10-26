@@ -80,7 +80,7 @@ var settingsRegistry = []settingMeta{
 
 	// --- URLhaus sharing knobs (non-secret; the Auth-Key is the shared
 	// MalwareBazaar one above — there is deliberately no urlhaus key field) ---
-	{Key: settings.KeyURLhausEndpoint, Kind: kindText, Label: "API endpoint"},
+	{Key: settings.KeyURLhausEndpoint, Kind: kindText, Label: "Submission API endpoint"},
 	{Key: settings.KeyURLhausTags, Kind: kindText, Label: "URL tags"},
 	{Key: settings.KeyURLhausActiveDays, Kind: kindInt, Label: "Active window (days)", MinInt: 1, MaxInt: 3, HasIntRange: true},
 	{Key: settings.KeyURLhausAnonymous, Kind: kindBool, Label: "Anonymous submissions"},

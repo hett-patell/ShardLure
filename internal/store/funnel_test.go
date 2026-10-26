@@ -101,6 +101,20 @@ func TestPayloadFunnelCountsEachStage(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE urlhaus_submissions SET submitted_at_key=NULL WHERE url=?", "http://198.51.100.7/y.sh"); err != nil {
 		t.Fatal(err)
 	}
+	// A URL URLhaus already listed (recorded by Share's duplicate pre-check)
+	// is not a submission of ours; only the two "ok" rows count as shared.
+	if err := s.RecordURLhausSubmission("http://198.51.100.7/listed-elsewhere", URLhausStatusAlreadyListed, in); err != nil {
+		t.Fatal(err)
+	}
+	// An older build recorded the plaintext already_queued answer under its
+	// own status; a pre-v22 row (no exact key) exercises the legacy branch of
+	// the filtered count too.
+	if err := s.RecordURLhausSubmission("http://198.51.100.7/queued-elsewhere", URLhausStatusAlreadyQueued, in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE urlhaus_submissions SET submitted_at_key=NULL WHERE url=?", "http://198.51.100.7/queued-elsewhere"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.RecordThreatFoxSubmission("198.51.100.7:80", "ip:port", "elf.mirai", "ok", old); err != nil {
 		t.Fatal(err)
 	}

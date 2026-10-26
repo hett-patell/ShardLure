@@ -25,9 +25,16 @@ func TestDiagnosticPrivacyHTTPAndLedgerFailure(t *testing.T) {
 		t.Error("HTTP error boundary leaked private diagnostics")
 	}
 	logged.Reset()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) }))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/lookup" {
+			_, _ = w.Write([]byte(`{"query_status":"no_results"}`))
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
 	defer upstream.Close()
 	s := newIntelTestServer(t, map[string]string{settings.KeyBazaar: "inert", settings.KeyURLhausEndpoint: upstream.URL})
+	s.urlhausLookupEndpointDefault = upstream.URL + "/lookup"
 	seedURLhausArtifact(t, s, t.TempDir(), strings.Repeat("a", 64), "http://8.8.8.8/inert.sh", shellPayload, time.Hour)
 	if err := s.st.WithTx(func(tx *sql.Tx) error {
 		_, err := tx.Exec("CREATE TRIGGER stop_ledger BEFORE INSERT ON urlhaus_submissions BEGIN SELECT RAISE(ABORT,'inert-private-key'); END")

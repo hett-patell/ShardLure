@@ -106,8 +106,23 @@ func TestURLhausCandidatesAndPendingFilter(t *testing.T) {
 	}
 
 	// Once submitted, it drops out of both candidates and pending.
-	if err := s.RecordURLhausSubmission("http://evil.tld/good", "ok", time.Now()); err != nil {
+	submittedAt := time.Now().Add(-time.Hour)
+	if err := s.RecordURLhausSubmission("http://evil.tld/good", "ok", submittedAt); err != nil {
 		t.Fatalf("record: %v", err)
+	}
+	// A URL the duplicate pre-check found already on URLhaus is terminal for
+	// dedup but is NOT a submission of ours: it must not inflate the total or
+	// move the "last submitted" clock. Without its exact key it exercises the
+	// legacy branch of the filtered "latest" query; the historical
+	// already_queued status is excluded the same way.
+	if err := s.RecordURLhausSubmission("http://evil.tld/listed-elsewhere", URLhausStatusAlreadyListed, time.Now()); err != nil {
+		t.Fatalf("record listed: %v", err)
+	}
+	if _, err := s.db.Exec("UPDATE urlhaus_submissions SET submitted_at_key=NULL WHERE url=?", "http://evil.tld/listed-elsewhere"); err != nil {
+		t.Fatalf("legacy key: %v", err)
+	}
+	if err := s.RecordURLhausSubmission("http://evil.tld/queued-elsewhere", URLhausStatusAlreadyQueued, time.Now()); err != nil {
+		t.Fatalf("record queued: %v", err)
 	}
 	cands, _ = s.URLhausCandidates(3, 0)
 	if len(cands) != 1 {
@@ -116,6 +131,9 @@ func TestURLhausCandidatesAndPendingFilter(t *testing.T) {
 	stats, _ = s.URLhausSubmissionStats(3)
 	if stats.Pending != 1 || stats.TotalSubmitted != 1 {
 		t.Errorf("pending=%d submitted=%d, want 1/1", stats.Pending, stats.TotalSubmitted)
+	}
+	if !stats.LastSubmittedAt.Equal(submittedAt) {
+		t.Errorf("lastSubmittedAt = %v, want %v (the already_listed row is not a submission)", stats.LastSubmittedAt, submittedAt)
 	}
 }
 

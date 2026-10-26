@@ -182,7 +182,12 @@ type urlhausSubmitResponse struct {
 	Status    string `json:"status"`
 	Submitted int    `json:"submitted"`
 	Skipped   int    `json:"skipped"`
-	Error     string `json:"error,omitempty"`
+	// Listed counts candidates URLhaus's own lookup already had on record.
+	// They are skipped and recorded in the ledger as already_listed, but they
+	// are not submissions of ours — the operator needs the distinction to see
+	// why a batch submitted fewer URLs than the panel offered.
+	Listed int    `json:"listed"`
+	Error  string `json:"error,omitempty"`
 }
 
 // handleURLhausSubmit submits every currently-eligible URL to URLhaus.
@@ -255,28 +260,44 @@ func (s *Server) handleURLhausSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.urlhausBatchMu.Unlock()
 
+	listed := 0
 	submitted, skipped, ferr := urlhaus.Share(r.Context(), s.st, cands, urlhaus.Options{
 		APIKey:     apiKey,
 		Endpoint:   s.urlhausEndpointLive(),
 		ExtraTags:  s.urlhausTagsLive(),
 		ActiveDays: activeDays,
 		Anonymous:  s.urlhausAnonymousLive(),
+		// The duplicate pre-check: a URL URLhaus already lists is recorded as
+		// already_listed and never submitted. Without it a batch containing
+		// duplicates came back in a shape the client refuses, failing whole.
+		LookupEndpoint: s.urlhausLookupEndpoint(),
+		OnProgress: func(_ urlhaus.Candidate, ok bool, reason string) {
+			if !ok && reason == urlhaus.ReasonAlreadyListed {
+				listed++
+			}
+		},
 	})
 
-	resp := urlhausSubmitResponse{Status: "ok", Submitted: submitted, Skipped: skipped}
+	resp := urlhausSubmitResponse{Status: "ok", Submitted: submitted, Skipped: skipped, Listed: listed}
 	switch {
 	case errors.Is(ferr, urlhaus.ErrUnauthorized):
-		logOperationError("urlhaus submit", ferr)
+		logOperationError("urlhaus submit", ferr, urlhaus.FailureSummary(ferr))
 		resp.Status = "error"
 		resp.Error = "abuse.ch rejected the Auth-Key"
 	case ferr != nil:
-		logOperationError("urlhaus submit", ferr)
+		// FailureSummary is bounded and provider-safe (no URL, key, path or
+		// upstream free text), so it is both logged and shown to the operator.
+		// The old message pointed at server logs that said only
+		// "operation_failed".
+		cause := urlhaus.FailureSummary(ferr)
+		logOperationError("urlhaus submit", ferr, cause)
 		if submitted > 0 {
 			resp.Status = "partial"
+			resp.Error = "some submissions failed — " + cause
 		} else {
 			resp.Status = "error"
+			resp.Error = "submission failed — " + cause
 		}
-		resp.Error = "some submissions failed — see server logs"
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }

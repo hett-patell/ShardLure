@@ -1675,9 +1675,9 @@
           </tbody>
         </table>
         <div id="urlhaus-log-wrap" style="margin-top:14px;display:none">
-          <div class="meta" style="margin-bottom:6px">recent submissions</div>
+          <div class="meta" style="margin-bottom:6px">recent submissions &amp; listing checks</div>
           <table class="dense" id="urlhaus-log">
-            <thead><tr><th>url</th><th style="width:110px">status</th><th style="width:150px">submitted</th></tr></thead>
+            <thead><tr><th>url</th><th style="width:110px">status</th><th style="width:150px">recorded</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -4142,7 +4142,7 @@ function renderURLhaus(d) {
   }
 
   if (!cands.length) {
-    tb.innerHTML = '<tr><td colspan="6"><div class="empty">no fetched payload URLs in the active window (or all already submitted)</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">no fetched payload URLs in the active window (or all already submitted/listed)</div></td></tr>';
   } else {
     tb.innerHTML = cands.map(function(c) {
       const gate = c.eligible
@@ -4171,7 +4171,7 @@ function renderURLhaus(d) {
     logTb.innerHTML = rows.map(function(rw) {
       return '<tr>' +
         '<td class="bz-sha" title="' + escHtml(rw.url) + '">' + escHtml(rw.url) + '</td>' +
-        '<td>' + escHtml(rw.status || '\u2014') + '</td>' +
+        '<td>' + escHtml(rw.status === 'already_listed' || rw.status === 'already_queued' ? 'already listed' : (rw.status || '\u2014')) + '</td>' +
         '<td class="range">' + (rw.submittedAt ? fmtShortTime(rw.submittedAt) : '\u2014') + '</td>' +
         '</tr>';
     }).join('');
@@ -4207,6 +4207,12 @@ async function submitOneURLhaus(btn) {
       if (row) { row.style.opacity = '0.5'; row.style.textDecoration = 'line-through'; }
       btn.replaceWith(document.createTextNode('submitted \u2713'));
       setTimeout(refreshURLhaus, 800);
+    } else if (d.status === 'ok' && (d.listed || 0) > 0) {
+      // URLhaus already lists this URL (another reporter got there first): the
+      // server recorded it in the ledger, so the next refresh drops the row.
+      if (row) { row.style.opacity = '0.5'; row.style.textDecoration = 'line-through'; }
+      btn.replaceWith(document.createTextNode('already listed'));
+      setTimeout(refreshURLhaus, 800);
     } else {
       btn.disabled = false;
       btn.textContent = '\u25b2 submit';
@@ -4238,7 +4244,8 @@ async function submitAllURLhaus(btn) {
     const d = await r.json().catch(function() { return {}; });
     if (d.status === 'ok' || d.status === 'partial') {
       showURLhausBanner('\u2713 submitted ' + (d.submitted || 0) + ' \u00b7 skipped ' + (d.skipped || 0) +
-        (d.status === 'partial' ? ' \u00b7 some failed \u2014 check server logs' : '') +
+        ((d.listed || 0) > 0 ? ' (' + d.listed + ' already listed upstream)' : '') +
+        (d.status === 'partial' ? ' \u00b7 some failed \u2014 ' + (d.error || 'check server logs') : '') +
         ' \u00b7 at ' + new Date().toLocaleTimeString(),
         d.status === 'partial' ? 'warn' : 'ok');
       setTimeout(refreshURLhaus, 800);

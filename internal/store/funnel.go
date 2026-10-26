@@ -131,7 +131,11 @@ FROM (SELECT DISTINCT sha256 FROM artifacts
 		query string
 	}{
 		{&out.SharedBazaar, funnelLedgerCountSQL(bazaarLedger, "COALESCE(response_status,'')<>'file_already_known'")},
-		{&out.SharedURLhaus, funnelLedgerCountSQL(urlhausLedger, "")},
+		// A listing check that found the URL already on URLhaus contributed
+		// nothing new, exactly as bazaar's file_already_known does not count.
+		// Historical already_queued rows are the same answer from an older
+		// build, so both statuses are excluded.
+		{&out.SharedURLhaus, funnelLedgerCountSQL(urlhausLedger, urlhausNotSubmittedWhere)},
 		{&out.SharedThreatFox, funnelLedgerCountSQL(threatfoxLedger, "")},
 	}
 	for _, l := range ledgers {

@@ -33,6 +33,9 @@ func WaitForProviderAttempt(ctx context.Context, last time.Time, gap time.Durati
 	}
 }
 
+// ErrResponseTooLarge marks a provider body that exceeded its read cap.
+var ErrResponseTooLarge = errors.New("response too large")
+
 // ReadBoundedResponse reads at most limit bytes and rejects a body that has
 // even one byte beyond the cap. io.LimitReader(limit) alone cannot distinguish
 // an exact-limit body from a truncated oversized response.
@@ -42,7 +45,9 @@ func ReadBoundedResponse(service string, body io.Reader, limit int64) ([]byte, e
 		return nil, SafeRequestError(service, "read response", err)
 	}
 	if int64(len(raw)) > limit {
-		return nil, fmt.Errorf("%s: response too large", service)
+		// Sentinel so callers can classify the failure without reading text;
+		// the message keeps the service name ("urlhaus: response too large").
+		return nil, fmt.Errorf("%s: %w", service, ErrResponseTooLarge)
 	}
 	return raw, nil
 }

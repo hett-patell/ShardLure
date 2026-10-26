@@ -48,7 +48,10 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 	statusOnly := fs.Bool("status", false, "list past submissions from urlhaus_submissions instead of submitting")
 	anonymous := fs.Bool("anonymous", cfg.Intel.URLhaus.Anonymous, "hide your abuse.ch handle on the public record")
 	activeDaysFlag := fs.Int("active-days", activeDays, "only submit URLs confirmed serving within this many days (may only tighten)")
-	endpoint := fs.String("endpoint", "", "override the URLhaus endpoint (default from config or builtin)")
+	endpoint := fs.String("endpoint", "", "override the URLhaus submission endpoint (default from config or builtin)")
+	// The duplicate pre-check is a separate abuse.ch host/path; an operator
+	// pointing --endpoint at a mock needs the lookup pointed somewhere too.
+	lookupEndpoint := fs.String("lookup-endpoint", "", "override the read-only URLhaus lookup endpoint (default builtin)")
 	// Unknown flags are fatal by convention in this CLI (flag.ExitOnError),
 	// so a typo can never silently change behaviour.
 	if err := fs.Parse(args); err != nil {
@@ -105,6 +108,7 @@ func cmdShareURLhaus(st *store.Store, cfg config.Config, keys *settings.Keystore
 	opts := urlhaus.Options{
 		APIKey:         apiKey,
 		Endpoint:       ep,
+		LookupEndpoint: *lookupEndpoint,
 		ExtraTags:      cfg.Intel.URLhaus.Tags,
 		ActiveDays:     *activeDaysFlag,
 		DryRun:         *dryRun,
