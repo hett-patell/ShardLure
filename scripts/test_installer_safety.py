@@ -97,9 +97,19 @@ class InstallerSafetyTests(unittest.TestCase):
             seen.append(args[2])
             return subprocess.CompletedProcess(args, 0, "User=shardlure\nGroup=shardlure\n", "")
 
-        safety.verify_unit_accounts(None, runner=manager)
+        for unit in safety.SHARE_UNITS:
+            (self.units / unit).write_text("[Service]\n")
+        safety.verify_unit_accounts(None, runner=manager, systemd_dir=self.units)
         for unit in (u for u in safety.SHARE_UNITS if u.endswith(".service")):
             self.assertIn(unit, seen)
+
+        # A host that has not installed them (the `run` wrapper writes only the
+        # live unit) must not be refused for units that do not exist.
+        empty = self.root / "empty-units"
+        empty.mkdir()
+        seen.clear()
+        safety.verify_unit_accounts(None, runner=manager, systemd_dir=empty)
+        self.assertFalse([u for u in seen if "shardlure-share" in u], seen)
 
     def test_descriptor_permission_update_rejects_parent_replacement(self):
         evidence = self.data / "evidence"
