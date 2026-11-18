@@ -1657,7 +1657,12 @@ def installation_state():
 
 
 def managed_resource_paths() -> list[Path]:
-    return [SYSTEMD_DIR / "shardlure-live.service", SYSTEMD_DIR / "cowrie.service", BIN_DIR / "shardlure"]
+    # installer_safety owns the unit names (it also holds the publish
+    # allow-list); uninstall must remove exactly what install may write, or a
+    # leftover shardlure-share.timer keeps firing after the data dir is gone.
+    share_units = [SYSTEMD_DIR / name for name in installer_safety.SHARE_UNITS]
+    return [SYSTEMD_DIR / "shardlure-live.service", *share_units,
+            SYSTEMD_DIR / "cowrie.service", BIN_DIR / "shardlure"]
 
 
 def validate_installation() -> None:
@@ -2144,13 +2149,26 @@ def remove_services() -> None:
     log("stopping and removing systemd services")
     state = installation_state()
     state.check_resources(managed_resource_paths())
+    # Disarm the share timer first: it is the only unit that starts itself, so
+    # leaving it enabled would keep firing oneshots against a data dir this
+    # uninstall is about to delete.
+    timer = SYSTEMD_DIR / "shardlure-share.timer"
+    if timer.exists():
+        run(["systemctl", "disable", "--now", timer.name]).check_returncode()
     units = [name for name in ("shardlure-live.service", "cowrie.service") if (SYSTEMD_DIR / name).exists()]
     if units:
         run(["systemctl", "stop", *units]).check_returncode()
         run(["systemctl", "disable", *units]).check_returncode()
-    for unit in units:
+    share_units = [name for name in installer_safety.SHARE_UNITS
+                   if name != timer.name and (SYSTEMD_DIR / name).exists()]
+    if share_units:
+        # Oneshot services and the target: nothing to stop, only to forget.
+        run(["systemctl", "disable", *share_units]).check_returncode()
+    for unit in [*units, *share_units]:
         p = SYSTEMD_DIR / unit
         state.remove(p)
+    if timer.exists() or timer.is_symlink():
+        state.remove(timer)
     run(["systemctl", "daemon-reload"]).check_returncode()
 
 

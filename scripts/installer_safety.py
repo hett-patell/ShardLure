@@ -23,6 +23,19 @@ import uuid
 from pathlib import Path
 
 
+# Units the installer may publish besides the binary and the live service. The
+# share pass is opt-in (--share-timer) but always installed, so its five unit
+# files are part of the administrative surface the safety helper knows by name
+# rather than by pattern.
+SHARE_UNITS = (
+    "shardlure-share-bazaar.service",
+    "shardlure-share-urlhaus.service",
+    "shardlure-share-threatfox.service",
+    "shardlure-share.target",
+    "shardlure-share.timer",
+)
+
+
 class SafetyError(ValueError):
     pass
 
@@ -722,6 +735,9 @@ def refuse_active_services(cowrie: bool, runner=None) -> None:
 def verify_unit_accounts(cowrie_user="cowrie", runner=None) -> None:
     runner = runner or subprocess.run
     units = {"shardlure-live.service": "shardlure"}
+    # The share cadence runs the CLI as the same unprivileged account as the
+    # live service; it needs the data dir (ledgers + keystore), nothing else.
+    units.update({unit: "shardlure" for unit in SHARE_UNITS if unit.endswith(".service")})
     if cowrie_user:
         units["cowrie.service"] = cowrie_user
     for unit, user in units.items():
@@ -872,6 +888,7 @@ def main(argv=None) -> int:
         ensure_authbind(args.port, user)
     elif args.operation == "publish":
         allowed = {args.bin_dir / "shardlure", args.systemd_dir / "shardlure-live.service"}
+        allowed.update(args.systemd_dir / unit for unit in SHARE_UNITS)
         if user:
             allowed.add(args.systemd_dir / "cowrie.service")
         if args.path not in allowed or args.source is None or args.mode not in (0o600, 0o755):
