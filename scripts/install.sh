@@ -600,7 +600,7 @@ cleanup_install() {
   if [[ "$INSTALL_MAINTENANCE" == 1 ]]; then
     installer_safety unseal --owner-pid "$$" || result=1
   fi
-  rm -f -- "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN" "$DL_COWRIE_PATCH" "$DL_SAFETY" "$DL_CONFIG" "$DL_LIVE_UNIT" "$DL_COWRIE_UNIT"
+  rm -f -- "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN" "$DL_COWRIE_PATCH" "$DL_SAFETY" "$DL_CONFIG" "$DL_LIVE_UNIT" "$DL_COWRIE_UNIT" "$DL_SHARE_TARGET" "$DL_SHARE_TIMER" "$UNIT_STAGE"/shardlure-share-*.service
   rmdir -- "$UNIT_STAGE" || result=1
   return "$result"
 }
