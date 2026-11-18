@@ -94,10 +94,13 @@ func TestClassifyTruncatedELFFamilyIsInternalOnly(t *testing.T) {
 	}
 }
 
-// The share bazaar upload of a truncated ELF carries no signature: no
-// "Suspected family" in the comment and no family or behaviour tags, while the
-// complete file of the same sample does (control).
-func TestShareUploadOfTruncatedELFCarriesNoFamily(t *testing.T) {
+// A truncated ELF is never uploaded at all: the fragment is refused by Vet
+// before any label is built, and only the complete file of the same sample
+// reaches the endpoint. Before the completeness reject, both were uploaded —
+// the fragment with no family (Outbound strips it) but still as its own
+// "inserted" corpus entry, which is how five cuts of one miner were shared as
+// five samples.
+func TestShareSkipsTruncatedELF(t *testing.T) {
 	whole, cut := truncatedXMRigELF(t)
 	dir := t.TempDir()
 	type upload struct {
@@ -139,19 +142,20 @@ func TestShareUploadOfTruncatedELFCarriesNoFamily(t *testing.T) {
 		{SHA256: "22bb", LocalPath: writeSample(t, dir, "whole", whole), SizeBytes: int64(len(whole)), CreatedAt: now, Origin: "cowrie_download", ObservedAt: now},
 	}
 	opts := Options{APIKey: "k", Endpoint: srv.URL, MaxBytes: 1 << 20, RateLimit: time.Millisecond}
-	if uploaded, _, err := Share(context.Background(), newMemRecorder(), cands, opts); err != nil || uploaded != 2 {
-		t.Fatalf("Share: uploaded %d, %v", uploaded, err)
+	uploaded, skipped, err := Share(context.Background(), newMemRecorder(), cands, opts)
+	if err != nil {
+		t.Fatalf("Share: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("want 2 uploads, got %d", len(got))
+	if uploaded != 1 || skipped != 1 {
+		t.Fatalf("want uploaded=1 skipped=1 (truncated refused), got uploaded=%d skipped=%d", uploaded, skipped)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want exactly 1 upload (the whole sample), got %d", len(got))
 	}
 	labelled := func(u upload) bool {
 		return strings.Contains(u.Context["comment"], "Suspected family") || containsTag(u.Tags, "xmrig") || containsTag(u.Tags, "miner")
 	}
-	if labelled(got[0]) {
-		t.Fatalf("truncated ELF uploaded with a family label: %+v", got[0])
-	}
-	if !labelled(got[1]) {
-		t.Fatalf("control: the complete ELF should carry its family: %+v", got[1])
+	if !labelled(got[0]) {
+		t.Fatalf("control: the complete ELF should carry its family: %+v", got[0])
 	}
 }
