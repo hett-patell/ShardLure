@@ -633,6 +633,30 @@ Before anything is sent, every candidate passes a **submission-policy gate** (`i
 
 Re-running is safe: every sha256 we successfully submit (including `file_already_known` responses) is recorded in `bazaar_uploads` and skipped on the next run.
 
+### Scheduled sharing (all three abuse.ch services)
+
+`share` is an on-demand command: nothing runs it for you. The installer ships a
+6-hourly timer that runs all three passes — MalwareBazaar, URLhaus and ThreatFox
+— as one oneshot service per provider behind a shared target, so a provider that
+fails cannot starve the other two. It is **installed but not enabled**: posting to
+abuse.ch is egress under your account, so turning it on is a decision, not an
+installer default.
+
+```bash
+sudo systemctl enable --now shardlure-share.timer   # opt in
+systemctl list-timers shardlure-share.timer         # next run
+journalctl -u shardlure-share-bazaar -n 20          # what the last pass did
+```
+
+Pass `--share-timer` to `install.sh` to enable it during installation, or set
+`SHARE_TIMER=1`. A reinstall keeps an already-enabled timer enabled.
+
+The cadence is not cosmetic: MalwareBazaar's 10-day freshness rule is measured
+from first observation, so a capture that waits for an operator can age out of
+policy — and a long gap lets more than one run's `--limit` (10 MalwareBazaar /
+25 URLhaus / 25 ThreatFox) accumulate unshared. Every pass reuses the same vetting
+gate as the CLI, so the timer cannot ship anything the manual command would not.
+
 You can also share payloads from the web dashboard: open the payload inspector modal on any captured artifact and click **Share to MalwareBazaar**. Set `SHARDLURE_BAZAAR_KEY` in your environment or systemd unit for this to work. The Red Team tab's MalwareBazaar panel shows upload history and every unshared candidate in the freshness window with the vetting gate's decision, including *why* a sample was held back (SSH key, unconfirmed, …); its **pending** count is the number of samples the gate would actually accept, and its Upload / Upload all eligible buttons act only on those (the server re-checks each one).
 
 **Flags**

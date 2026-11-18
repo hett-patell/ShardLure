@@ -91,6 +91,14 @@ var benignKinds = map[string]bool{
 // that only provenance would have accepted.
 const ReasonHarvestedNoSignal = "harvested second-stage sample without a family or behaviour signal"
 
+// ReasonIncompleteSample is Vet's refusal of a capture that provably ends
+// before the structure its own ELF headers declare (see Classification.Truncated).
+// A fragment is not a new sample: MalwareBazaar keys on sha256, so each cut of
+// the same miner is accepted as a distinct "inserted" entry, and a partial
+// upload shadows the complete one. No family/behaviour/provenance signal may
+// override this — the bytes are missing, whatever we think they are.
+const ReasonIncompleteSample = "incomplete sample: file ends before its declared ELF structure"
+
 // VetOptions holds optional policy overrides for Vet.
 type VetOptions struct {
 	FreshnessDays int // 1..9 tightens policy; 0, 10, or invalid = hard default (10)
@@ -113,6 +121,13 @@ func Vet(c Candidate, cls Classification, now time.Time, opts ...VetOptions) (bo
 	}
 	if c.SizeBytes < MinSampleBytes {
 		return false, "too small to be a real sample"
+	}
+	// Completeness: a download or SFTP upload that died mid-transfer leaves a
+	// valid prefix behind, which Classify proves from the ELF headers
+	// (Truncated). Reject before the signal checks so no family, behaviour tag
+	// or provenance can wave a fragment through.
+	if cls.Truncated {
+		return false, ReasonIncompleteSample
 	}
 	if benignKinds[cls.FileKind] {
 		return false, "benign content (" + cls.FileKind + ")"

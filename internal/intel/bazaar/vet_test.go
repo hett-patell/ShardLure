@@ -32,6 +32,30 @@ func TestVet(t *testing.T) {
 			wantSub: "unconfirmed",
 		},
 		{
+			// A cut-short capture is not a sample. Provenance would otherwise
+			// accept it (the attacker did fetch it), so this case pins that the
+			// completeness reject wins over every accept signal.
+			name:    "truncated ELF fetched in session rejects (incomplete)",
+			cand:    Candidate{SizeBytes: 6_979_584, Origin: "cowrie_file_download", ObservedAt: fresh},
+			cls:     Classification{FileKind: "ELF", Tags: []string{"elf", "linux"}, Truncated: true},
+			wantOK:  false,
+			wantSub: "incomplete sample",
+		},
+		{
+			name:    "truncated ELF with a family still rejects (incomplete)",
+			cand:    Candidate{SizeBytes: 1_540_096, Origin: "cowrie_download", ObservedAt: fresh},
+			cls:     Classification{FileKind: "ELF", Tags: []string{"elf", "linux", "miner"}, Family: "XMRig", Truncated: true},
+			wantOK:  false,
+			wantSub: "incomplete sample",
+		},
+		{
+			name:    "truncated harvested second stage rejects (incomplete wins over harvest rule)",
+			cand:    Candidate{SizeBytes: 3_211_264, Origin: "quarantine_fetch", ObservedAt: fresh, Depth: 1},
+			cls:     Classification{FileKind: "ELF", Tags: []string{"elf", "linux"}, Truncated: true},
+			wantOK:  false,
+			wantSub: "incomplete sample",
+		},
+		{
 			name:   "fresh NOVEL ELF fetched in session accepts (provenance)",
 			cand:   Candidate{SizeBytes: 1_500_000, Origin: "cowrie_download", ObservedAt: fresh},
 			cls:    Classification{FileKind: "ELF", Tags: []string{"elf", "aarch64", "linux"}},

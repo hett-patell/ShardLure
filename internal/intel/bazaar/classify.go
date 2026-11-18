@@ -23,6 +23,18 @@ type Classification struct {
 	// campaign worker's generic-build exclusion; Classify, the outbound
 	// entry point, strips it again (see Outbound).
 	HeaderMalformed bool
+	// Truncated is set when the file PROVABLY ends before the structure its
+	// own ELF headers declare: either the header table could not be read to
+	// the end (io.EOF/io.ErrUnexpectedEOF), or a PT_LOAD segment runs past
+	// the last byte. Cowrie records these whenever an attacker's wget/sftp
+	// dies mid-transfer, so the archive holds fragments of real miners —
+	// several copies of one binary cut at different offsets. A fragment is
+	// not a sample: Vet hard-rejects it (see ReasonIncompleteSample).
+	//
+	// Unlike HeaderMalformed this is not a *labeling* signal — it says the
+	// bytes are incomplete, not that the classification is unreliable — so
+	// Outbound preserves it: the outbound caller must still refuse to ship.
+	Truncated bool
 }
 
 // Outbound returns the classification as it may leave the host — the label
@@ -38,7 +50,7 @@ func (c Classification) Outbound() Classification {
 	if !c.HeaderMalformed {
 		return c
 	}
-	return Classification{Tags: []string{"elf", "linux"}, FileKind: "ELF", HeaderMalformed: true}
+	return Classification{Tags: []string{"elf", "linux"}, FileKind: "ELF", HeaderMalformed: true, Truncated: c.Truncated}
 }
 
 // Classify inspects a file on disk and returns format/arch/family
@@ -111,9 +123,17 @@ func classifyOpen(f *os.File) (Classification, error) {
 
 	c := Classification{}
 
+	// The declared-size check below needs the real length, not the head we
+	// happened to read. Stat is free here (the file is already open) and a
+	// failure only disables the overrun check, never the classification.
+	var size int64
+	if info, statErr := f.Stat(); statErr == nil {
+		size = info.Size()
+	}
+
 	switch {
 	case bytes.HasPrefix(buf, []byte{0x7f, 'E', 'L', 'F'}):
-		classifyELF(f, buf, &c)
+		classifyELF(f, size, buf, &c)
 	case bytes.HasPrefix(buf, []byte("MZ")):
 		c.FileKind = "PE executable"
 		c.Tags = append(c.Tags, "exe")
@@ -162,7 +182,7 @@ func classifyOpen(f *os.File) (Classification, error) {
 // We open with debug/elf rather than parsing by hand because the
 // e_machine field encoding is annoyingly broad (EM_ARM, EM_AARCH64,
 // EM_X86_64, EM_386, EM_MIPS, EM_MIPSEL, EM_PPC, EM_PPC64, ...).
-func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
+func classifyELF(f io.ReaderAt, size int64, buf []byte, c *Classification) {
 	c.FileKind = "ELF"
 	c.Tags = append(c.Tags, "elf")
 	// Parse the FULL file for structure: debug/elf eagerly reads the section
@@ -185,6 +205,13 @@ func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
 	if err != nil {
 		ef = nil // isPackedELF and the checks below take nil as "no structure"
 		c.HeaderMalformed = true
+		// A short read is truncation, not corruption: the header announced a
+		// table this file does not contain. Cowrie captures exactly this shape
+		// when a session dies mid-download (section headers sit at the END of
+		// an ELF, so the fragment is a valid prefix and nothing else).
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			c.Truncated = true
+		}
 	} else {
 		switch ef.Machine {
 		case elf.EM_X86_64:
@@ -206,6 +233,14 @@ func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
 		// they bundle libc to avoid the target's missing dynamic loader.
 		if isStaticELF(ef) {
 			c.Tags = append(c.Tags, "static")
+		}
+		// A header that parses can still describe a longer file than the one we
+		// hold: a cut that lands after the section table but before the last
+		// PT_LOAD body parses cleanly and would otherwise look whole. Compare
+		// the highest segment end against the real size (size 0 = Stat failed,
+		// check skipped rather than trusted).
+		if size > 0 && elfProgramEnd(ef) > uint64(size) {
+			c.Truncated = true
 		}
 	}
 	// Packing detection (verdict signal + reason to withhold a family guess).
@@ -230,6 +265,22 @@ func classifyELF(f io.ReaderAt, buf []byte, c *Classification) {
 		// (Left blank intentionally; documented so nobody "fixes" it later.)
 		_ = packed
 	}
+}
+
+// elfProgramEnd is the highest offset any PT_LOAD segment claims to occupy.
+// A file shorter than this is missing bytes its own loader would demand; zero
+// when the ELF declares no loadable segment (nothing to prove).
+func elfProgramEnd(ef *elf.File) uint64 {
+	var end uint64
+	for _, p := range ef.Progs {
+		if p.Type != elf.PT_LOAD {
+			continue
+		}
+		if next := p.Off + p.Filesz; next > end {
+			end = next
+		}
+	}
+	return end
 }
 
 func isStaticELF(ef *elf.File) bool {

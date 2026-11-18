@@ -63,6 +63,54 @@ class InstallerSafetyTests(unittest.TestCase):
             self.state.remove(unit)
         self.assertEqual(unit.read_bytes(), b"operator-customized unit")
 
+    def test_share_units_are_publishable_but_arbitrary_names_are_not(self):
+        """The share cadence is part of the administrative surface, by name.
+
+        The allow-list is what stops the installer (running as root) from
+        publishing an arbitrary unit into /etc/systemd/system. The five share
+        units are installed unconditionally but enabled only with
+        --share-timer, so they must be accepted here and nothing else may be.
+        """
+        self.state.begin()
+        source = self.root / "unit.in"
+        source.write_text("[Service]\nExecStart=/usr/bin/true\n")
+        for unit in safety.SHARE_UNITS:
+            with self.subTest(unit=unit):
+                safety.main([
+                    "publish", "--data-dir", str(self.data), "--systemd-dir", str(self.units),
+                    "--bin-dir", str(self.root / "bin"), "--cowrie", "0",
+                    "--path", str(self.units / unit), "--source", str(source), "--mode", "600",
+                ])
+                self.assertTrue((self.units / unit).exists())
+        with self.assertRaises(safety.SafetyError):
+            safety.main([
+                "publish", "--data-dir", str(self.data), "--systemd-dir", str(self.units),
+                "--bin-dir", str(self.root / "bin"), "--cowrie", "0",
+                "--path", str(self.units / "attacker.service"), "--source", str(source),
+                "--mode", "600",
+            ])
+
+    def test_share_services_are_checked_against_the_install_account(self):
+        seen = []
+
+        def manager(args, **kwargs):
+            seen.append(args[2])
+            return subprocess.CompletedProcess(args, 0, "User=shardlure\nGroup=shardlure\n", "")
+
+        for unit in safety.SHARE_UNITS:
+            (self.units / unit).write_text("[Service]\n")
+        safety.verify_unit_accounts(None, runner=manager, systemd_dir=self.units)
+        for unit in (u for u in safety.SHARE_UNITS if u.endswith(".service")):
+            self.assertIn(unit, seen)
+
+        # A host that has not installed them (the `run` wrapper writes only the
+        # live unit) must not be refused for units that do not exist.
+        empty = self.root / "empty-units"
+        empty.mkdir()
+        seen.clear()
+        safety.verify_unit_accounts(None, runner=manager, systemd_dir=empty)
+        self.assertFalse([u for u in seen if "shardlure-share" in u], seen)
+
     def test_descriptor_permission_update_rejects_parent_replacement(self):
         evidence = self.data / "evidence"
         evidence.mkdir()

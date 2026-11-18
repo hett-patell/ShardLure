@@ -16,6 +16,9 @@ set -euo pipefail
 #   --dash-port 8080    Dashboard port (default: 8080)
 #   --data-dir /var/lib/shardlure  Data directory (default: /var/lib/shardlure)
 #   --token TOKEN       Dashboard auth token (SHARDLURE_DASH_TOKEN env var)
+#   --share-timer       Also enable the 6-hourly abuse.ch share timer
+#                       (MalwareBazaar + URLhaus + ThreatFox). Off by default:
+#                       sharing is egress to a third party, so it is opt-in.
 
 REPO="hett-patell/ShardLure"
 TAG="${TAG:-}"
@@ -26,6 +29,7 @@ ADMIN_PORT="${ADMIN_PORT:-22}"
 DASH_PORT="${DASH_PORT:-8080}"
 DATA_DIR="${DATA_DIR:-/var/lib/shardlure}"
 DASH_TOKEN="${DASH_TOKEN:-}"
+SHARE_TIMER="${SHARE_TIMER:-0}"
 
 ABIN="shardlure-linux-amd64"
 declare -A ARCH_MAP
@@ -454,6 +458,78 @@ SVC
   printf '[Install]\nWantedBy=multi-user.target\n'
 }
 
+# The share passes are what make the honeypot a contribution rather than a
+# collector: without a cadence, captured samples sit until an operator runs
+# `shardlure share ...` and MalwareBazaar's hard 10-day freshness rule quietly
+# expires the oldest ones. The units below encode the same three passes the CLI
+# runs, one oneshot service per abuse.ch service, kicked by one 6-hourly timer
+# through a target so a failing provider cannot starve the other two.
+#
+# They are PUBLISHED always but ENABLED only with --share-timer (or if a
+# previous install already enabled the timer): submitting to abuse.ch is
+# egress under the operator's account, so it must be a deliberate opt-in, not
+# an installer default.
+render_share_service() {
+  local provider="$1" limit="$2" service_value
+  for service_value in "$provider" "$limit" "$DATA_DIR" "$DEST"; do
+    systemd_value "$service_value" >/dev/null || return
+  done
+  systemd_path "$DATA_DIR/shardlure.db" >/dev/null || return
+  cat <<SVC
+[Unit]
+Description=ShardLure share pass (abuse.ch $provider)
+After=shardlure-live.service
+ConditionPathExists=$(systemd_path "$DATA_DIR/shardlure.db")
+
+[Service]
+Type=oneshot
+User=shardlure
+Group=shardlure
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=$(systemd_value "$DATA_DIR")
+Environment=$(systemd_environment SHARDLURE_CONFIG "$DATA_DIR/shardlure.yaml")
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=15min
+ExecStart=$(systemd_exec_arg "$DEST") share $provider --limit $limit
+SVC
+}
+
+render_share_target() {
+  cat <<'TARGET'
+[Unit]
+Description=ShardLure abuse.ch share passes (MalwareBazaar + URLhaus + ThreatFox)
+Wants=shardlure-share-bazaar.service shardlure-share-urlhaus.service shardlure-share-threatfox.service
+TARGET
+}
+
+render_share_timer() {
+  cat <<'TIMER'
+[Unit]
+Description=ShardLure abuse.ch share passes every 6h
+
+[Timer]
+OnCalendar=*-*-* 00/6:20:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=shardlure-share.target
+
+[Install]
+WantedBy=timers.target
+TIMER
+}
+
 # Tests source the pure checkout functions above. Return before argument
 # parsing, root checks, downloads, package installation, or filesystem writes.
 if [[ "${SHARDLURE_INSTALL_SOURCE_ONLY:-0}" == "1" ]]; then
@@ -470,6 +546,7 @@ while [[ $# -gt 0 ]]; do
     --dash-port)    DASH_PORT="$2"; shift 2 ;;
     --data-dir)     DATA_DIR="$2"; shift 2 ;;
     --token)        DASH_TOKEN="$2"; shift 2 ;;
+    --share-timer)  SHARE_TIMER=1; shift ;;
     *)              err "unknown option: $1" ;;
   esac
 done
@@ -515,13 +592,15 @@ DL_CONFIG="$(mktemp /tmp/shardlure-config.XXXXXX)"
 UNIT_STAGE="$(mktemp -d /tmp/shardlure-units.XXXXXX)"
 DL_LIVE_UNIT="$UNIT_STAGE/shardlure-live.service"
 DL_COWRIE_UNIT="$UNIT_STAGE/cowrie.service"
+DL_SHARE_TARGET="$UNIT_STAGE/shardlure-share.target"
+DL_SHARE_TIMER="$UNIT_STAGE/shardlure-share.timer"
 INSTALL_MAINTENANCE=0
 cleanup_install() {
   local result=$?
   if [[ "$INSTALL_MAINTENANCE" == 1 ]]; then
     installer_safety unseal --owner-pid "$$" || result=1
   fi
-  rm -f -- "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN" "$DL_COWRIE_PATCH" "$DL_SAFETY" "$DL_CONFIG" "$DL_LIVE_UNIT" "$DL_COWRIE_UNIT"
+  rm -f -- "$DL_BIN" "$DL_SUMS" "$DL_ERR" "$DL_COWRIE_PIN" "$DL_COWRIE_PATCH" "$DL_SAFETY" "$DL_CONFIG" "$DL_LIVE_UNIT" "$DL_COWRIE_UNIT" "$DL_SHARE_TARGET" "$DL_SHARE_TIMER" "$UNIT_STAGE"/shardlure-share-*.service
   rmdir -- "$UNIT_STAGE" || result=1
   return "$result"
 }
@@ -748,19 +827,43 @@ fi
 # -- start services --------------------------------------------------------
 prepare_service_account
 render_live_service > "$DL_LIVE_UNIT"
-unit_files=("$DL_LIVE_UNIT")
+render_share_target > "$DL_SHARE_TARGET"
+render_share_timer > "$DL_SHARE_TIMER"
+for share_provider in bazaar urlhaus threatfox; do
+  case "$share_provider" in
+    bazaar) share_limit=10 ;;
+    *)      share_limit=25 ;;
+  esac
+  render_share_service "$share_provider" "$share_limit" > "$UNIT_STAGE/shardlure-share-$share_provider.service"
+done
+unit_files=("$DL_LIVE_UNIT" "$DL_SHARE_TARGET" "$DL_SHARE_TIMER" "$UNIT_STAGE"/shardlure-share-*.service)
 if [[ "$COWRIE" == 1 ]]; then unit_files+=("$DL_COWRIE_UNIT"); fi
 systemd-analyze verify "${unit_files[@]}" || err "generated unit validation failed; units were not published"
 installer_safety publish --path "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}/shardlure-live.service" --source "$DL_LIVE_UNIT" --mode 600
 if [[ "$COWRIE" == 1 ]]; then
   installer_safety publish --path "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}/cowrie.service" --source "$DL_COWRIE_UNIT" --mode 600
 fi
+# Share units are published whether or not the timer is enabled: publishing
+# changes nothing by itself, and it leaves `systemctl enable --now
+# shardlure-share.timer` as the one-command opt-in for an existing install.
+installer_safety publish --path "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}/shardlure-share.target" --source "$DL_SHARE_TARGET" --mode 600
+installer_safety publish --path "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}/shardlure-share.timer" --source "$DL_SHARE_TIMER" --mode 600
+for share_provider in bazaar urlhaus threatfox; do
+  installer_safety publish --path "${SHARDLURE_SYSTEMD_DIR:-/etc/systemd/system}/shardlure-share-$share_provider.service" --source "$UNIT_STAGE/shardlure-share-$share_provider.service" --mode 600
+done
 log "unprivileged systemd unit written (private dashboard binding)"
 systemctl daemon-reload
 installer_safety verify-units
 UNITS=("shardlure-live.service")
 [[ "$COWRIE" -eq 1 ]] && UNITS+=("cowrie.service")
 systemctl enable "${UNITS[@]}"
+if [[ "$SHARE_TIMER" == 1 ]] || systemctl is-enabled --quiet shardlure-share.timer 2>/dev/null; then
+  systemctl enable shardlure-share.timer
+  systemctl restart shardlure-share.timer
+  log "abuse.ch share timer enabled (every 6h: MalwareBazaar, URLhaus, ThreatFox)"
+else
+  log "abuse.ch share units installed but idle; enable with: systemctl enable --now shardlure-share.timer"
+fi
 if [[ "$COWRIE" -eq 1 ]]; then
   if systemctl is-active --quiet cowrie.service; then
     systemctl restart cowrie.service

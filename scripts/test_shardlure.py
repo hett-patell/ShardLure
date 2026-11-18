@@ -359,6 +359,43 @@ class ServiceSafetyTests(unittest.TestCase):
             self.assertEqual(victim.read_text(), "operator data\n")
             self.assertEqual(victim.stat().st_mode & 0o777, 0o644)
 
+    def test_uninstall_disarms_the_share_timer_before_anything_else(self):
+        """A leftover enabled timer would keep firing at a deleted data dir."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            units_dir = root / "units"
+            units_dir.mkdir()
+            for name in ("shardlure-live.service", "cowrie.service", *shardlure.installer_safety.SHARE_UNITS):
+                (units_dir / name).write_text("inert unit")
+            events = []
+
+            class State:
+                def check_resources(self, paths):
+                    events.append(("check", None))
+
+                def remove(self, path):
+                    events.append(("remove", path.name))
+
+            def fake_run(args, **kwargs):
+                events.append(("run", tuple(args)))
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            with (mock.patch.object(shardlure, "SYSTEMD_DIR", units_dir),
+                  mock.patch.object(shardlure, "installation_state", return_value=State()),
+                  mock.patch.object(shardlure, "run", side_effect=fake_run)):
+                shardlure.remove_services()
+
+            runs = [value for kind, value in events if kind == "run"]
+            disarm = [i for i, args in enumerate(runs)
+                      if "disable" in args and "--now" in args and "shardlure-share.timer" in args]
+            self.assertEqual(len(disarm), 1, runs)
+            first_stop = next(i for i, args in enumerate(runs) if "stop" in args)
+            self.assertLess(disarm[0], first_stop, "the timer must be disarmed before services stop")
+
+            removed = {value for kind, value in events if kind == "remove"}
+            for name in shardlure.installer_safety.SHARE_UNITS:
+                self.assertIn(name, removed)
+
     def test_invalid_generated_units_are_not_published_or_started(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

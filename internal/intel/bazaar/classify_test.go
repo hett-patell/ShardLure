@@ -421,3 +421,79 @@ func TestFirstLineHandlesEmpty(t *testing.T) {
 		}
 	}
 }
+
+// elfWithOverrunSegment builds a *parseable* ELF64 whose single PT_LOAD claims
+// `filesz` bytes at offset 0 while the file itself is a few hundred bytes. This
+// is the cut that lands after the section table: debug/elf parses it happily, so
+// HeaderMalformed stays false and only the declared-size comparison can tell
+// that the sample is a fragment.
+func elfWithOverrunSegment(filesz uint64) []byte {
+	const phoff = 64
+	var b bytes.Buffer
+	b.Write([]byte{0x7f, 'E', 'L', 'F'})
+	b.WriteByte(2) // ELFCLASS64
+	b.WriteByte(1) // ELFDATA2LSB
+	b.WriteByte(1) // EI_VERSION
+	b.Write(make([]byte, 9))
+	_ = binary.Write(&b, binary.LittleEndian, uint16(2)) // e_type EXEC
+	_ = binary.Write(&b, binary.LittleEndian, uint16(elf.EM_X86_64))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(1)) // e_version
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0)) // e_entry
+	_ = binary.Write(&b, binary.LittleEndian, uint64(phoff))
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0))  // e_shoff (no section table)
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0))  // e_flags
+	_ = binary.Write(&b, binary.LittleEndian, uint16(64)) // e_ehsize
+	_ = binary.Write(&b, binary.LittleEndian, uint16(56)) // e_phentsize
+	_ = binary.Write(&b, binary.LittleEndian, uint16(1))  // e_phnum
+	_ = binary.Write(&b, binary.LittleEndian, uint16(64)) // e_shentsize
+	_ = binary.Write(&b, binary.LittleEndian, uint16(0))  // e_shnum
+	_ = binary.Write(&b, binary.LittleEndian, uint16(0))  // e_shstrndx
+	_ = binary.Write(&b, binary.LittleEndian, uint32(elf.PT_LOAD))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(5)) // p_flags R+X
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0)) // p_offset
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0)) // p_vaddr
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0)) // p_paddr
+	_ = binary.Write(&b, binary.LittleEndian, filesz)    // p_filesz: past EOF
+	_ = binary.Write(&b, binary.LittleEndian, filesz)    // p_memsz
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0)) // p_align
+	b.Write(make([]byte, 256))                           // body, far shorter than filesz
+	return b.Bytes()
+}
+
+// TestClassifyFlagsTruncatedELF pins both proofs of incompleteness: a header
+// table cut off mid-read (parse fails with EOF) and a parseable header whose
+// PT_LOAD runs past the last byte. Both must survive the outbound view, because
+// the caller that ships the bytes is the one that has to refuse them.
+func TestClassifyFlagsTruncatedELF(t *testing.T) {
+	dir := t.TempDir()
+
+	whole := largeStaticELF64(elf.EM_X86_64)
+	cases := map[string]struct {
+		raw       []byte
+		truncated bool
+	}{
+		// e_phoff sits at 300 KiB; this cut loses the whole program table.
+		"cut-before-program-table": {raw: whole[:200*1024], truncated: true},
+		// Header parses (no section table, phdr in place) but the segment claims
+		// 4 MiB in a ~350-byte file.
+		"segment-past-eof": {raw: elfWithOverrunSegment(4 << 20), truncated: true},
+		// Control: the same builder with an honest p_filesz is a whole sample.
+		"complete": {raw: whole, truncated: false},
+	}
+	for name, tc := range cases {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, tc.raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Classify(p)
+		if err != nil {
+			t.Fatalf("%s: Classify: %v", name, err)
+		}
+		if got := c.Truncated; got != tc.truncated {
+			t.Errorf("%s: Truncated = %v, want %v (class %+v)", name, got, tc.truncated, c)
+		}
+		if !containsTag(c.Tags, "elf") {
+			t.Errorf("%s: lost the elf tag on the outbound view: %v", name, c.Tags)
+		}
+	}
+}

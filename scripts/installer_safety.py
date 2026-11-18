@@ -23,6 +23,19 @@ import uuid
 from pathlib import Path
 
 
+# Units the installer may publish besides the binary and the live service. The
+# share pass is opt-in (--share-timer) but always installed, so its five unit
+# files are part of the administrative surface the safety helper knows by name
+# rather than by pattern.
+SHARE_UNITS = (
+    "shardlure-share-bazaar.service",
+    "shardlure-share-urlhaus.service",
+    "shardlure-share-threatfox.service",
+    "shardlure-share.target",
+    "shardlure-share.timer",
+)
+
+
 class SafetyError(ValueError):
     pass
 
@@ -719,9 +732,17 @@ def refuse_active_services(cowrie: bool, runner=None) -> None:
             raise SafetyError("stop services and back up data before installer maintenance")
 
 
-def verify_unit_accounts(cowrie_user="cowrie", runner=None) -> None:
+def verify_unit_accounts(cowrie_user="cowrie", runner=None, systemd_dir=None) -> None:
     runner = runner or subprocess.run
+    systemd_dir = Path(systemd_dir) if systemd_dir is not None else Path("/etc/systemd/system")
     units = {"shardlure-live.service": "shardlure"}
+    # The share cadence runs the CLI as the same unprivileged account as the
+    # live service; it needs the data dir (ledgers + keystore), nothing else.
+    # Only units actually present are checked: the `run` wrapper installs the
+    # live unit alone, and asking systemd about a unit that does not exist
+    # reports no User= and would refuse a perfectly good installation.
+    units.update({unit: "shardlure" for unit in SHARE_UNITS
+                  if unit.endswith(".service") and (systemd_dir / unit).exists()})
     if cowrie_user:
         units["cowrie.service"] = cowrie_user
     for unit, user in units.items():
@@ -857,7 +878,7 @@ def main(argv=None) -> int:
     elif args.operation == "prepare":
         prepare_accounts(args.data_dir, args.systemd_dir, user)
     elif args.operation == "verify-units":
-        verify_unit_accounts(user)
+        verify_unit_accounts(user, systemd_dir=args.systemd_dir)
     elif args.operation == "seal":
         state.seal(args.owner_pid)
     elif args.operation == "unseal":
@@ -872,6 +893,7 @@ def main(argv=None) -> int:
         ensure_authbind(args.port, user)
     elif args.operation == "publish":
         allowed = {args.bin_dir / "shardlure", args.systemd_dir / "shardlure-live.service"}
+        allowed.update(args.systemd_dir / unit for unit in SHARE_UNITS)
         if user:
             allowed.add(args.systemd_dir / "cowrie.service")
         if args.path not in allowed or args.source is None or args.mode not in (0o600, 0o755):
