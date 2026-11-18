@@ -77,6 +77,53 @@ class ReleaseContractTests(unittest.TestCase):
             executed = subprocess.run(args, capture_output=True, text=True, check=True)
             self.assertEqual(executed.stdout.splitlines(), ["live", "127.0.0.1:8080", "--cowrie=" + str(data / "cowrie/cowrie.json")])
 
+    def test_installer_publishes_share_units_and_gates_the_timer(self) -> None:
+        """The share cadence ships as units, and enabling it stays opt-in.
+
+        Without a cadence, captures sit until an operator remembers and
+        MalwareBazaar's 10-day freshness rule expires the oldest; with an
+        unconditional enable, a fresh install starts posting to abuse.ch under
+        the operator's account without being asked. Both halves are asserted.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "share-data"
+            data.mkdir()
+            executable = daemon_fixture(data)
+            result = subprocess.run(
+                ["bash", "-c",
+                 'source "$INSTALLER"; DATA_DIR="$TEST_DATA"; DEST="$TEST_DEST"; '
+                 'render_share_service bazaar 10; echo "---TARGET---"; '
+                 'render_share_target; echo "---TIMER---"; render_share_timer'],
+                env=dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1",
+                         INSTALLER=str(INSTALLER_PATH), TEST_DATA=str(data),
+                         TEST_DEST=str(executable)),
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            service, rest = result.stdout.split("---TARGET---", 1)
+            target, timer = rest.split("---TIMER---", 1)
+
+            check_service_unit(self, root, service)
+            self.assertIn("Type=oneshot", service)
+            self.assertIn("User=shardlure", service)
+            self.assertIn("ConditionPathExists=" + str(data / "shardlure.db"), service)
+            executed = subprocess.run(service_command(service, "ExecStart"),
+                                      capture_output=True, text=True, check=True)
+            self.assertEqual(executed.stdout.splitlines(), ["share", "bazaar", "--limit", "10"])
+
+            for provider in ("bazaar", "urlhaus", "threatfox"):
+                self.assertIn(f"shardlure-share-{provider}.service", target)
+            self.assertIn("OnCalendar=*-*-* 00/6:20:00", timer)
+            self.assertIn("Unit=shardlure-share.target", timer)
+            self.assertIn("WantedBy=timers.target", timer)
+
+            installer = INSTALLER_PATH.read_text(encoding="utf-8")
+            self.assertIn('SHARE_TIMER="${SHARE_TIMER:-0}"', installer)
+            self.assertIn("--share-timer)", installer)
+            enable_block = installer[installer.index('systemctl enable "${UNITS[@]}"'):]
+            self.assertIn("SHARE_TIMER", enable_block[:400],
+                          "the share timer must be enabled conditionally, never by default")
+
     def test_installer_applies_release_capture_patch_idempotently(self) -> None:
         patch = ROOT / "install/persona/patches/sftp-capture-permissions.py"
         blocks = runpy.run_path(str(patch))
