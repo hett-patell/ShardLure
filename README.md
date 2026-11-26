@@ -121,7 +121,7 @@ logs, downloads, TTY logs, `etc/userdb.txt`, the sensor `uuid` and the SSH host
 keys, and starts Cowrie again. Everything moves by rename, so ingest keeps its
 place in `cowrie.json`. SSH, the units, your ShardLure config and the binary are
 not touched. It needs GitHub and PyPI, and the honeypot is down while it builds
-(a few minutes). If a step fails, the old tree is put back and started again,
+(about a minute on a 4-core ARM VPS). If a step fails, the old tree is put back and started again,
 and the incomplete new one is kept as `cowrie.failed-<commit>-<time>`. Hand
 edits to the old `etc/cowrie.cfg` are not carried over: compare it with the new
 one, then delete the old tree.
