@@ -24,7 +24,7 @@ from unittest import mock
 from scripts import shardlure
 
 
-EXPECTED_PIN = "c17c9b73d6af0972334ea1e90b20d974cb24eeca"
+EXPECTED_PIN = "183a3b1bc361bb941e1d54874922399baac42af0"
 
 
 def tailscale_fixture(root: Path) -> tuple[Path, dict[str, str]]:
@@ -125,7 +125,7 @@ class CowriePinTests(unittest.TestCase):
     def test_repository_pin_is_the_tested_cowrie_commit(self) -> None:
         # The persona patches are anchored on exact upstream text, so the
         # shipped pin must be the commit the patch set was validated against
-        # (v3.1.1). check-cowrie-patches.sh asserts the same value.
+        # (v3.1.8). check-cowrie-patches.sh asserts the same value.
         self.assertEqual(read_cowrie_pin(shardlure.COWRIE_PIN_FILE), EXPECTED_PIN)
 
     def test_read_cowrie_pin_rejects_missing_file(self) -> None:
@@ -768,7 +768,7 @@ class ServiceSafetyTests(unittest.TestCase):
         self.assertEqual(fallback.getint("honeypot", "boot_offset"), anchor)
 
     def test_max_input_size_is_pinned_at_the_measured_16k_everywhere(self):
-        # Phase B Task 8: [shell] max_input_size stays v3.1.1's 16384, pinned
+        # Phase B Task 8: [shell] max_input_size stays Cowrie's 16384, pinned
         # explicitly (the cfg comment records the arm measurement: a larger
         # cap stalls every session up to the 10 s parse timeout and then
         # answers a syntax error). The template, the patch_cowrie_cfg
@@ -805,6 +805,42 @@ class ServiceSafetyTests(unittest.TestCase):
         heredoc.read_string(managed)
         self.assertEqual(heredoc.getint("shell", "max_input_size"), 16384)
         self.assertEqual(heredoc.getint("honeypot", "download_limit_size"), 52428800)
+
+    def test_ttylog_bounds_and_bazaar_uploader_are_pinned_everywhere(self):
+        # Cowrie v3.1.6 added [honeypot] ttylog_limit_size (default 10 MiB; a
+        # session that fills it is disconnected) and ttylog_min_free (default
+        # 0, off), and v3.1.4 an [output_malwarebazaar] uploader that would
+        # share captures past bazaar.Vet. All four cfg writers pin the same
+        # values, and an operator's own value is kept rather than duplicated.
+        root = Path(__file__).resolve().parent.parent
+
+        def check(parser: configparser.ConfigParser, where: str) -> None:
+            self.assertEqual(parser.getint("honeypot", "ttylog_limit_size"), 10485760, where)
+            self.assertEqual(parser.getint("honeypot", "ttylog_min_free"), 2147483648, where)
+            self.assertFalse(parser.getboolean("output_malwarebazaar", "enabled"), where)
+
+        def parse(text: str) -> configparser.ConfigParser:
+            parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+            parser.read_string(text)
+            return parser
+
+        check(parse((root / "install" / "persona" / "cowrie-stealth.cfg").read_text()), "template")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(shardlure, "COWRIE_HOME", Path(tmp)):
+            text = shardlure.patch_cowrie_cfg("[honeypot]\nhostname = x\n", 2222)
+            kept = shardlure.patch_cowrie_cfg("[honeypot]\nttylog_limit_size = 0\n", 2222)
+        check(parse(text), "patch_cowrie_cfg")
+        self.assertEqual(kept.count("ttylog_limit_size"), 1)
+        self.assertIn("ttylog_limit_size = 0", kept)
+        script = (root / "scripts" / "apply-stealth.sh").read_text()
+        start = script.index('stealth = persona_cfg.read_text() if persona_cfg.exists() else """')
+        body = script[script.index('"""', start) + 3:]
+        check(parse(body[:body.index('"""')]), "apply-stealth.sh fallback")
+        installer = (root / "scripts" / "install.sh").read_text()
+        start = installer.index('cat > "$COWRIE_CFG" <<CFG\n') + len('cat > "$COWRIE_CFG" <<CFG\n')
+        managed = installer[start:installer.index("\nCFG\n", start)]
+        managed = (managed.replace("$CFG_MARKER", "# managed").replace("$HONEYPOT_PORT", "2222")
+                   .replace("$COWRIE_CFG_HOME", "/x"))
+        check(parse(managed), "install.sh managed cfg")
 
     def test_operator_boot_offset_reaches_the_motd_and_short_ones_warn(self):
         # Review m-5: patch_cowrie_cfg keeps an operator's boot_offset, so
@@ -2156,7 +2192,7 @@ class PersonaRegenTests(unittest.TestCase):
 
 
 class CowriePythonPreflightTests(unittest.TestCase):
-    """Task 8: v3.1.1 needs Python >= 3.11 (22.04 ships 3.10); both installers
+    """Task 8: the pinned Cowrie (v3.1 on) needs Python >= 3.11 (22.04 ships 3.10); both installers
     refuse an older interpreter before changing anything."""
 
     def test_shardlure_refuses_python_3_10(self):

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Cowrie v3.1.1 (lightweight tag; `git ls-remote ... refs/tags/v3.1.1`).
-EXPECTED_PIN="c17c9b73d6af0972334ea1e90b20d974cb24eeca"
+# Cowrie v3.1.8 (lightweight tag; `git ls-remote ... refs/tags/v3.1.8`).
+EXPECTED_PIN="183a3b1bc361bb941e1d54874922399baac42af0"
 PIN_FILE="$ROOT/install/cowrie.commit"
 ORCHESTRATOR="$ROOT/install/persona/apply-patches.py"
 
@@ -91,13 +91,14 @@ cp -a "$cowrie" "$partial_shell_parse_bounds"
 # remembers the -t target but still names the file after the C-record; ls
 # has the GNU recent form but keeps the ISO form for old files; grep has the
 # new class but still ignores -i; lspci lists the persona with one device
-# misnamed and leaves busybox.py pristine; free leaves SReclaimable out of
-# buff/cache, as stock Cowrie did; uname has its new flags dict (platform
-# preset to True) beside the old flag row and output; last puts a pty caller
-# on the admin's own pts/0; uptime has its uptime.py half but not its
-# base.py (w) half. Task 7: which prints every match again without -a.
+# misnamed and leaves busybox.py pristine; free computes used the procps
+# 4.0.2 way (total - available), as stock v3.1.8 does; uname has its new
+# flags dict (platform preset to True) beside the old flag row and output;
+# last puts a pty caller on the admin's own pts/0; uptime has its uptime.py
+# half but not its base.py (w) half. Task 7: which prints every match again
+# without -a.
 # Task 7: usr-bin-aliases aliases /bin but not /sbin.
-# Task 7: cat exits 1 on a bad option but still 0 on a missing file.
+# Task 7: cat -n writes the TAB but left-aligns the number.
 # Task 7: crontab's usage error goes to stderr but "no crontab" still to stdout.
 # Task 7: ls -h never prints a decimal.
 # Task 7: who lists an exec caller again.
@@ -250,9 +251,10 @@ if content.count(lspci["OLD"]) != 0 or content.count(lspci["NEW"]) != 0:
     raise SystemExit(f"lspci partial fixture unexpectedly contains a complete block in {lspci_path}")
 
 free = string_constants(root / "install/persona/patches/free-meminfo.py")
-if free["NEW"].count('raw["Cached"] + raw["SReclaimable"]') != 1:
+procps3_used = 'used = mem["total"] - mem["free"] - mem["cached"] - mem["buffers"]'
+if free["NEW"].count(procps3_used) != 1:
     raise SystemExit("free NEW block does not contain the expected fixture anchor")
-partial = free["NEW"].replace('raw["Cached"] + raw["SReclaimable"]', 'raw["Cached"]', 1)
+partial = free["NEW"].replace(procps3_used, 'used = mem["total"] - mem["available"]', 1)
 content = replace_once(free_path, free["OLD"], partial, "free partial")
 if content.count(free["OLD"]) != 0 or content.count(free["NEW"]) != 0:
     raise SystemExit(f"free partial fixture unexpectedly contains a complete block in {free_path}")
@@ -297,10 +299,13 @@ if content.count(aliases["OLD"]) != 0 or content.count(aliases["NEW"]) != 0:
     raise SystemExit(f"usr-bin-aliases partial fixture unexpectedly contains a complete block in {usr_bin_aliases_path}")
 
 cat = string_constants(root / "install/persona/patches/cat-exit.py")
-content = replace_once(cat_exit_path, cat["OLD_OPT"], cat["NEW_OPT"], "cat partial")
-expected = {"OLD_OPT": 0, "NEW_OPT": 1, "OLD": 1, "NEW": 0, "OLD_NUMBER": 1, "NEW_NUMBER": 0}
-if any(content.count(cat[name]) != count for name, count in expected.items()):
-    raise SystemExit(f"cat partial fixture has unexpected block counts in {cat_exit_path}")
+tab_column = '{self.linenumber:>6}\\t'
+if cat["NEW"].count(tab_column) != 1:
+    raise SystemExit("cat NEW block does not contain the expected fixture anchor")
+partial = cat["NEW"].replace(tab_column, '{self.linenumber:<6}\\t', 1)
+content = replace_once(cat_exit_path, cat["OLD"], partial, "cat partial")
+if content.count(cat["OLD"]) != 0 or content.count(cat["NEW"]) != 0:
+    raise SystemExit(f"cat partial fixture unexpectedly contains a complete block in {cat_exit_path}")
 
 crontab = string_constants(root / "install/persona/patches/crontab-list.py")
 content = replace_once(crontab_list_path, crontab["OLD"], crontab["NEW"], "crontab partial")

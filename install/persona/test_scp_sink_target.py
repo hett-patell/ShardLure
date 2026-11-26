@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Exercise the checked-out Cowrie scp sink with inert uploads.
 
-Runs the real pinned (and, after apply-patches.py, patched) Command_scp
+Runs the real pinned (v3.1.8; after apply-patches.py, patched) Command_scp
 methods start/parse_scp_data/save_file/drop_tmp_file without importing Twisted
 or starting a honeypot. Only the fake filesystem, the event sink and the
 command plumbing are stand-ins. It pins what scp-sink-target.py promises:
 `scp -t <path>` saves to <path> (a directory target keeps the record's name,
-as OpenSSH's sink does), and capture is unchanged: the bytes land in
+as OpenSSH's sink does; a trailing slash on a non-directory is refused),
+v3.1.8's `-d` guard still holds, and capture is unchanged: the bytes land in
 download_path_uniq/<sha256> and the upload event's shasum/outfile name it.
 """
 
@@ -165,6 +166,14 @@ class ScpSinkTargetTests(unittest.TestCase):
     def test_dash_d_keeps_cowries_directory_join(self):
         fs, events, _ = self.run_scp(["-t", "-d", "/tmp"], [("hw", b"\x7fELF d")])
         self.assert_captured(fs, events, "/tmp/hw", b"\x7fELF d")
+
+    def test_dash_d_without_a_directory_keeps_the_record_name(self):
+        # v3.1.8 (4dab2c8d): -d with no positional argument sets no
+        # directory instead of raising IndexError; with no -t argument either,
+        # the record's name is used, as stock does.
+        fs, events, errors = self.run_scp(["-t", "-d"], [("hw", b"\x7fELF nd")])
+        self.assertEqual(errors, [])
+        self.assert_captured(fs, events, "/root/hw", b"\x7fELF nd")
 
     def test_source_mode_ignores_its_argument(self):
         # `scp -f path` sends a file; it never names an upload destination.

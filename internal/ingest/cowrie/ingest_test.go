@@ -190,6 +190,35 @@ func TestParseReaderCountsSkippedLines(t *testing.T) {
 	}
 }
 
+// Cowrie v3.1.8 adds cowrie.client.kex_unexpected (a GEX message before
+// KEXINIT, answered with SSH_MSG_UNIMPLEMENTED) and, from its optional
+// uploader, cowrie.malwarebazaar.submitted; it also logs a login.failed with
+// no password field for a username containing "/". Ingest keeps dropping the
+// first two like any unmapped event, takes HASSH only from client.kex, and
+// reads the third as a failed login with an empty password.
+func TestParseReaderCowrieV318Events(t *testing.T) {
+	const hassh = "16443846184eafde36765c9bab2f4397"
+	input := strings.Join([]string{
+		`{"eventid":"cowrie.client.kex","timestamp":"2026-11-23T10:00:00.000000Z","src_ip":"1.2.3.4","session":"s1","hassh":"` + hassh + `"}`,
+		`{"eventid":"cowrie.client.kex_unexpected","timestamp":"2026-11-23T10:00:00.100000Z","src_ip":"1.2.3.4","session":"s1","messagenum":30,"kexalg":"curve25519-sha256"}`,
+		`{"eventid":"cowrie.login.failed","timestamp":"2026-11-23T10:00:01.000000Z","src_ip":"1.2.3.4","session":"s1","username":"a/b"}`,
+		`{"eventid":"cowrie.malwarebazaar.submitted","timestamp":"2026-11-23T10:00:02.000000Z","src_ip":"1.2.3.4","session":"s1","shasum":"` + strings.Repeat("ab", 32) + `"}`,
+	}, "\n") + "\n"
+	events, skipped, _, bindings, err := parseReader(strings.NewReader(input), false)
+	if err != nil {
+		t.Fatalf("parseReader: %v", err)
+	}
+	if len(events) != 1 || skipped != 3 {
+		t.Fatalf("got %d events and %d skipped lines, want only the failed login as an event", len(events), skipped)
+	}
+	if e := events[0]; e.Kind != models.KindFailedPass || e.Username != "a/b" || e.Password != "" {
+		t.Fatalf("login.failed without a password = %+v, want a failed login with an empty password", e)
+	}
+	if got := bindings.hassh["s1"]; got != hassh {
+		t.Fatalf("session HASSH = %q, want %q from client.kex alone", got, hassh)
+	}
+}
+
 // TestParseReaderSkipsOversizedLine guards HIGH-1: a single log line larger
 // than the per-line cap must NOT abort the whole parse (which previously
 // returned ErrTooLong and left the ingest offset un-advanced, permanently

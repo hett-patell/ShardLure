@@ -1,0 +1,5 @@
+#harness: stdin-lines=100 if true; then echo yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+#harness: overlap=echo alive
+#harness: rc=2
+#harness: within=6
+bash: line 101: syntax error: unexpected end of file

@@ -113,7 +113,7 @@ def ensure_cowrie_checkout(
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
-# The pinned Cowrie (install/cowrie.commit, v3.1.1) declares requires-python
+# The pinned Cowrie (install/cowrie.commit, v3.1.8) declares requires-python
 # >=3.11: v3.1 dropped 3.10, which is what Ubuntu 22.04 ships. Its venv is
 # built from the interpreter running this installer, so an older one gives a
 # pip failure halfway through the install, after the SSH migration.
@@ -128,7 +128,7 @@ def require_cowrie_python(version: tuple = tuple(sys.version_info[:3]),
         return
     have = ".".join(str(part) for part in version)
     want = ".".join(str(part) for part in COWRIE_MIN_PYTHON)
-    die(f"the pinned Cowrie (v3.1.1) needs Python {want} or newer, but this installer runs "
+    die(f"the pinned Cowrie (v3.1.8) needs Python {want} or newer, but this installer runs "
         f"under Python {have} ({executable}); Ubuntu 22.04 ships 3.10. Use Ubuntu 24.04 or "
         f"newer, or install python{want} with its venv module and rerun with it "
         f"(sudo python{want} scripts/shardlure.py run). Nothing was changed")
@@ -771,7 +771,7 @@ PERSONA_HOMES = (
 )
 # The account files were last written when the operator added deploy (its
 # shadow change day, 19790 = 2024-03-08); the pickle stamped them with one
-# instant every v3.1.1 install shares (May  4 20:16, review m-6).
+# instant every install of the pinned Cowrie shares (May  4 20:16, review m-6).
 PERSONA_ACCOUNTS_TIME = 1709906557
 PERSONA_FS_STAMPS = tuple((f"/etc/{name}", PERSONA_ACCOUNTS_TIME)
                           for name in ("passwd", "group", "shadow", "gshadow"))
@@ -927,9 +927,9 @@ class FsPickleRefused(ValueError):
     """A file named fs.pickle that is not a plain Cowrie filesystem tree."""
 
 
-# Cowrie's node layout (cowrie/shell/fs.py, v3.1.1): exactly ten fields,
+# Cowrie's node layout (cowrie/shell/fs.py, v3.1.8): exactly ten fields,
 # A_NAME..A_REALFILE, and node types T_LINK..T_FIFO (0..6). The pinned
-# pickle, inspected: 28,966 nodes, every one of length 10; name str; type,
+# pickle, inspected: 28,954 nodes, every one of length 10; name str; type,
 # uid, gid, size, mode int; ctime int (one float); contents a list of child
 # nodes for a directory and otherwise an empty list or, for a file, the
 # bytes fsctl `load` embedded; target a str for a link and None otherwise;
@@ -1477,7 +1477,12 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             # Bounded downloads (== capture.max_bytes). Cowrie reads it only
             # from [honeypot]; without it an attacker can fill the disk.
             ("download_limit_size", "52428800"),
-            # The persona's 42d 3h17m (== cowrie-stealth.cfg). Unset, v3.1.1
+            # TTY logs: a session's stops at 10 MiB (Cowrie then disconnects
+            # it), and below 2 GiB free (== capture.min_free_bytes) none are
+            # written, so they cannot fill the disk (== cowrie-stealth.cfg).
+            ("ttylog_limit_size", "10485760"),
+            ("ttylog_min_free", "2147483648"),
+            # The persona's 42d 3h17m (== cowrie-stealth.cfg). Unset, Cowrie
             # picks a random 1-90 day boot per process, and /proc/uptime,
             # uptime, w and last stop agreeing with the persona.
             ("boot_offset", "3640620"),
@@ -1491,7 +1496,7 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
             ("operating_system", "GNU/Linux"),
             ("ssh_version", "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6, OpenSSL 3.0.2 15 Mar 2022"),
             ("filesystem", f"{home}/src/cowrie/data/fs.pickle"),
-            # (== cowrie-stealth.cfg, which records the measurement.) v3.1.1's
+            # (== cowrie-stealth.cfg, which records the measurement.) Cowrie's
             # own default, pinned so a change is deliberate: a higher cap
             # makes big scripts stall every session for up to the 10 s parse
             # timeout and then answer a syntax error instead of running.
@@ -1500,6 +1505,10 @@ def patch_cowrie_cfg(text: str, honeypot_port: int) -> str:
         "output_jsonlog": [
             ("enabled", "true"),
             ("logfile", f"{home}/var/log/cowrie/cowrie.json"),
+        ],
+        # Cowrie's own uploader would share captures past bazaar.Vet.
+        "output_malwarebazaar": [
+            ("enabled", "false"),
         ],
     }
 

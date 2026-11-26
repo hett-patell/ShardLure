@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
-"""Patch cowrie/commands/free.py: procps free from the fake /proc/meminfo.
+"""Patch cowrie/commands/free.py: procps 3.3.17 free from the fake /proc/meminfo.
 
-WHY (payload-yield Phase B Task 6; factsheet-phaseB 3 #11, 5 #6): v3.1.1's
-free opens the HOST's real /proc/meminfo, so `free` on the honeypot discloses
-the Cowrie machine's own memory: arm's 24 GB behind a persona whose
-/proc/meminfo, lscpu and motd all say an 8 GB EC2 guest. That is both a host
-information leak and an immediate honeypot tell, and the probe is on the
-prod list verbatim (`free -m | grep Mem | awk '{print $2 ,$3, ...}'`, 36
-sessions in 30 days). Its arithmetic was not procps' either: it divided by
-1000 and left SReclaimable out of buff/cache.
+WHY (payload-yield Phase B Task 6; factsheet-phaseB 3 #11, 5 #6): history
+first. v3.1.1's free opened the HOST's real /proc/meminfo, so `free` on the
+honeypot disclosed the Cowrie machine's own memory (arm's 24 GB behind a
+persona whose /proc/meminfo, lscpu and motd all say an 8 GB EC2 guest), and
+its arithmetic divided by 1000 and left SReclaimable out of buff/cache.
+
+The pinned v3.1.8 (ea993de2, 069d3ca8, #40774) closed the leak: it reads the
+emulated /proc/meminfo and prints Debian 12's procps 4.0.2 layout. The
+persona is Ubuntu 22.04, whose free is procps-ng 3.3.17, and the two differ
+where a probe looks (`free -m | grep Mem | awk '{print $2 ,$3, ...}'`, 36
+sessions in 30 days, is on the prod list verbatim):
+  - used: 4.0.2 prints total - available, 3.3.17 total - free - buffers -
+    (Cached + SReclaimable). On the persona meminfo stock v3.1.8 printed
+    `free -m` used 1739 where 22.04 prints 1527;
+  - -h: 3.3.17's scale_size() integer-divides by 1024 first (528 kB ->
+    "0.0Ki", 1.5Gi used), 4.0.2 does not (528Ki, 1.7Gi);
+  - options: stock takes only -b -k -m -g -h and prints the table for any
+    other option; a missing /proc/meminfo is procps 4's "Memory information
+    file ... does not exist", exit 1.
 
 The patch replaces the module body (imports to the end of Command_free) with
-a port of procps-ng 3.3.17 (Ubuntu 22.04) free.c and proc/sysinfo.c meminfo():
-  - the input is self.fs.file_contents("/proc/meminfo"), the per-connection
-    fake filesystem (honeyfs). The host file is never opened; a missing node
-    gives procps' "Error: /proc must be mounted" and exit 102;
-  - used = total - free - buffers - (Cached + SReclaimable), procps' rule;
+a port of procps-ng 3.3.17 free.c and proc/sysinfo.c meminfo():
+  - the input is still self.fs.file_contents("/proc/meminfo"), the
+    per-connection fake filesystem (honeyfs). The host file is never opened;
+    an unreadable or missing node gives 3.3.17's "Error: /proc must be
+    mounted" and exit 102, as 22.04 does;
+  - used = total - free - buffers - (Cached + SReclaimable), 3.3.17's rule;
   - -b -k -m -g --kilo --mega --giga --tera --peta --tebi --pebi, -h, --si,
     -l, -t, -w, -s N, -c N, --help, -V, with getopt_long's abbreviations and
     glibc's error wording, exit 1 on a usage error;
@@ -29,18 +41,45 @@ Shadowed txtcmds/usr/bin/free is regenerated from procps for the same file.
 import sys
 from pathlib import Path
 
-# v3.1.1's free.py from its imports to its first registration.
+# v3.1.8's free.py from its imports to its first registration.
 OLD = r'''import getopt
-from math import floor
 
 from cowrie.shell.command import HoneyPotCommand
+from cowrie.shell.fs import FileNotFound
 
 commands = {}
 
-FREE_OUTPUT = """              total        used        free      shared  buff/cache   available
-Mem:{MemTotal:>15}{calc_total_used:>12}{MemFree:>12}{Shmem:>12}{calc_total_buffers_and_cache:>12}{MemAvailable:>12}
-Swap:{SwapTotal:>14}{calc_swap_used:>12}{SwapFree:>12}
-"""
+HEADER = (
+    "               total        used        free      shared  buff/cache   available\n"
+)
+
+# Unit options and the power of 1024 that a byte count is divided by.
+UNIT_EXPONENTS = {"-b": 0, "-k": 1, "-m": 2, "-g": 3}
+
+HUMAN_UNITS = "KMGTP"
+
+
+def scale_size(kib: int, exponent: int, human: bool) -> str:
+    """
+    Format a size given in kB the way procps 4.0.2's free does: a whole number
+    of the chosen unit, or with -h the shortest of "1.5Gi" or "974Mi" that
+    fits in five characters.
+    """
+    size = kib * 1024
+    if not human:
+        return str(size // 1024**exponent)
+    if len(f"{size}B") <= 4:
+        return f"{size}B"
+    text = ""
+    for power, unit in enumerate(HUMAN_UNITS, start=1):
+        value = size / 1024**power
+        text = f"{value:.1f}{unit}i"
+        if len(text) <= 5:
+            return text
+        text = f"{int(value)}{unit}i"
+        if len(text) <= 5:
+            return text
+    return text
 
 
 class Command_free(HoneyPotCommand):
@@ -51,92 +90,98 @@ class Command_free(HoneyPotCommand):
     def call(self) -> None:
         # Parse options or display no files
         try:
-            opts, _args = getopt.getopt(self.args, "mh")
+            opts, _args = getopt.getopt(self.args, "bkmgh")
         except getopt.GetoptError:
             self.do_free()
             return
 
-        # Parse options
+        exponent = 1
+        human = False
         for o, _a in opts:
-            if o in ("-h"):
-                self.do_free(fmt="human")
-                return
-            elif o in ("-m"):
-                self.do_free(fmt="megabytes")
-                return
-        self.do_free()
+            if o == "-h":
+                human = True
+            else:
+                exponent = UNIT_EXPONENTS[o]
+        self.do_free(exponent, human)
 
-    def do_free(self, fmt: str = "kilobytes") -> None:
+    def do_free(self, exponent: int = 1, human: bool = False) -> None:
         """
         print free statistics
         """
 
-        # Get real host memstats and add the calculated fields
-        raw_mem_stats = self.get_free_stats()
-
-        if raw_mem_stats == {}:
+        # Get the emulated machine's memstats
+        try:
+            stats = self.get_free_stats()
+        except FileNotFound:
+            self.errorWrite(
+                "free: Memory information file /proc/meminfo does not exist\n"
+            )
+            self.exit_code = 1
             return
 
-        raw_mem_stats["calc_total_buffers_and_cache"] = (
-            raw_mem_stats["Buffers"] + raw_mem_stats["Cached"]
+        # Derived figures as procps 4.0.2 computes them
+        available = stats["MemAvailable"]
+        if available > stats["MemTotal"]:
+            available = stats["MemFree"]
+        used = stats["MemTotal"] - available
+        if used < 0:
+            used = stats["MemTotal"] - stats["MemFree"]
+        buff_cache = stats["Buffers"] + stats["Cached"] + stats["SReclaimable"]
+        swap_used = stats["SwapTotal"] - stats["SwapFree"]
+
+        def row(label: str, sizes: list[int]) -> str:
+            cells = [scale_size(size, exponent, human) for size in sizes]
+            return f"{label:<9}" + " ".join(f"{cell:>11}" for cell in cells) + "\n"
+
+        self.write(
+            HEADER
+            + row(
+                "Mem:",
+                [
+                    stats["MemTotal"],
+                    used,
+                    stats["MemFree"],
+                    stats["Shmem"],
+                    buff_cache,
+                    available,
+                ],
+            )
+            + row("Swap:", [stats["SwapTotal"], swap_used, stats["SwapFree"]])
         )
-        raw_mem_stats["calc_total_used"] = raw_mem_stats["MemTotal"] - (
-            raw_mem_stats["MemFree"] + raw_mem_stats["calc_total_buffers_and_cache"]
-        )
-        raw_mem_stats["calc_swap_used"] = (
-            raw_mem_stats["SwapTotal"] - raw_mem_stats["SwapFree"]
-        )
-
-        if fmt == "megabytes":
-            # Transform KB to MB
-            for key, value in raw_mem_stats.items():
-                raw_mem_stats[key] = int(value / 1000)
-
-        if fmt == "human":
-            magnitude = ["B", "M", "G", "T", "Z"]
-            human_mem_stats = {}
-            for key, value in raw_mem_stats.items():
-                current_magnitude = 0
-
-                # Keep dividing until we get a sane magnitude
-                while value >= 1000 and current_magnitude < len(magnitude):
-                    value = floor(float(value / 1000))
-                    current_magnitude += 1
-
-                # Format to string and append value with new magnitude
-                human_mem_stats[key] = str(f"{value:g}{magnitude[current_magnitude]}")
-
-            self.write(FREE_OUTPUT.format(**human_mem_stats))
-        else:
-            self.write(FREE_OUTPUT.format(**raw_mem_stats))
 
     def get_free_stats(self) -> dict[str, int]:
         """
-        Get the free stats from /proc
+        Get the free stats from the emulated /proc/meminfo.
+
+        Like procps, a field that is missing or unreadable counts as 0, and a
+        kernel without MemAvailable reports MemFree as available.
+        Raises FileNotFound when /proc/meminfo does not exist.
         """
-        needed_keys = [
-            "Buffers",
-            "Cached",
-            "MemTotal",
-            "MemFree",
-            "SwapTotal",
-            "SwapFree",
-            "Shmem",
-            "MemAvailable",
-        ]
-        mem_info_map: dict[str, int] = {}
-        try:
-            with open("/proc/meminfo") as proc_file:
-                for line in proc_file:
-                    tokens = line.split(":")
+        mem_info_map = dict.fromkeys(
+            [
+                "Buffers",
+                "Cached",
+                "SReclaimable",
+                "MemTotal",
+                "MemFree",
+                "SwapTotal",
+                "SwapFree",
+                "Shmem",
+                "MemAvailable",
+            ],
+            0,
+        )
+        meminfo = self.fs.file_contents("/proc/meminfo").decode(errors="replace")
+        for line in meminfo.splitlines():
+            key, _, value = line.partition(":")
+            fields = value.split()
+            if key in mem_info_map and fields and fields[0].isdigit():
+                mem_info_map[key] = int(fields[0])
 
-                    # Later we are going to do some math on those numbers, better not include uneeded keys for performance
-                    if tokens[0] in needed_keys:
-                        mem_info_map[tokens[0]] = int(tokens[1].lstrip().split(" ")[0])
-        except Exception:
-            pass
+        if mem_info_map["MemAvailable"] == 0:
+            mem_info_map["MemAvailable"] = mem_info_map["MemFree"]
 
-        # Got a map with all tokens from /proc/meminfo and sizes in KBs
+        # Sizes are in kB, as /proc/meminfo gives them
         return mem_info_map
 
 
@@ -154,12 +199,12 @@ from cowrie.shell.command import HoneyPotCommand
 commands = {}
 
 # ShardLure persona (free-meminfo.py): procps-ng 3.3.17's free, the one
-# Ubuntu 22.04 ships, computed from the FAKE filesystem's /proc/meminfo. Stock
-# Cowrie opened the host's real /proc/meminfo, so every `free` disclosed the
-# Cowrie machine's own memory (arm's 24 GB behind a persona claiming 8 GB)
-# and used its own arithmetic (/1000, no SReclaimable in buff/cache).
-# Ported from procps v3.3.17 free.c and proc/sysinfo.c meminfo(); the
-# formatting quirks are procps', on purpose (`free -h` shows 528 kB as
+# Ubuntu 22.04 ships, computed from the FAKE filesystem's /proc/meminfo.
+# Stock Cowrie reads the same file but answers as Debian 12's procps 4.0.2:
+# used = total - available (1739 MiB on the persona where 22.04 prints
+# 1527), procps 4's -h rounding, only -bkmgh, and procps 4's missing-file
+# message. Ported from procps v3.3.17 free.c and proc/sysinfo.c meminfo();
+# the formatting quirks are procps', on purpose (`free -h` shows 528 kB as
 # "0.0Ki", because scale_size integer-divides by 1024 first).
 
 FREE_USAGE = """

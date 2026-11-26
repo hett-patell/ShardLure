@@ -1,53 +1,66 @@
 #!/usr/bin/env python3
-r"""Patch cowrie/commands/fs.py: GNU grep options, pattern dialects and exit status.
+r"""Patch cowrie/commands/fs.py: GNU grep options, pattern dialects, exit status
+and a regex time budget.
 
 WHY (payload-yield Phase B Task 4; factsheet-phaseB 2 ARCH/CPUS/GPU, 3 #19):
-v3.1.1's grep accepts -i -q -c -v -l -o through getopt and then ignores them.
-The SHELL_BEHAVIOR profiler (1,452 sessions in 30 days, one actor) asks
-`lspci | grep -i vga` for its GPU field, which never matches the persona's
-"VGA compatible controller"; its arch fallback `grep -q lm /proc/cpuinfo`
-prints every flags line, and its cpus fallback `grep -c "^processor"` prints
-the lines instead of 4. Every one of those is a cheap honeypot tell.
+v3.1.1's grep accepted -i -q -c -v -l -o through getopt and then ignored
+them. The SHELL_BEHAVIOR profiler (1,452 sessions in 30 days, one actor) asks
+`lspci | grep -i vga` for its GPU field, `grep -q lm /proc/cpuinfo` for its
+arch fallback and `grep -c "^processor"` for its cpus fallback; each answer
+was a cheap honeypot tell. (History: this patch superseded
+grep-case-insensitive.py, whose anchor v3.1.1 refactored away.)
 
-Supersedes grep-case-insensitive.py, whose anchor (grep_application) v3.1.1
-refactored into compile_match. This patch replaces the whole Command_grep
-class (plus a pattern translator ahead of it) with one that follows GNU grep
-3.7 (ubuntu:22.04), checked line by line against the real binary:
+The pinned v3.1.8 fixed those three (-i 05d8fbb1, -c fad93f32, -q and exit
+status 2 9388a335), but its grep still
+  - compiles the pattern as Python re after os.path.basename() and dropping
+    every '"': no BRE (`grep "model name\|Hardware"` matches nothing), no -E
+    or -F dialect;
+  - ignores -v -l -L -o -n -w -x -H -s -e -f, and takes -h as "print usage";
+  - answers usage errors with a BSD usage text;
+  - has no time budget: `printf 'a...a!\n' | grep -E '(a+)+$'` (40 `a`s) held
+    stock v3.1.8's single reactor thread at 100 % CPU for more than 13
+    minutes, freezing every session, until the process was killed.
+So the patch is an availability fix as much as a fidelity one.
+
+It replaces the whole Command_grep class (plus a pattern translator and the
+budget ahead of it) with one that follows GNU grep 3.7 (ubuntu:22.04),
+checked line by line against the real binary:
   -i  case-insensitive          -q  silent; exit 0 on the first selected line
   -c  count per input           -v  select non-matching lines
   -l/-L  name inputs with/without a selected line
   -o  print each non-empty match  -n  line numbers
   -w/-x  whole words / whole lines
-  -H/-h  force/suppress "file:" prefixes (default: more than one file);
-         stock Cowrie treated -h as "print usage"
+  -H/-h  force/suppress "file:" prefixes (default: more than one file)
   -s  no file error messages    -e PATTERN, repeatable; newline-separated
+  -f FILE  patterns from the fake filesystem
   --color/--colour[=WHEN]  accepted, no colour is emitted
   -V/--version, --help, --label, the common long option names
   exit status 0 selected / 1 none / 2 on any error, unless -q selected a line
-  GNU's usage errors on stderr with exit 2 (stock: a BSD usage text, exit 0)
-Pattern dialects: stock compiled the pattern as Python re (after taking its
-os.path.basename() and dropping every '"'). It is now translated: the default
-BRE (`\|` `\(` `\{` `\+` `\?` are operators, the bare forms literals, so
-`grep "model name\|Hardware"` works), -E ERE, -F fixed strings, -P as Python
-re. POSIX bracket classes, `\<` `\>` `\w` `\s` and back-references are
-translated, and invalid patterns get regcomp's messages ("Unmatched ( or \(",
+  GNU's usage errors on stderr with exit 2
+Pattern dialects: the default BRE (`\|` `\(` `\{` `\+` `\?` are operators,
+the bare forms literals), -E ERE, -F fixed strings, -P as Python re. POSIX
+bracket classes, `\<` `\>` `\w` `\s` and back-references are translated, and
+invalid patterns get regcomp's messages ("Unmatched ( or \(",
 "Trailing backslash", ...).
 Also: files win over a pipe ("-" names the pipe), a directory operand is
-"grep: d: Is a directory", and a trailing newline no longer yields a phantom
-empty last line.
+"grep: d: Is a directory", and a trailing newline yields no empty last line.
 
--m, the exec-channel stdin log path and the up-front pattern check are kept
-from v3.1.1. Not emulated: -r, -A/-B/-C context, -NUM, -z, binary-file
-detection, colour output. Residual: matching is Python's backtracking re,
-not GNU's DFA, so a pathological pattern on a long line (`(a+)+$`) can stall
-the shared reactor, as it already could on stock. Nothing attacker-supplied
-is executed; the pattern only ever reaches re.compile.
+Kept from v3.1.8: -m, the up-front pattern check, the -q/-c/exit-2 semantics,
+the `grep_get_contents(path, name, match)` signature, the `quiet`/`silent`
+long options and the stdin path (lines through lineReceived, then the exec
+channel's stdin log via stdin_log_contents() at EOF). Not emulated: -r,
+-A/-B/-C context, -NUM, -z, binary-file detection, colour output, egrep and
+fgrep as -E/-F (Cowrie registers both names on this class and does not pass
+the invoked name). Matching is still Python's backtracking re, not GNU's DFA,
+so each grep gets GREP_BUDGET_SECONDS of matching under SIGALRM and then
+finishes as if nothing more was selected. Nothing attacker-supplied is
+executed; the pattern only ever reaches re.compile.
 """
 
 import sys
 from pathlib import Path
 
-# v3.1.1's Command_grep, from the class line to its first registration.
+# v3.1.8's Command_grep, from the class line to its first registration.
 OLD = r'''class Command_grep(HoneyPotCommand):
     """
     grep command
@@ -57,29 +70,64 @@ OLD = r'''class Command_grep(HoneyPotCommand):
 
     interactive: bool = False
     matched: bool = False
+    # A file could not be read: grep then exits 2, unless -q and a match.
+    errored: bool = False
+    quiet: bool = False
     max_count: int | None = None
     match_count: int = 0
+    ignore_case: bool = False
+    # -c: print the number of matching lines instead of the lines.
+    count_only: bool = False
+    # Counts are prefixed with the file name when grep reads several files.
+    show_names: bool = False
+    # Matches seen so far on interactive stdin, for -c at end of input.
+    stdin_count: int = 0
 
-    def grep_get_contents(self, filename: str, match: str) -> None:
+    def grep_get_contents(self, path: str, name: str, match: str) -> None:
+        """Search the file at path; name is how the user wrote it, for
+        messages and -c prefixes."""
         try:
-            contents = self.fs.file_contents(filename)
-            self.grep_application(contents, match)
+            contents = self.fs.file_contents(path)
         except Exception:
-            self.errorWrite(f"grep: {filename}: No such file or directory\n")
+            self.errorWrite(f"grep: {name}: No such file or directory\n")
+            self.errored = True
+            return
+        count = self.grep_application(contents, match)
+        self.report_count(count, name)
+
+    def report_count(self, count: int, filename: str | None = None) -> None:
+        if not self.count_only or self.quiet:
+            return
+        if self.show_names and filename is not None:
+            self.write(f"{filename}:{count}\n")
+        else:
+            self.write(f"{count}\n")
 
     def compile_match(self, match: str) -> re.Pattern[bytes]:
         bmatch = os.path.basename(match).replace('"', "").encode("utf8")
-        return re.compile(bmatch)
+        flags = re.NOFLAG
+        if self.ignore_case:
+            flags = re.IGNORECASE
+        return re.compile(bmatch, flags)
 
-    def grep_application(self, contents: bytes, match: str) -> None:
+    def grep_application(self, contents: bytes, match: str) -> int:
+        """Print the lines of contents that match; return how many matched."""
+        count = 0
         matcher = self.compile_match(match)
-        for line in contents.split(b"\n"):
+        lines = contents.split(b"\n")
+        if contents.endswith(b"\n"):
+            # The final newline ends the last line; it does not start a new one.
+            lines.pop()
+        for line in lines:
             if self.max_count is not None and self.match_count >= self.max_count:
                 break
             if matcher.search(line):
                 self.matched = True
                 self.match_count += 1
-                self.writeBytes(line + b"\n")
+                count += 1
+                if not self.quiet and not self.count_only:
+                    self.writeBytes(line + b"\n")
+        return count
 
     def help(self) -> None:
         self.writeBytes(
@@ -96,7 +144,7 @@ OLD = r'''class Command_grep(HoneyPotCommand):
     def start(self) -> None:
         if not self.args:
             self.help()
-            self.exit()
+            self.exit(2)
             return
 
         try:
@@ -111,17 +159,23 @@ OLD = r'''class Command_grep(HoneyPotCommand):
                     "directories=",
                     "label",
                     "line-buffered",
+                    "quiet",
+                    "silent",
                 ],
             )
         except getopt.GetoptError as err:
             self.errorWrite(f"grep: invalid option -- {err.opt}\n")
             self.help()
-            self.exit()
+            self.exit(2)
             return
 
         for opt, arg in optlist:
             if opt == "-h":
                 self.help()
+            elif opt in ("-q", "--quiet", "--silent"):
+                self.quiet = True
+            elif opt == "-c":
+                self.count_only = True
             elif opt == "-m":
                 try:
                     n = int(arg)
@@ -132,6 +186,8 @@ OLD = r'''class Command_grep(HoneyPotCommand):
                     self.exit(2)
                     return
                 self.max_count = n
+            elif opt == "-i":
+                self.ignore_case = True
 
         if not args:
             # Options only, no pattern (e.g. `grep -h`).
@@ -152,16 +208,27 @@ OLD = r'''class Command_grep(HoneyPotCommand):
         files = args[1:]
 
         if self.input_data is not None:
-            self.grep_application(self.input_data, self.match)
+            self.report_count(self.grep_application(self.input_data, self.match))
         elif files:
-            for pname in self.check_arguments("grep", files):
-                self.grep_get_contents(pname, self.match)
+            self.show_names = len(files) > 1
+            for name in files:
+                for path in self.check_arguments("grep", [name]):
+                    self.grep_get_contents(path, name, self.match)
         else:
             # No file and no pipe: read stdin until EOF.
             self.interactive = True
             return
 
-        self.exit(0 if self.matched else 1)
+        self.exit(self._status())
+
+    def _status(self) -> int:
+        """grep's exit status: 0 on a match, 1 on none, 2 if a file could not
+        be read -- except that with -q any match is success."""
+        if self.matched and self.quiet:
+            return 0
+        if self.errored:
+            return 2
+        return 0 if self.matched else 1
 
     def lineReceived(self, line: str) -> None:
         self.protocol.events.dispatch(
@@ -171,7 +238,7 @@ OLD = r'''class Command_grep(HoneyPotCommand):
             input=line,
         )
         if self.interactive:
-            self.grep_application(line.encode("utf8"), self.match)
+            self.stdin_count += self.grep_application(line.encode("utf8"), self.match)
 
     def eofReceived(self) -> None:
         if self.interactive:
@@ -185,8 +252,9 @@ OLD = r'''class Command_grep(HoneyPotCommand):
                 # exec): the bytes were streamed to the stdin log rather than
                 # arriving via lineReceived, so match against them now.
                 with open(terminal.stdinlogFile, "rb") as f:
-                    self.grep_application(f.read(), self.match)
-        self.exit(0 if self.matched else 1)
+                    self.stdin_count += self.grep_application(f.read(), self.match)
+            self.report_count(self.stdin_count)
+        self.exit(self._status())
 
 
 commands["/bin/grep"] = Command_grep
@@ -613,11 +681,10 @@ class Command_grep(HoneyPotCommand):
 
     ShardLure persona (grep-options.py): GNU grep 3.7's options, pattern
     dialects (BRE, -E, -F, -P as Python re), exit status (0 selected, 1
-    none, 2 error unless -q selected a line) and usage errors. Stock v3.1.1
-    parsed -i -q -c -v -l -o and ignored them, so the SHELL_BEHAVIOR
-    profiler's `lspci | grep -i vga` matched nothing, its
-    `grep -q lm /proc/cpuinfo` printed every flags line and its
-    `grep -c "^processor"` printed lines instead of a count.
+    none, 2 error unless -q selected a line), usage errors and a matching
+    time budget. Stock v3.1.8 honours -i -q -c but compiles every pattern
+    as Python re, ignores -v -l -o -n -w -x -H -e -f, and lets one
+    backtracking pattern freeze the reactor.
     """
 
     consumes_stdin = True
@@ -645,13 +712,15 @@ class Command_grep(HoneyPotCommand):
     budget_left: float = GREP_BUDGET_SECONDS
     stdin_label: str = "(standard input)"
 
-    def grep_get_contents(self, filename: str, match: str, label: str | None = None) -> None:
+    def grep_get_contents(self, path: str, name: str, match: str) -> None:
+        """Search the file at path; name is how the user wrote it, for
+        messages and file-name prefixes (upstream's signature)."""
         try:
-            contents = self.fs.file_contents(filename)
+            contents = self.fs.file_contents(path)
         except Exception:
-            self.grep_error(f"grep: {label or filename}: No such file or directory\n")
+            self.grep_error(f"grep: {name}: No such file or directory\n")
             return
-        self.grep_application(contents, match, label or filename)
+        self.grep_application(contents, match, name)
 
     def grep_error(self, message: str) -> None:
         self.errored = True
@@ -789,7 +858,9 @@ class Command_grep(HoneyPotCommand):
         self.line_no = 0
         self.listed = False
 
-    def grep_status(self) -> int:
+    def _status(self) -> int:
+        """0 on a selected line, 1 on none, 2 on an error -- except that with
+        -q any selected line is success (upstream's name)."""
         if self.quiet and self.matched:
             return 0
         if self.errored:
@@ -990,7 +1061,7 @@ class Command_grep(HoneyPotCommand):
                 if self.fs.isdir(path):
                     self.grep_error(f"grep: {name}: Is a directory\n")
                     continue
-                self.grep_get_contents(path, self.match, name)
+                self.grep_get_contents(path, name, self.match)
         elif self.input_data is not None:
             self.grep_application(self.input_data, self.match)
         else:
@@ -998,7 +1069,7 @@ class Command_grep(HoneyPotCommand):
             self.interactive = True
             return
 
-        self.exit(self.grep_status())
+        self.exit(self._status())
 
     def lineReceived(self, line: str) -> None:
         self.protocol.events.dispatch(
@@ -1012,19 +1083,14 @@ class Command_grep(HoneyPotCommand):
 
     def eofReceived(self) -> None:
         if self.interactive:
-            terminal = self.protocol.terminal
-            if (
-                getattr(terminal, "stdinlogOpen", False)
-                and getattr(terminal, "stdinlogFile", "")
-                and os.path.exists(terminal.stdinlogFile)
-            ):
-                # Live exec-channel stdin (e.g. `grep foo < file` over an ssh
-                # exec): the bytes were streamed to the stdin log rather than
-                # arriving via lineReceived, so match against them now.
-                with open(terminal.stdinlogFile, "rb") as f:
-                    self.grep_lines(f.read(), self.match, self.stdin_label)
+            # Live exec-channel stdin (e.g. `grep foo < file` over an ssh
+            # exec): the bytes were streamed to the stdin log rather than
+            # arriving via lineReceived, so match against them now.
+            data = self.stdin_log_contents()
+            if data is not None:
+                self.grep_lines(data, self.match, self.stdin_label)
             self.grep_finish(self.stdin_label)
-        self.exit(self.grep_status())
+        self.exit(self._status())
 
 
 commands["/bin/grep"] = Command_grep

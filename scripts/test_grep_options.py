@@ -7,7 +7,10 @@ ubuntu:22.04 (`docker run --network none ubuntu:22.04`, same files, same
 stdin). The table pins the pattern dialects (Phase B Task 4 review I1: BRE
 by default, -E, -F), `--color` (I2), the profiler's own probes,
 -f FILE and the re-review's dialect fringes; BudgetTest pins the SIGALRM
-budget against catastrophic backtracking (re-review R1).
+budget against catastrophic backtracking (re-review R1). The v3.1.8 re-anchor
+adds the -q/-c/exit-2 semantics upstream gained (rows recorded with GNU grep
+3.11, whose answers for these options are 3.7's) and StdinEofTest, the
+interactive stdin path through lineReceived and stdin_log_contents() at EOF.
 
 Not covered here on purpose: colour output (`--color=always` is accepted but
 prints no escape codes), -r, -NUM context.
@@ -116,6 +119,20 @@ GNU = [
     (['-f', 'nope', 't'], None, '', 'grep: nope: No such file or directory\n', 2),
     (['-f', 'p', '-e', 'Foo', 't'], None, 'foo\n foo bar\nFoo\n(paren)\n*foo\n', '', 0),
     (['-c', '-f', 'p'], 'foo\nzz\n(paren)\n', '2\n', '', 0),
+    # Cowrie v3.1.8 re-anchor: what upstream's -q/-c/exit 2 now also does,
+    # recorded with GNU grep 3.11 (same files), program name shortened.
+    (['--quiet', 'foo', 't'], None, '', '', 0),
+    (['--silent', 'zzz', 't'], None, '', '', 1),
+    (['-q', 'foo', 'nope', 't'], None, '', 'grep: nope: No such file or directory\n', 0),
+    (['-q', 'zzz', 'nope', 't'], None, '', 'grep: nope: No such file or directory\n', 2),
+    (['foo', 'nope', 't'], None, 't:foo\nt: foo bar\nt:*foo\n', 'grep: nope: No such file or directory\n', 2),
+    (['-c', 'foo', 't', 'c'], None, 't:3\nc:0\n', '', 0),
+    (['-c', '-h', 'foo', 't', 'c'], None, '3\n0\n', '', 0),
+    (['-s', 'foo', 'nope'], None, '', '', 2),
+    (['-l', 'foo', 't', 'c'], None, 't\n', '', 0),
+    (['-H', '-n', 'Hardware', 'c'], None, 'c:3:Hardware\t: BCM\n', '', 0),
+    (['--count', 'foo'], 'foo\nfoo\n', '2\n', '', 0),
+    (['-e', 'foo'], 'foo\nbar\n', 'foo\n', '', 0),
 ]
 
 
@@ -194,6 +211,56 @@ class TranslatorTest(unittest.TestCase):
     def test_back_references_shift_with_earlier_patterns(self):
         out, _, rc = run(["-e", r"\(x\)\1", "-e", r"\(a\)\1"], "aa\nxy\n")
         self.assertEqual((out, rc), ("aa\n", 0))
+
+
+class _Events:
+    def dispatch(self, *args, **kwargs) -> None:
+        pass
+
+
+class _Protocol:
+    events = _Events()
+
+
+def run_interactive(args, lines, stdin_log):
+    """grep with neither a file nor a pipe: lines arrive through
+    lineReceived, then EOF reads the exec channel's stdin log (None: none)."""
+    cmd = NS["Command_grep"].__new__(NS["Command_grep"])
+    cmd.args, cmd.cwd, cmd.fs = list(args), "/tmp", _FS()
+    cmd.input_data = None
+    cmd.protocol = _Protocol()
+    cmd.stdin_log_contents = lambda: stdin_log
+    cmd.out = cmd.err = ""
+    cmd.code = "running"
+    cmd.start()
+    if cmd.code != "running":
+        raise AssertionError(f"grep exited before EOF: {cmd.code!r}")
+    for line in lines:
+        cmd.lineReceived(line)
+    cmd.eofReceived()
+    return cmd.out, cmd.err, cmd.code
+
+
+class StdinEofTest(unittest.TestCase):
+    """Upstream's stdin path (kept by the v3.1.8 re-anchor): typed lines
+    match as they arrive; at EOF the exec channel's stdin log is matched, then
+    -c reports one total for "(standard input)"."""
+
+    def test_typed_lines_match_as_they_arrive(self):
+        self.assertEqual(run_interactive(["foo"], ["foo", "bar"], None), ("foo\n", "", 0))
+        self.assertEqual(run_interactive(["zzz"], ["foo"], None), ("", "", 1))
+
+    def test_exec_stdin_log_is_read_at_eof(self):
+        log = b"model name\t: Xeon\nHardware\t: BCM\n"
+        self.assertEqual(run_interactive([r"model name\|Hardware"], [], log), (log.decode(), "", 0))
+
+    def test_count_covers_lines_and_log(self):
+        self.assertEqual(run_interactive(["-c", "a"], ["a", "b"], b"a\na\n"), ("3\n", "", 0))
+        self.assertEqual(run_interactive(["-c", "z"], [], b"a\n"), ("0\n", "", 1))
+
+    def test_quiet_and_list_at_eof(self):
+        self.assertEqual(run_interactive(["-q", "a"], [], b"a\n"), ("", "", 0))
+        self.assertEqual(run_interactive(["-l", "a"], [], b"b\na\n"), ("(standard input)\n", "", 0))
 
 
 class BudgetTest(unittest.TestCase):

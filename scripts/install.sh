@@ -335,7 +335,7 @@ preflight_installation() {
   validate_existing_accounts
 }
 
-# The pinned Cowrie (v3.1.1) declares requires-python >=3.11 (v3.1 dropped
+# The pinned Cowrie (v3.1.8) declares requires-python >=3.11 (v3.1 dropped
 # 3.10, which Ubuntu 22.04 ships), and its venv is built from python3. Refuse
 # here, before any package, account or checkout is touched, rather than fail
 # in pip halfway through. --no-cowrie needs no such interpreter.
@@ -343,7 +343,7 @@ require_cowrie_python() {
   [[ "$COWRIE" == 1 ]] || return 0
   local version status=0
   version="$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3]); sys.exit(sys.version_info < (3, 11))')" || status=$?
-  [[ "$status" == 0 ]] || err "the pinned Cowrie (v3.1.1) needs Python 3.11 or newer, but python3 is ${version:-unknown}; Ubuntu 22.04 ships 3.10. Use Ubuntu 24.04 or newer, make python3 a 3.11+ interpreter with its venv module, or pass --no-cowrie. Nothing was changed."
+  [[ "$status" == 0 ]] || err "the pinned Cowrie (v3.1.8) needs Python 3.11 or newer, but python3 is ${version:-unknown}; Ubuntu 22.04 ships 3.10. Use Ubuntu 24.04 or newer, make python3 a 3.11+ interpreter with its venv module, or pass --no-cowrie. Nothing was changed."
 }
 
 # Per-start persona regeneration: the same two ExecStartPre= lines as
@@ -789,10 +789,14 @@ $CFG_MARKER
 
 [honeypot]
 download_limit_size = 52428800
+# == install/persona/cowrie-stealth.cfg: a session's TTY log stops at 10 MiB
+# (Cowrie then disconnects it), and below 2 GiB free none is written.
+ttylog_limit_size = 10485760
+ttylog_min_free = 2147483648
 
 [shell]
 # == install/persona/cowrie-stealth.cfg (measured on arm; see its comment):
-# v3.1.1's own default, pinned so a pin bump cannot move it unnoticed.
+# Cowrie's own default, pinned so a pin bump cannot move it unnoticed.
 max_input_size = 16384
 
 [ssh]
@@ -801,6 +805,10 @@ listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0
 [output_jsonlog]
 enabled = true
 logfile = $COWRIE_CFG_HOME/var/log/cowrie/cowrie.json
+
+# Cowrie's own uploader would share captures past ShardLure's bazaar.Vet.
+[output_malwarebazaar]
+enabled = false
 CFG
     log "cowrie.cfg written (ssh port $HONEYPOT_PORT, jsonlog enabled)"
   else
@@ -808,6 +816,7 @@ CFG
     log "  ensure it contains: [ssh] listen_endpoints = tcp:$HONEYPOT_PORT:interface=0.0.0.0"
     log "  and [output_jsonlog] logfile = $COWRIE_HOME/var/log/cowrie/cowrie.json"
     log "  and [honeypot] download_limit_size = 52428800 (bounds attacker downloads)"
+    log "  and [honeypot] ttylog_limit_size = 10485760, ttylog_min_free = 2147483648 (bounds TTY logs)"
   fi
   if [[ "$FRESH_COWRIE" == 1 ]]; then
     installer_safety cowrie-permissions

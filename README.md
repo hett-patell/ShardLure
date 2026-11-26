@@ -82,13 +82,41 @@ Cowrie's pip install.
 ### Requirements
 
 - **Python 3.11 or newer** as `python3` on the honeypot host. The pinned Cowrie
-  (v3.1.1, `install/cowrie.commit`) declares `requires-python >=3.11` and its
+  (v3.1.8, `install/cowrie.commit`) declares `requires-python >=3.11` and its
   venv is built from the interpreter running the installer. Ubuntu 22.04 ships
   3.10, so use **Ubuntu 24.04 or newer** (or install `python3.11` with its venv
   module and run the installer with it: `sudo python3.11 scripts/shardlure.py run`).
   Both installers check this first and refuse with "Nothing was changed" rather
   than fail in pip after SSH has moved; `install.sh --no-cowrie` skips the check
   because it installs no Cowrie.
+
+### Cowrie version
+
+Each ShardLure release is built and tested against **one exact Cowrie commit**,
+pinned in `install/cowrie.commit`. Run the Cowrie version your ShardLure release
+pins, and no other: both installers fetch that commit, and the stealth patches
+are exact-text edits to that commit's source, so `apply-stealth.sh` and
+`shardlure.py run` refuse any other Cowrie checkout rather than half-patch it.
+
+| ShardLure | Cowrie | Pinned commit |
+|---|---|---|
+| v1.x | not pinned (Cowrie's `main` at install time) | — |
+| v2.0.0 – v2.10.1 | v3.0.8 | `65ded95b2d2b6555be8e4eb95315036a4db361f9` |
+| v2.11.0 – v2.13.0 | v3.1.1 | `c17c9b73d6af0972334ea1e90b20d974cb24eeca` |
+| next release (after v2.13.0) | v3.1.8 | `183a3b1bc361bb941e1d54874922399baac42af0` |
+
+Upgrading ShardLure across a row of this table moves Cowrie too, and an
+existing box is **not** moved in place: both installers refuse a Cowrie
+checkout at another commit, and the patched tree is dirty by design. To move:
+
+1. Take a `shardlure backup`.
+2. Stop `cowrie.service` and move the Cowrie directory aside.
+3. Install the new ShardLure release, which checks out its pinned Cowrie.
+4. Move back `var/log/cowrie/cowrie.json*` (with `mv`, so ingest keeps its
+   place), `var/lib/cowrie/downloads/`, `var/lib/cowrie/tty/` and
+   `etc/userdb.txt`.
+5. Run `scripts/apply-stealth.sh`, which patches the new Cowrie, gives it
+   fresh host keys and restarts it.
 
 ### Supported data filesystems
 
