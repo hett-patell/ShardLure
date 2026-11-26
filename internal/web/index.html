@@ -116,6 +116,10 @@
   #cobe-wrap { position: relative; flex: none; width: min(100%, var(--globe-h), 760px); aspect-ratio: 1; }
   #cobe { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   #cobe:active { cursor: grabbing; }
+  /* The route is drawn in 2D over Cobe's sphere (drawRoute in cobe-boot.js):
+     later in the tree than Cobe's canvas at the same z-index, so above the
+     globe, under the place label (z-index 3), and never in the way of a drag. */
+  #cobe-wrap > .globe-route { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
   /* Deliberately NOT positioned. CSS anchor positioning needs the anchor to be
      a descendant of the anchored element's containing block, and Cobe puts its
      `anchor-name: --cobe-<id>` divs in the wrapper it inserts around the
@@ -526,7 +530,7 @@ var _cobeBootPromise = null;
 function ensureCobeBoot() {
   if (window.ShardCobe) return Promise.resolve(window.ShardCobe);
   if (_cobeBootPromise) return _cobeBootPromise;
-  _cobeBootPromise = import('/cobe-boot.js?v=16').then(function () {
+  _cobeBootPromise = import('/cobe-boot.js?v=17').then(function () {
     return window.ShardCobe;
   }).catch(function (err) {
     _cobeBootPromise = null;

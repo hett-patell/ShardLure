@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -44,8 +45,8 @@ const draw = (conn) => {
   const e = g.buildCobeEntities(home, conn, cfg, now);
   return {
     markers: e.markers.map((m) => m.id),
-    arcs: e.arcs.map((a) => a.id),
-    heat: e.arcs.length ? level(e.arcs[0].color) : 0,
+    route: e.route ? [e.route.from.lat, e.route.from.lon, e.route.to.lat, e.route.to.lon] : [],
+    heat: e.route ? level(e.route.color) : 0,
   };
 };
 console.log(JSON.stringify([
@@ -56,8 +57,9 @@ console.log(JSON.stringify([
 ]));
 `)
 	type drawn struct {
-		Markers, Arcs []string
-		Heat          int
+		Markers []string
+		Route   []float64
+		Heat    int
 	}
 	var got []drawn
 	decodeJS(t, out, &got)
@@ -65,15 +67,85 @@ console.log(JSON.stringify([
 		t.Fatalf("harness returned %d scenarios, want 4: %s", len(got), out)
 	}
 	want := []drawn{
-		{Markers: []string{"home", "latest-connection"}, Arcs: []string{"route"}, Heat: 5},
-		{Markers: []string{"home", "latest-connection"}, Arcs: []string{"route"}, Heat: 1},
-		{Markers: []string{"home", "latest-connection"}, Arcs: []string{}, Heat: 0},
-		{Markers: []string{"home"}, Arcs: []string{}, Heat: 0},
+		{Markers: []string{"home", "latest-connection"}, Route: []float64{58.41, 15.62, 19.076, 72.8777}, Heat: 5},
+		{Markers: []string{"home", "latest-connection"}, Route: []float64{51.5, -0.12, 19.076, 72.8777}, Heat: 1},
+		{Markers: []string{"home", "latest-connection"}, Route: []float64{}, Heat: 0},
+		{Markers: []string{"home"}, Route: []float64{}, Heat: 0},
 	}
 	for i, name := range []string{"20 s ago", "2 h ago", "in the honeypot's city", "no connection"} {
 		if strings.Join(got[i].Markers, ",") != strings.Join(want[i].Markers, ",") ||
-			strings.Join(got[i].Arcs, ",") != strings.Join(want[i].Arcs, ",") || got[i].Heat != want[i].Heat {
+			fmt.Sprint(got[i].Route) != fmt.Sprint(want[i].Route) || got[i].Heat != want[i].Heat {
 			t.Errorf("%s: drew %+v, want %+v", name, got[i], want[i])
+		}
+	}
+}
+
+// The route flies over the globe: Cobe's own arcs are quadratic curves whose
+// middle sank inside the sphere on long routes (San Diego to Mumbai, 127°,
+// sliced through the globe). Every point of the path must stay above the
+// sphere, start and end on the two dots, follow one great circle, and rise
+// off the surface in the middle, for short, long and antipodal routes alike.
+func TestRoutePathFliesOverTheGlobe(t *testing.T) {
+	out := runGlobeJS(t, `
+const mumbai = { lat: 19.076, lon: 72.8777 };
+const routes = {
+  short: [{ lat: 23.0, lon: 72.6 }, mumbai],
+  london: [{ lat: 51.5, lon: -0.12 }, mumbai],
+  sandiego: [{ lat: 32.7157, lon: -117.1611 }, mumbai],
+  antipodes: [{ lat: -19.076, lon: -107.1223 }, mumbai],
+};
+const elevation = g.cobeThemeConfig('obsidian').markerElevation;
+const base = g.SPHERE_RADIUS + elevation;
+const len = (v) => Math.hypot(v[0], v[1], v[2]);
+const unit = (v) => v.map((c) => c / len(v));
+const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < 1e-6;
+const out = {};
+for (const [name, [a, b]] of Object.entries(routes)) {
+  const pts = g.routePath(a, b, elevation);
+  const radii = pts.map(len);
+  // One great circle: every point's direction lies in the plane of the ends.
+  const u = unit(pts[0]), w = unit(pts[pts.length - 1]);
+  const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+  const nl = len(n);
+  const offPlane = nl < 1e-9 ? 0 : Math.max(...pts.map((p) => Math.abs((p[0] * n[0] + p[1] * n[1] + p[2] * n[2]) / nl / len(p))));
+  out[name] = {
+    finite: pts.every((p) => p.every(Number.isFinite)),
+    lowest: Math.min(...radii),
+    middle: radii[Math.floor(radii.length / 2)],
+    starts: near(pts[0], g.latLonToVec3(a.lat, a.lon).map((c) => c * base)),
+    ends: near(pts[pts.length - 1], g.latLonToVec3(b.lat, b.lon).map((c) => c * base)),
+    offPlane,
+  };
+}
+console.log(JSON.stringify({ base, sphere: g.SPHERE_RADIUS, routes: out }));
+`)
+	var got struct {
+		Base, Sphere float64
+		Routes       map[string]struct {
+			Finite, Starts, Ends     bool
+			Lowest, Middle, OffPlane float64
+		}
+	}
+	decodeJS(t, out, &got)
+	if len(got.Routes) != 4 {
+		t.Fatalf("harness returned %d routes, want 4: %s", len(got.Routes), out)
+	}
+	for name, r := range got.Routes {
+		if !r.Finite {
+			t.Errorf("%s: the path has a non-finite point", name)
+			continue
+		}
+		if r.Lowest < got.Base-1e-9 {
+			t.Errorf("%s: a point sits at radius %.3f, under the dots' %.3f (sphere %.1f): the route cuts into the globe", name, r.Lowest, got.Base, got.Sphere)
+		}
+		if r.Middle <= got.Base+0.001 {
+			t.Errorf("%s: the middle sits at radius %.3f, not lifted off the dots' %.3f", name, r.Middle, got.Base)
+		}
+		if !r.Starts || !r.Ends {
+			t.Errorf("%s: the path does not run from the source's dot to the honeypot's (starts %v, ends %v)", name, r.Starts, r.Ends)
+		}
+		if r.OffPlane > 1e-9 {
+			t.Errorf("%s: a point strays %.2g off the great circle", name, r.OffPlane)
 		}
 	}
 }

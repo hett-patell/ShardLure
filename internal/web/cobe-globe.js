@@ -3,7 +3,10 @@
  * Cobe 2.x: no onRender — rAF + update.
  *
  * The globe draws the live connection: one route from the newest source into
- * the honeypot, coloured on the same heat scale as the feed's dots.
+ * the honeypot, coloured on the same heat scale as the feed's dots. Cobe draws
+ * the sphere and the two dots; the route itself is a lifted great circle drawn
+ * in 2D over it (routePath, projectVec), because Cobe's own arcs cut through
+ * the globe on long routes.
  */
 
 export function locationToAngles(lat, lon) {
@@ -26,13 +29,16 @@ export function latLonToVec3(lat, lon) {
   return [-o * Math.cos(a), Math.sin(r), o * Math.sin(a)];
 }
 
-export function projectLatLon(lat, lon, phi, theta, elevation = 0.02) {
-  const [x0, y0, z0] = latLonToVec3(lat, lon);
-  const r = 0.8 + elevation;
-  const x = x0 * r;
-  const y = y0 * r;
-  const z = z0 * r;
+/** Cobe's sphere radius in clip space; markers sit markerElevation above it. */
+export const SPHERE_RADIUS = 0.8;
 
+/**
+ * Project a point of Cobe's scene for the view, with Cobe's own rotation. x and
+ * y are fractions of the canvas; a point is hidden when it is behind the
+ * sphere (z < 0) and its projection falls inside the sphere's disc.
+ */
+export function projectVec(v, phi, theta) {
+  const [x, y, z] = v;
   const ct = Math.cos(theta);
   const st = Math.sin(theta);
   const cp = Math.cos(phi);
@@ -42,14 +48,20 @@ export function projectLatLon(lat, lon, phi, theta, elevation = 0.02) {
   const cy = sp * st * x + ct * y - cp * st * z;
   const cz = -sp * ct * x + st * y + cp * ct * z;
 
-  const onFront = cz >= 0;
-  const outsideDisk = cx * cx + cy * cy >= 0.64;
+  const front = cz >= 0;
+  const outsideDisk = cx * cx + cy * cy >= SPHERE_RADIUS * SPHERE_RADIUS;
   return {
     x: (cx + 1) / 2,
     y: (-cy + 1) / 2,
-    visible: onFront || outsideDisk,
-    front: onFront,
+    visible: front || outsideDisk,
+    front,
   };
+}
+
+export function projectLatLon(lat, lon, phi, theta, elevation = 0.02) {
+  const r = SPHERE_RADIUS + elevation;
+  const [x, y, z] = latLonToVec3(lat, lon);
+  return projectVec([x * r, y * r, z * r], phi, theta);
 }
 
 function vecToLatLon(v) {
@@ -86,6 +98,53 @@ export function routeView(a, b, tilt = 0.35) {
   const one = side(1);
   const other = side(-1);
   return vecToLatLon(Math.abs(one[1]) < Math.abs(other[1]) ? one : other);
+}
+
+// How far a route rises off the sphere at its middle: in proportion to its
+// length, so a short hop stays a low arch, and capped so the top of the
+// longest one still fits the canvas when it passes over the rim.
+const ROUTE_LIFT_PER_LENGTH = 0.22;
+const ROUTE_LIFT_MAX = 0.16;
+
+/**
+ * The route from a to b as points of Cobe's scene: the great circle between
+ * them, from marker height at either end up to a lift at the middle.
+ *
+ * Cobe's own arcs are quadratic curves through a control point above the
+ * midpoint, and on a long route their middle sinks inside the sphere: San
+ * Diego to Mumbai is 127°, and its apex fell at 0.72 under a 0.8 sphere, so
+ * the route sliced through the globe. Every point here stays above it.
+ */
+export function routePath(a, b, elevation, steps = 96) {
+  const va = latLonToVec3(a.lat, a.lon);
+  const vb = latLonToVec3(b.lat, b.lon);
+  const dot = clamp(va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2], -1, 1);
+  const angle = Math.acos(dot);
+  // The direction from a toward b within the route's plane. Antipodes have
+  // no single great circle; any will do, so go over a pole.
+  let w = [vb[0] - dot * va[0], vb[1] - dot * va[1], vb[2] - dot * va[2]];
+  if (Math.hypot(w[0], w[1], w[2]) < 1e-6) {
+    w = Math.abs(va[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    const d = w[0] * va[0] + w[1] * va[1] + w[2] * va[2];
+    w = [w[0] - d * va[0], w[1] - d * va[1], w[2] - d * va[2]];
+  }
+  const wl = Math.hypot(w[0], w[1], w[2]);
+  w = w.map((c) => c / wl);
+  const base = SPHERE_RADIUS + elevation;
+  const lift = Math.min(ROUTE_LIFT_MAX, ROUTE_LIFT_PER_LENGTH * base * angle);
+  const points = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const c = Math.cos(angle * t);
+    const s = Math.sin(angle * t);
+    const r = base + lift * Math.sin(Math.PI * t);
+    points.push([
+      (va[0] * c + w[0] * s) * r,
+      (va[1] * c + w[1] * s) * r,
+      (va[2] * c + w[2] * s) * r,
+    ]);
+  }
+  return points;
 }
 
 function clamp(n, lo, hi) {
@@ -375,7 +434,12 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   };
 }
 
-export function startGlobeLoop(globe, ix) {
+/**
+ * Drive the globe: ease the view, repaint only when it changed, and call
+ * onFrame(view) after each repaint so anything drawn over the sphere moves
+ * with it in the same frame.
+ */
+export function startGlobeLoop(globe, ix, onFrame) {
   let raf = 0;
   let alive = true;
   const wrap = ix.wrap;
@@ -451,6 +515,7 @@ export function startGlobeLoop(globe, ix) {
       lastPhi = view.phi;
       lastTheta = view.theta;
       lastPaint = now;
+      if (onFrame) onFrame(view);
     }
 
     schedule(interacting ? 0 : minGap || 32);
@@ -472,20 +537,22 @@ export function startGlobeLoop(globe, ix) {
 /* Globe materials. The sphere and the honeypot are neutral; the live route and
    its source dot are coloured by heat, on the feed's scale: a connection in
    the last minute is the hottest thing on the page, one quiet for an hour has
-   cooled to the arc colour. Triples are 0..1 RGB, as Cobe takes them.
+   cooled to grey. Triples are 0..1 RGB, as Cobe takes them.
    heat[2..4] are --heat-3…5 from themes.css. The two cool steps are picked for
    the globe rather than copied from the panel tokens (--heat-1 is an "off"
    dot and would vanish into the sphere), so each ramp gains contrast against
-   its own sphere at every step. */
+   its own sphere at every step and the coolest route still reads. */
 const GLOBE_SHARED = {
   mapSamples: 20000,
   markerElevation: 0.02,
-  // One route on the globe, so it can carry some weight.
-  arcWidth: 0.4,
-  arcHeight: 0.26,
   homeMarkerSize: 0.024,
   // Source dot size by heat level 1..5.
   sourceSize: [0.014, 0.016, 0.019, 0.022, 0.026],
+  // The route over the sphere, in CSS pixels: a core line, and a soft halo
+  // under it in the same colour.
+  routeWidth: 1.75,
+  routeHaloWidth: 6,
+  routeHaloAlpha: 0.22,
 };
 
 const GLOBE_THEMES = {
@@ -497,7 +564,6 @@ const GLOBE_THEMES = {
     baseColor: [0.24, 0.30, 0.29],
     glowColor: [0.09, 0.13, 0.12],
     markerColor: [0.58, 0.64, 0.62],
-    arcColor: [0.30, 0.36, 0.35],
     home: [0.90, 0.93, 0.92],
     heat: [
       [0.30, 0.36, 0.35],
@@ -518,11 +584,10 @@ const GLOBE_THEMES = {
     baseColor: [0.88, 0.92, 0.90],
     glowColor: [0.84, 0.90, 0.87],
     markerColor: [0.30, 0.36, 0.34],
-    arcColor: [0.66, 0.72, 0.69],
     home: [0.11, 0.13, 0.13],
     heat: [
-      [0.66, 0.72, 0.69],
-      [0.86, 0.63, 0.52],
+      [0.58, 0.64, 0.62],
+      [0.80, 0.52, 0.40],
       [0.77, 0.38, 0.18],
       [0.64, 0.25, 0.11],
       [0.44, 0.14, 0.06],
@@ -530,7 +595,7 @@ const GLOBE_THEMES = {
   },
 };
 
-/** Cobe createGlobe options + marker/arc RGB triples for a theme. */
+/** Cobe createGlobe options, marker colours and route styling for a theme. */
 export function cobeThemeConfig(theme) {
   return { ...GLOBE_SHARED, ...(GLOBE_THEMES[theme] || GLOBE_THEMES.obsidian) };
 }
@@ -547,8 +612,8 @@ function samePlace(a, b) {
     Math.round(a.lon * 10) === Math.round(b.lon * 10);
 }
 
-/** Stable key so globe.update runs only when what is drawn actually changes. */
-export function cobeEntitiesKey(home, markers, arcs) {
+/** Stable key so globe.update runs only when the markers actually change. */
+export function cobeEntitiesKey(home, markers) {
   const h = `${Number(home.lat).toFixed(3)},${Number(home.lon).toFixed(3)}`;
   const mk = (markers || [])
     .map(
@@ -556,15 +621,15 @@ export function cobeEntitiesKey(home, markers, arcs) {
         `${m.id}:${m.location[0].toFixed(2)},${m.location[1].toFixed(2)}:${m.size.toFixed(3)}:${m.color}`
     )
     .join("|");
-  const ar = (arcs || []).map((a) => `${a.id}:${a.color}`).join("|");
-  return `${h}#${mk}#${ar}`;
+  return `${h}#${mk}`;
 }
 
 /**
  * Markers and the route for the live connection, { lat, lon, ts } with ts in
  * epoch ms, or null while there is none to place. Its dot is
  * "latest-connection", the id the label anchors to; a source in the
- * honeypot's own city gets the dot but no route.
+ * honeypot's own city gets the dot but no route. The route is { from, to,
+ * color, level }, drawn by the caller along routePath.
  */
 export function buildCobeEntities(home, conn, cfg, now = Date.now()) {
   const markers = [
@@ -576,7 +641,7 @@ export function buildCobeEntities(home, conn, cfg, now = Date.now()) {
       color: cfg.home,
     },
   ];
-  const arcs = [];
+  let route = null;
   if (conn && Number.isFinite(conn.lat) && Number.isFinite(conn.lon)) {
     const level = globeHeat((now - conn.ts) / 1000);
     const color = cfg.heat[level - 1];
@@ -588,8 +653,13 @@ export function buildCobeEntities(home, conn, cfg, now = Date.now()) {
       color,
     });
     if (!samePlace(conn, home)) {
-      arcs.push({ id: "route", from: [conn.lat, conn.lon], to: [home.lat, home.lon], color });
+      route = {
+        from: { lat: conn.lat, lon: conn.lon },
+        to: { lat: home.lat, lon: home.lon },
+        color,
+        level,
+      };
     }
   }
-  return { markers, arcs };
+  return { markers, route };
 }

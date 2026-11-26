@@ -2,11 +2,14 @@
  * Lazy-loaded Cobe engine for the activity globe, shared by Obsidian and Kiln.
  *
  * The globe draws one route: from the newest connection's source into the
- * honeypot. It never spins on its own. A new connection replaces the route:
- * the new one lifts off the surface, its source dot pings and then the
- * honeypot's as the connection lands, and the globe turns to show the whole
- * route, so motion on the page always means "someone new connected". Under
- * prefers-reduced-motion the route simply appears and the turn is a cut.
+ * honeypot. Cobe draws the sphere and the two dots; the route is a lifted
+ * great circle drawn in 2D on a canvas over it (drawRoute), so it flies over
+ * the globe however long it is. The globe never spins on its own. A new
+ * connection replaces the route: it draws itself from the source to the
+ * honeypot, the source's dot pings as it leaves and the honeypot's as it
+ * lands, and the globe turns to show the whole route, so motion on the page
+ * always means "someone new connected". Under prefers-reduced-motion the route
+ * simply appears and the turn is a cut.
  */
 import createGlobe from "/vendor/cobe.esm.js";
 import {
@@ -15,9 +18,11 @@ import {
   cobeThemeConfig,
   cobeEntitiesKey,
   buildCobeEntities,
+  projectVec,
+  routePath,
   routeView,
   viewAngles,
-} from "/cobe-globe.js?v=19";
+} from "/cobe-globe.js?v=20";
 
 let _globe = null;
 let _stop = null;
@@ -35,18 +40,24 @@ let _dataKey = "";
 let _arrived = false;
 let _frameOnPaint = false;
 let _pings = [];
-let _riseAt = 0;
-let _settle = false;
 let _animFrame = 0;
+// The route overlay: its canvas, the path it draws (points of Cobe's scene),
+// that path's endpoints as a key, and its colour as 0..255 RGB.
+let _routeCanvas = null;
+let _routePts = null;
+let _routeKey = "";
+let _routeRGB = null;
+// How much of the route is drawn, 0..1, and when it began drawing itself in
+// (0 once it is whole).
+let _drawn = 0;
+let _drawAt = 0;
 
 // The same source back after this long is a new connection, not more of one.
 const QUIET_MS = 5 * 60 * 1000;
 const PING_MS = 900;
-// The honeypot's dot pings this long after the source's: the connection lands.
-const LAND_DELAY_MS = 450;
-const RISE_MS = 700;
-// A new route starts this fraction of its height off the surface.
-const RISE_FROM = 0.1;
+// How long a new route takes to draw itself from the source to the honeypot,
+// whose dot pings as it lands.
+const DRAW_MS = 900;
 
 function stage() {
   return document.getElementById("cobe-stage");
@@ -83,9 +94,18 @@ function destroy() {
   cancelAnimationFrame(_animFrame);
   _animFrame = 0;
   _pings = [];
-  _riseAt = 0;
-  _settle = false;
   _arrived = false;
+  _routeKey = "";
+  _routePts = null;
+  _drawn = 0;
+  _drawAt = 0;
+  if (_routeCanvas) {
+    const ctx = _routeCanvas.getContext("2d");
+    if (ctx) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, _routeCanvas.width, _routeCanvas.height);
+    }
+  }
   _ix = null;
   _state = null;
   _theme = null;
@@ -153,15 +173,13 @@ async function ensure(theme) {
     markerColor: cfg.markerColor,
     glowColor: cfg.glowColor,
     markerElevation: cfg.markerElevation,
-    arcColor: cfg.arcColor,
-    arcWidth: cfg.arcWidth,
-    arcHeight: cfg.arcHeight,
     markers: _entities.markers,
-    arcs: _entities.arcs,
   });
-  _dataKey = cobeEntitiesKey(_home, _entities.markers, _entities.arcs);
+  _dataKey = cobeEntitiesKey(_home, _entities.markers);
   _theme = theme;
-  _stop = startGlobeLoop(_globe, _ix);
+  _routeCanvas = routeCanvas();
+  setRoute(_entities.route, false);
+  _stop = startGlobeLoop(_globe, _ix, (view) => drawRoute(view.phi, view.theta));
   return _globe;
 }
 
@@ -200,20 +218,18 @@ function paint() {
   const arrived = _arrived;
   _arrived = false;
   const animate = arrived && !reducedMotion();
-  const key = cobeEntitiesKey(_home, _entities.markers, _entities.arcs);
-  try {
-    // Cobe bakes the height into an arc when the arc is set, so the new
-    // route's starting height goes in first.
-    if (animate) _globe.update({ arcHeight: cfg.arcHeight * RISE_FROM });
-    if (animate || key !== _dataKey) {
-      _dataKey = key;
-      _globe.update({ markers: _entities.markers, arcs: _entities.arcs });
+  const key = cobeEntitiesKey(_home, _entities.markers);
+  if (key !== _dataKey) {
+    _dataKey = key;
+    try {
+      _globe.update({ markers: _entities.markers });
       // A marker id Cobe has not seen before gets a fresh anchor div appended
       // to the wrapper, which would land AFTER the overlay container and break
       // tree order for every anchor created this tick. Re-assert the ordering.
       keepOverlaysLastInCobeWrapper();
-    }
-  } catch (_) {}
+    } catch (_) {}
+  }
+  setRoute(_entities.route, animate);
   if (_frameOnPaint && _conn) {
     _frameOnPaint = false;
     frameRoute(true);
@@ -221,22 +237,26 @@ function paint() {
   if (arrived && _conn) {
     if (animate) {
       const at = performance.now();
-      _riseAt = at;
-      _pings = [{ place: "source", at }, { place: "home", at: at + LAND_DELAY_MS }];
+      _pings = [{ place: "source", at }, { place: "home", at: at + DRAW_MS }];
       if (!_animFrame) _animFrame = requestAnimationFrame(animFrame);
     }
     frameRoute(false);
   }
+  drawRoute(_state.phi, _state.theta);
 }
 
-// One frame of an arrival: the route rising to its height and the two dots
-// pinging. The frame after the rise ends sends the route once more, because
-// Cobe applies a new height to the arcs it is given in the NEXT update.
+// One frame of an arrival: the route drawing itself in and the two dots
+// pinging, the source's as it leaves and the honeypot's as it lands.
 function animFrame() {
   _animFrame = 0;
   if (!_globe || !_entities) return;
-  const cfg = cobeThemeConfig(_theme);
   const now = performance.now();
+  if (_drawAt) {
+    const t = Math.min(1, (now - _drawAt) / DRAW_MS);
+    // Ease in and out, like something travelling.
+    _drawn = t < 0.5 ? 4 * t * t * t : 1 - (2 - 2 * t) ** 3 / 2;
+    if (t >= 1) _drawAt = 0;
+  }
   _pings = _pings.filter((p) => now - p.at < PING_MS);
   const grow = new Map();
   for (const p of _pings) {
@@ -244,29 +264,128 @@ function animFrame() {
     // Starts at 2.6x the dot's size and eases back to it.
     if (t >= 0) grow.set(p.place, 1 + 1.6 * (1 - t) * (1 - t));
   }
-  const patch = {
-    markers: _entities.markers.map((m) =>
-      grow.has(m.place) ? { ...m, size: m.size * grow.get(m.place) } : m
-    ),
-  };
-  if (_riseAt) {
-    const t = Math.min(1, (now - _riseAt) / RISE_MS);
-    const ease = 1 - (1 - t) ** 3;
-    patch.arcHeight = cfg.arcHeight * (RISE_FROM + (1 - RISE_FROM) * ease);
-    patch.arcs = _entities.arcs;
-    if (t >= 1) {
-      _riseAt = 0;
-      _settle = true;
-    }
-  } else if (_settle) {
-    patch.arcs = _entities.arcs;
-    _settle = false;
-  }
   try {
-    _globe.update(patch);
+    _globe.update({
+      markers: _entities.markers.map((m) =>
+        grow.has(m.place) ? { ...m, size: m.size * grow.get(m.place) } : m
+      ),
+    });
   } catch (_) {}
+  drawRoute(_state.phi, _state.theta);
   // The last frame, with every ping expired, puts the dots back to size.
-  if (_pings.length || _riseAt || _settle) _animFrame = requestAnimationFrame(animFrame);
+  if (_pings.length || _drawAt) _animFrame = requestAnimationFrame(animFrame);
+}
+
+// The route is drawn on a canvas of its own, laid over Cobe's (index.html
+// styles .globe-route): above the sphere, under the place label, and out of
+// the way of a drag.
+function routeCanvas() {
+  const w = wrap();
+  if (!w) return null;
+  let c = w.querySelector(":scope > canvas.globe-route");
+  if (!c) {
+    c = document.createElement("canvas");
+    c.className = "globe-route";
+    c.setAttribute("aria-hidden", "true");
+    w.appendChild(c);
+  }
+  return c;
+}
+
+/** The route to draw, from buildCobeEntities; animate draws a new one in. */
+function setRoute(route, animate) {
+  if (!route) {
+    _routePts = null;
+    _routeKey = "";
+    _drawAt = 0;
+    _drawn = 0;
+    return;
+  }
+  const key = `${route.from.lat},${route.from.lon}>${route.to.lat},${route.to.lon}`;
+  if (key !== _routeKey) {
+    _routeKey = key;
+    _routePts = routePath(route.from, route.to, cobeThemeConfig(_theme).markerElevation);
+    _drawn = 1;
+  }
+  _routeRGB = route.color.map((c) => Math.round(c * 255));
+  if (animate) {
+    _drawAt = performance.now();
+    _drawn = 0;
+  }
+}
+
+/**
+ * Draw the route for the view: project its points with Cobe's own rotation,
+ * drop the ones the sphere hides, and stroke a soft halo under a core line in
+ * the route's heat colour. While it draws itself in, a dot marks how far the
+ * connection has reached.
+ */
+function drawRoute(phi, theta) {
+  const c = _routeCanvas;
+  if (!c) return;
+  const w = c.clientWidth;
+  const h = c.clientHeight;
+  if (!w || !h) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const bw = Math.round(w * dpr);
+  const bh = Math.round(h * dpr);
+  if (c.width !== bw || c.height !== bh) {
+    c.width = bw;
+    c.height = bh;
+  }
+  const ctx = c.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const pts = _routePts;
+  if (!pts || !_routeRGB || _drawn <= 0) return;
+  // Runs of visible points; the drawn part may end partway along a segment.
+  const end = _drawn * (pts.length - 1);
+  const runs = [];
+  let run = null;
+  for (let i = 0; i <= Math.ceil(end); i++) {
+    let v = pts[i];
+    if (i > end) {
+      const a = pts[i - 1];
+      const f = end - (i - 1);
+      v = [a[0] + (v[0] - a[0]) * f, a[1] + (v[1] - a[1]) * f, a[2] + (v[2] - a[2]) * f];
+    }
+    const p = projectVec(v, phi, theta);
+    if (!p.visible) {
+      run = null;
+      continue;
+    }
+    if (!run) {
+      run = [];
+      runs.push(run);
+    }
+    run.push([p.x * w, p.y * h]);
+  }
+  const cfg = cobeThemeConfig(_theme);
+  const [r, g, b] = _routeRGB;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const stroke = (width, alpha) => {
+    ctx.lineWidth = width;
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    for (const line of runs) {
+      if (line.length < 2) continue;
+      ctx.beginPath();
+      ctx.moveTo(line[0][0], line[0][1]);
+      for (let k = 1; k < line.length; k++) ctx.lineTo(line[k][0], line[k][1]);
+      ctx.stroke();
+    }
+  };
+  stroke(cfg.routeHaloWidth, cfg.routeHaloAlpha);
+  stroke(cfg.routeWidth, 1);
+  // run is the last run only if the drawn end itself is visible.
+  if (_drawAt && run) {
+    const [hx, hy] = run[run.length - 1];
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.beginPath();
+    ctx.arc(hx, hy, cfg.routeWidth * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 /** Turn to show the whole live route. Refused while the operator steers. */
