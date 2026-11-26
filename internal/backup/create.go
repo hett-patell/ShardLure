@@ -267,6 +267,10 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 	if err != nil {
 		return manifest, err
 	}
+	// The bundle may not take the space capture needs: on the usual layout it
+	// shares a filesystem with the evidence, and a backup that fits with
+	// 1 MiB to spare pauses capture and starves the database and Cowrie.
+	reserve := uint64(max(cfg.Capture.MinFreeBytes, 0))
 	protected := []fs.FileInfo{sourceDB}
 	need := uint64(sourceDB.Size()) + 16<<20
 	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
@@ -280,8 +284,8 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 			return manifest, err
 		}
 	}
-	if free < need {
-		return manifest, ErrInsufficientSpace
+	if free < need || free-need < reserve {
+		return manifest, &SpaceShortfall{Need: need, Available: free, Reserve: reserve}
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -463,8 +467,14 @@ func createWithOperations(ctx context.Context, opts CreateOptions, ops fileOpera
 	if err != nil {
 		return manifest, err
 	}
-	if uint64(catalog.bytes) > free || free-uint64(catalog.bytes) < 1<<20 {
-		return manifest, ErrInsufficientSpace
+	if files := uint64(catalog.bytes); files > free || free-files < max(reserve, 1<<20) {
+		// Report the whole bundle against the space there was before it: the
+		// snapshot already written goes away with the staging directory.
+		snap, err := stage.Stat("database/shardlure.db")
+		if err != nil {
+			return manifest, err
+		}
+		return manifest, &SpaceShortfall{Need: files + uint64(snap.Size()), Available: free + uint64(snap.Size()), Reserve: reserve}
 	}
 	sort.Slice(catalog.files, func(i, j int) bool { return catalog.files[i].entry.Path < catalog.files[j].entry.Path })
 	for _, file := range catalog.files {
