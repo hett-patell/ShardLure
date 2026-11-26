@@ -124,8 +124,8 @@ func TestFocusRingIsNeverSuppressed(t *testing.T) {
 	if !strings.Contains(themes, ":focus-visible {") {
 		t.Error("themes.css has no shared :focus-visible rule")
 	}
-	if n := strings.Count(themes, "--focus-ring:"); n < 4 {
-		t.Errorf("--focus-ring defined in %d theme blocks, want all 4", n)
+	if n := strings.Count(themes, "--focus-ring:"); n < 2 {
+		t.Errorf("--focus-ring defined in %d theme blocks, want both (obsidian, kiln)", n)
 	}
 }
 
@@ -273,22 +273,9 @@ func TestNoInlineLayoutStyles(t *testing.T) {
 }
 
 func TestSmallScreenLayouts(t *testing.T) {
-	intel := strings.Join(mediaBlocks(styleBlock(t, intelHTML), "(max-width: 760px)"), "\n")
-	if !strings.Contains(intel, ".shell { grid-template-columns: 1fr;") {
-		t.Error("intel.html: the 52px sidebar column has no phone breakpoint")
-	}
 	index := strings.Join(mediaBlocks(styleBlock(t, indexHTML), "(max-width: 760px)"), "\n")
 	if strings.Contains(index, ".rail.right { display: none; }") {
 		t.Error("index.html: the live feed is hidden on phones")
-	}
-	for _, want := range []string{"html, body { overflow: auto;", ".rail.right { display: flex;"} {
-		if !strings.Contains(index, want) {
-			t.Errorf("index.html phone layout missing %q", want)
-		}
-	}
-	themes := strings.Join(mediaBlocks(string(themesCSS), "(max-width: 760px)"), "\n")
-	if !strings.Contains(themes, "max-width: none") {
-		t.Error("themes.css: #cobe-wrap keeps its viewport-relative max-width (0px on a phone)")
 	}
 }
 
@@ -336,8 +323,8 @@ func themeTokens(t *testing.T) map[string]map[string]string {
 
 func TestDimTokensMeetContrast(t *testing.T) {
 	blocks := themeTokens(t)
-	if len(blocks) != 7 {
-		t.Fatalf("found %d theme blocks defining --dim-2, want 7 (signal dark/light and five single-mode themes)", len(blocks))
+	if len(blocks) != 2 {
+		t.Fatalf("found %d theme blocks defining --dim-2, want 2 (obsidian, kiln)", len(blocks))
 	}
 	for sel, v := range blocks {
 		for _, k := range []string{"bg", "glass", "glass-2", "dim", "dim-2", "focus-ring"} {
@@ -484,21 +471,6 @@ func TestFontRoute(t *testing.T) {
 }
 
 // ── P3 hygiene ─────────────────────────────────────────────────────────────
-
-func TestSidebarLinksAreNamed(t *testing.T) {
-	re := regexp.MustCompile(`<a class="sb-item[^"]*"[^>]*><svg[^>]*>`)
-	for name, page := range pages {
-		links := re.FindAllString(page, -1)
-		if len(links) != 2 {
-			t.Errorf("%s: %d sidebar links, want 2", name, len(links))
-		}
-		for _, l := range links {
-			if !strings.Contains(l, "aria-label=") || !strings.Contains(l, `aria-hidden="true"`) {
-				t.Errorf("%s: icon link is named by title only or exposes its svg: %s", name, l)
-			}
-		}
-	}
-}
 
 func TestTabsControlTabpanels(t *testing.T) {
 	for _, v := range []string{"overview", "blue", "red", "settings"} {

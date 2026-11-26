@@ -9,15 +9,15 @@
 # family the themes reference, writes them next to the other embedded assets,
 # and generates fonts.css with same-origin @font-face rules.
 #
-# Only the families themes.css actually resolves are fetched:
-#   Signal   -> Inter (sans), JetBrains Mono (mono)
-#   Meridian -> Barlow (sans + display), IBM Plex Mono (mono)
-#   Sprite   -> DM Sans (sans), Pixelify Sans (display); mono is ui-monospace
-# Chakra Petch and Space Grotesk were requested by the old <link> tags but no
-# theme block ever resolved to them, so they are deliberately not vendored.
+# Only the families themes.css actually resolves are fetched. Both themes
+# (Obsidian and Kiln) share one family in two widths:
+#   Atkinson Hyperlegible Next -> --sans (interface text)
+#   Atkinson Hyperlegible Mono -> --mono (IP addresses, hashes, commands)
+# It was drawn to keep look-alike characters apart (0/O, 1/l/I, rn/m), which is
+# the confusion that matters when comparing fingerprints and attacker input.
 #
 # Re-run to refresh. Output is deterministic apart from Google's file hashes.
-# All six families are licensed under the SIL Open Font License 1.1; see
+# Both families are licensed under the SIL Open Font License 1.1; see
 # internal/web/fonts/README.md.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,12 +36,8 @@ out = Path(sys.argv[1])
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 families = [
-    "Inter:wght@400..700",
-    "JetBrains+Mono:wght@400..700",
-    "Barlow:wght@400;500;600;700",
-    "IBM+Plex+Mono:wght@400;500;600",
-    "DM+Sans:opsz,wght@9..40,400..700",
-    "Pixelify+Sans:wght@400..700",
+    "Atkinson+Hyperlegible+Next:wght@200..800",
+    "Atkinson+Hyperlegible+Mono:wght@200..800",
 ]
 url = ("https://fonts.googleapis.com/css2?" +
        "&".join("family=" + f for f in families) + "&display=swap")

@@ -1179,19 +1179,6 @@ func (s *Store) ListActors(limit int) ([]models.Actor, error) {
 	return s.queryActors(q)
 }
 
-// TopActorsByEvents returns actors ordered by total event_count — the actual
-// "top actors" by volume. The globe's actor list is ordered by last_seen (for
-// the live globe arcs), so a client-side slice of it showed recent actors, not
-// the highest-volume ones (the 64k-event top attacker was absent because it
-// wasn't recently active).
-func (s *Store) TopActorsByEvents(limit int) ([]models.Actor, error) {
-	if limit <= 0 {
-		limit = 14
-	}
-	return s.queryActors(`SELECT `+actorColumns+`
-FROM actors ORDER BY event_count DESC LIMIT ?`, limit)
-}
-
 // TopActorsByRate returns the actors with the highest attempts_per_hour. The
 // Brute-Force Radar needs the most AGGRESSIVE actors, but ListActors orders by
 // last_seen (most recent), so the radar — fed from that recent slice — was

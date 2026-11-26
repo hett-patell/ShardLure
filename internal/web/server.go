@@ -14,7 +14,6 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1452,8 +1451,6 @@ func (s *Server) requirePageAuth(w http.ResponseWriter, r *http.Request) bool {
 type dashboardResponse struct {
 	GeneratedAt  string            `json:"generatedAt"`
 	Summary      summaryBlock      `json:"summary"`
-	Actors       []actorCard       `json:"actors"`    // recent actors (drives globe points/arcs)
-	TopActors    []actorCard       `json:"topActors"` // actors by event volume (the "Top actors" widget)
 	Recent       []recentRecord    `json:"recent"`
 	Connection   *globeConnection  `json:"connection,omitempty"`
 	Sessions     []shellSessionRow `json:"sessions"`
@@ -1472,10 +1469,15 @@ type dashboardResponse struct {
 	Threat *threatBlock `json:"threat,omitempty"`
 }
 
+// globeConnection is the latest connection: the newest public source in the
+// live feed, carried by its newest event. The activity globe draws one route
+// from it into the honeypot; TS and Actor let the caption say when it was last
+// active and which clustered identity it belongs to, not only where from.
 type globeConnection struct {
-	ID  string  `json:"id"`
-	IP  string  `json:"ip"`
-	Geo *geoPin `json:"geo,omitempty"`
+	IP    string  `json:"ip"`
+	TS    string  `json:"ts"`
+	Actor string  `json:"actor,omitempty"`
+	Geo   *geoPin `json:"geo,omitempty"`
 }
 
 type geoPin struct {
@@ -1526,24 +1528,6 @@ type summaryBlock struct {
 	// active. -1 means "unknown" (no systemd, or the unit never started), which
 	// the UI renders as a dash rather than inventing a zero.
 	CowrieUptimeSeconds int64 `json:"cowrieUptimeSeconds"`
-}
-
-type actorCard struct {
-	DerivedCurrent bool    `json:"derivedCurrent"`
-	GeneratedNotes string  `json:"generatedNotes"`
-	ID             string  `json:"id"`
-	IP             string  `json:"ip"`
-	Playbook       string  `json:"playbook"`
-	Intent         string  `json:"intent"`
-	Probe          int     `json:"probe"`
-	Events         int     `json:"events"`
-	RateHour       float64 `json:"rateHour"`
-	LastSeen       string  `json:"lastSeen"`
-	Conf           int     `json:"conf"`
-	Lat            float64 `json:"lat,omitempty"`
-	Lon            float64 `json:"lon,omitempty"`
-	Country        string  `json:"country,omitempty"`
-	CC             string  `json:"cc,omitempty"`
 }
 
 type recentRecord struct {
@@ -1615,11 +1599,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	actors, err := s.st.ListActors(100)
-	if err != nil {
-		httpError(w, "server", err, http.StatusInternalServerError)
-		return
-	}
 	events, err := s.st.RecentEvents(120)
 	if err != nil {
 		httpError(w, "server", err, http.StatusInternalServerError)
@@ -1673,29 +1652,34 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	countryStats := map[string]*topCountryRow{}
 
-	geoIPs := make([]string, 0, len(actors)+len(topIPs))
-	for _, a := range actors {
-		geoIPs = append(geoIPs, a.PrimaryIP)
-	}
+	geoIPs := make([]string, 0, len(topIPs)+1)
 	for _, row := range topIPs {
 		geoIPs = append(geoIPs, row.Key)
 	}
-	// Reuse the bounded live feed and resolve at most one new source per poll.
-	// The source IP may differ from the actor's primary IP.
-	var latestConnect models.Event
+	// The globe draws the latest connection: the newest public source in the
+	// feed, routed into the honeypot. RecentEvents is newest first, and reusing
+	// it costs no query. locate, not cached: cached leaves a miss placeholder
+	// that makes the prefetch below skip the very IP it was handed, so a new
+	// source never resolved; locate also reads the local MMDB, so a new source
+	// lands on this poll.
 	for _, e := range events {
-		if e.Kind == models.KindConnect && e.ID > latestConnect.ID {
-			latestConnect = e
+		if e.SrcIP == "" || isPrivateIP(e.SrcIP) {
+			continue
 		}
-	}
-	if latestConnect.ID > 0 {
-		conn := &globeConnection{ID: strconv.FormatInt(latestConnect.ID, 10), IP: latestConnect.SrcIP}
-		if g := s.geo.cached(conn.IP); g.OK {
+		conn := &globeConnection{
+			IP:    e.SrcIP,
+			TS:    e.TS.UTC().Format(time.RFC3339),
+			Actor: actor.TrimActorPrefix(e.ActorID),
+		}
+		g, cached := s.geo.locate(e.SrcIP)
+		if g.OK {
 			conn.Geo = &geoPin{Lat: g.Lat, Lon: g.Lon, City: g.City, CC: g.CC, Country: g.Country}
-		} else {
-			geoIPs = append(geoIPs, conn.IP)
+		}
+		if !cached {
+			geoIPs = append(geoIPs, e.SrcIP)
 		}
 		resp.Connection = conn
+		break
 	}
 	// Fire-and-forget: blocking this 5s-polled handler on outbound geo
 	// lookups stalled the response up to the whole poll interval when a
@@ -1703,63 +1687,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// missing geo and the next poll picks up the cached result; prefetch
 	// dedupes in-flight lookups so overlapping polls are safe.
 	go s.geo.prefetch(geoIPs, 5*time.Second)
-
-	// Windowed rates for the globe cards: the Meridian/Signal chips print this as
-	// "N/h", so it has to mean current intensity rather than a lifetime mean.
-	cardRates := s.recentRatesCached()
-	for _, a := range actors {
-		card := actorCard{
-			DerivedCurrent: a.DerivedCurrent,
-			GeneratedNotes: a.GeneratedNotes,
-			ID:             a.ID,
-			IP:             a.PrimaryIP,
-			Playbook:       a.Playbook,
-			Intent:         a.Intent,
-			Probe:          a.ProbeScore,
-			Events:         a.EventCount,
-			RateHour:       cardRates[a.ID],
-			LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
-			Conf:           a.Confidence,
-		}
-		if !isPrivateIP(a.PrimaryIP) {
-			g := s.geo.cached(a.PrimaryIP)
-			if g.OK {
-				card.Lat = g.Lat
-				card.Lon = g.Lon
-				card.Country = g.Country
-				card.CC = g.CC
-			}
-		}
-		resp.Actors = append(resp.Actors, card)
-	}
-
-	// Top actors by event VOLUME for the "Top actors" widget. resp.Actors is
-	// ordered by last_seen (for the live globe), so the widget — slicing that —
-	// showed recent actors, not the highest-volume ones (the 64k-event top
-	// attacker was missing). This is a separate, volume-ordered list.
-	if topActors, err := s.st.TopActorsByEvents(14); err == nil {
-		for _, a := range topActors {
-			tc := actorCard{
-				DerivedCurrent: a.DerivedCurrent,
-				GeneratedNotes: a.GeneratedNotes,
-				ID:             a.ID,
-				IP:             a.PrimaryIP,
-				Playbook:       a.Playbook,
-				Intent:         a.Intent,
-				Probe:          a.ProbeScore,
-				Events:         a.EventCount,
-				RateHour:       cardRates[a.ID],
-				LastSeen:       a.LastSeen.UTC().Format(time.RFC3339),
-				Conf:           a.Confidence,
-			}
-			if !isPrivateIP(a.PrimaryIP) {
-				if g := s.geo.cached(a.PrimaryIP); g.OK {
-					tc.Lat, tc.Lon, tc.Country, tc.CC = g.Lat, g.Lon, g.Country, g.CC
-				}
-			}
-			resp.TopActors = append(resp.TopActors, tc)
-		}
-	}
 
 	for _, row := range topIPs {
 		var cc, country, city string

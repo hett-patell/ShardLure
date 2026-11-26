@@ -58,11 +58,12 @@ const (
 	KeyHomeCountry = "home.country"
 	KeyHomeCC      = "home.cc"
 
-	// UI appearance (non-secret). Allowed: signal | meridian | sprite.
-	// Empty / unset means signal (default).
+	// UI appearance (non-secret). Allowed: obsidian | kiln. Empty / unset means
+	// obsidian (default).
 	KeyUITheme = "ui.theme"
-	// KeyUIMode is the light/dark mode for themes that support it (Signal).
-	// Allowed: dark | light. Empty / unset means dark (default).
+	// KeyUIMode is the light/dark switch of the retired Signal theme. It is no
+	// longer settable; it is only read so a deployment that saved Signal in
+	// light mode opens in Kiln rather than Obsidian.
 	KeyUIMode = "ui.mode"
 
 	// MalwareBazaar sharing knobs (non-secret; yaml defaults when unset).

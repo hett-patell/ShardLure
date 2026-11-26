@@ -30,29 +30,15 @@ func TestValidateUITheme(t *testing.T) {
 	}
 }
 
-func TestLegacyWorkspaceTheme(t *testing.T) {
+func TestLegacyThemePreferences(t *testing.T) {
 	for _, tc := range []struct{ theme, mode, want string }{
-		{"signal", "light", "kiln"}, {"signal", "dark", "obsidian"},
-		{"meridian", "", "kiln"}, {"sprite", "", "kiln"}, {"phosphor", "", "obsidian"},
+		{"signal", "light", "kiln"}, {"signal", "dark", "obsidian"}, {"signal", "", "obsidian"},
+		{"meridian", "", "kiln"}, {"sprite", "", "kiln"},
+		{"kiln", "", "kiln"}, {"obsidian", "light", "obsidian"}, {"neon", "", "obsidian"},
 	} {
-		if got := effectiveWorkspaceTheme(tc.theme, tc.mode); got != tc.want {
+		if got := effectiveTheme(tc.theme, tc.mode); got != tc.want {
 			t.Errorf("%s/%s maps to %s, want %s", tc.theme, tc.mode, got, tc.want)
 		}
-	}
-}
-
-func TestValidateUIMode(t *testing.T) {
-	meta, ok := metaFor(settings.KeyUIMode)
-	if !ok {
-		t.Fatal("ui.mode missing from settingsRegistry")
-	}
-	for _, good := range []string{"dark", "light"} {
-		if msg := validateSetting(meta, good); msg != "" {
-			t.Fatalf("%q rejected: %s", good, msg)
-		}
-	}
-	if msg := validateSetting(meta, "sepia"); msg == "" {
-		t.Fatal("expected sepia to be rejected")
 	}
 }
 

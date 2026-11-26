@@ -55,11 +55,11 @@ Longer operational guides (installation, backup, security, troubleshooting) live
 - **Deploy-safe sync:** tar-over-SSH because `scp` of Go/Python sources mysteriously turns them into UTF-16. We do not gaslight you about this — see Troubleshooting.
 - **Incremental Cowrie ingest:** tracks file offset + inode, so a 100MB cowrie.json doesn't get re-scanned every 5 seconds. Your I/O thanks us.
 - **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
-- **Themes:** **Obsidian** (default dark) and **Kiln** (light) share the connection-driven globe. Switch themes in Settings → Appearance. Earlier light themes open in Kiln and earlier dark themes open in Obsidian.
-- **3D Cobe globe:** WebGL globe with live arcs from attacker IPs to your home point, plus floating artifacts anchored to attacker coordinates — satellites, a LIVE badge at your origin, and per-actor analytics chips. Pointer-drag rotation, scroll zoom, double-click reset. Proper listener lifecycle (no leaks on theme switch).
-- **Two dashboards, split by job:** the **globe view** (`/`) is an ambient wall display — summary counts (events, actors, unique IPs, countries, **fingerprint coverage**, shell sessions), threat-level gauge, a Cowrie honeypot status panel, events/hour sparkline, live feed, and the globe with its artifacts. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
+- **Themes:** **Obsidian** (default dark) and **Kiln** (light). In both, chrome stays neutral and the only saturated colour is heat: how recent or how intense something is. Switch themes in Settings → Appearance. Earlier light themes open in Kiln and earlier dark themes open in Obsidian.
+- **3D Cobe globe:** one route, from the latest connection's source into your honeypot, coloured by how recently it was active. It never spins for show: a new connection replaces the route (it lifts off the surface, the source pings, then your honeypot as the connection lands) and the globe turns to show it — no animation and a straight cut if the OS asks for reduced motion. Drag to look around, double-click to return home. Proper listener lifecycle (no leaks on theme switch).
+- **Two dashboards, split by job:** the **activity page** (`/`) is an ambient wall display — a one-line summary (actors, addresses, countries) with events, shell sessions and **fingerprint coverage**, the globe and its latest connection, a live feed, an events/hour sparkline, top source addresses, a Cowrie honeypot status panel and the threat level. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
 - **Command palette:** the search box in the intel console is a real lookup, not a row filter — type any IP, actor, session id, command, or payload hash and get grouped, actionable results (jump to an actor, enrich an IP, open a session transcript or payload) with arrow-key navigation. It searches the API, so it finds records that aren't on the current tab.
-- **Fingerprint coverage, stated honestly:** the globe's FINGERPRINTED tile is the share of Cowrie telemetry carrying a HASSH — event-weighted, because counting actor rows inverts the number (clustering collapses 784 IPs into one row, so successful clustering made coverage *look* worse). journald events are excluded from the denominator: sshd logs cannot carry a fingerprint at all.
+- **Fingerprint coverage, stated honestly:** the activity page's *fingerprinted* figure is the share of Cowrie telemetry carrying a HASSH — event-weighted, because counting actor rows inverts the number (clustering collapses 784 IPs into one row, so successful clustering made coverage *look* worse). journald events are excluded from the denominator: sshd logs cannot carry a fingerprint at all.
 - **Honeypot status panel:** Cowrie's real uptime read from systemd (`ActiveEnterTimestamp`), plus seconds-since-last-event and total ingested. Strictly read-only — ShardLure never starts, stops, or reconfigures the Cowrie unit; the two systemd units stay independent with the JSON log as their only contract. On a host without systemd it reports `unknown` rather than inventing a number, and the last-event signal still works (a Cowrie that is "up" but not logging is the real failure mode).
 - **Dashboard settings panel:** configure API keys, theme, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save. Home coordinates remain in YAML under `dashboard.home_*` and are not edited by Settings.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
@@ -1061,7 +1061,7 @@ sudo userdel -r cowrie
 - [x] Graceful shutdown on SIGINT/SIGTERM (so Ctrl-C is no longer a war crime)
 - [x] DB chmod 0600 + sshd-config auto-rollback on failed reload
 - [x] MalwareBazaar payload sharing (CLI + one-click dashboard upload)
-- [x] Signal theme — full SOC dashboard redesign with sidebar nav and light/dark toggle
+- [x] Obsidian and Kiln redesign — one header on both pages, heat-coded recency, Atkinson Hyperlegible type
 - [x] Dashboard widgets: threat gauge, geography, credentials, brute-force radar, live timeline
 - [x] Windowed threat scoring — the gauge and every rate column describe the last 24h, not all-time totals
 - [x] Widget verification harness (`scripts/verify-widgets.py`) — every dashboard number recomputed from SQL
@@ -1078,7 +1078,7 @@ sudo userdel -r cowrie
 - [x] Runtime keystore (DB > env > config precedence, no restart needed)
 - [x] AbuseIPDB outbound reporting (CLI + dashboard Report All, vetting gate, 24h dedup)
 - [x] Tunnel/proxy target tracking (`direct-tcpip` aggregation + red-team widget)
-- [x] Globe artifacts on every theme (satellites, live badge, per-actor analytics chips)
+- [x] Connection-driven globe (turns to each new source, labels it, draws its route)
 - [x] Ambient globe dashboard (analyst widgets consolidated in `/intel`)
 - [x] Intel command palette (actors / IPs / sessions / commands / payloads)
 - [x] GeoLite2 MMDB enrichment (local tier-1 geo: full coverage, zero egress, works air-gapped)
@@ -1092,7 +1092,7 @@ sudo userdel -r cowrie
 A: Marginally. It moves real SSH to a private port (good) and runs a fake one (interesting). The main value is *intel*: you learn what botnets are doing to boxes that look like yours.
 
 **Q: Will I get cool maps?**
-A: Yes. There is a globe. It rotates. Chartreuse arcs converge on your home point like you're in a 2007 hacker movie. The intel console has a threat gauge, brute-force radar, and attack geography panel.
+A: Yes. There is a globe. It turns to face whoever just knocked and traces their route to your box in ember, like you're in a 2007 hacker movie. The intel console has a threat meter, brute-force radar, and attack geography panel.
 
 **Q: Is this production-ready?**
 A: It's "single-VPS, one-operator, runs-on-my-laptop" ready. If you want a fleet, you'll want to front the SQLite with something less single-writer. PRs welcome.
