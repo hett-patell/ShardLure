@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ShardLure derives **attacker identity** from SSH honeypot telemetry. It wraps the [Cowrie](https://github.com/cowrie/cowrie) SSH honeypot (a separate Python process), ingests Cowrie's JSON log + journald sshd lines, clusters attackers into **actors**, enriches their IPs against threat-intel feeds, and serves a live dashboard + forensic TUI. It also shares findings back out (MalwareBazaar payloads, AbuseIPDB reports, STIX IOCs).
 
-Single Go module: `github.com/networkshard/shardlure` (Go 1.27). One binary, subcommand-dispatched from `cmd/shardlure/main.go`.
+Single Go module: `github.com/networkshard/shardlure` (`go 1.27.4` in `go.mod`: the November 2026 security release is the floor, and CI's `setup-go` builds with exactly that version). One binary, subcommand-dispatched from `cmd/shardlure/main.go`.
 
 ## Commands
 
