@@ -367,6 +367,22 @@ render_persona_regen_prestart() {
     "$regen_sh" "$py" "$(systemd_exec_arg "$regen/shardlure.py")" "$home"
 }
 
+# cowrie.service runs twistd directly, in the foreground: the same command and
+# environment as shardlure.py's unit (a test compares the two). Cowrie's own
+# `cowrie start` launcher cannot carry these flags: it hands only positional
+# arguments to twistd, so the `start -n --umask=0027` this used to write died
+# with "unrecognized arguments" and Cowrie never started on an install.sh box.
+# authbind lets the cowrie account bind a honeypot port below 1024.
+render_cowrie_exec() {
+  local py twistd pythonpath path
+  py="$(systemd_exec_arg "$COWRIE_HOME/venv/bin/python")" || return
+  twistd="$(systemd_exec_arg "$COWRIE_HOME/venv/bin/twistd")" || return
+  pythonpath="$(systemd_environment PYTHONPATH "$COWRIE_HOME/src")" || return
+  path="$(systemd_environment PATH "$COWRIE_HOME/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")" || return
+  printf 'Environment=%s\nEnvironment=%s\n' "$pythonpath" "$path"
+  printf 'ExecStart=/usr/bin/authbind --deep %s %s --umask 0027 --nodaemon --pidfile= -l - cowrie\n' "$py" "$twistd"
+}
+
 render_cowrie_service() {
   local prestart
   prestart="$(render_persona_regen_prestart)" || return
@@ -692,10 +708,9 @@ installer_safety config --source "$DL_CONFIG"
 log "configuration preserved or created at $DATA_DIR/shardlure.yaml"
 
 # -- systemd services ------------------------------------------------------
-# The cowrie.service unit is written AFTER cowrie itself is installed, since
-# the ExecStart path depends on the cowrie layout (old: bin/cowrie shell
-# script, new: venv/bin/cowrie console_script created by 'pip install -e .').
-# The live unit and account permissions are finalized after Cowrie setup.
+# The cowrie.service unit is written AFTER cowrie itself is installed, once
+# its venv's twistd exists. The live unit and account permissions are
+# finalized after Cowrie setup.
 
 
 # -- cowrie installation ---------------------------------------------------
@@ -799,27 +814,11 @@ CFG
   fi
 fi
 
-# -- write cowrie.service now that we know the entry-point layout ----------
-# Probe order:
-#   1. venv/bin/cowrie  (modern: console_script from 'pip install -e .')
-#   2. bin/cowrie       (legacy: shell wrapper invoking twistd)
-# In legacy mode, twistd needs PYTHONPATH and an explicit python interpreter,
-# matching the previous behavior of the script.
-COWRIE_EXEC=""
-if [[ -x "$COWRIE_HOME/venv/bin/cowrie" ]]; then
-  # Modern layout. AUTHBIND_ENABLED=yes is read by the cowrie launcher and
-  # tells it to invoke twistd via authbind when binding low ports.
-  COWRIE_EXEC="Environment=AUTHBIND_ENABLED=yes
-ExecStart=/usr/bin/authbind --deep $(systemd_exec_arg "$COWRIE_HOME/venv/bin/python") $(systemd_exec_arg "$COWRIE_HOME/venv/bin/cowrie") start -n --umask=0027"
-elif [[ -x "$COWRIE_HOME/bin/cowrie" ]]; then
-  # Legacy layout.
-  COWRIE_EXEC="ExecStart=/usr/bin/authbind --deep $(systemd_exec_arg "$COWRIE_HOME/venv/bin/python3") $(systemd_exec_arg "$COWRIE_HOME/bin/cowrie") start -n --umask=0027"
-fi
-
+# -- write cowrie.service now that Cowrie and its venv exist ---------------
 if [[ "$COWRIE" -eq 1 ]]; then
-  if [[ -z "$COWRIE_EXEC" ]]; then
-    err "could not locate cowrie entry point at $COWRIE_HOME/venv/bin/cowrie or $COWRIE_HOME/bin/cowrie. The checkout may have failed or upstream layout changed again."
-  fi
+  [[ -x "$COWRIE_HOME/venv/bin/twistd" ]] \
+    || err "could not find $COWRIE_HOME/venv/bin/twistd; the Cowrie checkout or its venv is incomplete."
+  COWRIE_EXEC="$(render_cowrie_exec)" || err "could not render the cowrie.service command"
   render_cowrie_service > "$DL_COWRIE_UNIT"
   log "cowrie systemd unit written"
 fi

@@ -2114,6 +2114,33 @@ class PersonaRegenTests(unittest.TestCase):
             self.assertIn("User=cowrie\n", proc.stdout)
             self.assertLess(proc.stdout.index("ExecStartPre="), proc.stdout.index("ExecStart="))
 
+    def test_install_sh_starts_cowrie_with_shardlures_twistd_command(self):
+        # Cowrie's `cowrie start` launcher hands only positional arguments to
+        # twistd, so the `start -n --umask=0027` install.sh used to write died
+        # with "unrecognized arguments" and Cowrie never started on an
+        # install.sh box. Both installers now run one twistd command.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / 'data "q" $VALUE %n a\'s' / "cowrie"
+            env = dict(os.environ, SHARDLURE_INSTALL_SOURCE_ONLY="1", TEST_HOME=str(home),
+                       INSTALLER=str(Path(shardlure.ROOT) / "scripts/install.sh"))
+            proc = subprocess.run(
+                ["bash", "-c", 'source "$INSTALLER"; COWRIE_HOME="$TEST_HOME"; render_cowrie_exec'],
+                env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            with (mock.patch.object(shardlure, "COWRIE_HOME", home),
+                  mock.patch.object(shardlure, "_tailscale_iface", return_value=""),
+                  mock.patch.object(shardlure.shutil, "which", return_value="/usr/bin/authbind")):
+                unit = shardlure.render_services(22, 8080)["cowrie.service"]
+        command = service_command(proc.stdout, "ExecStart")
+        self.assertEqual(command, service_command(unit, "ExecStart"))
+        self.assertEqual(command[2:], [str(home / "venv/bin/python"), str(home / "venv/bin/twistd"),
+                                       "--umask", "0027", "--nodaemon", "--pidfile=", "-l", "-", "cowrie"])
+        self.assertNotIn("start", command)
+        environment = service_values(proc.stdout, "Environment")
+        self.assertEqual(len(environment), 2)
+        for assignment in environment:
+            self.assertIn(assignment, service_values(unit, "Environment"))
+
     def test_plant_bait_hands_the_tree_back_to_cowrie(self):
         calls = []
         with (mock.patch.object(shardlure, "need_root"),
