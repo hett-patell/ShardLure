@@ -1,20 +1,30 @@
 <!doctype html>
-<html lang="en" data-theme="signal" data-mode="dark">
+<html lang="en" data-theme="obsidian" data-workspace data-mode="dark">
 <head>
 <script>
+  function resolveWorkspaceTheme(id, mode) {
+    if (id === 'kiln' || id === 'meridian' || id === 'sprite' ||
+        (id === 'signal' && mode === 'light')) return 'kiln';
+    return 'obsidian';
+  }
   try {
-    var t = localStorage.getItem('shardlure_theme') || 'signal';
+    var t = localStorage.getItem('shardlure_theme') || 'obsidian';
     // Validate before writing the attribute: a stale value from a removed
     // theme (localStorage outlives releases) matched no theme block and the
     // page rendered in the pre-theme :root palette.
-    if (t !== 'signal' && t !== 'meridian' && t !== 'sprite') t = 'signal';
     var m = localStorage.getItem('shardlure_mode') || 'dark';
+    t = resolveWorkspaceTheme(t, m);
     var d = localStorage.getItem('shardlure_density') || 'comfortable';
     document.documentElement.setAttribute('data-theme', t);
+    document.documentElement.toggleAttribute('data-workspace', ['obsidian', 'kiln'].includes(t));
+    if (new URLSearchParams(location.search).get('view') === 'globe') {
+      document.documentElement.dataset.globeView = 'full';
+    }
     document.documentElement.setAttribute('data-density', d);
     if (t === 'signal') document.documentElement.setAttribute('data-mode', m);
   } catch (e) {
-    document.documentElement.setAttribute('data-theme', 'signal');
+    document.documentElement.setAttribute('data-theme', 'obsidian');
+    document.documentElement.setAttribute('data-workspace', '');
     document.documentElement.setAttribute('data-mode', 'dark');
     document.documentElement.setAttribute('data-density', 'comfortable');
   }
@@ -360,9 +370,9 @@
 }
 
 </style>
-<link rel="stylesheet" href="/themes.css?v=18" />
+<link rel="stylesheet" href="/themes.css?v=37" />
 </head>
-<body>
+<body class="globe-page">
 
 <nav class="sidebar" aria-label="Primary">
   <div class="sb-brand" title="ShardLure"><svg class="sb-logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><path d="M32 4 L54 19 L48 45 L32 60 L16 45 L10 19 Z" fill="currentColor"/><path d="M32 4 L32 60 L16 45 L10 19 Z" fill="#000" opacity="0.30"/><path d="M32 4 L10 19 L16 45 Z" fill="#000" opacity="0.16"/></svg></div>
@@ -392,21 +402,29 @@
     <canvas id="cobe" width="1000" height="1000" role="img" aria-label="Globe of attacker origins; drag with a pointer to rotate. The Top source IPs table lists the same locations as text."></canvas>
     <div id="cobe-overlays"></div>
   </div>
+  <div id="connection-caption" class="connection-caption" hidden>
+    <span>Latest connection</span>
+    <strong id="connection-origin">Waiting for telemetry</strong>
+  </div>
 </div>
 <div id="vignette"></div>
 
 <aside class="rail left">
   <section class="panel title">
-    <h1><span class="dot"></span>ShardLure telemetry</h1>
+    <h1><span class="dot"></span><img class="activity-mark" src="/logo.svg" alt="" width="25" height="25" hidden>ShardLure<span class="legacy-title"> telemetry</span></h1>
     <div class="meta">
-      source <strong>journal + actors db</strong><br/>
-      origin <strong id="home-loc">— </strong><br/>
-      updated <strong id="gen-at">— </strong>
+      <span class="legacy-source">source <strong>journal + actors db</strong><br/></span>
+      <span>Origin <strong id="home-loc">—</strong></span><br/>
+      <span>Updated <strong id="gen-at">—</strong></span>
     </div>
     <nav class="nav" aria-label="Pages">
-      <a href="/" class="active" aria-current="page">Globe</a>
+      <a href="/" class="active legacy-globe-link" aria-current="page">Globe</a>
+      <a href="/" class="workspace-link" hidden>Activity</a>
+      <a href="/?view=globe" class="full-globe-link" hidden>Full globe</a>
       <a href="/intel">Intel</a>
+      <button type="button" id="reset-widgets" hidden>Reset layout</button>
     </nav>
+    <span id="widget-move-status" class="visually-hidden" role="status"></span>
     <button id="density-toggle" type="button" title="Toggle UI density"></button>
     <script>
       (function () {
@@ -427,7 +445,7 @@
     </script>
   </section>
 
-  <section class="panel">
+  <section class="panel landing-summary">
     <h2>Summary</h2>
     <div class="stats">
       <div class="stat"><div class="num accent" id="s-events">0</div><div class="label">events</div></div>
@@ -439,7 +457,7 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel landing-health">
     <h2>Honeypot</h2>
     <div class="hp-grid">
       <div class="hp-row"><span class="hp-k">cowrie</span><span class="hp-v" id="hp-state">—</span></div>
@@ -449,7 +467,7 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel landing-threat">
     <h2>Threat Level</h2>
     <div class="gauge-outer" id="threat-gauge">
       <svg class="gauge-svg" viewBox="0 0 200 110" role="img" aria-labelledby="gauge-lbl-svg gauge-val">
@@ -500,7 +518,7 @@
 /* ==== UI theme (Signal / Meridian / Sprite) ==== */
 window.__shardlureTheme = 'signal';
 function currentThemeId() {
-  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'signal';
+  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'obsidian';
 }
 function applyMode(mode) {
   mode = (mode === 'light') ? 'light' : 'dark';
@@ -513,7 +531,7 @@ function applyMode(mode) {
   try { syncGlobeEngine(currentThemeId()); } catch (e) {}
 }
 function applyTheme(id, opts) {
-  if (id !== 'signal' && id !== 'meridian' && id !== 'sprite') id = 'signal';
+  id = resolveWorkspaceTheme(id, document.documentElement.dataset.mode);
   var force = opts && opts.force;
   var prev = window.__shardlureTheme;
   // Same-tab BroadcastChannel echoes postMessage back to our own listener.
@@ -524,6 +542,7 @@ function applyTheme(id, opts) {
   }
   window.__shardlureTheme = id;
   document.documentElement.setAttribute('data-theme', id);
+  document.documentElement.toggleAttribute('data-workspace', ['obsidian', 'kiln'].includes(id));
   if (id === 'signal') {
     document.documentElement.setAttribute('data-mode', localStorage.getItem('shardlure_mode') || 'dark');
   } else {
@@ -546,13 +565,13 @@ function applyTheme(id, opts) {
 async function syncThemeFromServer() {
   try {
     var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
+    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'obsidian');
     var data = await r.json();
     var row = (data.settings || []).find(function (s) { return s.key === 'ui.theme'; });
-    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'signal';
+    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'obsidian';
     return applyTheme(id);
   } catch (e) {
-    return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
+    return applyTheme(localStorage.getItem('shardlure_theme') || 'obsidian');
   }
 }
 try {
@@ -644,7 +663,7 @@ var _cobeBootPromise = null;
 function ensureCobeBoot() {
   if (window.ShardCobe) return Promise.resolve(window.ShardCobe);
   if (_cobeBootPromise) return _cobeBootPromise;
-  _cobeBootPromise = import('/cobe-boot.js?v=1').then(function () {
+  _cobeBootPromise = import('/cobe-boot.js?v=13').then(function () {
     return window.ShardCobe;
   }).catch(function (err) {
     _cobeBootPromise = null;
@@ -660,6 +679,12 @@ function currentMode() {
 
 function syncGlobeEngine(theme) {
   theme = theme || currentThemeId();
+  const globeCanvas = document.getElementById('cobe');
+  const fullOrbit = document.documentElement.hasAttribute('data-workspace') && document.documentElement.dataset.globeView === 'full';
+  globeCanvas.tabIndex = fullOrbit ? 0 : -1;
+  globeCanvas.setAttribute('aria-label', fullOrbit
+    ? 'Globe of attacker origins. Drag or use the arrow keys to rotate.'
+    : 'Globe of attacker origins. The Top source IPs table lists the locations as text.');
   return ensureCobeBoot().then(function (boot) {
     return boot.ensure(theme, currentMode());
   }).then(function () {
@@ -667,18 +692,243 @@ function syncGlobeEngine(theme) {
     // container, so the cached signature cannot be trusted here.
     if (typeof applyGlobeOverlays === 'function') applyGlobeOverlays(true);
     if (typeof _lastHome !== 'undefined' && _lastHome && window.ShardCobe) {
-      window.ShardCobe.updateData(_lastHome, typeof _lastGlobeActors !== 'undefined' ? _lastGlobeActors : []);
+      window.ShardCobe.updateData(_lastHome, _lastGlobeActors, latestConnection?.geo || null);
+      if (latestConnection) updateConnection(latestConnection);
     }
   }).catch(function () {});
 }
 
 window.__shardlureOnTheme = function () {
   try { syncGlobeEngine(currentThemeId()); } catch (e) {}
+  scheduleWidgetLayout();
 };
 // Defer engine load until theme is known (localStorage head script + server sync).
 syncThemeFromServer().finally(function () {
   window.__shardlureOnTheme();
 });
+
+const fullGlobeView = document.documentElement.dataset.globeView === 'full';
+document.querySelector(fullGlobeView ? '.full-globe-link' : '.workspace-link')
+  .setAttribute('aria-current', 'page');
+
+let connectionID = null;
+let latestConnection = null;
+let initialConnectionView = true;
+let pendingConnectionUntil = 0;
+function updateConnection(connection) {
+  if (!connection) {
+    if (connectionID === null) connectionID = 0n;
+    return;
+  }
+  const id = BigInt(connection.id);
+  if (connectionID !== null && id < connectionID) return;
+  if (id !== connectionID) {
+    // The first response is a baseline. Coalesce subsequent bursts into the
+    // newest observed connection, and give geolocation time to arrive.
+    if (connectionID !== null) initialConnectionView = false;
+    pendingConnectionUntil = connectionID === null ? 0 : performance.now() + 15000;
+    connectionID = id;
+  }
+  latestConnection = connection;
+  const geo = connection.geo;
+  const place = geo && [geo.city, geo.cc].filter(Boolean).join(', ');
+  document.getElementById('connection-origin').textContent =
+    place ? place + ' · ' + connection.ip : connection.ip;
+  if (!geo || !document.documentElement.hasAttribute('data-workspace')) return;
+  if (initialConnectionView && window.ShardCobe?.focusConnection(geo, true)) {
+    initialConnectionView = false;
+  }
+  if (performance.now() < pendingConnectionUntil &&
+      window.ShardCobe?.focusConnection(geo)) {
+    pendingConnectionUntil = 0;
+  }
+}
+
+// Preserve the grid slots and translate only the moved widgets. Positions are
+// proportional to the space each panel can use, so a resize keeps grips reachable.
+const scheduleWidgetLayout = (() => {
+  const storageKey = 'shardlure_phosphor_widget_layout';
+  const narrow = matchMedia('(max-width: 700px)');
+  const layoutKey = () => narrow.matches ? 'narrow' : 'wide';
+  const toolbar = document.querySelector('.title');
+  const panelNames = new Map([
+    ['.landing-summary', 'Summary'], ['.rail-feed', 'Live feed'],
+    ['.sparkline', 'Events per hour'], ['.rail-topips', 'Top source IPs'],
+    ['.landing-health', 'Honeypot'], ['.landing-threat', 'Threat level'],
+  ]);
+  const reset = document.getElementById('reset-widgets');
+  const status = document.getElementById('widget-move-status');
+  let layouts = {};
+  try {
+    layouts = JSON.parse(localStorage.getItem(storageKey)) || {
+      wide: JSON.parse(localStorage.getItem('shardlure_phosphor_widgets')) || {},
+    };
+  } catch (_) {}
+  let activeLayout = layoutKey();
+  let positions = layouts[activeLayout] ||= {};
+  const widgets = [];
+  let placing = null;
+  let frame = 0;
+
+  function save() {
+    try { localStorage.setItem(storageKey, JSON.stringify(layouts)); } catch (_) {}
+  }
+
+  function bounds(rect) {
+    const x = 8;
+    const toolbarBottom = toolbar.getBoundingClientRect().bottom;
+    const bottom = Math.max(8, window.innerHeight - rect.height - 8);
+    const y = Math.min(bottom, Math.max(8, toolbarBottom + 12));
+    return { x, y, width: Math.max(0, document.documentElement.clientWidth - rect.width - 16),
+      height: bottom - y };
+  }
+
+  function apply(widget) {
+    const pos = positions[widget.name];
+    if (!Array.isArray(pos) || pos.length !== 2 ||
+        !pos.every(value => Number.isFinite(value) && value >= 0 && value <= 1)) return;
+    const rect = widget.panel.getBoundingClientRect();
+    const area = bounds(rect);
+    widget.x += area.x + area.width * pos[0] - rect.left;
+    widget.y += area.y + area.height * pos[1] - rect.top;
+    widget.panel.style.setProperty('--widget-x', widget.x + 'px');
+    widget.panel.style.setProperty('--widget-y', widget.y + 'px');
+    widget.panel.classList.add('widget-moved');
+  }
+
+  function move(widget, left, top) {
+    const area = bounds(widget.panel.getBoundingClientRect());
+    const fraction = (value, start, limit) => limit ? Math.max(0, Math.min(1, (value - start) / limit)) : 0;
+    positions[widget.name] = [fraction(left, area.x, area.width), fraction(top, area.y, area.height)];
+    apply(widget);
+  }
+
+  function choose(widget) {
+    if (placing) placing.handle.setAttribute('aria-pressed', 'false');
+    placing = widget;
+    document.body.classList.toggle('widget-placing', !!widget);
+    if (widget) {
+      widget.handle.setAttribute('aria-pressed', 'true');
+      status.textContent = 'Click or tap where you want to move ' + widget.name + '.';
+    } else {
+      status.textContent = '';
+    }
+  }
+
+  function clearOffsets(widget) {
+    widget.panel.classList.remove('widget-moved');
+    widget.x = widget.y = 0;
+  }
+
+  function restore(widget) {
+    delete positions[widget.name];
+    clearOffsets(widget);
+  }
+
+  function schedule() {
+    if (fullGlobeView || !document.documentElement.hasAttribute('data-workspace') || frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (activeLayout !== layoutKey()) {
+        activeLayout = layoutKey();
+        positions = layouts[activeLayout] ||= {};
+        widgets.forEach(clearOffsets);
+      }
+      widgets.forEach(apply);
+    });
+  }
+
+  if (fullGlobeView) return schedule;
+  const observer = new ResizeObserver(schedule);
+  for (const [selector, name] of panelNames) {
+    const panel = document.querySelector(selector);
+    const handle = document.createElement('button');
+    handle.type = 'button';
+    handle.className = 'widget-handle';
+    handle.textContent = '⠿';
+    handle.title = 'Move ' + name + ' by dragging or using the arrow keys';
+    handle.setAttribute('aria-label', handle.title);
+    handle.setAttribute('aria-pressed', 'false');
+    panel.classList.add('draggable-widget');
+    panel.appendChild(handle);
+    const widget = { name, panel, handle, x: 0, y: 0 };
+    widgets.push(widget);
+    observer.observe(panel);
+    let origin;
+    let dragged = false;
+
+    handle.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0) return;
+      dragged = false;
+      const rect = panel.getBoundingClientRect();
+      origin = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      handle.setPointerCapture(event.pointerId);
+    });
+    handle.addEventListener('pointermove', event => {
+      if (!origin || !handle.hasPointerCapture(event.pointerId)) return;
+      const dx = event.clientX - origin.x;
+      const dy = event.clientY - origin.y;
+      if (!dragged && Math.hypot(dx, dy) < 4) return;
+      dragged = true;
+      choose(null);
+      panel.classList.add('widget-dragging');
+      move(widget, origin.left + dx, origin.top + dy);
+    });
+    handle.addEventListener('lostpointercapture', () => {
+      origin = null;
+      panel.classList.remove('widget-dragging');
+      if (dragged) {
+        save();
+        status.textContent = name + ' moved.';
+      }
+    });
+    handle.addEventListener('click', event => {
+      if (!dragged || event.detail === 0) choose(placing === widget ? null : widget);
+      dragged = false;
+    });
+    handle.addEventListener('keydown', event => {
+      const offsets = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      const offset = offsets[event.key];
+      if (!offset && event.key !== 'Home' && event.key !== 'Escape') return;
+      event.preventDefault();
+      choose(null);
+      if (event.key === 'Escape') return;
+      if (offset) {
+        const rect = panel.getBoundingClientRect();
+        const step = event.shiftKey ? 48 : 16;
+        move(widget, rect.left + step * offset[0], rect.top + step * offset[1]);
+      } else {
+        restore(widget);
+      }
+      save();
+      status.textContent = name + (offset ? ' moved.' : ' returned to its default position.');
+    });
+  }
+
+  document.addEventListener('click', event => {
+    if (!placing || event.detail === 0 || event.target.closest('.widget-handle, #reset-widgets')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const widget = placing;
+    choose(null);
+    const rect = widget.panel.getBoundingClientRect();
+    move(widget, event.clientX - rect.width / 2, event.clientY - 20);
+    save();
+    status.textContent = widget.name + ' moved.';
+  }, true);
+
+  reset.addEventListener('click', () => {
+    choose(null);
+    widgets.forEach(restore);
+    save();
+    status.textContent = 'Default widget layout restored.';
+  });
+  window.addEventListener('scroll', schedule, { passive: true });
+  window.addEventListener('resize', schedule);
+  reset.hidden = false;
+  schedule();
+  return schedule;
+})();
 
 const spark = document.getElementById('spark');
 let sparkData = [];
@@ -706,7 +956,7 @@ function drawSpark(series) {
 
   const ac = themeAccentRGB();
   const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, rgba(ac, 0.55));
+  grad.addColorStop(0, rgba(ac, document.documentElement.hasAttribute('data-workspace') ? 0.12 : 0.55));
   grad.addColorStop(1, rgba(ac, 0.02));
   const pad = 1;
   const xy = function(p) {
@@ -834,6 +1084,16 @@ function themeAccentRGB() {
   var theme = currentThemeId();
   if (theme === 'meridian') return { r: 13, g: 92, b: 99, hex: '#0d5c63', hex2: '#a67c2d', text: '#1a2332', bg: 'rgba(244,246,248,0.96)', line: '#c5ccd6' };
   if (theme === 'sprite') return { r: 232, g: 93, b: 76, hex: '#e85d4c', hex2: '#f0b429', text: '#241910', bg: 'rgba(255,253,247,0.96)', line: '#241910' };
+  if (document.documentElement.hasAttribute('data-workspace')) {
+    var palette = getComputedStyle(document.documentElement);
+    var hex = palette.getPropertyValue('--accent').trim();
+    var rgb = Number.parseInt(hex.slice(1), 16);
+    return { r: rgb >> 16, g: rgb >> 8 & 255, b: rgb & 255, hex: hex,
+      hex2: palette.getPropertyValue('--accent-2').trim(),
+      text: palette.getPropertyValue('--text').trim(),
+      bg: palette.getPropertyValue('--glass').trim(),
+      line: palette.getPropertyValue('--line').trim() };
+  }
   if (theme === 'signal') {
     if (currentMode() === 'light') return { r: 182, g: 217, b: 0, hex: '#b6d900', hex2: '#1f8a4c', text: '#14151a', bg: 'rgba(239,239,233,0.96)', line: '#d6d6cc' };
     return { r: 209, g: 254, b: 23, hex: '#d1fe17', hex2: '#40d986', text: '#f7f7f8', bg: 'rgba(15,17,19,0.92)', line: 'rgba(150,160,60,0.22)' };
@@ -941,6 +1201,14 @@ function buildSatChipOverlays(home, pool) {
 }
 
 function buildThemeOverlays(theme, home, actors) {
+  if (document.documentElement.hasAttribute('data-workspace')) {
+    var pin = latestConnection?.geo;
+    if (!pin || !(pin.country || pin.cc)) return [];
+    return [{
+      kind: 'connection', lat: pin.lat, lng: pin.lon, title: pin.country || pin.cc,
+      placeKey: 'latest-connection', marker: 'latest-connection', emoji: flag(pin.cc)
+    }];
+  }
   if (theme !== 'sprite' && theme !== 'meridian' && theme !== 'signal') return [];
   var geoActors = (actors || [])
     .filter(function (a) { return Number.isFinite(a.lat) && Number.isFinite(a.lon); })
@@ -1021,7 +1289,12 @@ function makeOverlayEl(d) {
   var wrap = document.createElement('div');
   wrap.className = 'globe-overlay globe-overlay--' + (d.kind || 'x');
   wrap.title = d.label || d.title || d.ip || '';
-  if (d.kind === 'sticker') {
+  if (d.kind === 'connection') {
+    var label = document.createElement('span');
+    label.className = 'globe-country-label';
+    label.textContent = [d.emoji, d.title].filter(Boolean).join(' ');
+    wrap.appendChild(label);
+  } else if (d.kind === 'sticker') {
     // Emoji glyph, not an <img>: no asset to ship, and the flag comes straight
     // from the actor's country code.
     var box = document.createElement('div');
@@ -1205,8 +1478,9 @@ async function refresh() {
     }
 
     if (window.ShardCobe) {
-      window.ShardCobe.updateData(home, _lastGlobeActors);
+      window.ShardCobe.updateData(home, _lastGlobeActors, d.connection?.geo || null);
     }
+    updateConnection(d.connection);
     applyGlobeOverlays();
   } catch (e) {
     // keep the last good paint; the next tick retries

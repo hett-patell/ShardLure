@@ -55,7 +55,7 @@ Longer operational guides (installation, backup, security, troubleshooting) live
 - **Deploy-safe sync:** tar-over-SSH because `scp` of Go/Python sources mysteriously turns them into UTF-16. We do not gaslight you about this — see Troubleshooting.
 - **Incremental Cowrie ingest:** tracks file offset + inode, so a 100MB cowrie.json doesn't get re-scanned every 5 seconds. Your I/O thanks us.
 - **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
-- **Themes:** ships **Signal** (default — a near-black signal field with a light/dark toggle), plus **Meridian** and **Sprite**. Switchable live from the settings panel; the selected theme and Signal's mode persist in SQLite. One WebGL globe engine (Cobe) across all themes.
+- **Themes:** **Obsidian** (default dark) and **Kiln** (light) share the connection-driven globe. Switch themes in Settings → Appearance. Earlier light themes open in Kiln and earlier dark themes open in Obsidian.
 - **3D Cobe globe:** WebGL globe with live arcs from attacker IPs to your home point, plus floating artifacts anchored to attacker coordinates — satellites, a LIVE badge at your origin, and per-actor analytics chips. Pointer-drag rotation, scroll zoom, double-click reset. Proper listener lifecycle (no leaks on theme switch).
 - **Two dashboards, split by job:** the **globe view** (`/`) is an ambient wall display — summary counts (events, actors, unique IPs, countries, **fingerprint coverage**, shell sessions), threat-level gauge, a Cowrie honeypot status panel, events/hour sparkline, live feed, and the globe with its artifacts. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
 - **Command palette:** the search box in the intel console is a real lookup, not a row filter — type any IP, actor, session id, command, or payload hash and get grouped, actionable results (jump to an actor, enrich an IP, open a session transcript or payload) with arrow-key navigation. It searches the API, so it finds records that aren't on the current tab.
@@ -1044,7 +1044,7 @@ sudo userdel -r cowrie
 - [x] Dashboard auth token forwarded on every request + cross-page navigation
 - [x] One-command uninstall (`uninstall [--purge]`) with SSH-restore-first safety
 - [x] Full-window analytics — MITRE/TTP/IOC/graph/deobf cover the whole selected window (not a recent sample), with capped widgets disclosing "N of M"
-- [x] Multi-theme support (Signal, Meridian, Sprite) with live switching
+- [x] Multi-theme support (Obsidian and Kiln) with live switching
 - [x] 3D Cobe globe with WebGL arcs, drag rotation, and proper listener lifecycle
 - [x] Dashboard settings panel (API keys and theme — masked + connection-tested; home remains YAML)
 - [x] Runtime keystore (DB > env > config precedence, no restart needed)

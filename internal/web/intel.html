@@ -1,20 +1,27 @@
 <!doctype html>
-<html lang="en" data-theme="signal" data-mode="dark">
+<html lang="en" data-theme="obsidian" data-workspace data-mode="dark">
 <head>
 <script>
+  function resolveWorkspaceTheme(id, mode) {
+    if (id === 'kiln' || id === 'meridian' || id === 'sprite' ||
+        (id === 'signal' && mode === 'light')) return 'kiln';
+    return 'obsidian';
+  }
   try {
-    var t = localStorage.getItem('shardlure_theme') || 'signal';
+    var t = localStorage.getItem('shardlure_theme') || 'obsidian';
     // Validate before writing the attribute: a stale value from a removed
     // theme (localStorage outlives releases) matched no theme block and the
     // page rendered in the pre-theme :root palette.
-    if (t !== 'signal' && t !== 'meridian' && t !== 'sprite') t = 'signal';
     var m = localStorage.getItem('shardlure_mode') || 'dark';
+    t = resolveWorkspaceTheme(t, m);
     var d = localStorage.getItem('shardlure_density') || 'comfortable';
     document.documentElement.setAttribute('data-theme', t);
+    document.documentElement.toggleAttribute('data-workspace', ['obsidian', 'kiln'].includes(t));
     document.documentElement.setAttribute('data-density', d);
     if (t === 'signal') document.documentElement.setAttribute('data-mode', m);
   } catch (e) {
-    document.documentElement.setAttribute('data-theme', 'signal');
+    document.documentElement.setAttribute('data-theme', 'obsidian');
+    document.documentElement.setAttribute('data-workspace', '');
     document.documentElement.setAttribute('data-mode', 'dark');
     document.documentElement.setAttribute('data-density', 'comfortable');
   }
@@ -1332,7 +1339,7 @@
     .mitre-col h4 { min-height: 0; }
   }
 </style>
-<link rel="stylesheet" href="/themes.css?v=18" />
+<link rel="stylesheet" href="/themes.css?v=37" />
 </head>
 <body>
 <div class="shell">
@@ -1452,7 +1459,7 @@
       <div class="bars" id="bars-source"></div>
     </section>
 
-    <section class="panel full">
+    <section class="panel full actor-workspace">
       <h2>Threat actors</h2>
       <div class="scroll">
         <table id="actors-table">
@@ -1528,471 +1535,501 @@
   <section class="view" id="view-blue" role="tabpanel" aria-labelledby="tab-blue">
     <div class="team-banner blue">
       <span class="tb-title">Blue Team</span>
-      <span class="tb-sub">Defensive view · MITRE ATT&amp;CK coverage, sessions, IOCs and threat intel enrichment</span>
+      <span class="tb-sub">Inspect sessions, map observed techniques, and export indicators</span>
     </div>
 
-    <div class="grid">
-      <section class="panel full" id="panel-mitre">
-        <div class="panel-head">
-          <h2>MITRE ATT&amp;CK coverage</h2>
-          <span class="meta" id="mitre-meta">—</span>
-        </div>
-        <div id="mitre-grid" class="mitre-grid"></div>
-        <div class="mitre-top" id="mitre-top"></div>
-      </section>
-
-      <section class="panel full" id="panel-sessions">
-        <div class="panel-head">
-          <h2>Cowrie sessions · play-by-play</h2>
-          <span class="meta" id="sessions-meta">—</span>
-        </div>
-        <div class="sess-panel-body">
-          <div class="sess-scroll" id="sessions-scroll">
-            <div class="sess-head">
-              <span>#</span><span>When</span><span>IP</span><span>User</span>
-              <span>Client</span><span>HASSH</span><span class="n">Dur</span>
-              <span class="n">Ev</span><span class="n">Cmd</span><span>Actor</span>
+    <section class="intel-section" aria-labelledby="blue-region-1">
+      <h2 id="blue-region-1">Investigate sessions</h2>
+      <div class="grid">
+        <section class="panel full intel-workbench" id="panel-sessions">
+          <div class="panel-head">
+            <h2>Cowrie sessions</h2>
+            <span class="meta" id="sessions-meta">—</span>
+          </div>
+          <div class="sess-panel-body">
+            <div class="sess-scroll" id="sessions-scroll" tabindex="0" role="region" aria-label="Cowrie session list">
+              <div class="sess-head">
+                <span>#</span><span>Started</span><span>Source IP</span><span>User</span>
+                <span>Client</span><span>HASSH</span><span class="n">Duration</span>
+                <span class="n">Events</span><span class="n">Commands</span><span>Actor</span>
+              </div>
+              <div class="sess-list" id="sessions-list">
+                <div class="empty">loading…</div>
+              </div>
             </div>
-            <div class="sess-list" id="sessions-list">
-              <div class="empty">loading…</div>
+            <div class="sess-foot">
+              <button type="button" class="sess-jump" data-sess-jump="top">First session</button>
+              <button type="button" class="sess-jump" data-sess-jump="bottom">Last session</button>
             </div>
           </div>
-          <div class="sess-foot">
-            <button type="button" class="sess-jump" data-sess-jump="top">↑ top</button>
-            <button type="button" class="sess-jump" data-sess-jump="bottom">↓ bottom</button>
+        </section>
+
+        <section class="panel full intel-workbench" id="panel-mitre">
+          <div class="panel-head">
+            <h2>MITRE ATT&amp;CK coverage</h2>
+            <span class="meta" id="mitre-meta">—</span>
           </div>
-        </div>
-      </section>
+          <div id="mitre-grid" class="mitre-grid"></div>
+          <div class="mitre-top" id="mitre-top"></div>
+        </section>
+      </div>
+    </section>
 
-      <section class="panel full panel-collapse" id="panel-ioc">
-        <div class="panel-head">
-          <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="ioc-body">IOC export</button></h2>
-          <span class="meta" id="ioc-meta">STIX 2.1 · CSV</span>
-        </div>
-        <div class="panel-body" id="ioc-body">
-        <div class="ioc-toolbar">
-          <div class="ioc-kinds">
-            <button type="button" class="ioc-kind active" data-kind="ip">IP</button>
-            <button type="button" class="ioc-kind" data-kind="hash">hash</button>
-            <button type="button" class="ioc-kind" data-kind="url">URL</button>
-            <button type="button" class="ioc-kind" data-kind="user">user</button>
+    <section class="intel-section" aria-labelledby="blue-region-2">
+      <h2 id="blue-region-2">Inspect and export evidence</h2>
+      <div class="grid">
+        <section class="panel full panel-collapse" id="panel-ioc">
+          <div class="panel-head">
+            <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="ioc-body">IOC export</button></h2>
+            <span class="meta" id="ioc-meta">STIX 2.1 · CSV</span>
           </div>
-          <div class="ioc-actions">
-            <button type="button" class="ioc-dl" id="ioc-dl-csv">download CSV</button>
-            <button type="button" class="ioc-dl" id="ioc-dl-stix">download STIX bundle</button>
+          <div class="panel-body" id="ioc-body">
+          <div class="ioc-toolbar">
+            <div class="ioc-kinds">
+              <button type="button" class="ioc-kind active" data-kind="ip">IP</button>
+              <button type="button" class="ioc-kind" data-kind="hash">hash</button>
+              <button type="button" class="ioc-kind" data-kind="url">URL</button>
+              <button type="button" class="ioc-kind" data-kind="user">user</button>
+            </div>
+            <div class="ioc-actions">
+              <button type="button" class="ioc-dl" id="ioc-dl-csv">download CSV</button>
+              <button type="button" class="ioc-dl" id="ioc-dl-stix">download STIX bundle</button>
+            </div>
           </div>
-        </div>
-        <div class="table-scroll">
-        <table class="dense" id="ioc-table">
-          <thead>
-            <tr><th>value</th><th class="num">count</th><th>first</th><th>last</th><th>actors</th></tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        </div>
-        </div>
-      </section>
-
-      <section class="panel full" id="panel-abuse-suggest">
-        <div class="panel-head">
-          <h2>Suggested AbuseIPDB reports</h2>
-          <span class="meta" id="abuse-suggest-meta">ranked by report priority</span>
-          <button class="bz-btn" id="abuse-report-all-btn" onclick="reportAllSuggested(this)" style="margin-left:auto;display:none">⚑ Report All</button>
-        </div>
-        <div class="panel-body">
-        <div id="abuse-suggest-note" class="abuse-note" style="display:none"></div>
-        <table class="dense" id="abuse-suggest-table">
-          <thead>
-            <tr>
-              <th style="width:34px" title="report priority 0-100">pri</th>
-              <th>ip</th>
-              <th>playbook</th>
-              <th class="num" title="ProbeScore 0-100: computed from event mix and attempt rate">probe</th>
-              <th class="num" title="attempts per hour">rate/h</th>
-              <th class="num" title="distinct usernames tried">users</th>
-              <th>why</th>
-              <th>last seen</th>
-              <th style="width:92px">action</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="9"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        </div>
-      </section>
-
-      <section class="panel full" id="panel-funnel">
-        <div class="panel-head">
-          <h2>Payload funnel</h2>
-          <span class="meta" id="funnel-meta">cowrie sessions → payloads → shared</span>
-        </div>
-        <div class="panel-body">
-        <table class="dense" id="funnel-table">
-          <thead>
-            <tr>
-              <th>stage</th>
-              <th class="num">24h</th>
-              <th class="num">7d</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="3"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        </div>
-      </section>
-
-      <section class="panel full" id="panel-urlhaus">
-        <div class="panel-head">
-          <h2>URLhaus URL sharing</h2>
-          <span class="meta" id="urlhaus-meta">abuse.ch malware-URL blocklist</span>
-          <button class="bz-btn" id="urlhaus-submit-all-btn" onclick="submitAllURLhaus(this)" style="margin-left:auto;display:none">▲ Submit All to URLhaus</button>
-        </div>
-        <div class="panel-body">
-        <div class="stats tight" id="urlhaus-stats">
-          <div class="stat"><div class="num accent" id="uh-submitted">0</div><div class="label">submitted</div></div>
-          <div class="stat"><div class="num" style="color:var(--accent-2)" id="uh-eligible">0</div><div class="label">eligible now</div></div>
-          <div class="stat"><div class="num" style="color:var(--purple)" id="uh-pending">0</div><div class="label">candidates</div></div>
-          <div class="stat"><div class="num" style="color:var(--dim)" id="uh-last">—</div><div class="label">last submitted</div></div>
-        </div>
-        <div id="urlhaus-note" class="abuse-note" style="display:none"></div>
-        <table class="dense" id="urlhaus-table">
-          <thead>
-            <tr>
-              <th>url</th>
-              <th style="width:110px">kind</th>
-              <th class="num" style="width:74px">size</th>
-              <th style="width:96px" title="when our fetch last confirmed this URL was serving a payload">confirmed</th>
-              <th title="vetting-gate decision — the same policy the CLI applies">gate</th>
-              <th style="width:92px">action</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        <div id="urlhaus-log-wrap" style="margin-top:14px;display:none">
-          <div class="meta" style="margin-bottom:6px">recent submissions &amp; listing checks</div>
-          <table class="dense" id="urlhaus-log">
-            <thead><tr><th>url</th><th style="width:110px">status</th><th style="width:150px">recorded</th></tr></thead>
-            <tbody></tbody>
+          <div class="table-scroll">
+          <table class="dense" id="ioc-table">
+            <thead>
+              <tr><th>value</th><th class="num">count</th><th>first</th><th>last</th><th>actors</th></tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+            </tbody>
           </table>
-        </div>
-        </div>
-      </section>
+          </div>
+          </div>
+        </section>
 
-      <section class="panel full" id="panel-threatfox">
-        <div class="panel-head">
-          <h2>ThreatFox IOC sharing</h2>
-          <span class="meta" id="threatfox-meta">abuse.ch IOC exchange</span>
-          <button class="bz-btn" id="threatfox-submit-all-btn" onclick="submitAllThreatFox(this)" style="margin-left:auto;display:none">▲ Submit All to ThreatFox</button>
-        </div>
-        <div class="panel-body">
-        <div class="stats tight" id="threatfox-stats">
-          <div class="stat"><div class="num accent" id="tf-submitted">0</div><div class="label">IOCs submitted</div></div>
-          <div class="stat"><div class="num" style="color:var(--accent-2)" id="tf-eligible">0</div><div class="label">eligible now</div></div>
-          <div class="stat"><div class="num" style="color:var(--purple)" id="tf-pending">0</div><div class="label">candidates</div></div>
-          <div class="stat"><div class="num" style="color:var(--dim)" id="tf-last">—</div><div class="label">last submitted</div></div>
-        </div>
-        <div id="threatfox-note" class="abuse-note" style="display:none"></div>
-        <table class="dense" id="threatfox-table">
-          <thead>
-            <tr>
-              <th>payload url</th>
-              <th style="width:110px" title="malware family resolved to a Malpedia label">family</th>
-              <th class="num" style="width:56px" title="IOCs this candidate would submit: url, host, hash">IOCs</th>
-              <th style="width:96px" title="when our fetch last confirmed this host was serving a payload">confirmed</th>
-              <th title="vetting-gate decision — the same policy the CLI applies">gate</th>
-              <th style="width:92px">action</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        <div id="threatfox-log-wrap" style="margin-top:14px;display:none">
-          <div class="meta" style="margin-bottom:6px">recent submissions</div>
-          <table class="dense" id="threatfox-log">
-            <thead><tr><th>ioc</th><th style="width:96px">type</th><th style="width:120px">malware</th><th style="width:150px">submitted</th></tr></thead>
-            <tbody></tbody>
+        <section class="panel" id="panel-enrich">
+          <div class="panel-head">
+            <h2>Threat intel enrichment</h2>
+            <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo</span>
+          </div>
+          <div class="enrich-toolbar">
+            <input id="enrich-ip" class="enrich-input" type="text" aria-label="IP address to enrich" autocomplete="off" spellcheck="false" placeholder="lookup an IP (1.2.3.4)…" />
+            <button id="enrich-go" type="button" class="enrich-btn">lookup</button>
+          </div>
+          <div class="enrich-cards" id="enrich-cards">
+            <div class="empty">click an IP in the IOC table or enter one above.</div>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-funnel">
+          <div class="panel-head">
+            <h2>Payload funnel</h2>
+            <span class="meta" id="funnel-meta">cowrie sessions → payloads → shared</span>
+          </div>
+          <div class="panel-body">
+          <table class="dense" id="funnel-table">
+            <thead>
+              <tr>
+                <th>stage</th>
+                <th class="num">24h</th>
+                <th class="num">7d</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="3"><div class="empty">loading…</div></td></tr>
+            </tbody>
           </table>
-        </div>
-        </div>
-      </section>
+          </div>
+        </section>
+      </div>
+    </section>
 
-      <section class="panel full" id="panel-enrich">
-        <div class="panel-head">
-          <h2>Threat intel enrichment</h2>
-          <span class="meta" id="enrich-meta">AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo</span>
-        </div>
-        <div class="enrich-toolbar">
-          <input id="enrich-ip" class="enrich-input" type="text" aria-label="IP address to enrich" autocomplete="off" spellcheck="false" placeholder="lookup an IP (1.2.3.4)…" />
-          <button id="enrich-go" type="button" class="enrich-btn">lookup</button>
-        </div>
-        <div class="enrich-cards" id="enrich-cards">
-          <div class="empty">click an IP in the IOC table or enter one above.</div>
-        </div>
-      </section>
-    </div>
+    <section class="intel-section" aria-labelledby="blue-region-3">
+      <h2 id="blue-region-3">Review and share indicators</h2>
+      <div class="grid">
+        <section class="panel full" id="panel-abuse-suggest">
+          <div class="panel-head">
+            <h2>Suggested AbuseIPDB reports</h2>
+            <span class="meta" id="abuse-suggest-meta">ranked by report priority</span>
+            <button class="bz-btn" id="abuse-report-all-btn" onclick="reportAllSuggested(this)" style="margin-left:auto;display:none">⚑ Report All</button>
+          </div>
+          <div class="panel-body">
+          <div id="abuse-suggest-note" class="abuse-note" style="display:none"></div>
+          <table class="dense" id="abuse-suggest-table">
+            <thead>
+              <tr>
+                <th style="width:34px" title="report priority 0-100">pri</th>
+                <th>ip</th>
+                <th>playbook</th>
+                <th class="num" title="ProbeScore 0-100: computed from event mix and attempt rate">probe</th>
+                <th class="num" title="attempts per hour">rate/h</th>
+                <th class="num" title="distinct usernames tried">users</th>
+                <th>why</th>
+                <th>last seen</th>
+                <th style="width:92px">action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="9"><div class="empty">loading…</div></td></tr>
+            </tbody>
+          </table>
+          </div>
+        </section>
+
+        <section class="panel full" id="panel-urlhaus">
+          <div class="panel-head">
+            <h2>URLhaus URL sharing</h2>
+            <span class="meta" id="urlhaus-meta">abuse.ch malware-URL blocklist</span>
+            <button class="bz-btn" id="urlhaus-submit-all-btn" onclick="submitAllURLhaus(this)" style="margin-left:auto;display:none">▲ Submit All to URLhaus</button>
+          </div>
+          <div class="panel-body">
+          <div class="stats tight" id="urlhaus-stats">
+            <div class="stat"><div class="num accent" id="uh-submitted">0</div><div class="label">submitted</div></div>
+            <div class="stat"><div class="num" style="color:var(--accent-2)" id="uh-eligible">0</div><div class="label">eligible now</div></div>
+            <div class="stat"><div class="num" style="color:var(--purple)" id="uh-pending">0</div><div class="label">candidates</div></div>
+            <div class="stat"><div class="num" style="color:var(--dim)" id="uh-last">—</div><div class="label">last submitted</div></div>
+          </div>
+          <div id="urlhaus-note" class="abuse-note" style="display:none"></div>
+          <table class="dense" id="urlhaus-table">
+            <thead>
+              <tr>
+                <th>url</th>
+                <th style="width:110px">kind</th>
+                <th class="num" style="width:74px">size</th>
+                <th style="width:96px" title="when our fetch last confirmed this URL was serving a payload">confirmed</th>
+                <th title="vetting-gate decision — the same policy the CLI applies">gate</th>
+                <th style="width:92px">action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
+            </tbody>
+          </table>
+          <div id="urlhaus-log-wrap" style="margin-top:14px;display:none">
+            <div class="meta" style="margin-bottom:6px">recent submissions &amp; listing checks</div>
+            <table class="dense" id="urlhaus-log">
+              <thead><tr><th>url</th><th style="width:110px">status</th><th style="width:150px">recorded</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          </div>
+        </section>
+
+        <section class="panel full" id="panel-threatfox">
+          <div class="panel-head">
+            <h2>ThreatFox IOC sharing</h2>
+            <span class="meta" id="threatfox-meta">abuse.ch IOC exchange</span>
+            <button class="bz-btn" id="threatfox-submit-all-btn" onclick="submitAllThreatFox(this)" style="margin-left:auto;display:none">▲ Submit All to ThreatFox</button>
+          </div>
+          <div class="panel-body">
+          <div class="stats tight" id="threatfox-stats">
+            <div class="stat"><div class="num accent" id="tf-submitted">0</div><div class="label">IOCs submitted</div></div>
+            <div class="stat"><div class="num" style="color:var(--accent-2)" id="tf-eligible">0</div><div class="label">eligible now</div></div>
+            <div class="stat"><div class="num" style="color:var(--purple)" id="tf-pending">0</div><div class="label">candidates</div></div>
+            <div class="stat"><div class="num" style="color:var(--dim)" id="tf-last">—</div><div class="label">last submitted</div></div>
+          </div>
+          <div id="threatfox-note" class="abuse-note" style="display:none"></div>
+          <table class="dense" id="threatfox-table">
+            <thead>
+              <tr>
+                <th>payload url</th>
+                <th style="width:110px" title="malware family resolved to a Malpedia label">family</th>
+                <th class="num" style="width:56px" title="IOCs this candidate would submit: url, host, hash">IOCs</th>
+                <th style="width:96px" title="when our fetch last confirmed this host was serving a payload">confirmed</th>
+                <th title="vetting-gate decision — the same policy the CLI applies">gate</th>
+                <th style="width:92px">action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="6"><div class="empty">loading…</div></td></tr>
+            </tbody>
+          </table>
+          <div id="threatfox-log-wrap" style="margin-top:14px;display:none">
+            <div class="meta" style="margin-bottom:6px">recent submissions</div>
+            <table class="dense" id="threatfox-log">
+              <thead><tr><th>ioc</th><th style="width:96px">type</th><th style="width:120px">malware</th><th style="width:150px">submitted</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          </div>
+        </section>
+      </div>
+    </section>
   </section><!-- /view-blue -->
 
   <!-- ============ RED TEAM TAB ============ -->
   <section class="view" id="view-red" role="tabpanel" aria-labelledby="tab-red">
     <div class="team-banner red">
       <span class="tb-title">Red Team</span>
-      <span class="tb-sub">Offensive view · harvested TTPs, payload library, wordlists, infrastructure pivots and replay</span>
+      <span class="tb-sub">Investigate campaigns, compare scripts, and inspect captured evidence</span>
     </div>
 
-    <div class="grid">
-      <section class="panel full panel-collapse" id="panel-ttp">
-        <div class="panel-head">
-          <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="ttp-body">TTP harvesting</button></h2>
-          <span class="meta" id="ttp-meta">clustered command sequences</span>
-        </div>
-        <div class="panel-body" id="ttp-body">
-        <table class="dense ttp-table" id="ttp-table">
-          <thead>
-            <tr>
-              <th class="ttp-tmpl">command template</th>
-              <th class="num">count</th>
-              <th class="num">actors</th>
-              <th>techniques</th>
-              <th>first → last</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        </div>
-      </section>
-
-      <section class="panel panel-collapse" id="panel-payloads">
-        <div class="panel-head">
-          <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="payloads-body">Payload library</button></h2>
-          <span class="meta" id="payloads-meta">captured binaries / scripts</span>
-          <button type="button" class="bz-btn" id="upload-all-btn" onclick="uploadAllToBazaar(this)" style="margin-left:auto">▲ Upload All to MalwareBazaar</button>
-        </div>
-        <div class="panel-body" id="payloads-body">
-        <table class="dense" id="payloads-table">
-          <thead>
-            <tr>
-              <th>sha256</th>
-              <th class="num">size</th>
-              <th class="num" title="distinct delivery URLs · distinct source IPs · distinct actors">delivery</th>
-              <th>last url</th>
-              <th>last actor</th>
-              <th>status</th>
-              <th style="width:96px" title="VirusTotal engine verdict for this hash. Cached results show automatically; 'check' spends one lookup (free tier is ~4/min).">virustotal</th>
-              <th style="width:78px">bazaar</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="8"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-wordlist">
-        <div class="panel-head">
-          <h2>Credential wordlists</h2>
-          <span class="meta" id="wl-meta">john / hashcat ready</span>
-        </div>
-        <div class="wl-toolbar">
-          <div class="wl-kinds">
-            <button class="wl-kind active" data-kind="users">users</button>
-            <button class="wl-kind" data-kind="passwords">passwords</button>
-            <button class="wl-kind" data-kind="combos">combos</button>
+    <section class="intel-section" aria-labelledby="red-region-1">
+      <h2 id="red-region-1">Campaign evidence</h2>
+      <div class="grid">
+        <section class="panel full intel-workbench" id="panel-campaigns">
+          <div class="panel-head">
+            <h2>Campaigns</h2>
+            <span class="meta" id="campaigns-meta">sessions linked by the same SSH key, payload or script</span>
           </div>
-          <button type="button" class="ioc-dl" id="wl-dl">download .txt</button>
-        </div>
-        <div class="wl-preview" id="wl-preview">
-          <div class="empty">loading…</div>
-        </div>
-      </section>
-
-      <section class="panel full" id="panel-graph">
-        <div class="panel-head">
-          <h2>Infrastructure pivoting</h2>
-          <span class="meta" id="graph-meta">force-directed · drag · scroll to zoom</span>
-        </div>
-        <div class="graph-legend">
-          <span class="lg lg-actor"></span>actor
-          <span class="lg lg-ip"></span>ip
-          <span class="lg lg-hassh"></span>hassh
-          <span class="lg lg-user"></span>user
-          <span class="graph-spacer"></span>
-          <span id="graph-stats" class="graph-stats">loading…</span>
-        </div>
-        <div id="graph-canvas" class="graph-canvas"></div>
-      </section>
-
-      <section class="panel" id="panel-tunnels">
-        <div class="panel-head">
-          <h2>Proxy targets</h2>
-          <span class="meta" id="tunnels-meta">direct-tcpip pivot destinations</span>
-        </div>
-        <div class="panel-body">
-        <table class="dense" id="tunnels-table">
-          <thead>
-            <tr>
-              <th>destination</th>
-              <th class="num">port</th>
-              <th class="num">hits</th>
-              <th class="num">actors</th>
-              <th>first → last</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-campaigns">
-        <div class="panel-head">
-          <h2>Campaigns</h2>
-          <span class="meta" id="campaigns-meta">sessions linked by the same SSH key, payload or script</span>
-        </div>
-        <div class="panel-body">
-        <div class="table-scroll">
-        <table class="dense" id="campaigns-table">
-          <thead><tr><th>campaign</th><th class="num">actors</th><th class="num">IPs</th><th class="num">sessions</th><th>linked by</th><th>first → last</th></tr></thead>
-          <tbody><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
-        </table>
-        </div>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-scripts">
-        <div class="panel-head">
-          <h2>Scripts</h2>
-          <span class="meta" id="scripts-meta">normalised command scripts and their variants</span>
-        </div>
-        <div class="panel-body">
-        <div class="table-scroll">
-        <table class="dense" id="scripts-table">
-          <thead><tr><th>script</th><th class="num">variants</th><th class="num">sessions</th><th class="num">actors</th><th class="num">IPs</th><th>links</th><th>first → last</th></tr></thead>
-          <tbody><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
-        </table>
-        </div>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-replay">
-        <div class="panel-head">
-          <h2>Attack replay / synthesis</h2>
-          <span class="meta" id="replay-meta">bash · sandbox-only</span>
-        </div>
-        <div class="replay-toolbar">
-          <select id="replay-session" class="replay-select" aria-label="Session to replay"></select>
-          <label class="replay-toggle">
-            <input type="checkbox" id="replay-sleeps" checked>
-            inter-cmd sleeps
-          </label>
-          <label class="replay-toggle">
-            <input type="checkbox" id="replay-dryrun">
-            dry-run (comment cmds)
-          </label>
-          <button type="button" class="ioc-dl" id="replay-dl">download .sh</button>
-        </div>
-        <pre class="replay-pre" id="replay-pre"><div class="empty">select a session</div></pre>
-      </section>
-
-      <section class="panel" id="panel-deobf">
-        <div class="panel-head">
-          <h2>Obfuscation analysis</h2>
-          <span class="meta" id="deobf-meta">base64 · hex · eval · urlencoded</span>
-        </div>
-        <div class="deobf-tester">
-          <input type="text" id="deobf-input" class="deobf-input" aria-label="Command to decode"
-                 placeholder="Paste a suspicious command - decoded live"
-                 spellcheck="false" autocomplete="off">
-          <button id="deobf-clear" class="deobf-btn">clear</button>
-        </div>
-        <div id="deobf-tester-out" class="deobf-tester-out"></div>
-        <div class="deobf-divider">recent obfuscated commands</div>
-        <div id="deobf-rows" class="deobf-rows">
-          <div class="empty">loading…</div>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-pending">
-        <div class="panel-head">
-          <h2>Pending uploads</h2>
-          <span class="meta" id="pending-meta">payloads not yet on MalwareBazaar</span>
-          <button type="button" class="bz-btn" id="upload-pending-btn" onclick="uploadAllPending(this)" style="margin-left:auto">▲ Upload all pending</button>
-        </div>
-        <div class="panel-body">
-        <table class="dense" id="pending-table">
-          <thead>
-            <tr>
-              <th>sha256</th>
-              <th class="num">size</th>
-              <th>last url</th>
-              <th>last actor</th>
-              <th style="width:78px">bazaar</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
-          </tbody>
-        </table>
-        </div>
-      </section>
-
-      <section class="panel full" id="panel-bazaar">
-        <div class="panel-head">
-          <h2>MalwareBazaar sharing</h2>
-          <span class="meta" id="bazaar-meta">abuse.ch threat intel exchange</span>
-          <button type="button" class="bz-btn" id="bazaar-upload-all-btn" onclick="uploadAllBazaarCandidates(this)" style="margin-left:auto;display:none">▲ Upload all eligible</button>
-        </div>
-        <div class="stats tight" id="bazaar-stats">
-          <div class="stat"><div class="num accent" id="bz-uploaded">0</div><div class="label">uploaded</div></div>
-          <div class="stat"><div class="num" style="color:var(--accent-2)" id="bz-dupes">0</div><div class="label">duplicates</div></div>
-          <div class="stat"><div class="num" style="color:var(--purple)" id="bz-pending">0</div><div class="label">pending</div></div>
-          <div class="stat"><div class="num" style="color:var(--dim)" id="bz-last">—</div><div class="label">last upload</div></div>
-        </div>
-        <div id="bazaar-note" class="abuse-note" style="display:none"></div>
-        <div class="meta bz-sub" id="bazaar-cand-meta">candidates · MalwareBazaar vetting gate</div>
-        <div class="scroll" id="bazaar-cand-wrap">
-          <table class="dense" id="bazaar-cand-table">
-            <thead><tr>
-              <th>sha256</th>
-              <th class="num" style="width:70px">size</th>
-              <th style="width:110px">kind</th>
-              <th style="width:100px">family</th>
-              <th style="width:130px">origin</th>
-              <th style="width:90px" title="when our capture last fetched this payload successfully">fetched</th>
-              <th title="bazaar.Vet's decision, the same gate the upload endpoint and the CLI apply">gate</th>
-              <th style="width:92px">action</th>
-            </tr></thead>
-            <tbody><tr><td colspan="8"><div class="empty">loading…</div></td></tr></tbody>
+          <div class="panel-body">
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Campaign table">
+          <table class="dense" id="campaigns-table">
+            <thead><tr><th>campaign</th><th class="num">actors</th><th class="num">IPs</th><th class="num">sessions</th><th>linked by</th><th>first → last</th></tr></thead>
+            <tbody><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
           </table>
-        </div>
-        <div class="meta bz-sub">recent uploads</div>
-        <div class="scroll" id="bazaar-table-wrap">
-          <table id="bazaar-table">
-            <thead><tr>
-              <th>SHA256</th>
-              <th class="n">Size</th>
-              <th>Family</th>
-              <th>Kind</th>
-              <th>Source IP</th>
-              <th>Status</th>
-              <th>Time</th>
-            </tr></thead>
+          </div>
+          </div>
+        </section>
+
+        <section class="panel full intel-workbench" id="panel-scripts">
+          <div class="panel-head">
+            <h2>Scripts</h2>
+            <span class="meta" id="scripts-meta">normalised command scripts and their variants</span>
+          </div>
+          <div class="panel-body">
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Script families table">
+          <table class="dense" id="scripts-table">
+            <thead><tr><th>script</th><th class="num">variants</th><th class="num">sessions</th><th class="num">actors</th><th class="num">IPs</th><th>links</th><th>first → last</th></tr></thead>
             <tbody><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
           </table>
-        </div>
-      </section>
+          </div>
+          </div>
+        </section>
 
-    </div>
+        <section class="panel full panel-collapse" id="panel-ttp">
+          <div class="panel-head">
+            <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="ttp-body">TTP harvesting</button></h2>
+            <span class="meta" id="ttp-meta">clustered command sequences</span>
+          </div>
+          <div class="panel-body" id="ttp-body">
+          <table class="dense ttp-table" id="ttp-table">
+            <thead>
+              <tr>
+                <th class="ttp-tmpl">command template</th>
+                <th class="num">count</th>
+                <th class="num">actors</th>
+                <th>techniques</th>
+                <th>first → last</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+            </tbody>
+          </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="intel-section" aria-labelledby="red-region-2">
+      <h2 id="red-region-2">Captured artifacts</h2>
+      <div class="grid">
+        <section class="panel full panel-collapse" id="panel-payloads">
+          <div class="panel-head">
+            <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="payloads-body">Payload library</button></h2>
+            <span class="meta" id="payloads-meta">captured binaries / scripts</span>
+            <button type="button" class="bz-btn" id="upload-all-btn" onclick="uploadAllToBazaar(this)" style="margin-left:auto">▲ Upload All to MalwareBazaar</button>
+          </div>
+          <div class="panel-body" id="payloads-body">
+          <table class="dense" id="payloads-table">
+            <thead>
+              <tr>
+                <th>sha256</th>
+                <th class="num">size</th>
+                <th class="num" title="distinct delivery URLs · distinct source IPs · distinct actors">delivery</th>
+                <th>last url</th>
+                <th>last actor</th>
+                <th>status</th>
+                <th style="width:96px" title="VirusTotal engine verdict for this hash. Cached results show automatically; 'check' spends one lookup (free tier is ~4/min).">virustotal</th>
+                <th style="width:78px">bazaar</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="8"><div class="empty">loading…</div></td></tr>
+            </tbody>
+          </table>
+          </div>
+        </section>
+
+        <section class="panel full" id="panel-tunnels">
+          <div class="panel-head">
+            <h2>Proxy targets</h2>
+            <span class="meta" id="tunnels-meta">direct-tcpip pivot destinations</span>
+          </div>
+          <div class="panel-body">
+          <table class="dense" id="tunnels-table">
+            <thead>
+              <tr>
+                <th>destination</th>
+                <th class="num">port</th>
+                <th class="num">hits</th>
+                <th class="num">actors</th>
+                <th>first → last</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+            </tbody>
+          </table>
+          </div>
+        </section>
+
+        <section class="panel full" id="panel-graph">
+          <div class="panel-head">
+            <h2>Infrastructure pivoting</h2>
+            <span class="meta" id="graph-meta">force-directed · drag · scroll to zoom</span>
+          </div>
+          <div class="graph-legend">
+            <span class="lg lg-actor"></span>actor
+            <span class="lg lg-ip"></span>ip
+            <span class="lg lg-hassh"></span>hassh
+            <span class="lg lg-user"></span>user
+            <span class="graph-spacer"></span>
+            <span id="graph-stats" class="graph-stats">loading…</span>
+          </div>
+          <div id="graph-canvas" class="graph-canvas"></div>
+        </section>
+      </div>
+    </section>
+
+    <section class="intel-section" aria-labelledby="red-region-3">
+      <h2 id="red-region-3">Analysis tools</h2>
+      <div class="grid">
+        <section class="panel" id="panel-wordlist">
+          <div class="panel-head">
+            <h2>Credential wordlists</h2>
+            <span class="meta" id="wl-meta">john / hashcat ready</span>
+          </div>
+          <div class="wl-toolbar">
+            <div class="wl-kinds">
+              <button class="wl-kind active" data-kind="users">users</button>
+              <button class="wl-kind" data-kind="passwords">passwords</button>
+              <button class="wl-kind" data-kind="combos">combos</button>
+            </div>
+            <button type="button" class="ioc-dl" id="wl-dl">download .txt</button>
+          </div>
+          <div class="wl-preview" id="wl-preview">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-deobf">
+          <div class="panel-head">
+            <h2>Obfuscation analysis</h2>
+            <span class="meta" id="deobf-meta">base64 · hex · eval · urlencoded</span>
+          </div>
+          <div class="deobf-tester">
+            <input type="text" id="deobf-input" class="deobf-input" aria-label="Command to decode"
+                   placeholder="Paste a suspicious command - decoded live"
+                   spellcheck="false" autocomplete="off">
+            <button id="deobf-clear" class="deobf-btn">clear</button>
+          </div>
+          <div id="deobf-tester-out" class="deobf-tester-out"></div>
+          <div class="deobf-divider">recent obfuscated commands</div>
+          <div id="deobf-rows" class="deobf-rows">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+
+        <section class="panel full" id="panel-replay">
+          <div class="panel-head">
+            <h2>Attack replay / synthesis</h2>
+            <span class="meta" id="replay-meta">bash · sandbox-only</span>
+          </div>
+          <div class="replay-toolbar">
+            <select id="replay-session" class="replay-select" aria-label="Session to replay"></select>
+            <label class="replay-toggle">
+              <input type="checkbox" id="replay-sleeps" checked>
+              inter-cmd sleeps
+            </label>
+            <label class="replay-toggle">
+              <input type="checkbox" id="replay-dryrun">
+              dry-run (comment cmds)
+            </label>
+            <button type="button" class="ioc-dl" id="replay-dl">download .sh</button>
+          </div>
+          <pre class="replay-pre" id="replay-pre"><div class="empty">select a session</div></pre>
+        </section>
+      </div>
+    </section>
+
+    <section class="intel-section" aria-labelledby="red-region-4">
+      <h2 id="red-region-4">Payload sharing</h2>
+      <div class="grid">
+        <section class="panel full" id="panel-pending">
+          <div class="panel-head">
+            <h2>Pending uploads</h2>
+            <span class="meta" id="pending-meta">payloads not yet on MalwareBazaar</span>
+            <button type="button" class="bz-btn" id="upload-pending-btn" onclick="uploadAllPending(this)" style="margin-left:auto">▲ Upload all pending</button>
+          </div>
+          <div class="panel-body">
+          <table class="dense" id="pending-table">
+            <thead>
+              <tr>
+                <th>sha256</th>
+                <th class="num">size</th>
+                <th>last url</th>
+                <th>last actor</th>
+                <th style="width:78px">bazaar</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="5"><div class="empty">loading…</div></td></tr>
+            </tbody>
+          </table>
+          </div>
+        </section>
+
+        <section class="panel full" id="panel-bazaar">
+          <div class="panel-head">
+            <h2>MalwareBazaar sharing</h2>
+            <span class="meta" id="bazaar-meta">abuse.ch threat intel exchange</span>
+            <button type="button" class="bz-btn" id="bazaar-upload-all-btn" onclick="uploadAllBazaarCandidates(this)" style="margin-left:auto;display:none">▲ Upload all eligible</button>
+          </div>
+          <div class="stats tight" id="bazaar-stats">
+            <div class="stat"><div class="num accent" id="bz-uploaded">0</div><div class="label">uploaded</div></div>
+            <div class="stat"><div class="num" style="color:var(--accent-2)" id="bz-dupes">0</div><div class="label">duplicates</div></div>
+            <div class="stat"><div class="num" style="color:var(--purple)" id="bz-pending">0</div><div class="label">pending</div></div>
+            <div class="stat"><div class="num" style="color:var(--dim)" id="bz-last">—</div><div class="label">last upload</div></div>
+          </div>
+          <div id="bazaar-note" class="abuse-note" style="display:none"></div>
+          <div class="meta bz-sub" id="bazaar-cand-meta">candidates · MalwareBazaar vetting gate</div>
+          <div class="scroll" id="bazaar-cand-wrap">
+            <table class="dense" id="bazaar-cand-table">
+              <thead><tr>
+                <th>sha256</th>
+                <th class="num" style="width:70px">size</th>
+                <th style="width:110px">kind</th>
+                <th style="width:100px">family</th>
+                <th style="width:130px">origin</th>
+                <th style="width:90px" title="when our capture last fetched this payload successfully">fetched</th>
+                <th title="bazaar.Vet's decision, the same gate the upload endpoint and the CLI apply">gate</th>
+                <th style="width:92px">action</th>
+              </tr></thead>
+              <tbody><tr><td colspan="8"><div class="empty">loading…</div></td></tr></tbody>
+            </table>
+          </div>
+          <div class="meta bz-sub">recent uploads</div>
+          <div class="scroll" id="bazaar-table-wrap">
+            <table id="bazaar-table">
+              <thead><tr>
+                <th>SHA256</th>
+                <th class="n">Size</th>
+                <th>Family</th>
+                <th>Kind</th>
+                <th>Source IP</th>
+                <th>Status</th>
+                <th>Time</th>
+              </tr></thead>
+              <tbody><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
   </section><!-- /view-red -->
 
   <!-- ============ SETTINGS TAB ============ -->
@@ -2015,37 +2052,16 @@
         <span class="meta">UI theme · applies to globe and intel · saved live</span></div>
       <div class="panel-body">
         <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="UI theme">
-          <button type="button" class="theme-card" data-theme-id="signal" role="radio" aria-checked="true">
-            <div class="swatch" aria-hidden="true">
-              <span style="background:#0f1113"></span><span style="background:#1c1e20"></span>
-              <span style="background:#f7f7f8"></span><span style="background:#d1fe17"></span><span style="background:#b6d900"></span>
-            </div>
-            <div class="tname">Signal</div>
-            <p class="tblurb">High-contrast dark ops (default)</p>
+          <button type="button" class="theme-card" data-theme-id="obsidian" role="radio" aria-checked="true">
+            <div class="swatch" aria-hidden="true"><span style="background:#121315"></span><span style="background:#1c1e21"></span><span style="background:#f0efec"></span><span style="background:#cbdbe1"></span><span style="background:#f0c484"></span></div>
+            <div class="tname">Obsidian</div>
+            <p class="tblurb">Dark monitoring desk</p>
           </button>
-          <button type="button" class="theme-card" data-theme-id="meridian" role="radio" aria-checked="false">
-            <div class="swatch" aria-hidden="true">
-              <span style="background:#dfe3e8"></span><span style="background:#f4f6f8"></span>
-              <span style="background:#1a2332"></span><span style="background:#0d5c63"></span>
-              <span style="background:#a67c2d"></span>
-            </div>
-            <div class="tname">Meridian</div>
-            <p class="tblurb">Cool slate cartography</p>
+          <button type="button" class="theme-card" data-theme-id="kiln" role="radio" aria-checked="false">
+            <div class="swatch" aria-hidden="true"><span style="background:#efebe2"></span><span style="background:#faf7ef"></span><span style="background:#382e2a"></span><span style="background:#974014"></span><span style="background:#ad4b20"></span></div>
+            <div class="tname">Kiln</div>
+            <p class="tblurb">Light paper and terracotta</p>
           </button>
-          <button type="button" class="theme-card" data-theme-id="sprite" role="radio" aria-checked="false">
-            <div class="swatch" aria-hidden="true">
-              <span style="background:#7ec8e3"></span><span style="background:#fff8e8"></span>
-              <span style="background:#241910"></span><span style="background:#e85d4c"></span>
-              <span style="background:#f0b429"></span>
-            </div>
-            <div class="tname">Sprite</div>
-            <p class="tblurb">Chunky pixel console</p>
-          </button>
-        </div>
-        <div class="mode-toggle" id="mode-toggle" style="margin-top:12px;display:none">
-          <span class="set-label">Mode</span>
-          <button type="button" class="chip" data-mode="dark">Dark</button>
-          <button type="button" class="chip" data-mode="light">Light</button>
         </div>
         <div class="set-note" id="theme-picker-status" style="margin-top:10px;margin-bottom:0"></div>
       </div>
@@ -2230,7 +2246,7 @@ document.addEventListener('visibilitychange', function () {
 /* ==== UI theme (Signal / Meridian / Sprite) ==== */
 window.__shardlureTheme = 'signal';
 function currentThemeId() {
-  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'signal';
+  return window.__shardlureTheme || document.documentElement.getAttribute('data-theme') || 'obsidian';
 }
 function applyMode(mode) {
   mode = (mode === 'light') ? 'light' : 'dark';
@@ -2242,7 +2258,7 @@ function applyMode(mode) {
   }
 }
 function applyTheme(id, opts) {
-  if (id !== 'signal' && id !== 'meridian' && id !== 'sprite') id = 'signal';
+  id = resolveWorkspaceTheme(id, document.documentElement.dataset.mode);
   var force = opts && opts.force;
   var prev = window.__shardlureTheme;
   // Same-tab BroadcastChannel echoes postMessage back to our own listener.
@@ -2253,6 +2269,7 @@ function applyTheme(id, opts) {
   }
   window.__shardlureTheme = id;
   document.documentElement.setAttribute('data-theme', id);
+  document.documentElement.toggleAttribute('data-workspace', ['obsidian', 'kiln'].includes(id));
   if (id === 'signal') {
     document.documentElement.setAttribute('data-mode', localStorage.getItem('shardlure_mode') || 'dark');
   } else {
@@ -2275,13 +2292,13 @@ function applyTheme(id, opts) {
 async function syncThemeFromServer() {
   try {
     var r = await fetch('/api/settings?_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
+    if (!r.ok) return applyTheme(localStorage.getItem('shardlure_theme') || 'obsidian');
     var data = await r.json();
     var row = (data.settings || []).find(function (s) { return s.key === 'ui.theme'; });
-    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'signal';
+    var id = (row && row.value) || localStorage.getItem('shardlure_theme') || 'obsidian';
     return applyTheme(id);
   } catch (e) {
-    return applyTheme(localStorage.getItem('shardlure_theme') || 'signal');
+    return applyTheme(localStorage.getItem('shardlure_theme') || 'obsidian');
   }
 }
 try {
@@ -2449,7 +2466,7 @@ function heatmapPalette() {
   var text = g('--text', '#e8dcd8');
   var bg = g('--bg', '#0a0608');
   var glass2 = g('--glass-2', '#1e1618');
-  var theme = document.documentElement.getAttribute('data-theme') || 'signal';
+  var theme = document.documentElement.getAttribute('data-theme') || 'obsidian';
   // Purple isn't a core token on all themes — keep a readable fallback.
   var purple = theme === 'sprite' ? '#7a5ea8' : (theme === 'meridian' ? '#5a4a8a' : '#a878c0');
   var empty = glass2;
@@ -2971,7 +2988,7 @@ function syncModeToggle(id) {
   });
 }
 async function selectTheme(id) {
-  var prev = window.__shardlureTheme || 'signal';
+  var prev = currentThemeId();
   applyTheme(id);
   markThemePicker(id);
   syncModeToggle(id);
@@ -3018,7 +3035,7 @@ async function loadSettings() {
     var data = await r.json();
     _settingsLoaded = true;
     var buckets = { keys: [], abuse: [], bazaar: [], urlhaus: [], geo: [], token: [] };
-    var themeVal = 'signal';
+    var themeVal = currentThemeId();
     var modeVal = localStorage.getItem('shardlure_mode') || 'dark';
     (data.settings || []).forEach(function (s) {
       if (s.key === 'ui.theme') {
@@ -3038,6 +3055,7 @@ async function loadSettings() {
       else buckets.geo.push(s);
     });
     applyTheme(themeVal);
+    themeVal = currentThemeId();
     applyMode(modeVal);
     markThemePicker(themeVal);
     syncModeToggle(themeVal);
@@ -5714,7 +5732,7 @@ async function refreshGraph() {
 
 function isLightGraphTheme() {
   var t = document.documentElement.getAttribute('data-theme');
-  return t === 'sprite' || t === 'meridian';
+  return t === 'sprite' || t === 'meridian' || t === 'kiln';
 }
 
 function graphThemeColors() {

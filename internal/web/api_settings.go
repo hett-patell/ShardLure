@@ -161,6 +161,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Non-secret knobs are safe to echo so the form can prefill.
 			row.Value = s.keys.Get(m.Key)
+			if m.Key == settings.KeyUITheme && row.Value != "" {
+				row.Value = effectiveWorkspaceTheme(row.Value, s.keys.Get(settings.KeyUIMode))
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -168,6 +171,19 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		"generatedAt": time.Now().UTC().Format(time.RFC3339),
 		"settings":    rows,
 	})
+}
+
+// Read old preferences without rewriting a deployment's settings on a GET.
+func effectiveWorkspaceTheme(theme, mode string) string {
+	switch theme {
+	case "kiln", "meridian", "sprite":
+		return "kiln"
+	case "signal":
+		if mode == "light" {
+			return "kiln"
+		}
+	}
+	return "obsidian"
 }
 
 type saveRequest struct {
@@ -271,9 +287,9 @@ func validateSetting(m settingMeta, val string) string {
 	case kindText:
 		if m.Key == settings.KeyUITheme {
 			switch val {
-			case "signal", "meridian", "sprite":
+			case "obsidian", "kiln":
 			default:
-				return "theme must be signal, meridian, or sprite"
+				return "theme must be obsidian or kiln"
 			}
 		}
 		if m.Key == settings.KeyUIMode {

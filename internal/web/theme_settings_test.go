@@ -17,7 +17,7 @@ func TestValidateUITheme(t *testing.T) {
 	if !ok {
 		t.Fatal("ui.theme missing from settingsRegistry")
 	}
-	for _, good := range []string{"signal", "meridian", "sprite"} {
+	for _, good := range []string{"obsidian", "kiln"} {
 		if msg := validateSetting(meta, good); msg != "" {
 			t.Fatalf("%q rejected: %s", good, msg)
 		}
@@ -27,6 +27,17 @@ func TestValidateUITheme(t *testing.T) {
 	}
 	if msg := validateSetting(meta, "neon"); msg == "" {
 		t.Fatal("expected neon to be rejected")
+	}
+}
+
+func TestLegacyWorkspaceTheme(t *testing.T) {
+	for _, tc := range []struct{ theme, mode, want string }{
+		{"signal", "light", "kiln"}, {"signal", "dark", "obsidian"},
+		{"meridian", "", "kiln"}, {"sprite", "", "kiln"}, {"phosphor", "", "obsidian"},
+	} {
+		if got := effectiveWorkspaceTheme(tc.theme, tc.mode); got != tc.want {
+			t.Errorf("%s/%s maps to %s, want %s", tc.theme, tc.mode, got, tc.want)
+		}
 	}
 }
 
@@ -66,11 +77,11 @@ func TestSettingsSaveUITheme(t *testing.T) {
 		return rec
 	}
 
-	rec := save("meridian")
+	rec := save("obsidian")
 	if rec.Code != 200 {
-		t.Fatalf("save meridian: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("save obsidian: %d %s", rec.Code, rec.Body.String())
 	}
-	if got := keys.Get(settings.KeyUITheme); got != "meridian" {
+	if got := keys.Get(settings.KeyUITheme); got != "obsidian" {
 		t.Fatalf("keystore got %q", got)
 	}
 
@@ -78,13 +89,13 @@ func TestSettingsSaveUITheme(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("save neon: want 400, got %d %s", rec.Code, rec.Body.String())
 	}
-	if got := keys.Get(settings.KeyUITheme); got != "meridian" {
+	if got := keys.Get(settings.KeyUITheme); got != "obsidian" {
 		t.Fatalf("rejected save mutated keystore to %q", got)
 	}
 
-	rec = save("sprite")
+	rec = save("kiln")
 	if rec.Code != 200 {
-		t.Fatalf("save sprite: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("save kiln: %d %s", rec.Code, rec.Body.String())
 	}
 
 	// GET snapshot includes value
@@ -104,7 +115,7 @@ func TestSettingsSaveUITheme(t *testing.T) {
 	for _, row := range snap.Settings {
 		if row.Key == settings.KeyUITheme {
 			found = true
-			if row.Value != "sprite" {
+			if row.Value != "kiln" {
 				t.Fatalf("snapshot value %q", row.Value)
 			}
 			if row.Kind != "text" {

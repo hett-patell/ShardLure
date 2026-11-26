@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1454,6 +1455,7 @@ type dashboardResponse struct {
 	Actors       []actorCard       `json:"actors"`    // recent actors (drives globe points/arcs)
 	TopActors    []actorCard       `json:"topActors"` // actors by event volume (the "Top actors" widget)
 	Recent       []recentRecord    `json:"recent"`
+	Connection   *globeConnection  `json:"connection,omitempty"`
 	Sessions     []shellSessionRow `json:"sessions"`
 	TopIPs       []topIPRow        `json:"topIps"`
 	TopUsers     []topUserRow      `json:"topUsers"`
@@ -1468,6 +1470,20 @@ type dashboardResponse struct {
 	// each compute it in their own template - so the fix for the frozen gauge
 	// landed in one page and left the other reading a stale formula.
 	Threat *threatBlock `json:"threat,omitempty"`
+}
+
+type globeConnection struct {
+	ID  string  `json:"id"`
+	IP  string  `json:"ip"`
+	Geo *geoPin `json:"geo,omitempty"`
+}
+
+type geoPin struct {
+	Country string  `json:"country,omitempty"`
+	Lat     float64 `json:"lat"`
+	Lon     float64 `json:"lon"`
+	City    string  `json:"city,omitempty"`
+	CC      string  `json:"cc,omitempty"`
 }
 
 // shellSessionRow is a flattened cowrie session for the "Recent shell
@@ -1663,6 +1679,23 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, row := range topIPs {
 		geoIPs = append(geoIPs, row.Key)
+	}
+	// Reuse the bounded live feed and resolve at most one new source per poll.
+	// The source IP may differ from the actor's primary IP.
+	var latestConnect models.Event
+	for _, e := range events {
+		if e.Kind == models.KindConnect && e.ID > latestConnect.ID {
+			latestConnect = e
+		}
+	}
+	if latestConnect.ID > 0 {
+		conn := &globeConnection{ID: strconv.FormatInt(latestConnect.ID, 10), IP: latestConnect.SrcIP}
+		if g := s.geo.cached(conn.IP); g.OK {
+			conn.Geo = &geoPin{Lat: g.Lat, Lon: g.Lon, City: g.City, CC: g.CC, Country: g.Country}
+		} else {
+			geoIPs = append(geoIPs, conn.IP)
+		}
+		resp.Connection = conn
 	}
 	// Fire-and-forget: blocking this 5s-polled handler on outbound geo
 	// lookups stalled the response up to the whole poll interval when a

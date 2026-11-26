@@ -1,16 +1,17 @@
 /**
  * Lazy-loaded Cobe engine — the only globe engine, shared by all themes
- * (Signal / Meridian / Sprite).
+ * (Signal / Meridian / Sprite / Phosphor).
  */
 import createGlobe from "/vendor/cobe.esm.js";
 import {
   bindGlobeInteraction,
   startGlobeLoop,
   cobeThemeConfig,
+  isWorkspaceTheme,
   buildCobeEntities,
   globeActorOrder,
   locationToAngles,
-} from "/cobe-globe.js?v=5";
+} from "/cobe-globe.js?v=16";
 
 function cobeEntitiesKey(home, markers, arcs) {
   const h = `${Number(home.lat).toFixed(3)},${Number(home.lon).toFixed(3)}`;
@@ -37,6 +38,7 @@ let _theme = null;
 let _mode = "dark";
 let _home = { lat: 19.076, lon: 72.8777 };
 let _actors = [];
+let _connectionPin = null;
 
 function stage() {
   return document.getElementById("cobe-stage");
@@ -72,6 +74,7 @@ function destroy() {
   _ix = null;
   _state = null;
   _theme = null;
+  _dataKey = "";
   const ov = overlays();
   if (ov) ov.innerHTML = "";
   const st = stage();
@@ -83,13 +86,14 @@ function destroy() {
 
 async function ensure(theme, mode) {
   _mode = mode || "dark";
-  // Honor prefers-reduced-motion: skip globe creation entirely so no
-  // continuous rAF loop spins when the user opted out of motion.
-  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Phosphor has a dedicated globe view, so it still renders in reduced motion.
+  const workspace = isWorkspaceTheme(theme);
+  if (reducedMotion && !workspace) {
     destroy();
     return null;
   }
-  if (theme !== "meridian" && theme !== "sprite" && theme !== "signal") {
+  if (theme !== "meridian" && theme !== "sprite" && theme !== "signal" && !workspace) {
     destroy();
     return null;
   }
@@ -112,14 +116,18 @@ async function ensure(theme, mode) {
   w.style.height = "";
 
   const cfg = cobeThemeConfig(theme, _mode);
+  const horizon = workspace && document.documentElement.dataset.globeView !== "full";
+  const [homePhi, homeTheta] = locationToAngles(_home.lat, _home.lon);
+  const phi = workspace ? homePhi : 2.4;
+  const theta = workspace ? homeTheta : 0.22;
   _state = {
-    phi: 2.4,
-    theta: 0.22,
-    targetPhi: 2.4,
-    targetTheta: 0.22,
+    phi,
+    theta,
+    targetPhi: phi,
+    targetTheta: theta,
     scale: 1,
     targetScale: 1,
-    autoRotate: true,
+    autoRotate: !workspace,
     interacting: false,
   };
   const places = [{ id: "home", label: "Home", lat: _home.lat, lon: _home.lon }];
@@ -130,13 +138,20 @@ async function ensure(theme, mode) {
     wrap: w,
     places,
     markerElevation: cfg.markerElevation,
+    idleRotate: !workspace,
+    fixedSize: horizon,
+    fullOrbit: workspace && !horizon,
+    timedTurn: workspace,
   });
-  const size = () => Math.min(w.clientWidth || 480, w.clientHeight || 480) * 2;
+  const size = Math.min(w.clientWidth || 480, w.clientHeight || 480) * 2;
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const backingSize = horizon ? Math.min(1400, Math.round(size * dpr / 2)) : size;
   const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors, entityOpts(cfg));
   _globe = createGlobe(c, {
-    devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1.5),
-    width: size(),
-    height: size(),
+    // Horizon sizes already include DPR and denote actual framebuffer pixels.
+    devicePixelRatio: horizon ? 1 : dpr,
+    width: backingSize,
+    height: backingSize,
     phi: _state.phi,
     theta: _state.theta,
     dark: cfg.dark,
@@ -155,7 +170,7 @@ async function ensure(theme, mode) {
     arcs,
   });
   _theme = theme;
-  _stop = startGlobeLoop(_globe, _ix);
+  _stop = startGlobeLoop(_globe, _ix, undefined, horizon);
   try {
     const [p, th] = locationToAngles(_home.lat, _home.lon);
     _state.targetPhi = p;
@@ -166,15 +181,24 @@ async function ensure(theme, mode) {
 
 let _dataKey = "";
 let _dataTimer = 0;
-function updateData(home, actors) {
+function updateData(home, actors, connectionPin) {
   if (home) _home = home;
   if (actors) _actors = actors;
+  if (connectionPin !== undefined) _connectionPin = connectionPin;
   if (!_globe || !_theme) return;
   clearTimeout(_dataTimer);
   _dataTimer = setTimeout(() => {
     if (!_globe || !_theme) return;
     const cfg = cobeThemeConfig(_theme, _mode);
     const { markers, arcs } = buildCobeEntities(_home, _actors, cfg.colors, entityOpts(cfg));
+    if (isWorkspaceTheme(_theme) && _connectionPin) {
+      const location = [_connectionPin.lat, _connectionPin.lon];
+      const color = cfg.route;
+      markers.push({ id: "latest-connection", location, size: 0.018, color });
+      if (location[0] !== _home.lat || location[1] !== _home.lon) {
+        arcs.push({ id: "latest-route", from: location, to: [_home.lat, _home.lon], color });
+      }
+    }
     const key = cobeEntitiesKey(_home, markers, arcs);
     if (key === _dataKey) return;
     _dataKey = key;
@@ -226,6 +250,7 @@ function entityOpts(cfg) {
     maxArcs: cfg.maxArcs,
     maxMarkers: cfg.maxMarkers,
     markerSize: cfg.markerSize,
+    homeMarkerSize: cfg.homeMarkerSize,
     hotArcRatio: cfg.hotArcRatio,
     hotMarkerRatio: cfg.hotMarkerRatio,
   };
@@ -242,11 +267,28 @@ function setOverlayPlaces(places, htmlNodes) {
   }
 }
 
+function focusConnection(pin, initial = false) {
+  if (!isWorkspaceTheme(_theme) || !_ix || _ix.isDragging() || _state.interacting) return false;
+  // The horizon clips the equator of the image. Frame the source above it.
+  const horizon = document.documentElement.dataset.globeView !== "full";
+  const tilt = horizon ? -0.38 : 0;
+  if (initial) {
+    const [phi, theta] = locationToAngles(pin.lat, pin.lon);
+    _state.phi = _state.targetPhi = phi;
+    _state.theta = _state.targetTheta = theta + tilt;
+    return true;
+  }
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
+  _ix.focus(pin.lat, pin.lon, {}, tilt);
+  return true;
+}
+
 const ShardCobe = {
   ensure,
   destroy,
   updateData,
   setOverlayPlaces,
+  focusConnection,
   isActive: () => !!_globe,
   theme: () => _theme,
   // Marker-id ordering, so overlay builders can anchor to `--cobe-a<i>` and be

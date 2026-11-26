@@ -1,5 +1,5 @@
 /* ShardLure UI themes — applied via <html data-theme="…">.
-   Signal is the default; it supports data-mode="dark|light". */
+   Phosphor is the default. Signal supports data-mode="dark|light". */
 
 html,
 html[data-theme="signal"] {
@@ -155,6 +155,111 @@ html[data-theme="sprite"] {
   --bg-pane: var(--glass-2);
 }
 
+html[data-theme="phosphor"] {
+  color-scheme: dark;
+  --connection-color: #ffb18b;
+  --bg: #171d22;
+  --glass: #212a30;
+  --glass-2: #29333a;
+  --sheet: #212a30;
+  --paper: #171d22;
+  --line: #3a474f;
+  --line-strong: #71828a;
+  --line-soft: #313c44;
+  --text: #eef0ed;
+  --ink: #eef0ed;
+  --dim: #c1c9c7;
+  --dim-2: #acb7bb;
+  --muted: #acb7bb;
+  --accent: #d8e0dc;
+  --accent-2: #becac7;
+  --good: #a4d4bd;
+  --warn: #e8c194;
+  --danger: #ffa18e;
+  --ok: #a4d4bd;
+  --blue-team: #d8e0dc;
+  --red-team: #ffa18e;
+  --focus-ring: #d8e0dc;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --sans: "Barlow", system-ui, sans-serif;
+  --display: var(--sans);
+  --radius: 10px;
+  --chunk: 0px;
+  --shadow: none;
+  --panel-bg: var(--glass);
+  --body-bg: var(--bg);
+  --vignette: none;
+  --globe-atmosphere: #839ca1;
+  --globe-point: #d8e0dc;
+  --bg-pane: var(--glass-2);
+}
+
+html[data-theme="obsidian"] {
+  color-scheme: dark;
+  --bg: #121315;
+  --glass: #1c1e21;
+  --glass-2: #272a2d;
+  --sheet: #1c1e21;
+  --paper: #121315;
+  --line: #373b3e;
+  --line-strong: #60676c;
+  --line-soft: #303337;
+  --text: #f0efec;
+  --ink: #f0efec;
+  --dim: #bfc7cc;
+  --dim-2: #a6afb5;
+  --muted: #a6afb5;
+  --accent: #cbdbe1;
+  --accent-2: #b8c6ce;
+  --good: #a4d4bd;
+  --ok: #a4d4bd;
+  --warn: #f0c484;
+  --danger: #ffa18e;
+  --red-team: #ffa18e;
+  --blue-team: #cbdbe1;
+  --focus-ring: #cbdbe1;
+  --connection-color: #f0c484;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --sans: "Inter", system-ui, sans-serif;
+  --radius: 5px;
+  --panel-bg: var(--glass);
+  --body-bg: var(--bg);
+  --bg-pane: var(--glass-2);
+}
+
+html[data-theme="kiln"] {
+  color-scheme: light;
+  --bg: #efebe2;
+  --glass: #faf7ef;
+  --glass-2: #ede4d6;
+  --sheet: #faf7ef;
+  --paper: #efebe2;
+  --line: #c4b4a3;
+  --line-strong: #886b58;
+  --line-soft: #ddd2c1;
+  --text: #382e2a;
+  --ink: #382e2a;
+  --dim: #5e4e43;
+  --dim-2: #65554a;
+  --muted: #65554a;
+  --accent: #974014;
+  --accent-2: #6f4737;
+  --good: #356047;
+  --ok: #356047;
+  --warn: #854517;
+  --danger: #a63929;
+  --red-team: #a63929;
+  --blue-team: #974014;
+  --focus-ring: #974014;
+  --connection-color: #974014;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --sans: "DM Sans", system-ui, sans-serif;
+  --radius: 14px;
+  --panel-bg: var(--glass);
+  --body-bg: var(--bg);
+  --bg-pane: var(--glass-2);
+}
+
 /* Keyboard focus. One rule for both dashboards so every interactive control
    — tabs, chips, sidebar links, buttons, inputs, theme cards, dialog close
    buttons, the pivot-graph canvas — gets the same visible ring (WCAG 2.4.7).
@@ -269,7 +374,7 @@ html[data-theme="signal"][data-mode="light"] .sb-item.on {
 /* Theme picker (Settings → Appearance) */
 .theme-picker {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 148px), 1fr));
   gap: 10px;
 }
 .theme-card {
@@ -1057,4 +1162,974 @@ html[data-theme="sprite"] #heatmap-wrap {
     width: min(78vw, 340px); height: min(78vw, 340px);
     max-width: none; max-height: none;
   }
+}
+
+/* Phosphor uses a dark workspace with independent activity and geography columns. */
+html[data-workspace] body {
+  background: var(--body-bg);
+  color: var(--text);
+}
+
+html[data-workspace] #vignette {
+  background: var(--vignette);
+}
+
+html[data-workspace] :is(.sidebar, .topbar, .panel) {
+  background: var(--panel-bg);
+  border-color: var(--line);
+}
+
+html[data-workspace] .panel {
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+
+html[data-workspace] .panel-head {
+  border-bottom-color: var(--line);
+}
+
+html[data-workspace] :is(.panel h2, .stat .label) {
+  text-transform: none;
+  letter-spacing: 0.025em;
+}
+
+html[data-workspace] .panel h2 {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+html[data-workspace] :is(.chip.on, .tab.active, .sb-item.on) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--glass));
+}
+
+html[data-workspace] .globe-page {
+  display: grid;
+  grid-template-columns: minmax(0, 8fr) minmax(0, 5fr);
+  grid-template-areas:
+    "header header"
+    "summary summary"
+    "chart map"
+    "activity sources"
+    "threat health";
+  gap: 16px;
+  max-width: 1440px;
+  margin-inline: auto;
+  padding: 24px clamp(16px, 4vw, 64px);
+  height: auto;
+  overflow: visible;
+}
+
+html[data-workspace]:has(.globe-page) {
+  height: auto;
+  overflow: auto;
+}
+
+html[data-workspace] .globe-page :is(.sidebar, #vignette) {
+  display: none;
+}
+
+html[data-workspace] .globe-page .rail {
+  display: contents;
+}
+
+html[data-workspace] .globe-page .title {
+  grid-area: header;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 0 0 16px;
+}
+
+html[data-workspace] .globe-page .title h1 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+}
+
+html[data-workspace] .globe-page .title .nav {
+  margin: 0 0 0 auto;
+}
+
+html[data-workspace] .globe-page #density-toggle {
+  position: static;
+}
+
+html[data-workspace] .landing-summary { grid-area: summary; }
+html[data-workspace] .landing-health { grid-area: health; }
+html[data-workspace] .landing-threat { grid-area: threat; }
+
+html[data-workspace] .landing-summary {
+  padding-block: 12px;
+}
+
+html[data-workspace] .landing-summary .stats {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0;
+}
+
+html[data-workspace] .landing-summary .stat {
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  border-inline-end: 1px solid var(--line-soft);
+  border-radius: 0;
+}
+
+html[data-workspace] .landing-summary .stat:last-child {
+  border-inline-end: 0;
+}
+
+html[data-workspace] .landing-summary .num {
+  font-size: 20px;
+  color: var(--text);
+}
+
+html[data-workspace] .globe-page .sparkline {
+  grid-area: chart;
+  display: block;
+  position: static;
+  width: auto;
+  margin: 0;
+  transform: none;
+  z-index: auto;
+}
+
+html[data-workspace] .sparkline canvas {
+  height: 112px;
+}
+
+html[data-workspace] .globe-page .rail-feed {
+  grid-area: activity;
+  height: 395px;
+  min-height: 0;
+}
+
+html[data-workspace] .globe-page .feed {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  mask-image: none;
+}
+
+html[data-workspace] .globe-page .feed-inner {
+  position: absolute;
+}
+
+html[data-workspace] .globe-page .feed-row {
+  padding: 9px 4px;
+  border-bottom-style: solid;
+  animation: none;
+}
+
+html[data-workspace] .globe-page .feed-row:nth-child(odd) {
+  background: color-mix(in srgb, var(--glass-2) 44%, var(--glass));
+}
+
+html[data-workspace] .globe-page .rail-topips {
+  grid-area: sources;
+  max-height: 238px;
+}
+
+html[data-workspace] .globe-page #cobe-stage {
+  grid-area: map;
+  grid-template-columns: minmax(0, 1fr);
+  position: relative;
+  inset: auto;
+  height: auto;
+  padding: 0;
+  min-height: 232px;
+  background: var(--glass-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+html[data-workspace] .globe-page #cobe-wrap {
+  width: min(100%, 400px);
+  height: auto;
+  aspect-ratio: 1;
+  max-width: none;
+  max-height: none;
+}
+
+html[data-workspace] .globe-page #cobe {
+  position: absolute;
+  inset: 0;
+}
+
+html[data-workspace] .globe-page .landing-threat .gauge-outer {
+  flex-direction: row;
+  gap: 16px;
+}
+
+html[data-workspace] .globe-page .gauge-svg {
+  width: 110px;
+  flex: none;
+}
+
+html[data-workspace] .shell .tab {
+  text-transform: none;
+  letter-spacing: normal;
+  font: 600 14px var(--sans);
+}
+
+html[data-workspace] .shell .tab.active {
+  border-bottom-color: var(--accent);
+}
+
+@media (max-width: 900px) {
+  html[data-workspace] .landing-summary .stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  html[data-workspace] .landing-summary .stat:nth-child(3) {
+    border-inline-end: 0;
+  }
+}
+
+@media (max-width: 700px) {
+  html[data-workspace] .globe-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "header" "summary" "chart" "activity" "map" "sources" "threat" "health";
+  }
+  html[data-workspace] .globe-page .title h1 { font-size: 25px; }
+  html[data-workspace] .globe-page .title .nav { margin: 0; }
+  html[data-workspace] .globe-page .rail-feed { height: 320px; }
+}
+
+@media (max-width: 380px) {
+  html[data-workspace] .landing-summary .num { font-size: 16px; }
+  html[data-workspace] .globe-page .landing-threat .gauge-outer {
+    flex-direction: column;
+  }
+}
+
+html[data-workspace] .globe-page .legacy-globe-link {
+  display: none;
+}
+
+html[data-workspace] .globe-page :is(.workspace-link, .full-globe-link) {
+  display: inline-block;
+}
+
+html[data-workspace] .globe-page .nav [aria-current="page"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page {
+  --horizon-size: clamp(680px, min(80vw, 155svh), 1260px);
+  --horizon-line: clamp(160px, 28svh, 300px);
+  position: relative;
+  isolation: isolate;
+  max-width: 1600px;
+  min-height: 100svh;
+  padding: 24px clamp(18px, 4vw, 64px) 36px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-areas:
+    "header header header header header header header header header header header header"
+    "summary summary summary . . . . . . activity activity activity"
+    "chart chart chart chart chart chart chart chart chart chart chart chart"
+    "sources sources sources sources health health health health threat threat threat threat";
+  grid-template-rows: auto minmax(60svh, auto) auto auto;
+  column-gap: clamp(12px, 1.6vw, 24px);
+  row-gap: 24px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page #cobe-stage {
+  position: fixed;
+  grid-area: auto;
+  inset: 0;
+  overflow: hidden;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: radial-gradient(ellipse at 50% 45%, #29363e 0%, var(--bg) 72%);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page #cobe-wrap {
+  position: absolute;
+  inset: auto auto calc(var(--horizon-line) - var(--horizon-size) / 2) 50%;
+  width: var(--horizon-size);
+  transform: translateX(-50%);
+  clip-path: inset(0 0 50% 0);
+  mask-image: linear-gradient(to bottom, #000 43%, transparent 50%);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .panel {
+  z-index: 2;
+  min-width: 0;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .title {
+  border: 0;
+  padding-bottom: 0;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .title .dot {
+  box-shadow: none;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .title .meta {
+  color: var(--dim);
+  font: 12px/1.45 var(--sans);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .landing-summary {
+  align-self: start;
+  margin-top: 24px;
+  padding: 12px 38px 12px 14px;
+  border: 0;
+  background: none;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .landing-summary .stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 6px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .landing-summary .stat {
+  border: 0;
+  padding: 0;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .landing-summary .stat:nth-child(2) {
+  order: -1;
+  grid-column: 1 / -1;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .landing-summary #s-actors {
+  font: 600 clamp(34px, 4vw, 54px)/1 var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .landing-summary .label {
+  font: 13px var(--sans);
+  color: var(--dim);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .rail-feed {
+  align-self: start;
+  margin-top: 24px;
+  height: clamp(240px, 43svh, 450px);
+  min-height: 0;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--glass) 92%, transparent);
+  box-shadow: 0 16px 42px #0005;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .feed-row {
+  grid-template-columns: 31px minmax(0, 1fr);
+  padding: 8px 0;
+  background: transparent;
+  font-size: 11px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .rail-topips {
+  max-height: 200px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .sparkline {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.5fr) minmax(0, 3fr);
+  align-items: center;
+  gap: 24px;
+  padding: 8px 16px;
+  border: 0;
+  border-block: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: var(--bg);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .sparkline .label {
+  display: block;
+  text-transform: none;
+  letter-spacing: normal;
+  font: 13px/1.5 var(--sans);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) #spark-max {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .sparkline canvas {
+  height: 45px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .landing-threat .gauge-outer {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .gauge-svg {
+  width: 80px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .connection-caption {
+  inset: auto auto calc(var(--horizon-line) + 18px) 50%;
+  width: max-content;
+  max-width: min(36vw, 430px);
+  transform: translateX(-50%);
+  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 9px 16px 11px;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  border: 0;
+  border-radius: 6px;
+  text-align: center;
+  font: 13px var(--sans);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .connection-caption strong {
+  font: 500 12px var(--mono);
+  color: var(--connection-color);
+}
+
+@media (max-width: 900px) {
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    grid-template-areas: "header header" "summary activity" "chart chart" "sources sources" "health threat";
+    grid-template-rows: auto minmax(60svh, auto) auto auto auto;
+  }
+
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page .rail-feed {
+    align-self: start;
+  }
+}
+
+@media (max-width: 700px) {
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page {
+    --horizon-size: min(145vw, 660px);
+    --horizon-line: 42svh;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "header" "summary" "activity" "chart" "sources" "threat" "health";
+    grid-template-rows: auto;
+  }
+
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page #cobe-stage.on {
+    pointer-events: none;
+  }
+
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page .landing-summary {
+    margin-top: 34svh;
+    padding: 12px;
+    background: var(--glass);
+  }
+
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page .connection-caption {
+    bottom: calc(var(--horizon-line) - 12px);
+    max-width: calc(100vw - 40px);
+  }
+
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page .rail-feed {
+    height: 290px;
+    margin-top: 0;
+  }
+
+  html[data-workspace]:not([data-globe-view="full"]) .globe-page .sparkline {
+    gap: 8px;
+  }
+}
+
+html[data-workspace] .connection-caption {
+  position: absolute;
+  inset: auto 0 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--glass);
+  color: var(--dim);
+  font: 12px var(--mono);
+  overflow-wrap: anywhere;
+}
+
+html[data-workspace] .connection-caption strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+html[data-workspace][data-globe-view="full"] .globe-page {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "header" "map";
+  min-height: 100dvh;
+  grid-template-rows: auto 1fr;
+}
+
+html[data-workspace][data-globe-view="full"] .globe-page :is(
+  .landing-summary, .sparkline, .rail-feed, .landing-threat, .landing-health, .rail-topips
+) {
+  display: none;
+}
+
+html[data-workspace][data-globe-view="full"] .globe-page #cobe-stage {
+  min-height: 0;
+  padding-bottom: 44px;
+  overflow: hidden;
+  background: radial-gradient(ellipse at center, var(--glass-2), var(--bg) 72%);
+}
+
+html[data-workspace][data-globe-view="full"] .globe-page #cobe-wrap {
+  width: min(100%, 72dvh, 760px);
+  max-width: 100%;
+}
+
+html[data-workspace] .shell {
+  grid-template-columns: 124px minmax(0, 1fr);
+  height: 100dvh;
+}
+
+html[data-workspace] .shell .sidebar {
+  grid-row: 1;
+  flex-direction: row;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg);
+  border-right: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+html[data-workspace] .shell :is(.sb-brand, .sb-dot) {
+  flex: none;
+  margin-bottom: 0;
+}
+
+html[data-workspace] .shell .sb-item {
+  flex: none;
+  width: 29px;
+}
+
+html[data-workspace] .shell .sb-dot {
+  display: none;
+}
+
+html[data-workspace] .shell .topbar {
+  grid-column: 2;
+  grid-row: 1;
+  padding: 14px 26px 14px 12px;
+  background: var(--bg);
+  border-bottom-color: var(--line-soft);
+}
+
+html[data-workspace] .topbar .brand .b2,
+html[data-workspace] .team-banner .tb-title {
+  font-family: var(--sans);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+html[data-workspace] .topbar .brand .b1 {
+  font-size: 20px;
+  letter-spacing: -0.025em;
+}
+
+html[data-workspace] .topbar .brand .b2 {
+  font-size: 13px;
+}
+
+html[data-workspace] .shell-main {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+}
+
+html[data-workspace] .shell-main .wrap {
+  padding: 18px clamp(14px, 4vw, 58px) 48px;
+}
+
+html[data-workspace] .shell-main .tabs {
+  column-gap: 16px;
+}
+
+html[data-workspace] .shell-main .tab {
+  padding-inline: 6px;
+}
+
+html[data-workspace] .shell-main .tab.active {
+  background: transparent;
+}
+
+html[data-workspace] .team-banner {
+  padding-inline: 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+}
+
+html[data-workspace] #view-overview.active {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+html[data-workspace] #view-overview > .grid {
+  display: contents;
+}
+
+html[data-workspace] #view-overview > .stats {
+  grid-column: 1 / -1;
+  order: -2;
+  margin-bottom: 0;
+  gap: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+html[data-workspace] #view-overview > .stats .stat {
+  background: transparent;
+  border: 0;
+}
+
+html[data-workspace] #view-overview > .stats .num {
+  font-family: var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-workspace] #view-overview .actor-workspace {
+  order: -1;
+}
+
+html[data-workspace] .actor-workspace thead th {
+  text-transform: none;
+  font-family: var(--sans);
+  font-size: 12px;
+  letter-spacing: normal;
+}
+
+@media (max-width: 760px) {
+  html[data-workspace] .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  html[data-workspace] .shell .topbar {
+    grid-column: 1;
+    grid-row: 2;
+    padding: 8px 12px;
+  }
+
+  html[data-workspace] .shell-main {
+    grid-row: 3;
+  }
+
+  html[data-workspace] #view-overview.active {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.widget-handle,
+#reset-widgets {
+  display: none;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .draggable-widget {
+  position: relative;
+  inset: auto;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .widget-moved {
+  z-index: 4;
+  translate: var(--widget-x, 0px) var(--widget-y, 0px);
+  background: var(--glass);
+  box-shadow: 0 10px 32px #0005;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .globe-page .widget-dragging {
+  z-index: 5;
+  outline: 1px solid var(--line-strong);
+  outline-offset: 2px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .widget-handle {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  inset: 5px 5px auto auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: var(--glass);
+  color: var(--dim);
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  font: 18px/1 system-ui, sans-serif;
+}
+
+html[data-workspace] .widget-dragging .widget-handle {
+  cursor: grabbing;
+}
+
+html[data-workspace] .widget-handle:is(:hover, [aria-pressed="true"]) {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+html[data-workspace]:not([data-globe-view="full"]) .sparkline {
+  padding-inline-end: 42px;
+}
+
+html[data-workspace]:not([data-globe-view="full"]) #reset-widgets:not([hidden]) {
+  display: inline-block;
+  padding: 6px 12px;
+  font: 11px var(--mono);
+  color: var(--dim);
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+html[data-workspace] #reset-widgets:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+html[data-workspace] .widget-placing,
+html[data-workspace] .widget-placing #cobe {
+  cursor: crosshair;
+}
+
+.globe-country-label {
+  display: block;
+  padding: 5px 9px;
+  transform: translateY(-10px);
+  border: 1px solid color-mix(in srgb, var(--connection-color) 55%, transparent);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  white-space: nowrap;
+  font: 600 13px/1.3 var(--sans);
+}
+
+html[data-workspace] .globe-page .title h1 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 600 25px/1.2 "Inter", system-ui, sans-serif;
+  letter-spacing: -0.045em;
+}
+
+html[data-workspace] .globe-page .title :is(.dot, .legacy-title, .legacy-source) {
+  display: none;
+}
+
+html[data-workspace] .globe-page .title .activity-mark {
+  display: block;
+  filter: grayscale(1);
+}
+
+html[data-workspace] .globe-page .title .meta {
+  padding-inline-start: 14px;
+  border-inline-start: 1px solid var(--line-soft);
+}
+
+@media (max-width: 700px) {
+  html[data-workspace] .globe-page .title {
+    gap: 10px 16px;
+  }
+}
+
+/* Obsidian places the feed and throughput on one side of a drafting field. */
+html[data-theme="obsidian"]:not([data-globe-view="full"]) .globe-page #cobe-stage {
+  background:
+    linear-gradient(90deg, #a5bac510 1px, transparent 1px) center / 64px 64px,
+    linear-gradient(#a5bac510 1px, transparent 1px) center / 64px 64px,
+    radial-gradient(ellipse at 50% 50%, #22272c, var(--bg) 73%);
+}
+
+html[data-theme="obsidian"]:not([data-globe-view="full"]) .globe-page .landing-summary {
+  align-self: end;
+  margin-block: 0 28px;
+  padding: 12px 38px 12px 14px;
+  border: 1px solid var(--line-soft);
+  background: var(--glass);
+}
+
+html[data-theme="obsidian"] .globe-page .title h1 {
+  letter-spacing: -0.025em;
+}
+
+/* Kiln keeps visualization on a paper-colored field and the widgets like instruments. */
+html[data-theme="kiln"]:not([data-globe-view="full"]) .globe-page #cobe-stage {
+  background: radial-gradient(ellipse at 48% 53%, #f7e7d6, var(--bg) 74%);
+}
+
+html[data-theme="kiln"]:not([data-globe-view="full"]) .globe-page :is(.landing-summary, .rail-feed) {
+  background: var(--glass);
+  border: 1px solid var(--line-soft);
+  box-shadow: 0 12px 24px #65402514;
+}
+
+html[data-theme="kiln"] .globe-page .title .activity-mark {
+  filter: grayscale(1) brightness(.45);
+}
+
+html[data-theme="kiln"]:not([data-globe-view="full"]) .globe-page .sparkline {
+  background: var(--glass);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+}
+
+@media (min-width: 901px) {
+  html[data-theme="obsidian"]:not([data-globe-view="full"]) .globe-page {
+    grid-template-areas:
+      "header header header header header header header header header header header header"
+      "summary summary summary . . . . . activity activity activity activity"
+      "chart chart chart chart chart chart chart chart chart chart chart chart"
+      "sources sources sources sources sources health health health health threat threat threat";
+  }
+
+  html[data-theme="kiln"]:not([data-globe-view="full"]) .globe-page {
+    grid-template-areas:
+      "header header header header header header header header header header header header"
+      "summary summary summary . . . . . . activity activity activity"
+      "chart chart chart chart chart chart chart chart chart activity activity activity"
+      "sources sources sources sources health health health health threat threat threat threat";
+  }
+
+}
+
+@media (max-width: 700px) {
+  html[data-theme="obsidian"]:not([data-globe-view="full"]) .globe-page .landing-summary {
+    margin-block: 34svh 0;
+  }
+}
+
+html[data-workspace] .theme-picker {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+html[data-workspace] .team-banner .tb-title {
+  font-size: 24px;
+  color: var(--text);
+}
+
+html[data-workspace] .team-banner {
+  align-items: baseline;
+  flex-wrap: wrap;
+  row-gap: 4px;
+  margin-bottom: 16px;
+}
+
+html[data-workspace] .intel-workbench {
+  padding: 0;
+}
+
+html[data-workspace] .intel-workbench .panel-head {
+  padding: 16px 18px 12px;
+  margin: 0;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+html[data-workspace] .intel-workbench .panel-head h2 {
+  font-size: 18px;
+}
+
+html[data-workspace] .intel-workbench .panel-head .meta {
+  font: 13px var(--sans);
+  letter-spacing: normal;
+}
+
+html[data-workspace] .intel-workbench :is(.sess-scroll, .table-scroll) {
+  border: 0;
+  border-radius: 0;
+}
+
+html[data-workspace] .intel-workbench :is(.sess-head, thead th) {
+  color: var(--dim);
+  background: var(--glass-2);
+  font: 600 12px var(--sans);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+html[data-workspace] .intel-workbench thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+html[data-workspace] .intel-workbench :is(.sess-head, .sess-row) {
+  grid-template-columns: 24px 64px 116px 76px minmax(80px, 1fr) 77px 64px 48px 63px 64px;
+  min-width: 750px;
+  padding: 8px 14px;
+}
+
+html[data-workspace] .intel-workbench .sess-foot {
+  padding: 8px 14px;
+  margin: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+html[data-workspace] .intel-workbench .sess-jump {
+  min-height: 28px;
+  font: 600 12px var(--sans);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+html[data-workspace] .intel-workbench .mitre-grid {
+  padding: 14px 16px;
+}
+
+html[data-workspace] .intel-workbench .mitre-top {
+  padding-inline: 16px;
+}
+
+html[data-workspace] .intel-workbench .mitre-cell {
+  min-height: 44px;
+}
+
+html[data-workspace] .intel-workbench .panel-body {
+  padding: 0;
+}
+
+html[data-workspace] .intel-workbench td,
+html[data-workspace] .intel-workbench th {
+  padding-block: 9px;
+}
+
+@media (max-width: 500px) {
+  html[data-workspace] .theme-picker {
+    grid-template-columns: 1fr;
+  }
+}
+
+html[data-workspace] .intel-section + .intel-section {
+  margin-top: 28px;
+}
+
+html[data-workspace] .intel-section > h2 {
+  margin: 0 0 10px;
+  color: var(--text);
+  font: 600 16px/1.3 var(--sans);
+}
+
+html[data-workspace] .intel-section .grid {
+  align-items: start;
+}
+
+html[data-workspace] .intel-section #panel-payloads .panel-body {
+  max-height: 440px;
+  overflow: auto;
 }

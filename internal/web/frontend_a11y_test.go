@@ -336,8 +336,8 @@ func themeTokens(t *testing.T) map[string]map[string]string {
 
 func TestDimTokensMeetContrast(t *testing.T) {
 	blocks := themeTokens(t)
-	if len(blocks) != 4 {
-		t.Fatalf("found %d theme blocks defining --dim-2, want 4 (signal dark/light, meridian, sprite)", len(blocks))
+	if len(blocks) != 7 {
+		t.Fatalf("found %d theme blocks defining --dim-2, want 7 (signal dark/light and five single-mode themes)", len(blocks))
 	}
 	for sel, v := range blocks {
 		for _, k := range []string{"bg", "glass", "glass-2", "dim", "dim-2", "focus-ring"} {

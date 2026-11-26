@@ -82,6 +82,9 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
     ? opts.markerElevation
     : 0.03;
   const onFocus = opts.onFocus || (() => {});
+  const idleRotate = opts.idleRotate !== false;
+  const fullOrbit = opts.fullOrbit === true;
+  const dragPitch = theta => fullOrbit ? theta : clamp(theta, -0.85, 0.95);
   const surface = wrap || canvas;
 
   let dragging = false;
@@ -94,6 +97,7 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   let velTheta = 0;
   let resumeTimer = 0;
   let focusHoldUntil = 0;
+  let lastTickAt = performance.now();
 
   state.phi ??= 2.4;
   state.theta ??= 0.2;
@@ -101,7 +105,7 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   state.targetTheta ??= state.theta;
   state.scale ??= 1;
   state.targetScale ??= 1;
-  state.autoRotate ??= true;
+  state.autoRotate ??= idleRotate;
   state.interacting ??= false;
 
   surface.style.touchAction = "none";
@@ -118,15 +122,19 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
     clearTimeout(resumeTimer);
     resumeTimer = setTimeout(() => {
       if (Date.now() < focusHoldUntil) return;
-      state.autoRotate = true;
+      state.autoRotate = idleRotate;
       state.interacting = false;
     }, ms);
   };
 
-  const focus = (lat, lon, meta = {}) => {
+  const focus = (lat, lon, meta = {}, thetaOffset = 0) => {
     const [p, t] = locationToAngles(lat, lon);
     state.targetPhi = state.phi + shortestAngleDelta(state.phi, p);
-    state.targetTheta = clamp(t, -0.8, 0.9);
+    if (fullOrbit) {
+      state.targetTheta = state.theta + shortestAngleDelta(state.theta, t);
+    } else {
+      state.targetTheta = thetaOffset ? clamp(t + thetaOffset, -1.8, 1.6) : clamp(t, -0.8, 0.9);
+    }
     velPhi = 0;
     velTheta = 0;
     state.autoRotate = false;
@@ -134,7 +142,7 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
     focusHoldUntil = Date.now() + 4500;
     clearTimeout(resumeTimer);
     resumeTimer = setTimeout(() => {
-      state.autoRotate = true;
+      state.autoRotate = idleRotate;
       state.interacting = false;
     }, 4500);
     onFocus({ lat, lon, ...meta });
@@ -164,7 +172,7 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
     if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
 
     const nextPhi = pointerPhi + dx * 0.008;
-    const nextTheta = clamp(pointerTheta + dy * 0.005, -0.85, 0.95);
+    const nextTheta = dragPitch(pointerTheta + dy * 0.005);
 
     velPhi = nextPhi - state.phi;
     velTheta = nextTheta - state.theta;
@@ -211,6 +219,7 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   window.addEventListener("pointercancel", endDrag);
 
   const onWheel = (e) => {
+    if (opts.fixedSize) return;
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.05 : 0.05;
     state.targetScale = clamp((state.targetScale || 1) + delta, 0.7, 1.55);
@@ -227,6 +236,20 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
     }
   };
   canvas.addEventListener("dblclick", onDblClick);
+
+  const onOrbitKey = (event) => {
+    const delta = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    const step = delta[event.key];
+    if (!step) return;
+    event.preventDefault();
+    velPhi = velTheta = 0;
+    state.phi += step[0] * 0.18;
+    state.theta += step[1] * 0.18;
+    state.targetPhi = state.phi;
+    state.targetTheta = state.theta;
+    pauseAuto(3200);
+  };
+  if (fullOrbit) canvas.addEventListener("keydown", onOrbitKey);
 
   let labelEls = [];
   let placeById = {};
@@ -489,16 +512,21 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
       window.removeEventListener("pointercancel", endDrag);
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("dblclick", onDblClick);
+      canvas.removeEventListener("keydown", onOrbitKey);
       clearTimeout(resumeTimer);
     },
     setPlaces(next) {
       rebindLabels(next);
     },
     tick() {
+      const now = performance.now();
+      const elapsed = Math.min(50, now - lastTickAt);
+      lastTickAt = now;
+      const easing = opts.timedTurn ? 1 - Math.exp(-elapsed / 240) : 0.085;
       if (!dragging) {
         if (Math.abs(velPhi) > 0.0002 || Math.abs(velTheta) > 0.0002) {
           state.phi += velPhi;
-          state.theta = clamp(state.theta + velTheta, -0.85, 0.95);
+          state.theta = dragPitch(state.theta + velTheta);
           state.targetPhi = state.phi;
           state.targetTheta = state.theta;
           velPhi *= 0.94;
@@ -507,8 +535,8 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
           if (state.autoRotate && !state.interacting) {
             state.targetPhi += 0.002;
           }
-          state.phi += shortestAngleDelta(state.phi, state.targetPhi) * 0.085;
-          state.theta += (state.targetTheta - state.theta) * 0.085;
+          state.phi += shortestAngleDelta(state.phi, state.targetPhi) * easing;
+          state.theta += (state.targetTheta - state.theta) * easing;
         }
         state.scale += ((state.targetScale || 1) - (state.scale || 1)) * 0.14;
       }
@@ -522,14 +550,20 @@ export function bindGlobeInteraction(canvas, state, opts = {}) {
   };
 }
 
-export function startGlobeLoop(globe, ix, onFrame) {
+export function startGlobeLoop(globe, ix, onFrame, fixedSize = false) {
   let raf = 0;
   let alive = true;
   const wrap = ix.wrap;
-  const base = ix.baseSize || 480;
+  let base = ix.baseSize || 480;
+  const resize = fixedSize && new ResizeObserver(([entry]) => {
+    base = entry.contentRect.width || base;
+  });
+  if (resize) resize.observe(wrap);
   // Cap DPR — full retina * zoom reallocates WebGL buffers and hangs weak GPUs.
   const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-  const backing = (cssPx) => Math.max(2, Math.round(cssPx * dpr));
+  const backing = (cssPx) => Math.max(2, Math.round(
+    fixedSize ? Math.min(1400, cssPx * dpr) : cssPx * dpr,
+  ));
 
   let lastW = 0;
   let lastH = 0;
@@ -580,7 +614,7 @@ export function startGlobeLoop(globe, ix, onFrame) {
     const due = now - lastPaint >= minGap;
 
     if (due && (sizeChanged || angleChanged || zoomChanged || interacting)) {
-      if (wrap && (sizeChanged || zoomChanged)) {
+      if (wrap && !fixedSize && (sizeChanged || zoomChanged)) {
         wrap.style.width = `${cssPx}px`;
         wrap.style.height = `${cssPx}px`;
       }
@@ -605,6 +639,7 @@ export function startGlobeLoop(globe, ix, onFrame) {
   schedule(0);
   return () => {
     alive = false;
+    if (resize) resize.disconnect();
     document.removeEventListener("visibilitychange", onVis);
     if (raf) {
       cancelAnimationFrame(raf);
@@ -613,6 +648,21 @@ export function startGlobeLoop(globe, ix, onFrame) {
     }
   };
 }
+
+const workspacePalettes = {
+  phosphor: {},
+  obsidian: {
+    baseColor: [0.26, 0.30, 0.33], glowColor: [0.13, 0.16, 0.21],
+    route: [0.94, 0.77, 0.52], arc: [0.42, 0.50, 0.56],
+  },
+  kiln: {
+    dark: 0, mapBrightness: 4.3, mapBaseBrightness: 0.07,
+    baseColor: [0.90, 0.82, 0.72], glowColor: [0.91, 0.78, 0.67],
+    route: [0.68, 0.26, 0.10], arc: [0.56, 0.45, 0.37],
+  },
+};
+
+export const isWorkspaceTheme = (theme) => Object.hasOwn(workspacePalettes, theme);
 
 /** Theme palettes for Cobe createGlobe options + marker/arc RGB triples. */
 export function cobeThemeConfig(theme, mode) {
@@ -725,6 +775,36 @@ export function cobeThemeConfig(theme, mode) {
         arc: [0.89, 0.48, 0.36],
       },
       stickers: { max: 5, minSeparationDeg: 22 },
+    };
+  }
+  if (isWorkspaceTheme(theme)) {
+    const { route = [1, 0.69, 0.55], arc = [0.29, 0.35, 0.36], ...material } = workspacePalettes[theme];
+    return {
+      dark: 1,
+      diffuse: 1.32,
+      mapSamples: 19000,
+      mapBrightness: 1.85,
+      mapBaseBrightness: 0.008,
+      baseColor: [0.27, 0.32, 0.34],
+      markerColor: [0.62, 0.65, 0.66],
+      glowColor: [0.17, 0.24, 0.27],
+      markerElevation: 0.02,
+      arcColor: [0.62, 0.65, 0.66],
+      arcWidth: 0.19,
+      arcHeight: 0.24,
+      maxArcs: 8,
+      maxMarkers: 12,
+      homeMarkerSize: 0.022,
+      route,
+      ...material,
+      markerSize: { base: 0.009, cap: 0.014, div: 1700 },
+      colors: {
+        home: [0.62, 0.65, 0.66],
+        hot: [0.49, 0.54, 0.55],
+        critical: [0.78, 0.63, 0.56],
+        cool: [0.35, 0.41, 0.42],
+        arc,
+      },
     };
   }
   // meridian (default light)
@@ -856,7 +936,7 @@ export function buildCobeEntities(home, actors, colors, opts = {}) {
     {
       id: "home",
       location: [home.lat, home.lon],
-      size: 0.085,
+      size: opts.homeMarkerSize ?? 0.085,
       color: homeC,
     },
   ];
