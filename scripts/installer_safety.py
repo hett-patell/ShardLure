@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import argparse
+import fnmatch
 import fcntl
 import hashlib
 import json
@@ -383,14 +384,21 @@ def plan_service_permissions(plan: PermissionPlan, *, cowrie: bool) -> None:
         except FileNotFoundError:
             pass
     if cowrie:
-        for rel in ("cowrie", "cowrie/var", "cowrie/var/lib", "cowrie/var/lib/cowrie", "cowrie/var/log"):
-            plan.ensure_directory(rel)
-            plan.collect(rel, "cowrie-parent")
-        for rel in ("cowrie/var/log/cowrie", "cowrie/var/lib/cowrie/downloads", "cowrie/var/lib/cowrie/tty"):
-            plan.ensure_directory(rel)
-            plan.collect(rel, "cowrie-runtime", recursive=True)
-            if not rel.endswith("/log/cowrie"):
-                plan.collect(rel, "retention")
+        plan_cowrie_runtime(plan)
+
+
+def plan_cowrie_runtime(plan: PermissionPlan) -> None:
+    """Cowrie's output the live daemon reads through the cowrie group: its
+    parents traversable, logs/downloads/TTY logs group-readable, and the two
+    capture directories group-writable for retention."""
+    for rel in ("cowrie", "cowrie/var", "cowrie/var/lib", "cowrie/var/lib/cowrie", "cowrie/var/log"):
+        plan.ensure_directory(rel)
+        plan.collect(rel, "cowrie-parent")
+    for rel in ("cowrie/var/log/cowrie", "cowrie/var/lib/cowrie/downloads", "cowrie/var/lib/cowrie/tty"):
+        plan.ensure_directory(rel)
+        plan.collect(rel, "cowrie-runtime", recursive=True)
+        if not rel.endswith("/log/cowrie"):
+            plan.collect(rel, "retention")
 
 
 def service_policy(service, cowrie=None):
@@ -812,16 +820,83 @@ def prepare_accounts(data: Path, systemd: Path, cowrie_user="cowrie", runner=Non
 
 
 def prepare_cowrie_tree(data: Path, user: str) -> None:
+    """Hand the Cowrie tree to its account: code private, runtime output with
+    the same modes the service policy gives it. Making the logs private too
+    would lock the live daemon (a cowrie-group member) out of cowrie.json
+    after every `plant-bait` or Cowrie move."""
     account = pwd.getpwnam(user)
+    runtime = service_policy(None, account)
     with PermissionPlan(data, {account.pw_uid}) as plan:
         plan.collect("cowrie", "code", recursive=True, preserve_symlinks=True)
         plan.collect("", "parent")
+        plan_cowrie_runtime(plan)
         def policy(role, info):
             if role == "parent":
                 return info.st_uid, account.pw_gid, 0o710
+            if role == "cowrie-parent":
+                # The service policy keeps the owner it finds; a fresh checkout
+                # is still root's here, and Cowrie writes under var/lib/cowrie.
+                return account.pw_uid, account.pw_gid, 0o750
+            if role in ("cowrie-runtime", "retention"):
+                return runtime(role, info)
             mode = 0o700 if stat.S_ISDIR(info.st_mode) or info.st_mode & 0o111 else 0o600
             return account.pw_uid, account.pw_gid, mode
         plan.apply(policy)
+
+
+# What a Cowrie move (shardlure.py cowrie-upgrade) carries from the old tree
+# into the new one: these directories entry by entry (the new checkout's own
+# placeholders win), and the matching regular files over the new tree's
+# copies. Each move is a rename between directories opened without following
+# links, so cowrie.json keeps its inode (the live daemon's ingest cursor stays
+# valid) and nothing the Cowrie account planted is followed. The sensor uuid
+# is stamped on every event and the host keys are the honeypot's identity:
+# neither should change with the Cowrie version.
+COWRIE_STATE_DIRS = ("var/log/cowrie", "var/lib/cowrie/downloads", "var/lib/cowrie/tty")
+COWRIE_STATE_FILES = (("etc", ("userdb.txt",)), ("var/lib/cowrie", ("uuid", "ssh_host_*")))
+
+
+def _entry_exists(name: str, dir_fd: int) -> bool:
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def carry_cowrie_state(old: Path, new: Path, user: str, moved: list) -> None:
+    """Move Cowrie's state from tree `old` into tree `new`, appending each
+    (directory, name) to `moved` as it goes so a partial carry can be undone."""
+    owners = {pwd.getpwnam(user).pw_uid}
+    for rel, patterns in [*((rel, None) for rel in COWRIE_STATE_DIRS), *COWRIE_STATE_FILES]:
+        with contextlib.ExitStack() as stack:
+            try:
+                src = stack.enter_context(directory(old / rel, owners=owners))
+            except FileNotFoundError:
+                continue
+            dst = stack.enter_context(directory(new / rel, owners=owners, create=True))
+            for name in sorted(os.listdir(src)):
+                if patterns is None:
+                    if _entry_exists(name, dst):
+                        continue
+                elif (not any(fnmatch.fnmatchcase(name, p) for p in patterns) or
+                        not stat.S_ISREG(os.stat(name, dir_fd=src, follow_symlinks=False).st_mode)):
+                    continue
+                os.rename(name, name, src_dir_fd=src, dst_dir_fd=dst)
+                moved.append((rel, name))
+            os.fsync(dst)
+            os.fsync(src)
+
+
+def return_cowrie_state(old: Path, new: Path, user: str, moved: list) -> None:
+    """Undo carry_cowrie_state's moves, newest first."""
+    owners = {pwd.getpwnam(user).pw_uid}
+    while moved:
+        rel, name = moved[-1]
+        with directory(new / rel, owners=owners) as src, directory(old / rel, owners=owners) as dst:
+            os.rename(name, name, src_dir_fd=src, dst_dir_fd=dst)
+            os.fsync(dst)
+        moved.pop()
 
 
 def ensure_authbind(port: int, user: str) -> None:

@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 if __package__:
@@ -56,6 +57,27 @@ def read_cowrie_pin(path: Path) -> str:
     return lines[0]
 
 
+def cowrie_checkout_head(target: Path) -> str:
+    """HEAD of the Cowrie checkout at `target` (the tree is the Cowrie
+    account's, so root reads it through Git's safe.directory)."""
+    current = run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={target.resolve()}",
+            "-C",
+            str(target),
+            "rev-parse",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if current.returncode != 0:
+        die(f"cannot read Cowrie HEAD at {target}; move the checkout aside and rerun")
+    return current.stdout.strip()
+
+
 def ensure_cowrie_checkout(
     target: Path,
     pin: str,
@@ -63,26 +85,11 @@ def ensure_cowrie_checkout(
 ) -> None:
     """Create the exact detached Cowrie checkout or validate an existing one."""
     if (target / ".git").exists():
-        current = run(
-            [
-                "git",
-                "-c",
-                f"safe.directory={target.resolve()}",
-                "-C",
-                str(target),
-                "rev-parse",
-                "HEAD",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if current.returncode != 0:
-            die(f"cannot read Cowrie HEAD at {target}; move the checkout aside and rerun")
-        actual = current.stdout.strip()
+        actual = cowrie_checkout_head(target)
         if actual != pin:
             die(
                 f"Cowrie checkout at {target} is {actual}, expected {pin}; "
-                "move it aside or check out the tested commit manually. "
+                "move it aside or run `scripts/shardlure.py cowrie-upgrade`. "
                 "ShardLure is refusing to pull or reset an existing checkout"
             )
         log(f"existing Cowrie checkout matches tested commit {pin}")
@@ -2126,6 +2133,73 @@ def cmd_finish() -> None:
     print_summary(admin, honeypot, dash)
 
 
+def cmd_cowrie_upgrade() -> None:
+    """Move an installed Cowrie to the tested commit (README "Cowrie version").
+
+    `run` and `finish` refuse a running host, and hosts installed before
+    v2.8.0 altogether; this replaces only the Cowrie tree. SSH, the units,
+    accounts, the ShardLure config and binary are left as they are. The old
+    tree is moved aside, not deleted, and put back if anything fails."""
+    need_root()
+    require_cowrie_python()
+    validate_existing_accounts()
+    try:
+        pin = read_cowrie_pin(COWRIE_PIN_FILE)
+    except (OSError, ValueError) as exc:
+        die(f"cannot load tested Cowrie commit: {exc}")
+    if not (COWRIE_HOME / ".git").is_dir():
+        die(f"no Cowrie checkout at {COWRIE_HOME}; `run` installs one. Nothing was changed")
+    current = cowrie_checkout_head(COWRIE_HOME)
+    if current == pin:
+        log(f"Cowrie at {COWRIE_HOME} is already the tested commit {pin}; nothing to move")
+        return
+    try:
+        pwd.getpwnam(COWRIE_USER)
+    except KeyError:
+        die(f"Cowrie account {COWRIE_USER} does not exist. Nothing was changed")
+    honeypot, _, _ = load_ports_from_config()
+    aside = COWRIE_HOME.with_name(f"{COWRIE_HOME.name}.{current[:12]}")
+    if aside.exists() or aside.is_symlink():
+        die(f"{aside} already exists, probably from an earlier move; delete or rename it first. Nothing was changed")
+    state = run(["systemctl", "show", "cowrie.service", "--property=ActiveState", "--value"],
+                capture_output=True, text=True)
+    restart = (state.stdout or "").strip() in ("active", "activating", "reloading")
+    # Stop it even when it is not running: an auto-restart would otherwise
+    # start the half-built tree, unpatched, in the middle of the install.
+    if run(["systemctl", "stop", "cowrie.service"]).returncode != 0:
+        die("cannot stop cowrie.service. Nothing was changed")
+    log(f"moving Cowrie {current[:12]} to {pin[:12]}; the old tree is kept at {aside}")
+    os.rename(COWRIE_HOME, aside)
+    moved: list[tuple[str, str]] = []
+    try:
+        install_cowrie(honeypot)
+        installer_safety.carry_cowrie_state(aside, COWRIE_HOME, COWRIE_USER, moved)
+        # Hand the carried logs and captures over with the rest of the tree.
+        installer_safety.prepare_cowrie_tree(DATA_DIR, COWRIE_USER)
+    except BaseException as exc:
+        restore_cowrie_tree(aside, pin, moved, restart)
+        if isinstance(exc, (OSError, ValueError, subprocess.CalledProcessError)):
+            die(f"Cowrie move failed ({exc}); the previous Cowrie is back in place")
+        raise
+    if restart and run(["systemctl", "start", "cowrie.service"]).returncode != 0:
+        die(f"Cowrie {pin[:12]} is installed but cowrie.service did not start; see journalctl -u cowrie")
+    log(f"Cowrie {pin[:12]} installed with the persona and patches; its logs, downloads, TTY logs, "
+        "userdb.txt, sensor uuid and host keys came from the old tree")
+    log(f"delete {aside} once the new Cowrie runs; edits to its etc/cowrie.cfg were not carried over")
+
+
+def restore_cowrie_tree(aside: Path, pin: str, moved: list, start: bool) -> None:
+    log(f"Cowrie move failed; restoring the previous tree from {aside}")
+    installer_safety.return_cowrie_state(aside, COWRIE_HOME, COWRIE_USER, moved)
+    if COWRIE_HOME.exists() or COWRIE_HOME.is_symlink():
+        failed = COWRIE_HOME.with_name(f"{COWRIE_HOME.name}.failed-{pin[:12]}-{time.strftime('%Y%m%d%H%M%S')}")
+        os.rename(COWRIE_HOME, failed)
+        log(f"the incomplete {pin[:12]} tree is kept at {failed}")
+    os.rename(aside, COWRIE_HOME)
+    if start:
+        run(["systemctl", "start", "cowrie.service"])
+
+
 def restore_sshd() -> set[int]:
     """Restore verified SSH state without retiring unverified management access."""
     transition = _ssh_transition()
@@ -2292,6 +2366,8 @@ def main() -> None:
         cmd_start()
     elif cmd == "finish":
         cmd_finish()
+    elif cmd == "cowrie-upgrade":
+        cmd_cowrie_upgrade()
     elif cmd == "persona-fs":
         # An option-shaped argument is a usage error, not a Cowrie home
         # (`persona-fs --bogus` used to look for a pickle under ./--bogus;
@@ -2329,7 +2405,7 @@ def main() -> None:
         cmd_uninstall()
     else:
         die("usage: sudo python3 scripts/shardlure.py "
-            "{run|finish|start|stop|status|plant-bait|persona-fs [COWRIE_HOME]|"
+            "{run|finish|cowrie-upgrade|start|stop|status|plant-bait|persona-fs [COWRIE_HOME]|"
             "persona-regen-install [COWRIE_HOME]|time-persona [COWRIE_HOME]|uninstall [--purge]}")
 
 

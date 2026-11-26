@@ -1,5 +1,6 @@
 """Filesystem/ownership tests use only private temporary directories."""
 import os
+import pwd
 import tempfile
 import subprocess
 import unittest
@@ -199,6 +200,80 @@ class InstallerSafetyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 test_installation.check_guest()
             marker.lstat.assert_not_called()
+
+    @staticmethod
+    def _tree(base, files):
+        for rel, text in files.items():
+            (base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (base / rel).write_text(text)
+
+    def test_cowrie_handoff_keeps_the_live_daemons_read_access(self):
+        # Every install, plant-bait and Cowrie move hands the tree back with
+        # this. It made cowrie.json 0600 under 0700 parents, locking the
+        # shardlure account (a cowrie-group member) out of its own ingest.
+        home = self.data / "cowrie"
+        self._tree(home, {"src/cowrie/core.py": "", "var/log/cowrie/cowrie.json": "{}\n",
+                          "var/lib/cowrie/downloads/sample": "inert", "var/lib/cowrie/fs.pickle": "",
+                          "venv/bin/python": ""})
+        (home / "venv/bin/python").chmod(0o755)
+        safety.prepare_cowrie_tree(self.data, pwd.getpwuid(os.getuid()).pw_name)
+        modes = {rel: (home / rel).stat().st_mode & 0o777 for rel in (
+            "", "var", "var/lib", "var/lib/cowrie", "var/log", "var/log/cowrie", "var/log/cowrie/cowrie.json",
+            "var/lib/cowrie/downloads", "var/lib/cowrie/downloads/sample", "var/lib/cowrie/tty",
+            "src/cowrie/core.py", "var/lib/cowrie/fs.pickle", "venv/bin/python")}
+        self.assertEqual(modes, {
+            "": 0o750, "var": 0o750, "var/lib": 0o750, "var/lib/cowrie": 0o750, "var/log": 0o750,
+            "var/log/cowrie": 0o750, "var/log/cowrie/cowrie.json": 0o640,
+            "var/lib/cowrie/downloads": 0o770, "var/lib/cowrie/downloads/sample": 0o640, "var/lib/cowrie/tty": 0o770,
+            "src/cowrie/core.py": 0o600, "var/lib/cowrie/fs.pickle": 0o600, "venv/bin/python": 0o700})
+        self.assertEqual(self.data.stat().st_mode & 0o777, 0o710)
+
+    def test_cowrie_state_carry_keeps_the_log_inode_and_can_be_undone(self):
+        user = pwd.getpwuid(os.getuid()).pw_name
+        old, new = self.data / "cowrie.c17c9b73d6af", self.data / "cowrie"
+        self._tree(old, {"var/log/cowrie/cowrie.json": "live\n", "var/log/cowrie/cowrie.json.2026-11-25": "rotated\n",
+                         "var/log/cowrie/.gitignore": "old", "var/lib/cowrie/downloads/sample": "payload",
+                         "var/lib/cowrie/tty/t1": "tty", "etc/userdb.txt": "operator\n", "etc/cowrie.cfg": "old",
+                         "var/lib/cowrie/uuid": "sensor", "var/lib/cowrie/ssh_host_ed25519_key": "old key",
+                         "var/lib/cowrie/fs.pickle": "old"})
+        self._tree(new, {"var/log/cowrie/.gitignore": "new", "etc/userdb.txt": "persona\n", "etc/cowrie.cfg": "new",
+                         "var/lib/cowrie/ssh_host_ed25519_key": "fresh key", "var/lib/cowrie/fs.pickle": "new"})
+        inode = (old / "var/log/cowrie/cowrie.json").stat().st_ino
+        moved = []
+        safety.carry_cowrie_state(old, new, user, moved)
+        self.assertEqual((new / "var/log/cowrie/cowrie.json").stat().st_ino, inode)
+        carried = {rel: (new / rel).read_text() for rel in (
+            "var/log/cowrie/cowrie.json.2026-11-25", "var/lib/cowrie/downloads/sample", "var/lib/cowrie/tty/t1",
+            "etc/userdb.txt", "var/lib/cowrie/uuid", "var/lib/cowrie/ssh_host_ed25519_key",
+            "var/log/cowrie/.gitignore", "etc/cowrie.cfg", "var/lib/cowrie/fs.pickle")}
+        self.assertEqual(carried, {
+            "var/log/cowrie/cowrie.json.2026-11-25": "rotated\n", "var/lib/cowrie/downloads/sample": "payload",
+            "var/lib/cowrie/tty/t1": "tty", "etc/userdb.txt": "operator\n", "var/lib/cowrie/uuid": "sensor",
+            "var/lib/cowrie/ssh_host_ed25519_key": "old key",
+            # Not state: the new tree's own placeholder, config and filesystem stay.
+            "var/log/cowrie/.gitignore": "new", "etc/cowrie.cfg": "new", "var/lib/cowrie/fs.pickle": "new"})
+        safety.return_cowrie_state(old, new, user, moved)
+        self.assertEqual(moved, [])
+        self.assertEqual((old / "var/log/cowrie/cowrie.json").stat().st_ino, inode)
+        self.assertEqual((old / "var/lib/cowrie/ssh_host_ed25519_key").read_text(), "old key")
+        self.assertFalse((new / "var/log/cowrie/cowrie.json").exists())
+
+    def test_cowrie_state_carry_never_follows_a_planted_link(self):
+        user = pwd.getpwuid(os.getuid()).pw_name
+        old, new = self.data / "cowrie.c17c9b73d6af", self.data / "cowrie"
+        outside = self.root / "outside"
+        self._tree(outside, {"shadow": "keep"})
+        (old / "etc").mkdir(parents=True)
+        (old / "etc/userdb.txt").symlink_to(outside / "shadow")
+        new.mkdir()
+        safety.carry_cowrie_state(old, new, user, [])
+        self.assertFalse((new / "etc/userdb.txt").exists())
+        (old / "var/log").mkdir(parents=True)
+        (old / "var/log/cowrie").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(OSError):
+            safety.carry_cowrie_state(old, new, user, [])
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["shadow"])
+        self.assertFalse((new / "var/log/cowrie/shadow").exists())
 
 
 if __name__ == "__main__":

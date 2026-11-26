@@ -272,6 +272,109 @@ class CowrieCheckoutTests(unittest.TestCase):
             self.assertIn("not a Git checkout", stderr.getvalue())
 
 
+class CowrieUpgradeTests(unittest.TestCase):
+    """`cowrie-upgrade` is the only way to move a running host, or one
+    installed before v2.8.0, to a new Cowrie pin: `run` refuses both."""
+
+    OLD = "c17c9b73d6af0972334ea1e90b20d974cb24eeca"
+
+    def _host(self, data: Path) -> Path:
+        home = data / "cowrie"
+        for rel, text in {".git/HEAD": "", "etc/cowrie.cfg": "hand-edited\n", "etc/userdb.txt": "operator\n",
+                          "var/log/cowrie/cowrie.json": "{}\n", "var/lib/cowrie/tty/t1": "tty",
+                          "var/lib/cowrie/ssh_host_ed25519_key": "old key"}.items():
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text(text)
+        return home
+
+    def _upgrade(self, data: Path, head: str, install, handoff=None) -> list:
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "active\n" if "show" in args else "", "")
+
+        with (mock.patch.object(shardlure, "DATA_DIR", data),
+              mock.patch.object(shardlure, "COWRIE_HOME", data / "cowrie"),
+              mock.patch.object(shardlure, "COWRIE_USER", pwd.getpwuid(os.getuid()).pw_name),
+              mock.patch.object(shardlure, "need_root"),
+              mock.patch.object(shardlure, "require_cowrie_python"),
+              mock.patch.object(shardlure, "validate_existing_accounts"),
+              mock.patch.object(shardlure, "read_cowrie_pin", return_value=EXPECTED_PIN),
+              mock.patch.object(shardlure, "cowrie_checkout_head", return_value=head),
+              mock.patch.object(shardlure, "load_ports_from_config", return_value=(22, 2222, 8080)),
+              mock.patch.object(shardlure, "install_cowrie", side_effect=install) as installed,
+              mock.patch.object(shardlure.installer_safety, "prepare_cowrie_tree", side_effect=handoff),
+              mock.patch.object(shardlure, "run", side_effect=fake_run),
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+            try:
+                shardlure.cmd_cowrie_upgrade()
+            finally:
+                self.installed = installed.call_args_list
+        return calls
+
+    @staticmethod
+    def _fresh_tree(home: Path) -> None:
+        for rel, text in {".git/HEAD": "", "etc/userdb.txt": "persona\n", "var/log/cowrie/.gitignore": "",
+                          "var/lib/cowrie/ssh_host_ed25519_key": "fresh key"}.items():
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text(text)
+
+    def test_moves_cowrie_and_carries_its_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            home = self._host(data)
+            inode = (home / "var/log/cowrie/cowrie.json").stat().st_ino
+            calls = self._upgrade(data, self.OLD, lambda port: self._fresh_tree(home))
+            aside = data / f"cowrie.{self.OLD[:12]}"
+            self.assertEqual([c[1] for c in calls if c[0] == "systemctl"], ["show", "stop", "start"])
+            self.assertEqual(self.installed, [mock.call(22)])
+            # Ingest keeps its place: the same file, not a copy.
+            self.assertEqual((home / "var/log/cowrie/cowrie.json").stat().st_ino, inode)
+            self.assertEqual((home / "var/lib/cowrie/tty/t1").read_text(), "tty")
+            self.assertEqual((home / "etc/userdb.txt").read_text(), "operator\n")
+            self.assertEqual((home / "var/lib/cowrie/ssh_host_ed25519_key").read_text(), "old key")
+            # The old tree is kept, with what was not carried.
+            self.assertEqual((aside / "etc/cowrie.cfg").read_text(), "hand-edited\n")
+
+    def test_failed_move_puts_the_old_cowrie_back(self) -> None:
+        def install_fails(home: Path):
+            def install(port):
+                self._fresh_tree(home)
+                shardlure.die("pip install failed")
+            return install, None
+
+        def handoff_fails(home: Path):
+            def handoff(data, user):
+                raise shardlure.installer_safety.SafetyError("symlink or special file in service data")
+            return (lambda port: self._fresh_tree(home)), handoff
+
+        for name, failure in (("install", install_fails), ("handoff", handoff_fails)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp) / "data"
+                home = self._host(data)
+                inode = (home / "var/log/cowrie/cowrie.json").stat().st_ino
+                install, handoff = failure(home)
+                with self.assertRaises(SystemExit):
+                    self._upgrade(data, self.OLD, install, handoff)
+                self.assertEqual((home / "var/log/cowrie/cowrie.json").stat().st_ino, inode)
+                self.assertEqual((home / "var/lib/cowrie/ssh_host_ed25519_key").read_text(), "old key")
+                self.assertEqual((home / "etc/cowrie.cfg").read_text(), "hand-edited\n")
+                self.assertFalse((data / f"cowrie.{self.OLD[:12]}").exists())
+                failed = list(data.glob(f"cowrie.failed-{EXPECTED_PIN[:12]}-*"))
+                self.assertEqual(len(failed), 1)
+                self.assertTrue((failed[0] / "var/log/cowrie/.gitignore").exists())
+
+    def test_cowrie_at_the_pin_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            home = self._host(data)
+            calls = self._upgrade(data, EXPECTED_PIN, lambda port: self.fail("installed over the pin"))
+            self.assertEqual(calls, [])
+            self.assertEqual(sorted(p.name for p in data.iterdir()), ["cowrie"])
+            self.assertEqual((home / "etc/cowrie.cfg").read_text(), "hand-edited\n")
+
+
 class PatchDeploymentTests(unittest.TestCase):
     def test_deploy_patches_invokes_atomic_orchestrator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

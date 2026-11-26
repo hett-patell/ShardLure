@@ -105,18 +105,26 @@ are exact-text edits to that commit's source, so `apply-stealth.sh` and
 | v2.11.0 – v2.13.0 | v3.1.1 | `c17c9b73d6af0972334ea1e90b20d974cb24eeca` |
 | next release (after v2.13.0) | v3.1.8 | `183a3b1bc361bb941e1d54874922399baac42af0` |
 
-Upgrading ShardLure across a row of this table moves Cowrie too, and an
-existing box is **not** moved in place: both installers refuse a Cowrie
-checkout at another commit, and the patched tree is dirty by design. To move:
+Upgrading ShardLure across a row of this table moves Cowrie too. The installers
+do not move an existing box: they refuse a running host (and any host installed
+before v2.8.0), and a Cowrie checkout at another commit, whose patched tree is
+dirty by design. After a [backup](#upgrading), run from a checkout of the new
+release:
 
-1. Take a `shardlure backup`.
-2. Stop `cowrie.service` and move the Cowrie directory aside.
-3. Install the new ShardLure release, which checks out its pinned Cowrie.
-4. Move back `var/log/cowrie/cowrie.json*` (with `mv`, so ingest keeps its
-   place), `var/lib/cowrie/downloads/`, `var/lib/cowrie/tty/` and
-   `etc/userdb.txt`.
-5. Run `scripts/apply-stealth.sh`, which patches the new Cowrie, gives it
-   fresh host keys and restarts it.
+```bash
+sudo python3 scripts/shardlure.py cowrie-upgrade
+```
+
+It stops `cowrie.service`, moves the Cowrie tree aside to `cowrie.<old commit>`,
+installs the pinned commit with the persona and every patch, moves back the
+logs, downloads, TTY logs, `etc/userdb.txt`, the sensor `uuid` and the SSH host
+keys, and starts Cowrie again. Everything moves by rename, so ingest keeps its
+place in `cowrie.json`. SSH, the units, your ShardLure config and the binary are
+not touched. It needs GitHub and PyPI, and the honeypot is down while it builds
+(a few minutes). If a step fails, the old tree is put back and started again,
+and the incomplete new one is kept as `cowrie.failed-<commit>-<time>`. Hand
+edits to the old `etc/cowrie.cfg` are not carried over: compare it with the new
+one, then delete the old tree.
 
 ### Supported data filesystems
 
