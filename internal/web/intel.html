@@ -3113,7 +3113,12 @@ function renderSessions(data) {
   const meta = document.getElementById('sessions-meta');
   const scrollEl = document.getElementById('sessions-scroll');
   const prevScroll = scrollEl ? scrollEl.scrollTop : 0;
-  const atBottom = scrollEl && (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 24);
+  // Newest first, so a new list opens at the top. Stay at the bottom only if
+  // the operator was already reading the oldest rows: the short "loading…"
+  // placeholder also measured as "at the bottom", so the first render jumped
+  // to the oldest session whenever the tab was open while it loaded.
+  const hadRows = !!list.querySelector('.sess-row');
+  const atBottom = hadRows && scrollEl && (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 24);
   var win = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
   if (!data.sessions || data.sessions.length === 0) {
     list.innerHTML = '<div class="empty">no cowrie sessions in window</div>';
