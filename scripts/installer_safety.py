@@ -819,6 +819,19 @@ def prepare_accounts(data: Path, systemd: Path, cowrie_user="cowrie", runner=Non
         plan.apply(service_policy(accounts["shardlure"], accounts.get(cowrie_user)))
 
 
+def _cowrie_data_owners(data: Path, cowrie) -> set[int]:
+    owners = {cowrie.pw_uid}
+    # Current installs give the shared data directory to the live service,
+    # while Cowrie owns its subtree. Legacy installs give it to root.
+    try:
+        live = pwd.getpwnam("shardlure")
+    except KeyError:
+        return owners
+    if live.pw_dir == str(data):
+        owners.add(live.pw_uid)
+    return owners
+
+
 def prepare_cowrie_tree(data: Path, user: str) -> None:
     """Hand the Cowrie tree to its account: code private, runtime output with
     the same modes the service policy gives it. Making the logs private too
@@ -826,7 +839,7 @@ def prepare_cowrie_tree(data: Path, user: str) -> None:
     after every `plant-bait` or Cowrie move."""
     account = pwd.getpwnam(user)
     runtime = service_policy(None, account)
-    with PermissionPlan(data, {account.pw_uid}) as plan:
+    with PermissionPlan(data, _cowrie_data_owners(data, account)) as plan:
         plan.collect("cowrie", "code", recursive=True, preserve_symlinks=True)
         plan.collect("", "parent")
         plan_cowrie_runtime(plan)
@@ -867,7 +880,7 @@ def _entry_exists(name: str, dir_fd: int) -> bool:
 def carry_cowrie_state(old: Path, new: Path, user: str, moved: list) -> None:
     """Move Cowrie's state from tree `old` into tree `new`, appending each
     (directory, name) to `moved` as it goes so a partial carry can be undone."""
-    owners = {pwd.getpwnam(user).pw_uid}
+    owners = _cowrie_data_owners(new.parent, pwd.getpwnam(user))
     for rel, patterns in [*((rel, None) for rel in COWRIE_STATE_DIRS), *COWRIE_STATE_FILES]:
         with contextlib.ExitStack() as stack:
             try:
@@ -890,7 +903,7 @@ def carry_cowrie_state(old: Path, new: Path, user: str, moved: list) -> None:
 
 def return_cowrie_state(old: Path, new: Path, user: str, moved: list) -> None:
     """Undo carry_cowrie_state's moves, newest first."""
-    owners = {pwd.getpwnam(user).pw_uid}
+    owners = _cowrie_data_owners(new.parent, pwd.getpwnam(user))
     while moved:
         rel, name = moved[-1]
         with directory(new / rel, owners=owners) as src, directory(old / rel, owners=owners) as dst:
