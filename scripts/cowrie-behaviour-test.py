@@ -12,13 +12,16 @@ Cases (all under --cases-dir, default scripts/behaviour/):
   profiler.sh          the recurring SHELL_BEHAVIOR profiler, verbatim (case
                        name "profiler"; 1,452 sessions in 30 days on prod).
   probes.txt           "<name><TAB><command>" per line; '#' comments.
-  expected/<name>.out  the expected stdout+stderr, byte for byte, apart from
-                       the declared volatile tokens below.
+  expected/<name>.out  the expected output (stdout and stderr as one stream),
+                       byte for byte, apart from the declared volatile tokens.
 
 Each case is one SSH **exec** channel on a fresh connection, because that is
 how the profiler arrives (one `cowrie.command.input` with embedded newlines).
-stdout is followed by stderr; Cowrie writes both to the channel's stdout
-anyway (factsheet 2, FILTER "exec-channel stderr").
+stdout and stderr are read as one stream in arrival order, as a terminal
+shows them (paramiko's combine_stderr; ssh+sshpass shares one pipe). Since
+Cowrie v3.1.7 an exec channel without a pty sends stderr on its own SSH
+stream; v3.1.1 wrote both to stdout, so appending stderr after stdout
+reordered every case that mixes the two.
 
 Expected files may start with directive lines, consumed until the first other
 line:
@@ -33,6 +36,17 @@ line:
                             upload. --upload-source defaults to /bin/true, a
                             harmless ELF; Cowrie only stores it. Upload and run
                             share ONE exec channel.
+  #harness: stdin-lines=N TEXT
+                            send TEXT plus a newline N times (1..
+                            MAX_STDIN_LINES) on the case's exec channel stdin,
+                            STDIN_LINE_PAUSE seconds apart, then EOF, so a
+                            command reading stdin line by line (`bash` exec'd
+                            as the SSH command) gets one line per read. Takes
+                            before=, upload-channel=, upload-script= and
+                            overlap= (the lines go out before channel B
+                            opens); excludes scp-stdin and sftp-during. Paced
+                            on paramiko only; ssh+sshpass sends the lines at
+                            once.
   #harness: upload-channel=TARGET NAME
                             before the case, on an EARLIER exec channel of the
                             SAME connection, run `scp -t TARGET` and feed it the
@@ -74,7 +88,8 @@ line:
                             (Task 3b I-2: /proc/uptime). Use a case that
                             sleeps before it reads.
                             sftp-during and overlap combine with no other
-                            channel directive; both need paramiko.
+                            channel directive (overlap takes stdin-lines);
+                            both need paramiko.
   #harness: within=SECONDS  the case (all its channels) must finish within
                             SECONDS, well under the 10 s deadline: a command
                             that stalls Cowrie's single reactor stalls every
@@ -198,6 +213,9 @@ CURRENT_SESSION_MAX = 12 * 3600   # before the Cowrie start (persona_start)
 LS_MIN_AGE = 183 * 86400   # ls prints the year form only for files > ~6 months
 
 DEFAULT_TIMEOUT = 10.0
+# stdin-lines: the most lines one case may send, and the pause between them.
+MAX_STDIN_LINES = 10000
+STDIN_LINE_PAUSE = 0.02
 DEFAULT_CASES_DIR = Path(__file__).resolve().parent / "behaviour"
 
 _WDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
@@ -245,6 +263,7 @@ class Expected:
     before: list[str] = field(default_factory=list)
     sftp_during: str | None = None
     overlap: str | None = None
+    stdin_lines: tuple[int, str] | None = None
     no_host_memtotal: bool = False
     within: float | None = None
 
@@ -343,6 +362,12 @@ def parse_expected(text: str) -> Expected:
             if not command:
                 raise ValueError(f"empty overlap directive: {lines[i]!r}")
             exp.overlap = command
+        elif body.startswith("stdin-lines="):
+            m = re.fullmatch(r"stdin-lines=(\d+) (.*\S.*)", body)
+            if not m or not 1 <= int(m.group(1)) <= MAX_STDIN_LINES:
+                raise ValueError(f"bad stdin-lines directive (want N in 1..{MAX_STDIN_LINES}"
+                                 f" and TEXT): {lines[i]!r}")
+            exp.stdin_lines = (int(m.group(1)), m.group(2))
         elif body.startswith("within="):
             try:
                 exp.within = float(body[7:])
@@ -358,6 +383,8 @@ def parse_expected(text: str) -> Expected:
     exp.content = "\n".join(lines[i:])
     if sum(map(bool, (exp.scp_stdin, exp.upload_channel, exp.upload_script))) > 1:
         raise ValueError("scp-stdin, upload-channel and upload-script are exclusive")
+    if exp.stdin_lines and (exp.scp_stdin or exp.sftp_during):
+        raise ValueError("stdin-lines combines with neither scp-stdin nor sftp-during")
     others = bool(exp.scp_stdin or exp.upload_channel or exp.upload_script or exp.before)
     if (exp.sftp_during or exp.overlap) and (others or (exp.sftp_during and exp.overlap)):
         raise ValueError("sftp-during and overlap combine with no other channel directive")
@@ -838,15 +865,26 @@ def exec_on_channel(chan, command: str, deadline: float, closed_exc=Exception,
     return drain_channel(chan, deadline, start_exec(chan, command, closed_exc, stdin))
 
 
-def start_exec(chan, command: str, closed_exc=Exception, stdin: bytes | None = None) -> bool:
-    """Send the exec request (and stdin, then EOF). True if it went unacked."""
+def stdin_lines(count: int, text: str) -> list[bytes]:
+    """What a stdin-lines directive sends: TEXT and a newline, COUNT times."""
+    return [f"{text}\n".encode()] * count
+
+
+def start_exec(chan, command: str, closed_exc=Exception,
+               stdin: bytes | list[bytes] | None = None) -> bool:
+    """Send the exec request (and stdin, then EOF). True if it went unacked.
+
+    stdin is one write (bytes) or paced lines (a list, STDIN_LINE_PAUSE apart)."""
     unacked = False
     try:
         chan.exec_command(command)
     except closed_exc:
         unacked = True
     if stdin is not None and not unacked:
-        chan.sendall(stdin)
+        for n, chunk in enumerate([stdin] if isinstance(stdin, bytes) else stdin):
+            if n:
+                time.sleep(STDIN_LINE_PAUSE)
+            chan.sendall(chunk)
         chan.shutdown_write()
     return unacked
 
@@ -892,10 +930,10 @@ def exec_sequence(open_channel, steps, deadline: float, closed_exc=Exception) ->
 
 
 def exec_overlapped(open_channel, command: str, overlap: str, deadline: float,
-                    closed_exc=Exception) -> RunResult:
+                    closed_exc=Exception, stdin: bytes | list[bytes] | None = None) -> RunResult:
     """The case on channel A, with channel B opened, run and closed meanwhile."""
     chan_a = open_channel()
-    unacked = start_exec(chan_a, command, closed_exc)
+    unacked = start_exec(chan_a, command, closed_exc, stdin)
     res_b = exec_on_channel(open_channel(), overlap, deadline, closed_exc)
     if res_b.timed_out or res_b.rc != 0:
         why = "hung" if res_b.timed_out else f"exit status {res_b.rc}"
@@ -1010,11 +1048,13 @@ def paramiko_runner(host: str, port: int, user: str, password: str, known_hosts_
             transport = client.get_transport()
 
             def open_channel():
-                return transport.open_session(timeout=timeout)
+                chan = transport.open_session(timeout=timeout)
+                chan.set_combine_stderr(True)
+                return chan
 
             if overlap:
                 return exec_overlapped(open_channel, command, overlap, deadline,
-                                       paramiko.SSHException)
+                                       paramiko.SSHException, stdin)
             steps = [*(before or []), (command, stdin)]
             if sftp_during:
                 path, data = sftp_during
@@ -1052,13 +1092,15 @@ def ssh_runner(host: str, port: int, user: str, password: str, known_hosts_file:
         if before or sftp_during or overlap:
             return RunResult("", None, False, "this case runs several channels on one"
                              " connection and needs --transport paramiko")
+        if isinstance(stdin, list):
+            stdin = b"".join(stdin)
         stdio = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
         try:
-            p = subprocess.run(base + [command], env=env, capture_output=True,
-                               timeout=timeout, **stdio)
+            p = subprocess.run(base + [command], env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=timeout, **stdio)
         except subprocess.TimeoutExpired as exc:
-            return RunResult(_decode((exc.stdout or b"") + (exc.stderr or b"")), None, True)
-        return RunResult(_decode(p.stdout + p.stderr), p.returncode, False)
+            return RunResult(_decode(exc.stdout or b""), None, True)
+        return RunResult(_decode(p.stdout), p.returncode, False)
 
     return run
 
@@ -1189,18 +1231,19 @@ def main(argv: list[str] | None = None, runner=None) -> int:
             exp.content = exp.content.replace(UPLOAD_SIZE, str(size))
             before.append((f"scp -t {target}", scp_record(target.rsplit("/", 1)[1], script)))
         before.extend((cmd, None) for cmd in exp.before)
+        stdin_kw = {"stdin": stdin_lines(*exp.stdin_lines)} if exp.stdin_lines else {}
         sftp_data = None
         if exp.sftp_during:
             sftp_data = payload + os.urandom(16)
             run = runner(command, args.timeout, sftp_during=(exp.sftp_during, sftp_data))
         elif exp.overlap:
-            run = runner(command, args.timeout, overlap=exp.overlap)
+            run = runner(command, args.timeout, overlap=exp.overlap, **stdin_kw)
         elif exp.scp_stdin:
             run = runner(command, args.timeout, stdin=scp_record(exp.scp_stdin, payload))
         elif before:
-            run = runner(command, args.timeout, before=before)
+            run = runner(command, args.timeout, before=before, **stdin_kw)
         else:
-            run = runner(command, args.timeout)
+            run = runner(command, args.timeout, **stdin_kw)
         clock = Clock(start=started, end=datetime.now(timezone.utc),
                       uptime_slack=args.uptime_slack, tz=tz,
                       cowrie_age=args.cowrie_age)

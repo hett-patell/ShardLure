@@ -167,6 +167,49 @@ func TestGeoPrefetchMMDBIgnores48Cap(t *testing.T) {
 	}
 }
 
+// /api/dashboard checks each globe source's IP and then queues the same IP for
+// prefetch in one request. cached() leaves a 30 s miss placeholder, which
+// prefetch reads as already known, so a source first seen on the globe never
+// resolved and was never drawn. peek must leave nothing behind for prefetch to
+// trip over.
+func TestGeoPeekMissDoesNotShadowPrefetch(t *testing.T) {
+	st := newGeoTestStore(t)
+	keys := newGeoTestKeys(t, st, map[string]string{settings.KeyGeoHTTP: "0"})
+	g := newGeoResolver(geoConfig{MMDB: testMMDB}, st, keys)
+	defer g.mmdb.close()
+
+	const ip = "89.160.20.130"
+	if g.peek(ip).OK {
+		t.Fatal("nothing has resolved this IP yet")
+	}
+	g.prefetch([]string{ip}, 2*time.Second)
+	if ent := g.peek(ip); !ent.OK || ent.CC != "SE" {
+		t.Fatalf("prefetch after a peek miss = %+v, want SE", ent)
+	}
+}
+
+// A new source lands on the globe on the poll that first sees it: locate reads
+// the MMDB before anything is cached, and leaves caching (and the persisted row
+// the countries count reads) to the prefetch it reports as still needed.
+func TestGeoLocateReadsMMDBWithoutCaching(t *testing.T) {
+	st := newGeoTestStore(t)
+	keys := newGeoTestKeys(t, st, map[string]string{settings.KeyGeoHTTP: "0"})
+	g := newGeoResolver(geoConfig{MMDB: testMMDB}, st, keys)
+	defer g.mmdb.close()
+
+	const ip = "89.160.20.130"
+	if ent, cached := g.locate(ip); !ent.OK || ent.CC != "SE" || cached {
+		t.Fatalf("first locate = %+v cached=%v, want SE from the MMDB, uncached", ent, cached)
+	}
+	if g.peek(ip).OK {
+		t.Fatal("locate cached its MMDB answer, so prefetch would skip the IP and never persist it")
+	}
+	g.prefetch([]string{ip}, 2*time.Second)
+	if ent, cached := g.locate(ip); !ent.OK || !cached {
+		t.Fatalf("locate after prefetch = %+v cached=%v, want the cached answer", ent, cached)
+	}
+}
+
 // An MMDB miss must fall through to the HTTP tier when that tier is enabled.
 func TestGeoMMDBMissFallsThroughToHTTP(t *testing.T) {
 	var hits int

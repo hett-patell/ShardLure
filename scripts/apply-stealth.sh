@@ -127,6 +127,8 @@ stealth = persona_cfg.read_text() if persona_cfg.exists() else """
 hostname = prod-app-server-01
 sensor_name = prod-app-server-01
 download_limit_size = 52428800
+ttylog_limit_size = 10485760
+ttylog_min_free = 2147483648
 boot_offset = 3640620
 
 [shell]
@@ -143,6 +145,9 @@ max_input_size = 16384
 
 [ssh]
 version = SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6
+
+[output_malwarebazaar]
+enabled = false
 """
 
 def parse_ini(text):

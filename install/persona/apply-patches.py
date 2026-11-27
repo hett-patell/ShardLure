@@ -9,11 +9,14 @@ from pathlib import Path
 
 
 PATCHES = (
-    # Pinned Cowrie is v3.1.1 (install/cowrie.commit). Two former patches are
-    # gone for good because upstream fixed the same faults: the grammar rewrite
-    # in #40611 gave real subshell pipelines (bashparse-subshell-pipe), and
+    # Pinned Cowrie is v3.1.8 (install/cowrie.commit; moved from v3.1.1).
+    # Patches upstream made redundant are gone for good: the grammar rewrite
+    # in #40611 gave real subshell pipelines (bashparse-subshell-pipe),
     # f6f5f9fb routes command-not-found through the shell's stderr, so
-    # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect).
+    # `e=$(./x 2>&1)` captures it (honeypot-capture-redirect), and v3.1.2's
+    # GNU exit statuses (9388a335) took two of cat-exit's three blocks. Where
+    # an entry below names v3.1.1, that is where the fault was measured;
+    # v3.1.8 still has it unless the entry says otherwise.
     #
     # Stealth hardening (2026-08-13): close the honeypot-detection gaps found in
     # live log analysis so bots proceed to payload delivery.
@@ -21,9 +24,10 @@ PATCHES = (
     # cwd): the pin-era text applied cleanly and then raised TypeError, hanging
     # every `command -v` session (scripts/behaviour command-v-wget catches it).
     "command-type-builtins.py",
-    # which printed every PATH hit; 22.04 is usr-merged, so `which ls` gave
-    # /usr/bin/ls and /bin/ls and `ls -lh $(which ls)` failed. Shares
-    # which.py with command-type-builtins on a disjoint anchor (class body).
+    # which prints every PATH hit (v3.1.8 only added exit 1 for a missing
+    # name); 22.04 is usr-merged, so `which ls` gave /usr/bin/ls and /bin/ls
+    # and `ls -lh $(which ls)` failed. Shares which.py with
+    # command-type-builtins on a disjoint anchor (class body).
     "which-first.py",
     "passwd-stdin.py",
     # v3.1.1 folds "too large" and "binary" into one refusal; only an
@@ -33,8 +37,10 @@ PATCHES = (
     # the fake filesystem per channel, so the run found nothing (26 of 26 prod
     # scp sessions).
     "connection-shared-fs.py",
-    # ...and v3.1.1 saved the upload under the C-record's name, ignoring the
-    # `scp -t <path>` target the bot then runs.
+    # ...and Cowrie (v3.1.8 as v3.1.1) saves the upload under the C-record's
+    # name, ignoring the `scp -t <path>` target the bot then runs. Upstream
+    # main's d0855fb6 does the same; once released, only this patch's
+    # trailing-slash refusal is left to keep.
     "scp-sink-target.py",
     # GNU ls -l dates: v3.1.1 prints the --time-style=long-iso form, a tell on
     # any `ls -l`, including a dropper listing the file it just uploaded.
@@ -42,16 +48,20 @@ PATCHES = (
     # ls -lh rounded to one decimal at every scale (135.0K); GNU rounds up
     # and drops the decimal from 10 on (135K). Disjoint from ls-date-format.
     "ls-human-size.py",
-    # Persona commands (payload-yield Phase B). grep honours -i -q -c -v -l -o
-    # and GNU's exit status (supersedes grep-case-insensitive, whose anchor
-    # v3.1.1 refactored away): the profiler's `lspci | grep -i vga` GPU probe.
+    # Persona commands (payload-yield Phase B). v3.1.8's grep gained -i -q -c
+    # and exit 2, but still compiles every pattern as Python re (no BRE, -E
+    # or -F), ignores -v -l -o -n -w -x -H -e, and has no time budget:
+    # `grep -E '(a+)+$'` on a 41-byte line froze stock v3.1.8, every session,
+    # for 13+ minutes. This is GNU grep 3.7 under a per-grep SIGALRM budget.
     "grep-options.py",
     # lspci is a registered command that shadows txtcmds/usr/bin/lspci with a
     # desktop AMD/GeForce board; the profiler's GPU field reads it (and
     # `busybox lspci`, which BusyBox 1.20.2 has no applet for).
     "lspci-persona.py",
-    # free read the Cowrie host's real /proc/meminfo (arm's 24 GB behind an
-    # 8 GB persona); it now ports procps 3.3.17 over the fake filesystem's.
+    # v3.1.8's free reads the fake /proc/meminfo (v3.1.1 read the host's:
+    # arm's 24 GB behind an 8 GB persona) but computes procps 4.0.2's used
+    # (total - available): `free -m` said 1739 where 22.04's procps 3.3.17,
+    # ported here, says 1527.
     "free-meminfo.py",
     # uname folded -m -p -i into one flag; GNU prints three fields, so a real
     # `uname -a` ends "x86_64 x86_64 x86_64 GNU/Linux" (~720 sessions/30d).
@@ -73,8 +83,8 @@ PATCHES = (
     # ("cannot execute binary file"). Shares shell/protocol.py with
     # connection-shared-fs; disjoint anchors.
     "usr-bin-aliases.py",
-    # cat exited 0 on a missing file, so `cat /x || fallback` never fell
-    # back; `cat -n` wrote two spaces where coreutils writes a TAB.
+    # `cat -n` wrote two spaces where coreutils writes a TAB. (Its exit-status
+    # blocks, `cat /x || fallback`, are upstream since v3.1.2.)
     "cat-exit.py",
     # crontab -l printed "no crontab for root" on stdout with exit 0; cron
     # writes it to stderr and exits 1 (it ended up inside droppers' crontabs).
@@ -86,14 +96,16 @@ PATCHES = (
     # such file or directory". python3 answers as 22.04's: fake success,
     # never execution (the patch's docstring and test_python3_fake.py).
     "python3-emulation.py",
-    # The shell parses on the single reactor thread: a $(...) body was parsed
-    # again on every evaluation (a 116-byte `while` line held every session
-    # 22 s; nested $( froze all sessions 189 s live), and ~200 levels of
-    # nesting raised RecursionError out of the protocol. $(...) bodies now
-    # reuse their line's tree, each parser remembers recent results (backtick
-    # bodies have no tree to reuse), nesting past 16 is refused before the
-    # grammar runs, and a RecursionError fails one parse (production nests at
-    # most 6).
+    # The shell parses on the single reactor thread, and v3.1.8 still parses
+    # a $(...) body again on every evaluation (a 116-byte `while` line held
+    # every session 22 s; nested $( froze all sessions 189 s live) and
+    # re-parses a line-fed construct's whole pending text with each new line.
+    # Every grammar run now goes through one budgeted entry (_lark_parse:
+    # 30 s per connection, then refused): $(...) bodies reuse their enclosing
+    # tree at all three sites, each connection remembers recent results
+    # (backtick bodies have no tree to reuse), nesting past 16 is refused
+    # before the grammar runs, and a RecursionError fails one parse
+    # (production nests at most 6).
     "shell-parse-bounds.py",
     # The live daemon uses a separate account with read access via this group.
     # scripts/install.sh fetches this one file standalone, so it must stay in

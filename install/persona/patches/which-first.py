@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Patch cowrie/commands/which.py: which prints the first match, as debianutils does.
 
-WHY (payload-yield Phase B Task 7; factsheet-phaseB 3 #13, 5 #7): v3.1.1's
+WHY (payload-yield Phase B Task 7; factsheet-phaseB 3 #13, 5 #7): Cowrie's
 which prints EVERY $PATH hit. 22.04 is usr-merged (/bin -> usr/bin), so root's
 PATH finds each binary twice and `which ls` printed /usr/bin/ls AND /bin/ls.
 The probe `ls -lh $(which ls)` (35 sessions in 30 days) then ran
 `ls -lh /usr/bin/ls /bin/ls`, which Cowrie answered with
-"ls: cannot access '/usr/bin/ls\\n/bin/ls'", and every exit status was 0.
+"ls: cannot access '/usr/bin/ls\\n/bin/ls'". Since v3.1.2 (9388a335) Cowrie
+exits 1 when a name is not found, but still prints every hit and accepts any
+path that exists (a directory, a file without an x bit). History: v3.1.1 also
+exited 0 for a missing name.
 
 Now a port of debianutils 5.5's /usr/bin/which (the 22.04 shell script):
   which NAME..   -> the first PATH entry holding a regular executable file
@@ -40,11 +43,16 @@ OLD = '''class Command_which(HoneyPotCommand):
 
         # Look up each file
         for f in self.args:
+            found = False
             for path in self.environ["PATH"].split(":"):
                 resolved = self.fs.resolve_path(f, path)
 
                 if self.fs.exists(resolved):
                     self.write(f"{path}/{f}\\n")
+                    found = True
+            if not found:
+                # A name not found prints nothing but makes which fail.
+                self.exit_code = 1
 '''
 
 NEW = '''class Command_which(HoneyPotCommand):

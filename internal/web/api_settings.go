@@ -95,7 +95,6 @@ var settingsRegistry = []settingMeta{
 
 	// --- appearance (non-secret) ---
 	{Key: settings.KeyUITheme, Kind: kindText, Label: "UI theme"},
-	{Key: settings.KeyUIMode, Kind: kindText, Label: "Light/dark mode"},
 
 	// --- dashboard auth (secret; rendered in its own panel, not with provider keys) ---
 	{Key: settings.KeyDashToken, Kind: kindSecret, Label: "Dashboard auth token"},
@@ -161,6 +160,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Non-secret knobs are safe to echo so the form can prefill.
 			row.Value = s.keys.Get(m.Key)
+			if m.Key == settings.KeyUITheme && row.Value != "" {
+				row.Value = effectiveTheme(row.Value, s.keys.Get(settings.KeyUIMode))
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -168,6 +170,22 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		"generatedAt": time.Now().UTC().Format(time.RFC3339),
 		"settings":    rows,
 	})
+}
+
+// effectiveTheme maps a stored theme to one that still exists, at read time,
+// so a GET never rewrites a deployment's settings. Releases before Obsidian
+// and Kiln stored signal (with a light/dark ui.mode), meridian or sprite: the
+// light ones read as Kiln, everything else as Obsidian.
+func effectiveTheme(theme, mode string) string {
+	switch theme {
+	case "kiln", "meridian", "sprite":
+		return "kiln"
+	case "signal":
+		if mode == "light" {
+			return "kiln"
+		}
+	}
+	return "obsidian"
 }
 
 type saveRequest struct {
@@ -271,16 +289,9 @@ func validateSetting(m settingMeta, val string) string {
 	case kindText:
 		if m.Key == settings.KeyUITheme {
 			switch val {
-			case "signal", "meridian", "sprite":
+			case "obsidian", "kiln":
 			default:
-				return "theme must be signal, meridian, or sprite"
-			}
-		}
-		if m.Key == settings.KeyUIMode {
-			switch val {
-			case "dark", "light":
-			default:
-				return "mode must be dark or light"
+				return "theme must be obsidian or kiln"
 			}
 		}
 		if m.Key == settings.KeyBazaarEndpoint || m.Key == settings.KeyURLhausEndpoint {

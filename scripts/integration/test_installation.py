@@ -338,6 +338,55 @@ class Acceptance:
         self.control_alive()
         self.login(self.new_admin)
 
+    def legacy_cowrie_upgrade(self):
+        home = self.data / "cowrie"
+        log = home / "var/log/cowrie/cowrie.json"
+        identity = log.stat()
+        unit = Path("/etc/systemd/system/cowrie.service")
+        dropin = unit.with_suffix(".service.d") / "integration.conf"
+        dropin.parent.mkdir()
+        local = "[Service]\nRestart=no\n"
+        dropin.write_text(local)
+        run(["systemctl", "stop", "cowrie.service"])
+        with self.wrapper(self.data) as s:
+            # Give the installed source a different HEAD without modifying
+            # Cowrie's code, and put back the v2.13.0 install.sh launch line.
+            run(["runuser", "-u", "cowrie", "--", "git", "-C", home, "-c", "user.name=Fixture",
+                 "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "--no-gpg-sign",
+                 "-m", "previous checkout fixture"])
+            modern = unit.read_text()
+            old_start = (f"Environment=AUTHBIND_ENABLED=yes\nExecStart=/usr/bin/authbind --deep "
+                         f'{s.systemd_exec_arg(str(home / "venv/bin/python"))} '
+                         f'{s.systemd_exec_arg(str(home / "venv/bin/cowrie"))} start -n --umask=0027\n')
+            current = "".join(line for line in modern.splitlines(keepends=True)
+                              if not line.startswith(("Environment=\"PYTHONPATH=", "Environment=\"PATH=")))
+            start = next(line for line in current.splitlines(keepends=True) if line.startswith("ExecStart="))
+            s.installation_state().publish(unit, current.replace(start, old_start, 1).encode(), 0o600)
+            run(["systemctl", "daemon-reload"])
+            run(["systemctl", "start", "cowrie.service"], check=False)
+            until = time.monotonic() + 10
+            while run(["systemctl", "show", "cowrie.service", "-p", "ActiveState", "--value"]).stdout.strip() != "failed":
+                if time.monotonic() >= until:
+                    raise RuntimeError("legacy Cowrie launcher did not fail as expected")
+                time.sleep(0.2)
+
+            install_cowrie = s.install_cowrie
+
+            def install_loopback(port):
+                install_cowrie(port)
+                cfg = home / "etc/cowrie.cfg"
+                cfg.write_text(cfg.read_text().replace("interface=0.0.0.0", "interface=127.0.0.1"))
+
+            with mock.patch.object(s, "install_cowrie", side_effect=install_loopback):
+                s.cmd_cowrie_upgrade()
+            assert unit.read_text() == modern and dropin.read_text() == local
+            assert log.stat().st_ino == identity.st_ino
+            assert s.cowrie_checkout_head(home) == s.read_cowrie_pin(s.COWRIE_PIN_FILE)
+            s.installation_state().check_resources([unit])
+        self.cowrie_stays_active()
+        self.control_alive()
+        self.record("legacy install.sh launcher migrated on upgrade with real systemd; drop-in and log inode preserved")
+
     def execute(self):
         try:
             assert os.environ["GITHUB_SHA"][:7] in run([self.binary, "version"]).stdout
@@ -348,6 +397,7 @@ class Acceptance:
             self.permissions_and_ingest()
             self.failure_and_restore()
             self.shell_adoption()
+            self.legacy_cowrie_upgrade()
             self.record("all real guest checks passed")
         except BaseException as exc:
             for path in ("/", "/srv", "/usr", "/usr/local", "/usr/local/bin", "/etc", "/etc/systemd", "/etc/systemd/system", "/tmp"):

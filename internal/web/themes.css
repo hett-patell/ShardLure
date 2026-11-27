@@ -1,1060 +1,381 @@
-/* ShardLure UI themes — applied via <html data-theme="…">.
-   Signal is the default; it supports data-mode="dark|light". */
+/* ShardLure themes: Obsidian (dark, the default) and Kiln (light).
 
-html,
-html[data-theme="signal"] {
-  --bg: #0f1113;
-  --glass: #131517;
-  --glass-2: #1c1e20;
-  --sheet: #131517;
-  --paper: #0f1113;
-  --line: #2a2d31;
-  --line-strong: #3a3d41;
-  --line-soft: #1e2024;
-  --text: #f7f7f8;
-  --ink: #f7f7f8;
-  --dim: #898a8b;
-  /* --dim-2 is the "even quieter" tier used for row numbers, timestamps and
-     secondary meta in intel.html. It is defined PER THEME here because the
-     page's own :root value (#604840, a warm brown from the pre-theme palette)
-     was never overridden and measured 2.4:1 on Signal's ground — well under
-     the 4.5:1 WCAG floor for the 10px text it decorates. Every theme's value
-     is pinned by TestDimTokensMeetContrast against its bg AND its lightest
-     panel surface. */
-  --dim-2: #86888b;
-  --muted: #565a5e;
-  --accent: #d1fe17;
-  --accent-2: #40d986;
-  --good: #40d986;
-  --warn: #f3c977;
-  --danger: #e72930;
-  --ok: #40d986;
-  --blue-team: #5a8fd4;
-  --red-team: #e72930;
-  /* Keyboard focus ring colour. Chosen per theme for >= 3:1 against the
-     body ground (non-text contrast): the accent where it is legible, the
-     ink where the accent is too pale (Sprite's coral on cream is 3.2:1 but
-     the chunky ink border is the theme's own idiom). */
-  --focus-ring: #d1fe17;
-  --mono: "JetBrains Mono", ui-monospace, monospace;
-  --sans: "Inter", system-ui, -apple-system, sans-serif;
-  /* Only Sprite's rules read --display; it is defined here so the token
-     resolves under every theme. */
-  --display: "Inter", system-ui, sans-serif;
-  --radius: 12px;
-  --chunk: 0px;
-  --shadow: none;
-  --panel-bg: var(--glass);
-  --body-bg: var(--bg);
-  --vignette: radial-gradient(ellipse at center, transparent 40%, rgba(0, 0, 0, 0.5) 95%);
-  --globe-atmosphere: #d1fe17;
-  --globe-point: #d1fe17;
-  --bg-pane: var(--glass);
+   Applied through <html data-theme="obsidian|kiln">. Both themes are made by
+   fire: Obsidian is lava cooled into black glass, Kiln is clay fired into
+   porcelain. The chrome is the cooled material (quiet, iron-tinted neutrals)
+   and the only saturated colour is heat, which always means the same thing:
+   how live, recent or intense a piece of data is. Interaction states (the
+   selected tab, the active filter, the primary button, the focus ring) use
+   ink, never heat, so a hot colour on screen is always about the attackers.
+
+   This file loads BEFORE each page's own <style>: it owns the tokens and the
+   components both dashboards share (header, sheets, tables, buttons, filters),
+   and a page refines them below it without fighting the cascade.
+
+   Every token block here is checked by TestDimTokensMeetContrast: --dim and
+   --dim-2 clear 4.5:1 on --bg, --glass and --glass-2, and --focus-ring clears
+   3:1 on --bg. Re-run it after touching a colour. */
+
+/* ── Shared scale ─────────────────────────────────────────────────────────── */
+:root {
+  /* One family in two widths. Atkinson Hyperlegible keeps look-alike glyphs
+     apart (0/O, 1/l/I, rn/m): the confusion that matters when comparing HASSH
+     fingerprints or reading an attacker's typed password. Mono is for machine
+     text only (addresses, hashes, commands, timestamps, table counts), never
+     for labels. */
+  --sans: "Atkinson Hyperlegible Next", system-ui, sans-serif;
+  --mono: "Atkinson Hyperlegible Mono", ui-monospace, monospace;
+  /* Product scale, fixed steps, ~1.13 ratio. "comfortable" is the default;
+     compact restores the denser 13px base for operators who want it. */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-md: 15px;
+  --fs-lg: 17px;
+  --fs-xl: 21px;
+  --fs-2xl: 28px;
+  --fs-table: 13px;
+  --fs-th: 12px;
+  --radius: 6px;
+  --radius-sm: 4px;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --z-sticky: 2;
+  --z-header: 20;
+  --z-popover: 60;
+}
+html[data-density="compact"] {
+  --fs-base: 13px;
+  --fs-table: 12px;
+  --fs-th: 11.5px;
 }
 
-html[data-theme="signal"][data-mode="light"] {
-  --bg: #efefe9;
-  --glass: #f7f7f2;
-  --glass-2: #ffffff;
-  --sheet: #f7f7f2;
-  --paper: #efefe9;
-  --line: #d6d6cc;
-  --line-strong: #c4c4b8;
-  --line-soft: #e0e0d6;
-  --text: #14151a;
-  --ink: #14151a;
-  --dim: #5c5e63;
-  --dim-2: #66686d;
-  --muted: #8b8d92;
-  --focus-ring: #1f8a4c;
-  --accent: #b6d900;
-  --accent-2: #1f8a4c;
-  --good: #1f8a4c;
-  --warn: #9a6b00;
-  --danger: #c41e25;
-  --ok: #1f8a4c;
-  --red-team: #c41e25;
-  --globe-atmosphere: #b6d900;
-  --globe-point: #b6d900;
-  --vignette: radial-gradient(ellipse at 50% 42%, rgba(255, 255, 255, 0.5) 0%, transparent 70%);
+/* ── Obsidian ─────────────────────────────────────────────────────────────── */
+html[data-theme="obsidian"] {
+  color-scheme: dark;
+  /* Volcanic glass: near-black with the faint green cast of the real stone. */
+  --bg: #0e1312;
+  --glass: #141b1a;
+  --glass-2: #1b2423;
+  --line: #263130;
+  --line-soft: #1e2827;
+  /* Control edges (inputs, buttons): 3:1 on every surface they sit on. */
+  --line-strong: #5e706c;
+  --text: #e5ecea;
+  --ink: #e5ecea;
+  --dim: #93a4a0;
+  --dim-2: #84958f;
+  --muted: #5d6d69;
+  --accent: #e5ecea;
+  --good: #79c7a0;
+  --warn: #e2b05e;
+  --danger: #ff7a68;
+  /* Heat, cooled to molten. On dark glass hotter is brighter. */
+  --heat-1: #34403d;
+  --heat-2: #6e4535;
+  --heat-3: #b8572c;
+  --heat-4: #f2843f;
+  --heat-5: #ffc27f;
+  --live: #f2843f;
+  --focus-ring: #e5ecea;
+  /* Polished glass catches light on its top edge. */
+  --edge: inset 0 1px 0 rgba(229, 236, 234, 0.045);
+  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.55);
+  --backdrop: rgba(5, 8, 7, 0.78);
+  --stage-glow: #1a2321;
 }
 
-html[data-theme="meridian"] {
-  --bg: #dfe3e8;
-  --glass: #f4f6f8;
-  --glass-2: #eef1f4;
-  --sheet: #f4f6f8;
-  --paper: #dfe3e8;
-  --line: #c5ccd6;
-  --line-strong: #aeb6c2;
-  --line-soft: #d5dbe3;
-  --text: #1a2332;
-  --ink: #1a2332;
-  --dim: #525d6b;
-  --dim-2: #57626f;
-  --muted: #525d6b;
-  --focus-ring: #0d5c63;
-  --accent: #0d5c63;
-  --accent-2: #a67c2d;
-  --good: #2f6b4f;
-  --warn: #a67c2d;
-  --danger: #8b3a3a;
-  --ok: #2f6b4f;
-  --blue-team: #3a5a9a;
-  --red-team: #8b3a3a;
-  --mono: "IBM Plex Mono", ui-monospace, monospace;
-  --sans: "Barlow", system-ui, sans-serif;
-  --display: "Barlow", system-ui, sans-serif;
-  --radius: 2px;
-  --chunk: 0px;
-  --shadow: none;
-  --panel-bg: var(--sheet);
-  --body-bg: var(--paper);
-  --vignette: radial-gradient(ellipse at 50% 42%, rgba(255, 255, 255, 0.55) 0%, transparent 70%);
-  --globe-atmosphere: #0d5c63;
-  --globe-point: #0d5c63;
-  --bg-pane: var(--glass-2);
+/* ── Kiln ─────────────────────────────────────────────────────────────────── */
+html[data-theme="kiln"] {
+  color-scheme: light;
+  /* Celadon porcelain. Celadon and iron-red glazes both come from iron oxide,
+     so the light theme's neutral and its heat are one material. */
+  --bg: #e8ece9;
+  --glass: #f7f9f7;
+  --glass-2: #dfe5e1;
+  --line: #ccd4cf;
+  --line-soft: #dbe1dd;
+  --line-strong: #76837d;
+  --text: #1b2220;
+  --ink: #1b2220;
+  --dim: #4c5753;
+  --dim-2: #56615c;
+  --muted: #87938e;
+  --accent: #1b2220;
+  --good: #2c6a4b;
+  --warn: #8a5800;
+  --danger: #b0291b;
+  /* On porcelain hotter is darker: pale yellow would vanish. */
+  --heat-1: #c6cfca;
+  --heat-2: #dba184;
+  --heat-3: #c4602f;
+  --heat-4: #a2401c;
+  --heat-5: #6f2410;
+  --live: #a2401c;
+  --focus-ring: #1b2220;
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --shadow-pop: 0 18px 44px rgba(34, 48, 42, 0.18);
+  --backdrop: rgba(36, 46, 42, 0.42);
+  --stage-glow: #f4f7f5;
 }
 
-html[data-theme="sprite"] {
-  --bg: #fff6e4;
-  --glass: #fffdf7;
-  --glass-2: #fff8e8;
-  --sheet: #fffdf7;
-  --paper: #fff6e4;
-  --line: #241910;
-  --line-strong: #241910;
-  --line-soft: #efe6d4;
-  --text: #241910;
-  --ink: #241910;
-  --dim: #5c4a3e;
-  --dim-2: #7a6759;
-  --muted: #5c4a3e;
-  --focus-ring: #241910;
-  --accent: #e85d4c;
-  --accent-2: #f0b429;
-  --good: #2f9a62;
-  --warn: #f0b429;
-  --danger: #e85d4c;
-  --ok: #2f9a62;
-  --blue-team: #3a5a9a;
-  --red-team: #e85d4c;
-  /* System stack on purpose (the pixel console wants the OS terminal face);
-     ui-monospace already resolves to SF Mono on Apple platforms. */
-  --mono: ui-monospace, Menlo, Consolas, monospace;
-  --sans: "DM Sans", system-ui, sans-serif;
-  --display: "Pixelify Sans", ui-rounded, system-ui, sans-serif;
-  --radius: 0px;
-  --chunk: 3px;
-  --shadow: 3px 3px 0 #241910;
-  --panel-bg: var(--sheet);
-  --body-bg: var(--paper);
-  --vignette: none;
-  --globe-atmosphere: #6ec0e0;
-  --globe-point: #e85d4c;
-  --bg-pane: var(--glass-2);
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  font: var(--fs-base)/1.5 var(--sans);
+  background: var(--bg);
+  color: var(--text);
 }
+html[data-theme="obsidian"] body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+::selection { background: color-mix(in srgb, var(--text) 24%, transparent); }
+button, input, select, textarea { font: inherit; color: inherit; }
+code, kbd, samp, pre { font-family: var(--mono); }
+h1, h2, h3 { text-wrap: balance; }
+/* Components set display on many controls, which would otherwise beat the
+   UA's [hidden] rule and leave a "hidden" button on screen. */
+[hidden] { display: none !important; }
 
 /* Keyboard focus. One rule for both dashboards so every interactive control
-   — tabs, chips, sidebar links, buttons, inputs, theme cards, dialog close
-   buttons, the pivot-graph canvas — gets the same visible ring (WCAG 2.4.7).
-   :focus-visible only fires for keyboard/AT focus, so pointer clicks stay
-   clean. The two pages used to suppress the UA outline on their inputs with
-   outline:none and replaced it with nothing; that rule is gone and a test
-   pins that it never comes back. */
+   gets the same visible ring (WCAG 2.4.7). :focus-visible only fires for
+   keyboard/AT focus, so pointer clicks stay clean. The pages used to suppress
+   the UA outline with outline:none and replace it with nothing; a test pins
+   that it never comes back. */
 :focus-visible {
-  outline: 2px solid var(--focus-ring, var(--accent));
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
-/* Rows and cells that act as buttons get an inset ring so it is not clipped
-   by the panel's overflow:hidden. */
+/* Rows and cells that act as buttons get an inset ring so it is not clipped by
+   the panel's overflow. */
 tr:focus-visible, td:focus-visible, .sess-row:focus-visible, .mitre-cell:focus-visible {
   outline-offset: -2px;
 }
 
-/* Shared chrome that keys off theme tokens */
-html[data-theme="meridian"] body,
-html[data-theme="sprite"] body,
-html[data-theme="signal"][data-mode="light"] body {
-  background: var(--body-bg);
-  color: var(--text);
+/* Thin scrollbars in the theme's edge colour, so a scrolling table does not
+   paint a bright system gutter across a dark sheet. */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Screen-reader-only text (chart summaries, live status). */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important; clip-path: inset(50%) !important; overflow: hidden !important;
+  width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important;
+  border: 0 !important; white-space: nowrap !important;
 }
 
-html[data-theme="meridian"] .panel,
-html[data-theme="meridian"] .rail .panel {
-  background: var(--panel-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: none;
-}
-
-html[data-theme="sprite"] .panel,
-html[data-theme="sprite"] .rail .panel {
-  background: var(--panel-bg);
-  border: var(--chunk) solid var(--line);
-  border-radius: 0;
-  box-shadow: var(--shadow);
-}
-
-html[data-theme="sprite"] .brand .b1,
-html[data-theme="sprite"] .sb-brand,
-html[data-theme="sprite"] .title h1,
-html[data-theme="sprite"] .panel h2,
-html[data-theme="sprite"] .stat .num,
-html[data-theme="sprite"] .stat .n {
-  font-family: var(--display);
-}
-
-html[data-theme="meridian"] #vignette {
-  background: var(--vignette);
-  opacity: 0.85;
-}
-
-html[data-theme="sprite"] #vignette {
-  display: none;
-}
-
-html[data-theme="meridian"] .sidebar,
-html[data-theme="sprite"] .sidebar,
-html[data-theme="signal"][data-mode="light"] .sidebar {
-  background: var(--ink);
-}
-
-html[data-theme="meridian"] .sidebar .sb-brand,
-html[data-theme="sprite"] .sidebar .sb-brand,
-html[data-theme="signal"][data-mode="light"] .sidebar .sb-brand {
-  color: var(--sheet);
-  border-color: var(--accent);
-}
-
-html[data-theme="meridian"] .topbar,
-html[data-theme="sprite"] .topbar,
-html[data-theme="signal"][data-mode="light"] .topbar {
-  background: color-mix(in srgb, var(--sheet) 92%, transparent);
-  border-bottom: 1px solid var(--line);
-}
-
-html[data-theme="sprite"] .topbar {
-  border-bottom: var(--chunk) solid var(--line);
-  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.08);
-}
-
-html[data-theme="meridian"] .chip.on,
-html[data-theme="sprite"] .chip.on,
-html[data-theme="signal"][data-mode="light"] .chip.on {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-
-html[data-theme="sprite"] .chip {
-  border: 2px solid var(--line);
-  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.08);
-}
-
-html[data-theme="sprite"] .tab.active,
-html[data-theme="meridian"] .tab.active,
-html[data-theme="signal"][data-mode="light"] .tab.active {
-  border-bottom-color: var(--accent-2);
-  color: var(--text);
-}
-
-html[data-theme="sprite"] .sb-item.on,
-html[data-theme="meridian"] .sb-item.on,
-html[data-theme="signal"][data-mode="light"] .sb-item.on {
-  color: var(--sheet);
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
-}
-
-/* Theme picker (Settings → Appearance) */
-.theme-picker {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-.theme-card {
-  cursor: pointer;
-  text-align: left;
-  border: 1px solid var(--line);
-  background: var(--paper, var(--bg));
-  color: var(--text);
-  padding: 12px;
-  border-radius: var(--radius);
-  font: inherit;
-}
-html[data-theme="sprite"] .theme-card {
-  border: var(--chunk) solid var(--line);
-  box-shadow: 2px 2px 0 var(--line);
-  border-radius: 0;
-}
-.theme-card:hover {
-  border-color: var(--accent);
-}
-.theme-card.on {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-html[data-theme="sprite"] .theme-card.on {
-  box-shadow: 3px 3px 0 var(--accent);
-}
-.theme-card .swatch {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  height: 28px;
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 10px;
-  border: 1px solid var(--line-soft, var(--line));
-}
-.theme-card .swatch span { display: block; }
-.theme-card .tname {
-  font: 600 13px var(--sans);
-  margin: 0 0 4px;
-}
-html[data-theme="sprite"] .theme-card .tname {
-  font-family: var(--display);
-}
-.theme-card .tblurb {
-  margin: 0;
-  font: 400 11px var(--sans);
-  color: var(--dim);
-  line-height: 1.4;
-}
-@media (max-width: 900px) {
-  .theme-picker { grid-template-columns: 1fr; }
-}
-
-/* —— Globe HTML overlays (Phase B) —— */
-.globe-overlay {
-  transform: translate(-50%, -100%);
-  pointer-events: none;
-  user-select: none;
-  transition: opacity 200ms ease;
-}
-/* Sprite stickers are flag EMOJI treated as die-cut decals: the glyph itself is
-   the sticker. The previous version boxed an 18px flag inside a hard-bordered
-   34x26 frame, which at globe scale read as clutter rather than as a sticker.
-   The white dilate-outline (SVG filter) plus a soft drop shadow does the
-   lifting-off-the-globe work instead — no border, no background. */
-.globe-sticker {
-  margin: 0; padding: 0;
-  display: block;
-  font-size: 28px; line-height: 1;
-  /* Colour emoji ignore `color`; keep the system emoji font so flags render as
-     flags rather than falling back to two letter glyphs. */
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
-    "Twemoji Mozilla", sans-serif;
-  white-space: nowrap;
-  filter: url(#globe-sticker-outline) drop-shadow(0 2px 2px rgba(36, 25, 16, 0.35));
-  /* Declutter fades the GLYPH; the wrapper's opacity is Cobe's front/back
-     signal. Two separate properties multiply, so neither has to know about the
-     other, and a sticker losing a collision eases out instead of blinking. */
-  transition: opacity 0.22s ease;
-}
-/* No outline filter available (non-Chromium SVG filter quirks): fall back to a
-   plain shadow so the glyph still separates from the globe. */
-@supports not (filter: url(#globe-sticker-outline)) {
-  .globe-sticker { filter: drop-shadow(0 1px 2px rgba(36, 25, 16, 0.5)); }
-}
-/* Satellite marks are the U+1F6F0 emoji, not a shipped SVG. The box keeps
-   explicit dimensions because the ::after pulse ring insets against it — sizing
-   it by font metrics instead would make the ring drift between platforms. The
-   glyph is centred and set smaller than the box so the ring has room.
-
-   Deliberately NOT given the die-cut outline the Sprite flags use: that filter
-   floods a fixed warm white, and dilating a broad satellite glyph by 2px on
-   Signal's near-black globe produced a white box rather than an outline. A mark
-   on the globe only needs grounding, so it gets a shadow. */
-.globe-sat {
+/* ── Header (both dashboards) ─────────────────────────────────────────────── */
+.topbar {
   position: relative;
-  width: 28px; height: 28px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 20px; line-height: 1;
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
-    "Twemoji Mozilla", sans-serif;
-  filter: drop-shadow(0 1px 2px rgba(26, 35, 50, 0.45));
-}
-/* On a dark globe a dark shadow does nothing and a light halo reads as a box;
-   the glyph already contrasts, so it just needs a tight anchor shadow. */
-html[data-theme="signal"] .globe-sat {
-  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.9));
-}
-.globe-sat::after {
-  content: "";
-  position: absolute;
-  inset: -7px;
-  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
-  border-radius: 50%;
-  animation: satRing 2.4s ease-out infinite;
-  animation-delay: var(--ring-delay, 0s);
-  pointer-events: none;
-}
-.globe-sat--hub {
-  width: 34px; height: 34px;
-  font-size: 25px;
-}
-.globe-sat--hub::after {
-  inset: -9px;
-  border-width: 1.5px;
-  animation-duration: 2s;
-}
-@keyframes satRing {
-  0% { transform: scale(0.72); opacity: 0.75; }
-  100% { transform: scale(1.55); opacity: 0; }
-}
-.globe-live {
-  display: inline-flex; align-items: center; gap: 5px;
-  font: 600 10px var(--mono);
-  letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--ok); background: var(--sheet);
-  border: 1px solid var(--line); padding: 3px 7px 3px 6px;
-  white-space: nowrap;
-  box-shadow: 1px 1px 0 rgba(26, 35, 50, 0.08);
-  transform: translate(10px, -50%);
-}
-.globe-live i {
-  width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
-  display: inline-block;
-  animation: satPulse 1.8s ease-in-out infinite;
-}
-@keyframes satPulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
-}
-.globe-live b { color: var(--ink); font-weight: 600; }
-/* Declutter fades these (see declutterTarget in cobe-globe.js); the wrapper's
-   opacity stays the front/back signal, so the two multiply. */
-.globe-analytics, .globe-sat, .globe-live { transition: opacity 0.22s ease; }
-.globe-analytics {
-  font: 500 11px var(--mono); color: var(--ink);
-  background: color-mix(in srgb, var(--sheet) 96%, transparent);
-  border: 1px solid var(--line);
-  padding: 4px 7px; white-space: nowrap; text-align: left;
-  box-shadow: 1px 1px 0 rgba(26, 35, 50, 0.06);
-  transform: translate(12px, -50%);
-}
-.globe-analytics .lbl {
-  color: var(--dim); display: block; font-size: 10px;
-  letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 1px;
-}
-.globe-analytics .up { color: var(--ok); }
-.globe-analytics .dn { color: var(--danger); }
-
-/* Light themes: soften dark-theme glow assumptions */
-html[data-theme="meridian"] .title .dot,
-html[data-theme="sprite"] .title .dot,
-html[data-theme="signal"][data-mode="light"] .title .dot {
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
-}
-html[data-theme="meridian"] .sb-item.on,
-html[data-theme="sprite"] .sb-item.on,
-html[data-theme="signal"][data-mode="light"] .sb-item.on {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-}
-html[data-theme="meridian"] .nav a.active,
-html[data-theme="sprite"] .nav a.active,
-html[data-theme="signal"][data-mode="light"] .nav a.active {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-html[data-theme="meridian"] body,
-html[data-theme="sprite"] body,
-html[data-theme="signal"][data-mode="light"] body {
-  color: var(--text);
-}
-.globe-overlay--live,
-.globe-overlay--analytics {
-  transform: translate(8px, -50%);
-}
-.globe-overlay--live .globe-live,
-.globe-overlay--analytics .globe-analytics {
-  transform: none;
-}
-.globe-overlay--sticker {
-  transform: translate(-50%, calc(-100% - 4px));
-}
-.globe-overlay--sat {
-  transform: translate(-50%, calc(-100% - 10px));
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .globe-sat::after,
-  .globe-live i { animation: none; }
-}
-
-
-/* —— Light theme: light-theme chrome overrides —— */
-html[data-theme="meridian"],
-html[data-theme="sprite"],
-html[data-theme="signal"][data-mode="light"] {
-  --bg-pane: var(--glass-2);
-  color-scheme: light;
-}
-
-html[data-theme="meridian"] .stat,
-html[data-theme="meridian"] .cap-stat,
-html[data-theme="meridian"] .users .pill,
-html[data-theme="meridian"] .sparkline,
-html[data-theme="sprite"] .stat,
-html[data-theme="sprite"] .cap-stat,
-html[data-theme="sprite"] .users .pill,
-html[data-theme="sprite"] .sparkline,
-html[data-theme="signal"][data-mode="light"] .stat,
-html[data-theme="signal"][data-mode="light"] .cap-stat,
-html[data-theme="signal"][data-mode="light"] .users .pill,
-html[data-theme="signal"][data-mode="light"] .sparkline {
-  background: var(--glass-2);
-  border-color: var(--line);
-  color: var(--text);
-}
-
-html[data-theme="meridian"] .sidebar,
-html[data-theme="sprite"] .sidebar,
-html[data-theme="signal"][data-mode="light"] .sidebar {
-  background: var(--ink);
-  border-right-color: color-mix(in srgb, var(--ink) 80%, #000);
-}
-html[data-theme="meridian"] .sb-item,
-html[data-theme="sprite"] .sb-item,
-html[data-theme="signal"][data-mode="light"] .sb-item { color: color-mix(in srgb, var(--sheet) 55%, transparent); }
-html[data-theme="meridian"] .sb-item:hover,
-html[data-theme="sprite"] .sb-item:hover,
-html[data-theme="signal"][data-mode="light"] .sb-item:hover {
-  color: var(--sheet);
-  background: color-mix(in srgb, var(--sheet) 12%, transparent);
-  border-color: color-mix(in srgb, var(--sheet) 20%, transparent);
-}
-html[data-theme="meridian"] .sb-brand,
-html[data-theme="sprite"] .sb-brand,
-html[data-theme="signal"][data-mode="light"] .sb-brand { color: #fff; }
-
-html[data-theme="meridian"] .chip,
-html[data-theme="sprite"] .chip,
-html[data-theme="signal"][data-mode="light"] .chip,
-html[data-theme="meridian"] .toolbar input.search,
-html[data-theme="sprite"] .toolbar input.search,
-html[data-theme="signal"][data-mode="light"] .toolbar input.search,
-html[data-theme="meridian"] input.search,
-html[data-theme="sprite"] input.search,
-html[data-theme="signal"][data-mode="light"] input.search {
-  background: var(--sheet) !important;
-  border-color: var(--line) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .bar-row .track,
-html[data-theme="sprite"] .bar-row .track,
-html[data-theme="signal"][data-mode="light"] .bar-row .track,
-html[data-theme="meridian"] .radar-track,
-html[data-theme="sprite"] .radar-track,
-html[data-theme="signal"][data-mode="light"] .radar-track {
-  background: color-mix(in srgb, var(--ink) 8%, transparent) !important;
-}
-html[data-theme="meridian"] tr.actor-row:hover td,
-html[data-theme="sprite"] tr.actor-row:hover td,
-html[data-theme="signal"][data-mode="light"] tr.actor-row:hover td {
-  background: color-mix(in srgb, var(--accent) 6%, transparent) !important;
-}
-html[data-theme="meridian"] tr.actor-row.selected td,
-html[data-theme="sprite"] tr.actor-row.selected td,
-html[data-theme="signal"][data-mode="light"] tr.actor-row.selected td {
-  background: color-mix(in srgb, var(--accent) 12%, transparent) !important;
-}
-html[data-theme="meridian"] .detail,
-html[data-theme="sprite"] .detail,
-html[data-theme="signal"][data-mode="light"] .detail,
-html[data-theme="meridian"] .gauge-breakdown,
-html[data-theme="sprite"] .gauge-breakdown,
-html[data-theme="signal"][data-mode="light"] .gauge-breakdown,
-html[data-theme="meridian"] .empty,
-html[data-theme="sprite"] .empty,
-html[data-theme="signal"][data-mode="light"] .empty {
-  background: var(--glass-2);
-  color: var(--dim);
-}
-html[data-theme="meridian"] .topbar,
-html[data-theme="sprite"] .topbar,
-html[data-theme="signal"][data-mode="light"] .topbar {
-  background: color-mix(in srgb, var(--sheet) 94%, transparent) !important;
+  z-index: var(--z-header);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 24px;
+  padding: 12px clamp(14px, 3vw, 32px);
+  background: var(--bg);
   border-bottom: 1px solid var(--line);
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  text-decoration: none;
+  font: 700 var(--fs-lg)/1 var(--sans);
+  letter-spacing: -0.01em;
+}
+.brand-mark { width: 20px; height: 20px; flex: none; color: var(--text); }
+.nav { display: flex; align-items: center; gap: 2px; }
+.nav a {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--dim);
+  text-decoration: none;
+  font: 500 var(--fs-base)/1.2 var(--sans);
+}
+.nav a:hover { color: var(--text); background: var(--glass-2); }
+.nav a[aria-current="page"] { color: var(--text); background: var(--glass-2); }
+
+/* ── Sheets ───────────────────────────────────────────────────────────────── */
+.panel {
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--edge);
+}
+.panel h2 {
+  margin: 0 0 12px;
+  font: 600 var(--fs-md)/1.3 var(--sans);
   color: var(--text);
 }
-html[data-theme="meridian"] .shell-main,
-html[data-theme="sprite"] .shell-main,
-html[data-theme="signal"][data-mode="light"] .shell-main,
-html[data-theme="meridian"] .wrap,
-html[data-theme="sprite"] .wrap,
-html[data-theme="signal"][data-mode="light"] .wrap {
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin-bottom: 12px;
+}
+.panel-head h2 { margin: 0; }
+.panel-head .meta { color: var(--dim); font: var(--fs-xs)/1.4 var(--sans); }
+.empty { color: var(--dim); font: var(--fs-sm)/1.5 var(--sans); padding: 8px 0; }
+
+/* ── Tables ───────────────────────────────────────────────────────────────── */
+/* Cells are machine text (addresses, hashes, playbook ids, counts), so the body
+   is mono; headers are interface text, so they are sans and sentence case. */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font: var(--fs-table)/1.45 var(--mono);
+}
+th, td {
+  padding: 7px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+th {
+  font: 500 var(--fs-th)/1.3 var(--sans);
+  color: var(--dim);
+  border-bottom-color: var(--line);
+}
+td.n, th.n, td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:last-child td { border-bottom: 0; }
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+/* Every action button on both pages shares this one look; pages only add size
+   or state. A primary action is filled with ink, never with heat. */
+.set-btn, .bz-btn, .ioc-dl, .enrich-btn, .deobf-btn, .sess-jump, .vt-btn, .cm-btn,
+.sm-close, #reset-widgets, #density-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
+  font: 500 var(--fs-sm)/1.1 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s var(--ease-out), border-color 0.15s var(--ease-out);
 }
-html[data-theme="meridian"] table,
-html[data-theme="sprite"] table,
-html[data-theme="signal"][data-mode="light"] table,
-html[data-theme="meridian"] th,
-html[data-theme="sprite"] th,
-html[data-theme="signal"][data-mode="light"] th,
-html[data-theme="meridian"] td,
-html[data-theme="sprite"] td,
-html[data-theme="signal"][data-mode="light"] td {
-  border-bottom-color: var(--line-soft, var(--line));
-}
-html[data-theme="meridian"] .tab,
-html[data-theme="sprite"] .tab,
-html[data-theme="signal"][data-mode="light"] .tab { color: var(--dim); }
-html[data-theme="meridian"] .tab.active,
-html[data-theme="sprite"] .tab.active,
-html[data-theme="signal"][data-mode="light"] .tab.active { color: var(--text); }
-html[data-theme="meridian"] .set-row,
-html[data-theme="sprite"] .set-row,
-html[data-theme="signal"][data-mode="light"] .set-row,
-html[data-theme="meridian"] .set-control input,
-html[data-theme="sprite"] .set-control input,
-html[data-theme="signal"][data-mode="light"] .set-control input,
-html[data-theme="meridian"] .set-control textarea,
-html[data-theme="sprite"] .set-control textarea,
-html[data-theme="signal"][data-mode="light"] .set-control textarea {
-  background: var(--sheet);
-  color: var(--text);
-  border-color: var(--line);
-}
-html[data-theme="meridian"] .team-banner,
-html[data-theme="sprite"] .team-banner,
-html[data-theme="signal"][data-mode="light"] .team-banner,
-html[data-theme="meridian"] .set-note,
-html[data-theme="sprite"] .set-note,
-html[data-theme="signal"][data-mode="light"] .set-note {
+:is(.set-btn, .bz-btn, .ioc-dl, .enrich-btn, .deobf-btn, .sess-jump, .vt-btn, .cm-btn,
+.sm-close, #reset-widgets, #density-toggle):hover:not(:disabled) {
   background: var(--glass-2);
-  border-color: var(--line);
+  border-color: var(--text);
+}
+:is(.set-btn, .bz-btn, .ioc-dl, .enrich-btn, .deobf-btn, .sess-jump, .vt-btn, .cm-btn):disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* The one primary action in a view is filled with ink. Settings repeats Save on
+   every row, so there "primary" is only a firmer outline: a column of filled
+   buttons would shout more than the values they save. */
+.enrich-btn {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
+.enrich-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 86%, var(--bg));
+}
+.set-btn.primary { border-color: var(--text); }
+#density-toggle[aria-pressed="true"] { background: var(--glass-2); border-color: var(--text); }
+
+/* ── Filters (segmented choices) ──────────────────────────────────────────── */
+.chip, .ioc-kind, .wl-kind {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--dim);
+  font: 500 var(--fs-sm)/1 var(--sans);
+  letter-spacing: 0;
+  cursor: pointer;
+  user-select: none;
 }
-html[data-theme="meridian"] .sess-modal .sm-card,
-html[data-theme="sprite"] .sess-modal .sm-card,
-html[data-theme="signal"][data-mode="light"] .sess-modal .sm-card {
-  background: var(--sheet);
+:is(.chip, .ioc-kind, .wl-kind):hover { color: var(--text); background: var(--glass-2); }
+.chip.on, .ioc-kind.active, .wl-kind.active {
   color: var(--text);
-  border-color: var(--line);
-}
-html[data-theme="meridian"] .feed-row,
-html[data-theme="sprite"] .feed-row,
-html[data-theme="signal"][data-mode="light"] .feed-row,
-html[data-theme="meridian"] .cap-row,
-html[data-theme="sprite"] .cap-row,
-html[data-theme="signal"][data-mode="light"] .cap-row,
-html[data-theme="meridian"] .row,
-html[data-theme="sprite"] .row,
-html[data-theme="signal"][data-mode="light"] .row {
-  border-bottom-color: var(--line-soft, var(--line));
+  background: var(--glass-2);
+  border-color: var(--line-strong);
 }
 
-/* Cobe stage (Meridian / Sprite) */
-#cobe-stage {
-  position: fixed; inset: 0; z-index: 0;
-  display: grid; place-items: center;
-  pointer-events: none;
-}
-#cobe-stage.on { pointer-events: auto; }
-#cobe-stage[hidden] { display: none !important; }
-#cobe-wrap {
+/* ── Heat ─────────────────────────────────────────────────────────────────── */
+/* A dot or bar coloured by recency or intensity. Level 5 is the hottest. */
+.heat { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--heat-1); flex: none; }
+.heat.h2 { background: var(--heat-2); }
+.heat.h3 { background: var(--heat-3); }
+.heat.h4 { background: var(--heat-4); }
+.heat.h5 { background: var(--heat-5); }
+
+/* Threat level: one straight heat bar, the same scale as everything else. */
+.threat-meter { display: grid; gap: 10px; }
+.threat-read { display: flex; align-items: baseline; gap: 10px; }
+.threat-val { font: 700 var(--fs-2xl)/1 var(--sans); font-variant-numeric: tabular-nums; }
+.threat-of { color: var(--dim); font-size: var(--fs-sm); }
+.threat-lbl { margin-left: auto; font: 600 var(--fs-base)/1 var(--sans); }
+.threat-bar {
   position: relative;
-  width: min(72vh, 640px);
-  height: min(72vh, 640px);
-  max-width: calc(100vw - 744px);
-  max-height: calc(100vh - 80px);
+  height: 8px;
+  border-radius: 4px;
+  background: var(--glass-2);
+  overflow: hidden;
 }
-#cobe {
-  width: 100%; height: 100%;
-  display: block;
-  cursor: grab;
-  touch-action: none;
-}
-#cobe:active { cursor: grabbing; }
-html[data-theme="meridian"] #cobe-stage {
-  background:
-    radial-gradient(ellipse at 50% 42%, #eef1f4 0%, var(--paper) 70%);
-}
-html[data-theme="sprite"] #cobe-stage {
-  background:
-    radial-gradient(circle at 50% 48%, #fff 0%, var(--panel-bg) 55%);
-}
-
-/* Starfield — Signal DARK only.
-   The globe otherwise floats on flat near-black; a sparse star layer reads as
-   "in orbit" and gives the arcs somewhere to sit. Built from layered
-   radial-gradient dots rather than an image or canvas: no asset to embed, no
-   extra request, and no per-frame cost next to the WebGL globe (a second
-   animated canvas would compete with Cobe for the GPU — see the globe.gl
-   removal in v2.0.0). Deliberately NOT applied to the light themes (Signal
-   light, Meridian, Sprite), where stars on paper look like dirt.
-   `background-attachment: fixed` keeps the field still while the globe spins,
-   so it reads as distant sky rather than a moving texture. */
-html[data-theme="signal"]:not([data-mode="light"]) #cobe-stage {
-  background-color: var(--bg);
-  background-image:
-    radial-gradient(1.6px 1.6px at 12% 18%, rgba(255, 255, 255, 0.55) 50%, transparent 50%),
-    radial-gradient(1.2px 1.2px at 28% 62%, rgba(255, 255, 255, 0.38) 50%, transparent 50%),
-    radial-gradient(1.8px 1.8px at 43% 27%, rgba(255, 255, 255, 0.50) 50%, transparent 50%),
-    radial-gradient(1.1px 1.1px at 57% 78%, rgba(255, 255, 255, 0.32) 50%, transparent 50%),
-    radial-gradient(1.5px 1.5px at 71% 12%, rgba(255, 255, 255, 0.45) 50%, transparent 50%),
-    radial-gradient(1.2px 1.2px at 82% 55%, rgba(255, 255, 255, 0.36) 50%, transparent 50%),
-    radial-gradient(1.7px 1.7px at 91% 33%, rgba(255, 255, 255, 0.48) 50%, transparent 50%),
-    radial-gradient(1.1px 1.1px at 8% 84%, rgba(255, 255, 255, 0.30) 50%, transparent 50%),
-    radial-gradient(1.4px 1.4px at 36% 8%, rgba(255, 255, 255, 0.40) 50%, transparent 50%),
-    radial-gradient(1.2px 1.2px at 64% 46%, rgba(255, 255, 255, 0.34) 50%, transparent 50%),
-    /* faint accent-tinted stars tie the field to the theme */
-    radial-gradient(1.5px 1.5px at 22% 40%, color-mix(in srgb, var(--accent) 45%, transparent) 50%, transparent 50%),
-    radial-gradient(1.3px 1.3px at 78% 70%, color-mix(in srgb, var(--accent) 35%, transparent) 50%, transparent 50%),
-    /* soft depth wash so the globe sits in a pool of light, not a flat plane */
-    radial-gradient(ellipse at 50% 45%, color-mix(in srgb, var(--accent) 5%, transparent) 0%, transparent 62%);
-  background-repeat: repeat;
-  background-size: 340px 340px, 290px 290px, 410px 410px, 260px 260px,
-    380px 380px, 310px 310px, 440px 440px, 275px 275px, 355px 355px,
-    295px 295px, 470px 470px, 505px 505px, 100% 100%;
-  background-attachment: fixed;
-}
-
-/* Reduced-motion users still get the field (it is static), but PRODUCT.md's
-   accessibility section asks for a calmer alternative to globe motion — keep the
-   depth wash and drop the densest star layers so the backdrop is quieter. */
-@media (prefers-reduced-motion: reduce) {
-  html[data-theme="signal"]:not([data-mode="light"]) #cobe-stage {
-    background-image:
-      radial-gradient(1.6px 1.6px at 12% 18%, rgba(255, 255, 255, 0.40) 50%, transparent 50%),
-      radial-gradient(1.8px 1.8px at 43% 27%, rgba(255, 255, 255, 0.36) 50%, transparent 50%),
-      radial-gradient(1.5px 1.5px at 71% 12%, rgba(255, 255, 255, 0.32) 50%, transparent 50%),
-      radial-gradient(ellipse at 50% 45%, color-mix(in srgb, var(--accent) 5%, transparent) 0%, transparent 62%);
-    background-size: 340px 340px, 410px 410px, 380px 380px, 100% 100%;
-  }
-}
-
-/* Deliberately NOT positioned. CSS anchor positioning requires the anchor
-   element to be a descendant of the anchored element's containing block; Cobe
-   puts its `anchor-name: --cobe-<id>` divs in the wrapper it inserts around the
-   canvas. If this container were `position: absolute` it would become the
-   containing block itself, leaving those anchors as mere SIBLINGS — anchor()
-   then silently fails and every sticker collapses onto one spot. Static keeps
-   the containing block at Cobe's wrapper, which does contain the anchors.
-   Children are absolutely positioned, so this box contributes no layout. */
-#cobe-overlays {
-  position: static;
-  pointer-events: none;
-  z-index: 3;
-}
-#cobe-overlays .globe-overlay {
+.threat-fill {
   position: absolute;
-  left: 0; top: 0;
-  transform: none; /* projection sets transform */
-  pointer-events: none;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 4px;
+  background: var(--heat-2);
+  transition: width 0.4s var(--ease-out);
 }
-#cobe-overlays .globe-overlay .globe-sticker,
-#cobe-overlays .globe-overlay .globe-sat,
-#cobe-overlays .globe-overlay .globe-live,
-#cobe-overlays .globe-overlay .globe-analytics {
-  pointer-events: auto;
+.threat-meter[data-level="2"] .threat-fill { background: var(--heat-2); }
+.threat-meter[data-level="3"] .threat-fill { background: var(--heat-3); }
+.threat-meter[data-level="4"] .threat-fill { background: var(--heat-4); }
+.threat-meter[data-level="5"] .threat-fill { background: var(--heat-5); }
+/* Only the hot steps colour the label: they clear 4.5:1 as text, the cooler
+   ones do not, so those stay in ink. */
+.threat-meter[data-level="4"] .threat-lbl { color: var(--heat-4); }
+.threat-meter[data-level="5"] .threat-lbl { color: var(--heat-5); }
+.gauge-breakdown {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+  color: var(--dim);
+  font: var(--fs-xs)/1.4 var(--sans);
 }
-
-/* Intel: replace hardcoded rgba blacks / reds with tokens */
-html[data-theme="meridian"] .chip,
-html[data-theme="sprite"] .chip,
-html[data-theme="signal"][data-mode="light"] .chip,
-html[data-theme="meridian"] .toolbar .chip,
-html[data-theme="sprite"] .toolbar .chip,
-html[data-theme="signal"][data-mode="light"] .toolbar .chip {
-  background: var(--sheet) !important;
-  border-color: var(--line) !important;
-  color: var(--dim) !important;
-}
-html[data-theme="meridian"] .chip.on,
-html[data-theme="sprite"] .chip.on,
-html[data-theme="signal"][data-mode="light"] .chip.on {
-  color: var(--accent) !important;
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent) !important;
-  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
-}
-html[data-theme="meridian"] input.search,
-html[data-theme="sprite"] input.search,
-html[data-theme="signal"][data-mode="light"] input.search,
-html[data-theme="meridian"] .toolbar input.search,
-html[data-theme="sprite"] .toolbar input.search,
-html[data-theme="signal"][data-mode="light"] .toolbar input.search {
-  background: var(--sheet) !important;
-  border-color: var(--line) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .detail,
-html[data-theme="sprite"] .detail,
-html[data-theme="signal"][data-mode="light"] .detail,
-html[data-theme="meridian"] .gauge-breakdown,
-html[data-theme="sprite"] .gauge-breakdown,
-html[data-theme="signal"][data-mode="light"] .gauge-breakdown {
-  background: color-mix(in srgb, var(--ink) 6%, transparent) !important;
-}
-html[data-theme="meridian"] .sess-modal .sm-card,
-html[data-theme="sprite"] .sess-modal .sm-card,
-html[data-theme="signal"][data-mode="light"] .sess-modal .sm-card,
-html[data-theme="meridian"] .sm-card,
-html[data-theme="sprite"] .sm-card,
-html[data-theme="signal"][data-mode="light"] .sm-card {
-  background: var(--sheet) !important;
-  color: var(--text) !important;
-  border-color: var(--line-strong) !important;
-  box-shadow: 0 24px 80px color-mix(in srgb, var(--ink) 18%, transparent) !important;
-}
-html[data-theme="meridian"] .nav a.active,
-html[data-theme="sprite"] .nav a.active,
-html[data-theme="signal"][data-mode="light"] .nav a.active,
-html[data-theme="meridian"] .sb-item.on,
-html[data-theme="sprite"] .sb-item.on,
-html[data-theme="signal"][data-mode="light"] .sb-item.on,
-html[data-theme="meridian"] .set-btn.primary,
-html[data-theme="sprite"] .set-btn.primary,
-html[data-theme="signal"][data-mode="light"] .set-btn.primary,
-html[data-theme="meridian"] .tag.hot,
-html[data-theme="sprite"] .tag.hot,
-html[data-theme="signal"][data-mode="light"] .tag.hot,
-html[data-theme="meridian"] .cap-badge.failed,
-html[data-theme="sprite"] .cap-badge.failed,
-html[data-theme="signal"][data-mode="light"] .cap-badge.failed,
-html[data-theme="meridian"] .cap-badge.blocked,
-html[data-theme="sprite"] .cap-badge.blocked,
-html[data-theme="signal"][data-mode="light"] .cap-badge.blocked {
-  color: var(--accent) !important;
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent) !important;
-  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
-}
-html[data-theme="meridian"] .panel,
-html[data-theme="sprite"] .panel,
-html[data-theme="signal"][data-mode="light"] .panel,
-html[data-theme="meridian"] .pane,
-html[data-theme="sprite"] .pane,
-html[data-theme="signal"][data-mode="light"] .pane {
-  background: var(--panel-bg);
-}
-html[data-theme="meridian"] .shell,
-html[data-theme="sprite"] .shell,
-html[data-theme="signal"][data-mode="light"] .shell,
-html[data-theme="meridian"] .shell-main,
-html[data-theme="sprite"] .shell-main,
-html[data-theme="signal"][data-mode="light"] .shell-main {
-  background: var(--body-bg);
-  color: var(--text);
-}
-html[data-theme="meridian"] .live-dot,
-html[data-theme="sprite"] .live-dot,
-html[data-theme="signal"][data-mode="light"] .live-dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent);
-}
-/* MITRE ATT&CK coverage — light theme columns + heat cells */
-html[data-theme="meridian"] .mitre-col,
-html[data-theme="sprite"] .mitre-col,
-html[data-theme="signal"][data-mode="light"] .mitre-col {
-  background: var(--glass-2) !important;
-  border-color: var(--line) !important;
-}
-html[data-theme="meridian"] .mitre-cell,
-html[data-theme="sprite"] .mitre-cell,
-html[data-theme="signal"][data-mode="light"] .mitre-cell {
-  background: var(--sheet) !important;
-  border-color: var(--line) !important;
-  color: var(--dim) !important;
-}
-html[data-theme="meridian"] .mitre-cell:hover,
-html[data-theme="sprite"] .mitre-cell:hover,
-html[data-theme="signal"][data-mode="light"] .mitre-cell:hover {
-  color: var(--text) !important;
-  border-color: var(--line-strong) !important;
-}
-html[data-theme="meridian"] .mitre-cell.lv1,
-html[data-theme="sprite"] .mitre-cell.lv1,
-html[data-theme="signal"][data-mode="light"] .mitre-cell.lv1 {
-  background: color-mix(in srgb, var(--accent-2) 10%, var(--sheet)) !important;
-  border-color: color-mix(in srgb, var(--accent-2) 35%, transparent) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .mitre-cell.lv2,
-html[data-theme="sprite"] .mitre-cell.lv2,
-html[data-theme="signal"][data-mode="light"] .mitre-cell.lv2 {
-  background: color-mix(in srgb, var(--accent-2) 18%, var(--sheet)) !important;
-  border-color: color-mix(in srgb, var(--accent-2) 45%, transparent) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .mitre-cell.lv3,
-html[data-theme="sprite"] .mitre-cell.lv3,
-html[data-theme="signal"][data-mode="light"] .mitre-cell.lv3 {
-  background: color-mix(in srgb, var(--accent-2) 28%, var(--sheet)) !important;
-  border-color: color-mix(in srgb, var(--accent-2) 55%, transparent) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .mitre-cell.lv4,
-html[data-theme="sprite"] .mitre-cell.lv4,
-html[data-theme="signal"][data-mode="light"] .mitre-cell.lv4 {
-  background: color-mix(in srgb, var(--warn) 32%, var(--sheet)) !important;
-  border-color: color-mix(in srgb, var(--warn) 55%, transparent) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .mitre-cell.lv5,
-html[data-theme="sprite"] .mitre-cell.lv5,
-html[data-theme="signal"][data-mode="light"] .mitre-cell.lv5 {
-  background: color-mix(in srgb, var(--accent) 28%, var(--sheet)) !important;
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .mitre-top .mt-pill,
-html[data-theme="sprite"] .mitre-top .mt-pill,
-html[data-theme="signal"][data-mode="light"] .mitre-top .mt-pill {
-  background: color-mix(in srgb, var(--accent-2) 12%, var(--sheet)) !important;
-  border-color: color-mix(in srgb, var(--accent-2) 40%, transparent) !important;
-  color: var(--blue-team) !important;
-}
-html[data-theme="sprite"] .mitre-col,
-html[data-theme="sprite"] .mitre-cell {
-  border-radius: 0;
-  border-width: 2px;
-  box-shadow: 1px 1px 0 rgba(36, 25, 16, 0.1);
-}
-html[data-theme="meridian"] .set-note,
-html[data-theme="sprite"] .set-note,
-html[data-theme="signal"][data-mode="light"] .set-note,
-html[data-theme="meridian"] .team-banner,
-html[data-theme="sprite"] .team-banner,
-html[data-theme="signal"][data-mode="light"] .team-banner,
-html[data-theme="meridian"] .enrich-card,
-html[data-theme="sprite"] .enrich-card,
-html[data-theme="signal"][data-mode="light"] .enrich-card {
-  background: var(--glass-2) !important;
-  border-color: var(--line) !important;
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .users .pill,
-html[data-theme="sprite"] .users .pill,
-html[data-theme="signal"][data-mode="light"] .users .pill {
-  background: var(--glass-2) !important;
-  border-color: var(--line) !important;
-  color: var(--text) !important;
+.gauge-breakdown .gb-row { display: flex; justify-content: space-between; gap: 8px; }
+.gauge-breakdown .gb-val { color: var(--text); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.gauge-breakdown .gb-foot {
+  grid-column: 1 / -1;
+  padding-top: 6px;
+  margin-top: 2px;
+  border-top: 1px solid var(--line-soft);
 }
 
-
-/* Red team wells: force light surfaces under Meridian / Sprite */
-html[data-theme="meridian"] .wl-preview,
-html[data-theme="sprite"] .wl-preview,
-html[data-theme="signal"][data-mode="light"] .wl-preview,
-html[data-theme="meridian"] .graph-canvas,
-html[data-theme="sprite"] .graph-canvas,
-html[data-theme="signal"][data-mode="light"] .graph-canvas,
-html[data-theme="meridian"] .replay-select,
-html[data-theme="sprite"] .replay-select,
-html[data-theme="signal"][data-mode="light"] .replay-select,
-html[data-theme="meridian"] .replay-pre,
-html[data-theme="sprite"] .replay-pre,
-html[data-theme="signal"][data-mode="light"] .replay-pre,
-html[data-theme="meridian"] .deobf-input,
-html[data-theme="sprite"] .deobf-input,
-html[data-theme="signal"][data-mode="light"] .deobf-input,
-html[data-theme="meridian"] .deobf-row,
-html[data-theme="sprite"] .deobf-row,
-html[data-theme="signal"][data-mode="light"] .deobf-row,
-html[data-theme="meridian"] .pm-strings,
-html[data-theme="sprite"] .pm-strings,
-html[data-theme="signal"][data-mode="light"] .pm-strings,
-html[data-theme="meridian"] .pm-hex,
-html[data-theme="sprite"] .pm-hex,
-html[data-theme="signal"][data-mode="light"] .pm-hex,
-html[data-theme="meridian"] .sm-transcript,
-html[data-theme="sprite"] .sm-transcript,
-html[data-theme="signal"][data-mode="light"] .sm-transcript {
-  background: var(--bg) !important;
-  color: var(--text);
-  border-color: var(--line);
-}
-html[data-theme="meridian"] .wl-kind.active,
-html[data-theme="sprite"] .wl-kind.active,
-html[data-theme="signal"][data-mode="light"] .wl-kind.active {
-  color: var(--accent) !important;
-  border-color: color-mix(in srgb, var(--accent) 50%, transparent) !important;
-  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
-}
-html[data-theme="meridian"] .deobf-orig,
-html[data-theme="sprite"] .deobf-orig,
-html[data-theme="signal"][data-mode="light"] .deobf-orig,
-html[data-theme="meridian"] .replay-pre,
-html[data-theme="sprite"] .replay-pre,
-html[data-theme="signal"][data-mode="light"] .replay-pre {
-  color: var(--text) !important;
-}
-html[data-theme="meridian"] .deobf-final,
-html[data-theme="sprite"] .deobf-final,
-html[data-theme="signal"][data-mode="light"] .deobf-final {
-  color: var(--good) !important;
-}
-html[data-theme="meridian"] .deobf-layer-pill,
-html[data-theme="sprite"] .deobf-layer-pill,
-html[data-theme="signal"][data-mode="light"] .deobf-layer-pill {
-  background: color-mix(in srgb, var(--accent) 15%, transparent) !important;
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent) !important;
-  color: var(--accent) !important;
-}
-html[data-theme="sprite"] .wl-preview,
-html[data-theme="sprite"] .graph-canvas,
-html[data-theme="sprite"] .replay-select,
-html[data-theme="sprite"] .replay-pre,
-html[data-theme="sprite"] .deobf-input,
-html[data-theme="sprite"] .deobf-row {
-  border: 2px solid var(--line);
-  border-radius: 0;
-  box-shadow: 2px 2px 0 rgba(36, 25, 16, 0.12);
-}
-
-
-/* Overview activity heatmap */
-html[data-theme="meridian"] #heatmap-wrap,
-html[data-theme="sprite"] #heatmap-wrap,
-html[data-theme="signal"][data-mode="light"] #heatmap-wrap {
-  background: var(--glass-2) !important;
-  border-color: var(--line) !important;
-}
-html[data-theme="sprite"] #heatmap-wrap {
-  border: 2px solid var(--line);
-  border-radius: 0;
-  box-shadow: 2px 2px 0 rgba(36, 25, 16, 0.1);
-}
-
-/* ==== Globe stage on small screens ====
-   Kept here beside the desktop #cobe-stage / #cobe-wrap rules so the cascade
-   order is explicit: this file loads after each page's inline stylesheet, so a
-   phone override written there would lose to the fixed-position rules above.
-   Tablet (<=1100px): the rails are 280px each, so the globe's max-width
-   tracks them (it was calc(100vw - 744px) = 156px at 900px wide).
-   Phone (<=760px): the stage leaves the fixed layer and becomes the first
-   block of a normally scrolling page (index.html hands the rails over to
-   static flow at the same breakpoint); the wrapper's viewport-relative
-   max-width, which computed to 0px on a 375px screen, is dropped. */
-/* Above the phone breakpoint the stage is offset so the globe is centred in
-   the free band between the two rails rather than in the viewport, which put
-   its left limb under the left rail (32px at 900px). Tablet rails are both
-   280px, so the band starts at the 52px sidebar; desktop rails are 344px and
-   320px, so the band's centre sits (344-320)/2 = 12px further right and the
-   stage starts at 52 + 24 = 76px. */
-@media (min-width: 761px) {
-  #cobe-stage { left: 52px; }
-}
-@media (min-width: 1101px) {
-  #cobe-stage { left: 76px; }
-}
-@media (max-width: 1100px) {
-  /* 52px sidebar + two 280px rails + 40px of breathing room. */
-  #cobe-wrap { max-width: calc(100vw - 652px); }
-}
-@media (max-width: 760px) {
-  /* The Signal star-field rule above sets background-attachment: fixed at a
-     higher specificity, so it is named here too or the stars stay pinned to
-     the viewport and pan against the stage as the page scrolls. */
-  #cobe-stage, #cobe-stage.on,
-  html[data-theme="signal"]:not([data-mode="light"]) #cobe-stage {
-    position: relative; inset: auto; height: auto; padding: 12px 0 4px;
-    background-attachment: scroll;
-  }
-  #cobe-wrap {
-    width: min(78vw, 340px); height: min(78vw, 340px);
-    max-width: none; max-height: none;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

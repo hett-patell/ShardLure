@@ -55,11 +55,11 @@ Longer operational guides (installation, backup, security, troubleshooting) live
 - **Deploy-safe sync:** tar-over-SSH because `scp` of Go/Python sources mysteriously turns them into UTF-16. We do not gaslight you about this — see Troubleshooting.
 - **Incremental Cowrie ingest:** tracks file offset + inode, so a 100MB cowrie.json doesn't get re-scanned every 5 seconds. Your I/O thanks us.
 - **Idempotent everything:** re-running ingest dedupes events instead of duping them. Past you can't bully present you.
-- **Themes:** ships **Signal** (default — a near-black signal field with a light/dark toggle), plus **Meridian** and **Sprite**. Switchable live from the settings panel; the selected theme and Signal's mode persist in SQLite. One WebGL globe engine (Cobe) across all themes.
-- **3D Cobe globe:** WebGL globe with live arcs from attacker IPs to your home point, plus floating artifacts anchored to attacker coordinates — satellites, a LIVE badge at your origin, and per-actor analytics chips. Pointer-drag rotation, scroll zoom, double-click reset. Proper listener lifecycle (no leaks on theme switch).
-- **Two dashboards, split by job:** the **globe view** (`/`) is an ambient wall display — summary counts (events, actors, unique IPs, countries, **fingerprint coverage**, shell sessions), threat-level gauge, a Cowrie honeypot status panel, events/hour sparkline, live feed, and the globe with its artifacts. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
+- **Themes:** **Obsidian** (default dark) and **Kiln** (light). In both, chrome stays neutral and the only saturated colour is heat: how recent or how intense something is. Switch themes in Settings → Appearance. Earlier light themes open in Kiln and earlier dark themes open in Obsidian.
+- **3D Cobe globe:** one route, from the latest connection's source into your honeypot along the great circle, lifted over the globe and coloured by how recently it was active. It never spins for show: a new connection replaces the route (it draws itself from the source to your honeypot, the source pings as it leaves and your honeypot as it lands) and the globe turns to show it — no animation and a straight cut if the OS asks for reduced motion. Drag to look around, double-click to return home. Proper listener lifecycle (no leaks on theme switch).
+- **Two dashboards, split by job:** the **activity page** (`/`) is an ambient wall display — a one-line summary (actors, addresses, countries) with events, shell sessions and **fingerprint coverage**, the globe and its latest connection, a live feed, an events/hour sparkline, top source addresses, a Cowrie honeypot status panel and the threat level. The **intel console** (`/intel`) is where you dig: attack geography, brute-force radar, top credentials, MITRE ATT&CK coverage, sessions, payloads, tunnel/proxy targets, IOC export. All fed by real-time API polling.
 - **Command palette:** the search box in the intel console is a real lookup, not a row filter — type any IP, actor, session id, command, or payload hash and get grouped, actionable results (jump to an actor, enrich an IP, open a session transcript or payload) with arrow-key navigation. It searches the API, so it finds records that aren't on the current tab.
-- **Fingerprint coverage, stated honestly:** the globe's FINGERPRINTED tile is the share of Cowrie telemetry carrying a HASSH — event-weighted, because counting actor rows inverts the number (clustering collapses 784 IPs into one row, so successful clustering made coverage *look* worse). journald events are excluded from the denominator: sshd logs cannot carry a fingerprint at all.
+- **Fingerprint coverage, stated honestly:** the activity page's *fingerprinted* figure is the share of Cowrie telemetry carrying a HASSH — event-weighted, because counting actor rows inverts the number (clustering collapses 784 IPs into one row, so successful clustering made coverage *look* worse). journald events are excluded from the denominator: sshd logs cannot carry a fingerprint at all.
 - **Honeypot status panel:** Cowrie's real uptime read from systemd (`ActiveEnterTimestamp`), plus seconds-since-last-event and total ingested. Strictly read-only — ShardLure never starts, stops, or reconfigures the Cowrie unit; the two systemd units stay independent with the JSON log as their only contract. On a host without systemd it reports `unknown` rather than inventing a number, and the last-event signal still works (a Cowrie that is "up" but not logging is the real failure mode).
 - **Dashboard settings panel:** configure API keys, theme, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save. Home coordinates remain in YAML under `dashboard.home_*` and are not edited by Settings.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
@@ -82,13 +82,58 @@ Cowrie's pip install.
 ### Requirements
 
 - **Python 3.11 or newer** as `python3` on the honeypot host. The pinned Cowrie
-  (v3.1.1, `install/cowrie.commit`) declares `requires-python >=3.11` and its
+  (v3.1.8, `install/cowrie.commit`) declares `requires-python >=3.11` and its
   venv is built from the interpreter running the installer. Ubuntu 22.04 ships
   3.10, so use **Ubuntu 24.04 or newer** (or install `python3.11` with its venv
   module and run the installer with it: `sudo python3.11 scripts/shardlure.py run`).
   Both installers check this first and refuse with "Nothing was changed" rather
   than fail in pip after SSH has moved; `install.sh --no-cowrie` skips the check
   because it installs no Cowrie.
+
+### Cowrie version
+
+Each ShardLure release is built and tested against **one exact Cowrie commit**,
+pinned in `install/cowrie.commit`. Run the Cowrie version your ShardLure release
+pins, and no other: both installers fetch that commit, and the stealth patches
+are exact-text edits to that commit's source, so `apply-stealth.sh` and
+`shardlure.py run` refuse any other Cowrie checkout rather than half-patch it.
+
+| ShardLure | Cowrie | Pinned commit |
+|---|---|---|
+| v1.x | not pinned (Cowrie's `main` at install time) | — |
+| v2.0.0 – v2.10.1 | v3.0.8 | `65ded95b2d2b6555be8e4eb95315036a4db361f9` |
+| v2.11.0 – v2.13.0 | v3.1.1 | `c17c9b73d6af0972334ea1e90b20d974cb24eeca` |
+| v2.14.0 | v3.1.8 | `183a3b1bc361bb941e1d54874922399baac42af0` |
+
+Upgrading ShardLure across a row of this table moves Cowrie too. The installers
+do not move an existing box: they refuse a running host (and any host installed
+before v2.8.0), and a Cowrie checkout at another commit, whose patched tree is
+dirty by design. After a [backup](#upgrading), run from a checkout of the new
+release:
+
+```bash
+sudo python3 scripts/shardlure.py cowrie-upgrade
+```
+
+It stops `cowrie.service`, moves its tree aside as `cowrie.<old commit>`, and
+installs the pinned commit with the persona and patches. It moves the logs,
+downloads, TTY logs, `etc/userdb.txt`, sensor UUID and SSH host keys back by
+rename, so ingest keeps its place in `cowrie.json`. Hand edits to the old
+`etc/cowrie.cfg` stay in the old tree; review them before deleting it.
+
+It also updates a verified `install.sh`-managed unit that still uses
+`cowrie start -n --umask=0027` to run `twistd` directly. Custom units and
+drop-ins are not rewritten. An unverified unit with that launcher must be
+fixed by the operator before upgrading. Admin SSH, the ShardLure service,
+config and binary are not changed.
+
+The move needs GitHub and PyPI. The honeypot is down during the build (about
+a minute on a 4-core ARM VPS). The command starts and checks a previously
+running Cowrie or a failed legacy launcher; a deliberately stopped service
+stays stopped. If the replacement fails to start or listen, the upgrade
+stops it, restores the old tree and any changed unit, and brings back the
+previous service if it had been running. A failed replacement is kept as
+`cowrie.failed-<commit>-<time>` for inspection.
 
 ### Supported data filesystems
 
@@ -296,6 +341,12 @@ sudo systemctl restart shardlure-live
 shardlure version
 ```
 
+Building from a checkout instead of downloading a release (Go older than
+`go.mod` asks for downloads the right toolchain by itself): run `make build`,
+then `sudo install -m 0755 shardlure /usr/local/bin/shardlure.new` and continue
+at step 1. `shardlure version` names the commit it was built from.
+
+- **The backup needs room, and keeps capture's.** A bundle holds the database, Cowrie's logs, downloads and TTY logs, and the evidence, so it is about as large as those together (`du -sh` them first), and `backup create` refuses one that would leave less than `capture.min_free_bytes` (2 GiB) free on its filesystem, naming the sizes. On a small disk, put `--output` on another volume or copy the bundle off the host and delete it there.
 - **First start migrates the schema** in place (v2.7.x is schema 18, v2.8.0 is 24). Larger databases then convert legacy timestamps in the background, in bounded batches, while collection continues. When the bot-script normaliser changed (v2.9 is normaliser version 5; the second release candidate was 4, so upgrading from it rebuilds once more), the campaigns worker also re-records every script in the background; campaign regrouping waits until the rebuilt scripts settle (at most 30 minutes after it catches up), the dashboard explains the wait, and campaign names and IDs are carried over. `ingest cowrie --replace` starts the same wait, so a replaced log keeps its campaign names and IDs too.
 - **Startup takes a while on big databases.** The dashboard answers `503 starting` until the 30-day journal seed finishes (about a minute on 1.75M events). `/readyz` answers loopback callers only: on the host run `curl http://127.0.0.1:8080/readyz`, or for a Tailscale-only bind `curl --interface 127.0.0.1 http://<tailscale-ip>:8080/readyz`. `journalctl -u shardlure-live -f` shows the same progress.
 - **Database permissions are enforced.** v2.8.0 refuses a database that is not owned by the account the service runs as, or whose directory is group- or world-writable (`unsafe database path` in the journal). Installer-built hosts already comply. For a hand-built layout, fix the ownership and mode (for example `chmod 0755 /var/lib/shardlure`, `chmod 0600 shardlure.db`) and restart.
@@ -804,7 +855,7 @@ sudo -u "$SVC" shardlure backup restore --input /var/backups/shardlure/2026-09-2
 
 The destination's parent directories must be owned by root or the service account. For example, a `/srv` owned by `ubuntu` is refused.
 
-- **What a bundle holds.** A SQLite snapshot taken through the database's own backup API (safe on a live WAL database), the configuration exactly as the service parsed it, referenced evidence files, Cowrie downloads and TTY logs, and a `manifest.json` with every file's hash and size. `--include-file` adds extra administrative files.
+- **What a bundle holds.** A SQLite snapshot taken through the database's own backup API (safe on a live WAL database), the configuration exactly as the service parsed it, referenced evidence files, Cowrie's JSON logs, downloads and TTY logs, and a `manifest.json` with every file's hash and size. `--include-file` adds extra administrative files. `create` refuses a bundle that would leave less than `capture.min_free_bytes` free on the output filesystem.
 - **Ownership and limits.** Bundle directories are `0700` and files `0600`. The manifest is format v1, capped at 64 MiB and 1,000,000 entries. Every operation times out after 30 minutes unless `--timeout` says otherwise.
 - **Failure is visible.** A bundle is staged under a private `.incomplete` name and only published once every write and `fsync` succeeded. If `backup create` fails before publishing, it removes its own staging directory on Linux, and nothing else. If that cleanup fails, or on other platforms, the staging directory is kept and the command prints its path. If publication fails late, the output keeps its incomplete marker and the command does not report success. A refused source file, such as a symlinked config or `--include-file`, is named in the error with the reason.
 - **Restore never overwrites.** The destination must not exist. Restore re-checks every hash, remaps stored evidence paths into the new directory, resets Cowrie file cursors so a later replay deduplicates instead of duplicating history, and writes `shardlure.recovery.yaml` (capture and retention disabled) plus `recovery-report.json` describing every transformation. Your original config, settings, annotations and submission ledgers are preserved unchanged.
@@ -1033,7 +1084,7 @@ sudo userdel -r cowrie
 - [x] Graceful shutdown on SIGINT/SIGTERM (so Ctrl-C is no longer a war crime)
 - [x] DB chmod 0600 + sshd-config auto-rollback on failed reload
 - [x] MalwareBazaar payload sharing (CLI + one-click dashboard upload)
-- [x] Signal theme — full SOC dashboard redesign with sidebar nav and light/dark toggle
+- [x] Obsidian and Kiln redesign — one header on both pages, heat-coded recency, Atkinson Hyperlegible type
 - [x] Dashboard widgets: threat gauge, geography, credentials, brute-force radar, live timeline
 - [x] Windowed threat scoring — the gauge and every rate column describe the last 24h, not all-time totals
 - [x] Widget verification harness (`scripts/verify-widgets.py`) — every dashboard number recomputed from SQL
@@ -1044,13 +1095,13 @@ sudo userdel -r cowrie
 - [x] Dashboard auth token forwarded on every request + cross-page navigation
 - [x] One-command uninstall (`uninstall [--purge]`) with SSH-restore-first safety
 - [x] Full-window analytics — MITRE/TTP/IOC/graph/deobf cover the whole selected window (not a recent sample), with capped widgets disclosing "N of M"
-- [x] Multi-theme support (Signal, Meridian, Sprite) with live switching
+- [x] Multi-theme support (Obsidian and Kiln) with live switching
 - [x] 3D Cobe globe with WebGL arcs, drag rotation, and proper listener lifecycle
 - [x] Dashboard settings panel (API keys and theme — masked + connection-tested; home remains YAML)
 - [x] Runtime keystore (DB > env > config precedence, no restart needed)
 - [x] AbuseIPDB outbound reporting (CLI + dashboard Report All, vetting gate, 24h dedup)
 - [x] Tunnel/proxy target tracking (`direct-tcpip` aggregation + red-team widget)
-- [x] Globe artifacts on every theme (satellites, live badge, per-actor analytics chips)
+- [x] Connection-driven globe (turns to each new source, labels it, draws its route)
 - [x] Ambient globe dashboard (analyst widgets consolidated in `/intel`)
 - [x] Intel command palette (actors / IPs / sessions / commands / payloads)
 - [x] GeoLite2 MMDB enrichment (local tier-1 geo: full coverage, zero egress, works air-gapped)
@@ -1064,7 +1115,7 @@ sudo userdel -r cowrie
 A: Marginally. It moves real SSH to a private port (good) and runs a fake one (interesting). The main value is *intel*: you learn what botnets are doing to boxes that look like yours.
 
 **Q: Will I get cool maps?**
-A: Yes. There is a globe. It rotates. Chartreuse arcs converge on your home point like you're in a 2007 hacker movie. The intel console has a threat gauge, brute-force radar, and attack geography panel.
+A: Yes. There is a globe. It turns to face whoever just knocked and traces their route to your box in ember, like you're in a 2007 hacker movie. The intel console has a threat meter, brute-force radar, and attack geography panel.
 
 **Q: Is this production-ready?**
 A: It's "single-VPS, one-operator, runs-on-my-laptop" ready. If you want a fleet, you'll want to front the SQLite with something less single-writer. PRs welcome.

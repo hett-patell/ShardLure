@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,13 +30,16 @@ import (
 )
 
 // Build-time injected via -ldflags "-X main.version=... -X main.commit=...".
-// Defaults reflect a dev build from an untagged checkout.
+// Defaults reflect a dev build from an untagged checkout; a plain `go build`
+// (make build, the shardlure.py installer) still names its commit, from the
+// VCS stamp Go embeds (see vcsCommit).
 var (
 	version = "dev"
 	commit  = "unknown"
 )
 
 func main() {
+	commit = buildCommit()
 	cfgPath := flag.String("config", "", "path to shardlure.yaml")
 	flag.Parse()
 	args := flag.Args()
@@ -169,6 +173,44 @@ func main() {
 		usage()
 		os.Exit(1)
 	}
+}
+
+// buildCommit is commit, or for a build without -ldflags the revision Go
+// embedded from the checkout.
+func buildCommit() string {
+	if commit != "unknown" {
+		return commit
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if c := vcsCommit(info.Settings); c != "" {
+			return c
+		}
+	}
+	return commit
+}
+
+// vcsCommit is the revision a build from a Git checkout embedded, short like
+// the release builds' `git rev-parse --short HEAD` and marked -dirty for a
+// modified tree; "" when the build carries none.
+func vcsCommit(settings []debug.BuildSetting) string {
+	var revision string
+	var modified bool
+	for _, s := range settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	if revision == "" {
+		return ""
+	}
+	revision = revision[:min(7, len(revision))]
+	if modified {
+		revision += "-dirty"
+	}
+	return revision
 }
 
 func cmdIngest(st *store.Store, cfg config.Config, args []string) {

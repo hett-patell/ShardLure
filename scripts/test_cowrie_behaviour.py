@@ -1129,6 +1129,86 @@ class ScpStdinTest(unittest.TestCase):
                 cbt.parse_expected(f"#harness: scp-stdin={bad}\n")
 
 
+class StdinLinesTest(unittest.TestCase):
+    def test_directive(self):
+        exp = cbt.parse_expected("#harness: stdin-lines=3 echo a b\n")
+        self.assertEqual(exp.stdin_lines, (3, "echo a b"))
+        self.assertEqual(cbt.parse_expected(
+            f"#harness: stdin-lines={cbt.MAX_STDIN_LINES} x\n").stdin_lines[0],
+            cbt.MAX_STDIN_LINES)
+        for bad in ("", "3", "3 ", "0 x", "-1 x", "x echo", f"{cbt.MAX_STDIN_LINES + 1} x",
+                    "3echo"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cbt.parse_expected(f"#harness: stdin-lines={bad}\n")
+
+    def test_combinations(self):
+        for ok in ("#harness: before=echo a\n", "#harness: overlap=echo b\n",
+                   "#harness: within=3\n", "#harness: upload-channel=/tmp/x hw\n"):
+            with self.subTest(ok=ok):
+                cbt.parse_expected("#harness: stdin-lines=2 x\n" + ok)
+        for bad in ("#harness: scp-stdin=x\n", "#harness: sftp-during=/tmp/u\n"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cbt.parse_expected("#harness: stdin-lines=2 x\n" + bad)
+
+    def test_lines_are_sent_paced_then_eof(self):
+        chan = FakeChannel([b"done\n"], 0)
+        events = []
+        chan.sendall = lambda data: events.append(("send", data))
+        chan.shutdown_write = lambda: events.append(("eof",))
+        with mock.patch.object(cbt.time, "sleep",
+                               side_effect=lambda s: events.append(("sleep", s))):
+            res = cbt.exec_on_channel(chan, "bash", time.monotonic() + 5, ClosedError,
+                                      cbt.stdin_lines(3, "if true"))
+        pause = ("sleep", cbt.STDIN_LINE_PAUSE)
+        line = ("send", b"if true\n")
+        self.assertEqual(events[:6], [line, pause, line, pause, line, ("eof",)])
+        self.assertEqual(res, cbt.RunResult("done\n", 0, False))
+
+    def test_overlap_sends_the_lines_before_channel_b(self):
+        order = []
+        a, b = FakeChannel([b"a\n"], 0), FakeChannel([b"b\n"], 0)
+        a.sendall = lambda data: order.append(("a", data))
+        a.shutdown_write = lambda: order.append(("a", "eof"))
+        b.exec_command = lambda command: order.append(("b", command))
+        opened = iter([a, b])
+        with mock.patch.object(cbt.time, "sleep"):
+            res = cbt.exec_overlapped(lambda: next(opened), "bash", "echo b",
+                                      time.monotonic() + 5, ClosedError,
+                                      cbt.stdin_lines(2, "x"))
+        self.assertEqual(order, [("a", b"x\n"), ("a", b"x\n"), ("a", "eof"), ("b", "echo b")])
+        self.assertEqual(res.output, "a\n")
+
+    def test_ssh_transport_sends_the_lines_at_once(self):
+        with mock.patch.object(cbt.shutil, "which", return_value="/usr/bin/x"):
+            run = cbt.ssh_runner("127.0.0.1", 2299, "root", "pw", "/dev/null")
+        done = mock.Mock(stdout=b"ok\n", stderr=b"", returncode=0)
+        with mock.patch.object(cbt.subprocess, "run", return_value=done) as sp:
+            run("bash", 5, stdin=cbt.stdin_lines(2, "x"))
+        self.assertEqual(sp.call_args.kwargs["input"], b"x\nx\n")
+
+    def test_main_passes_the_lines_to_the_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "expected").mkdir()
+            (root / "probes.txt").write_text("fed\tbash\n")
+            (root / "expected" / "fed.out").write_text(
+                "#harness: stdin-lines=2 echo hi\n#harness: before=true\nhi\nhi\n")
+            userdb = root / "userdb.txt"
+            userdb.write_text("root:x:pw\n")
+            seen = []
+
+            def runner(command, timeout, stdin=None, before=None):
+                seen.append((command, stdin, before))
+                return cbt.RunResult("hi\nhi\n", 0, False)
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cbt.main(["--host", "127.0.0.1", "--port", "2299", "--password-from",
+                               str(userdb), "--cases-dir", str(root), "--only", "probes"],
+                              runner=runner)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(seen, [("bash", [b"echo hi\n", b"echo hi\n"], [("true", None)])])
+
 
 class UploadChannelTest(unittest.TestCase):
     def test_directive(self):

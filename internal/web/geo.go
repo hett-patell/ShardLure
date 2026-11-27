@@ -182,13 +182,43 @@ func newGeoResolver(cfg geoConfig, st *store.Store, keys *settings.Keystore) *ge
 // cached returns geolocation only if already resolved (never blocks
 // on HTTP). Expired entries are reported as a miss; they are removed
 // lazily on the next put() so the cache size obeys the LRU cap even
-// if expiry sweeping never gets to them.
+// if expiry sweeping never gets to them. A miss leaves a 30 s
+// placeholder so repeated calls do not re-read the store.
 func (g *geoResolver) cached(ip string) geoEntry {
+	return g.resolved(ip, true)
+}
+
+// peek is cached without the miss placeholder. Use it for an IP the same
+// request is about to hand to prefetch: prefetch treats a fresh entry of any
+// kind as known, so cached's placeholder made it skip the IP on every poll and
+// a source seen first as the latest connection never resolved at all.
+func (g *geoResolver) peek(ip string) geoEntry {
+	return g.resolved(ip, false)
+}
+
+// locate answers from the cache or, failing that, the local MMDB, and reports
+// whether the answer was cached. An MMDB answer is neither cached nor
+// persisted here: the caller hands uncached IPs to prefetch, which does both.
+// A new source is placed on the poll that first sees it rather than the next
+// one, and nothing here touches the network.
+func (g *geoResolver) locate(ip string) (ent geoEntry, cached bool) {
+	if ent = g.peek(ip); ent.OK {
+		return ent, true
+	}
+	if g.isEnabled() && !isPrivateIP(ip) && g.mmdb.ready() {
+		if local, ok := g.mmdb.lookup(ip, g.now()); ok {
+			return local, false
+		}
+	}
+	return geoEntry{}, false
+}
+
+func (g *geoResolver) resolved(ip string, holdMiss bool) geoEntry {
 	if !g.isEnabled() || isPrivateIP(ip) {
 		return geoEntry{}
 	}
 	g.mu.Lock()
-	if v, ok := g.cache[ip]; ok && g.now().Before(v.Expiry) {
+	if v, ok := g.cache[ip]; ok && g.now().Before(v.Expiry) && (v.OK || holdMiss) {
 		g.lru.MoveToFront(v.elem)
 		g.mu.Unlock()
 		return *v
@@ -219,6 +249,9 @@ func (g *geoResolver) cached(ip string) geoEntry {
 				}
 			}
 		}
+	}
+	if !holdMiss {
+		return geoEntry{}
 	}
 	g.mu.Lock()
 	if existing, ok := g.cache[ip]; !ok || !existing.OK {

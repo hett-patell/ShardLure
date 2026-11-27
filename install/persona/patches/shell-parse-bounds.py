@@ -1,55 +1,71 @@
 #!/usr/bin/env python3
 """Patch cowrie/shell/bashparse.py: bound what one input costs the parser.
 
-WHY (payload-yield Phase B Task 8b): Cowrie parses every command line, script
-and command substitution with a Lark Earley grammar on the reactor thread, so
-while one input parses every other session waits. Measured on v3.1.1 with the
-ShardLure patch set (x86 here; arm is slower):
+WHY (payload-yield Phase B Task 8b, re-anchored on Cowrie v3.1.8): Cowrie
+parses every command line, script, command substitution and here-document
+body with a Lark Earley grammar on the reactor thread, so while one input
+parses every other session waits. Measured with the ShardLure patch set (x86;
+arm is slower):
 
-* A command substitution was parsed again each time it ran. Nested `$(`
-  cost the depth times the body (8 levels around 11 KB: 23 s), and a loop
-  re-parsed its body every pass: the 116-byte line
+* A command substitution is parsed again each time it runs. Nested `$(` cost
+  the depth times the body (8 levels around 11 KB: 23 s on v3.1.1), and a
+  loop re-parsed its body every pass: the 116-byte line
   `i=0; while true; do x=$(true w0 ... w19); done` made 1,001 parses and held
-  the reactor 22 s (436 bytes: 107 s). The 189 s stall Task 8 saw live is
-  this shape. A `$(...)` body now runs from the tree its enclosing line
-  already produced; the differential over every `$(...)` in the harness,
-  the profiler and Cowrie's own tests found no change in statements, line
-  numbers or transcripts.
-* A backtick body is one flat token, with no tree in its line to reuse, so
-  the same line with backticks still parsed every pass (24 s). Each SSH
-  connection now remembers its recent parse results (inputs up to 2 KiB,
-  8 KiB in all), keyed by the exact input, and splits a repeat from the
-  remembered tree: the 200-pass backtick loop went from 4.5 s to 0.26 s,
-  the same as $(...). It is kept per connection, not per parser, because
-  subshells, pipeline stages and substitutions each run in a new shell.
-* Shape bounds alone kept missing costly inputs (each review round found
-  another), so grammar time is also budgeted: PARSE_BUDGET_SECONDS (30 s)
-  per connection, after which every parse that needs the grammar is
-  refused at once. Whatever shape an input takes, one connection spends at
-  most the budget plus one parse (the 10 s parse timeout) in the grammar.
-  It bounds grammar time only: running what parsed is not budgeted, so a
-  line that keeps re-entering the shell still holds the reactor longer
-  than it is charged (a 70-body `while true` line: 46.6 s for 30 s
-  charged), and nested `while true` loops hold it as long as pristine
-  v3.1.1 lets them (64 s for two levels).
-* ~200 levels of "(", "{" or if raised RecursionError out of lineReceived
-  (128 levels of `$(` raised one while evaluating), and nested case clauses
+  the reactor 22 s. v3.1.8 still re-parses (stock v3.1.8: the harness's
+  parse-loop-* cases take 5.7-5.8 s against their 3-4 s limits). A `$(...)`
+  body now runs from the tree its enclosing line, or here-document body,
+  already produced (_substitute, at all three sites: a word, a double-quoted
+  part, a here-document body). Only when the body would parse the same way on
+  its own: one that holds a here-document or ends inside a line continuation
+  is parsed afresh, as stock does.
+* A backtick body is one flat token, with no tree in its line to reuse. Each
+  SSH connection remembers its recent grammar results (inputs up to 2 KiB,
+  8 KiB in all), keyed by the exact input and grammar rule, and answers a
+  repeat from the remembered tree or syntax error: the 200-pass backtick loop
+  went from 4.5 s to 0.26 s. It is kept per connection, not per parser,
+  because subshells, pipeline stages and substitutions each run in a new
+  shell. A timeout or a recursion failure is never remembered (load and stack
+  depth decide those, not the input).
+* Shape bounds alone kept missing costly inputs, so grammar time is also
+  budgeted: PARSE_BUDGET_SECONDS (30 s) per connection, after which every
+  input that needs the grammar is refused at once. Whatever shape an input
+  takes, one connection spends at most the budget plus one parse (the 10 s
+  parse timeout) in the grammar. It bounds grammar time only, not the time
+  spent running what parsed.
+* v3.1.8 reads multi-line input like bash: a line-fed shell (interactive, or
+  `bash` reading the channel's stdin) joins each new line onto a construct
+  still open (an `if` without its `fi`) and parses the whole pending text
+  again, up to [shell] max_input_size, so N lines cost N(N+1)/2 lines of
+  grammar, and lines that queued while one parsed run back to back in one
+  reactor turn: 100 lines of 80 B held every other session 39.6 s (37 s with
+  only the budget). When the earlier text ended at a clean line boundary
+  (nothing lexically open, no here-document), its tree is remembered and only
+  the new lines are parsed (_extend_pending): the same 100 lines finish in
+  2.9 s, 2.25 s of it the client's own pacing, and another session waits at
+  most 0.57 s. Every parse, extended or whole, is charged to the budget.
+* ~200 levels of "(", "{" or if raise RecursionError, and nested case clauses
   are superlinear in the grammar itself (64 levels, 1.2 KB: 5.8 s). Input
-  nested deeper than MAX_NESTING_DEPTH (16) is refused by a linear scan
-  before the grammar runs; production's deepest input in 28,479 commands and
-  104 captured scripts nests 6 levels.
+  nested deeper than MAX_NESTING_DEPTH (16) is refused by a linear scan of
+  the pre-scanner's stripped text (here-document bodies lifted out) before
+  the grammar runs; production's deepest input in 28,479 commands and 104
+  captured scripts nests 6 levels. A here-document body is scanned only when
+  it holds a `$(` or backtick, since its plain parentheses are text.
 * Nesting the scan does not count (if, while, `{ }`) parses in linear time
-  but can still exhaust the stack; that RecursionError now fails the one
-  parse instead of escaping into the protocol.
+  but can still exhaust the stack; that RecursionError, in the grammar or in
+  the statement splitter, fails the one parse instead of escaping into the
+  protocol.
 
-Refusals answer as bash answers an unclosed "( (" group, "syntax error:
-unexpected end of file" with status 2: the reply Cowrie already gives an
-oversized or timed-out parse, so a refusal is no new kind of answer. Nothing
-is ever executed.
+Every refusal raises ParseRefusedError, a ParseTimeoutError, from _lark_parse,
+so it takes the path stock v3.1.8 already gives a timed-out parse: a command
+line answers bash's "syntax error: unexpected end of file" with status 2, and a
+here-document body is used as written. A refusal is no new kind of answer.
+Nothing is ever executed.
 """
 import sys
 from pathlib import Path
 
+# The parse-timeout helper and the alarm guard after it: the constants, the
+# nesting scan and ParseRefusedError go between them.
 OLD_LIMITS = r'''    return CowrieConfig.getfloat("shell", "parse_timeout_seconds", fallback=10.0)
 
 
@@ -69,26 +85,35 @@ NEW_LIMITS = r'''    return CowrieConfig.getfloat("shell", "parse_timeout_second
 # 3-12 KB profiler); 16 leaves that 10 levels of headroom.
 MAX_NESTING_DEPTH = 16
 
-# Grammar time one SSH connection may spend, summed over its channels and the
-# child shells its subshells, pipelines and substitutions run in. Shape bounds
-# alone kept missing inputs (a review found a new costly shape per round); this
-# bounds them all: past it every parse that needs the grammar is refused at
-# once. It counts grammar time only, not the time spent running what parsed
-# (see the module docstring). A connection that spends it has held the
-# reactor at least 30 s; a 16 KiB
-# dropper script, the largest input [shell] max_input_size admits, costs 4-7 s
-# on arm, and a bot's ordinary commands milliseconds.
+# Grammar time one SSH connection may spend, summed over its channels, the
+# child shells its subshells, pipelines and substitutions run in, and every
+# re-parse of a line-fed construct still open. Shape bounds alone kept missing
+# inputs (a review found a new costly shape per round); this bounds them all:
+# past it every input that needs the grammar is refused at once. It counts
+# grammar time only, not the time spent running what parsed. A connection
+# that spends it has held the reactor at least 30 s; a 16 KiB dropper script,
+# the largest input [shell] max_input_size admits, costs 4-7 s on arm, and a
+# bot's ordinary commands milliseconds.
 PARSE_BUDGET_SECONDS = 30.0
 
-# Parse results a connection remembers, keyed by the exact input: a loop runs
-# the same backtick body, and the same line, every pass, and a backtick body is
-# one flat token with no tree in its line to reuse the way a "$(...)" body
-# does (the 104-byte `while` line with backticks parsed 1,000 times: 24 s).
-# Only inputs up to PARSE_MEMO_ENTRY_CHARS are kept, PARSE_MEMO_CHARS in all:
-# a tree holds 500-680 bytes per input character, so this is ~5 MB at most.
+# Grammar results a connection remembers, keyed by the grammar rule and the
+# exact input: a loop runs the same backtick body, and the same line, every
+# pass, and a backtick body is one flat token with no tree in its line to
+# reuse the way a "$(...)" body does (the 104-byte `while` line with
+# backticks parsed 1,000 times: 24 s). Only inputs up to
+# PARSE_MEMO_ENTRY_CHARS are kept, PARSE_MEMO_CHARS in all: a tree holds
+# 500-680 bytes per input character, so this is ~5 MB at most.
 PARSE_MEMO_ENTRIES = 64
 PARSE_MEMO_ENTRY_CHARS = 2048
 PARSE_MEMO_CHARS = 8192
+
+
+class ParseRefusedError(ParseTimeoutError):
+    """ShardLure (shell-parse-bounds.py): the input was refused without a
+    full parse (nested too deep, the connection's grammar budget is spent, or
+    the recursion limit was hit). A ParseTimeoutError, so every caller answers
+    it the way it answers a timed-out parse."""
+
 
 from time import perf_counter as _parse_clock
 
@@ -236,67 +261,184 @@ def nesting_too_deep(text: str, limit: int = MAX_NESTING_DEPTH) -> bool:
     return deepest > limit
 
 
+import copy as _copy
+
+from cowrie.shell.prescan import ScanResult
+
+
+def _moved(node, shift: int, rows: int):
+    """A copy of a grammar node parsed from text that starts ``shift``
+    characters and ``rows`` lines into a larger text, placed in that text.
+    Columns stay: the smaller text starts a line. The node itself is never
+    changed (it may be a remembered tree)."""
+    if isinstance(node, Token):
+        return Token(
+            node.type,
+            node.value,
+            start_pos=None if node.start_pos is None else node.start_pos + shift,
+            line=None if node.line is None else node.line + rows,
+            column=node.column,
+            end_line=None if node.end_line is None else node.end_line + rows,
+            end_column=node.end_column,
+            end_pos=None if node.end_pos is None else node.end_pos + shift,
+        )
+    if isinstance(node, Tree):
+        meta = _copy.copy(node.meta)
+        if not meta.empty:
+            meta.start_pos += shift
+            meta.end_pos += shift
+            meta.line += rows
+            meta.end_line += rows
+        return Tree(node.data, [_moved(child, shift, rows) for child in node.children], meta)
+    return node
+
+
+def _remembered_error(error: LarkError) -> tuple:
+    """What the memo keeps of a grammar error: the fields parse() reads, not
+    the exception, which holds the parser's state."""
+    if isinstance(error, UnexpectedCharacters):
+        return ("chars", error.pos_in_stream, error.line, error.column)
+    if isinstance(error, UnexpectedEOF):
+        return ("eof",)
+    return ("lark",)
+
+
+def _raise_remembered(entry: tuple, text: str) -> None:
+    """Raise a fresh grammar error equal to the remembered one."""
+    if entry[0] == "chars":
+        raise UnexpectedCharacters(text, entry[1], entry[2], entry[3])
+    if entry[0] == "eof":
+        raise UnexpectedEOF([])
+    raise LarkError("remembered syntax error")
+
+
 _HAS_PARSE_ALARM = all(
 '''
 
-OLD = r'''        previous "unexpected end of file" fallback.
-        """
+# parse(): before the pre-scan, take the tree a $(...) body was handed.
+OLD_PARSE = r'''        self._line_offset = first_line - 1
+        scanned = scan(text, max_heredoc=max_heredoc_size())
+'''
+
+NEW_PARSE = r'''        self._line_offset = first_line - 1
+        # ShardLure (shell-parse-bounds.py): a $(...) body the evaluator is
+        # about to run is split from the tree its enclosing text produced
+        # (see _substitute) instead of being parsed again.
+        reused, self._reuse = self._reuse, None
+        if reused is not None and reused[0] is text:
+            statements = self._split_reused(*reused)
+            if statements is not None:
+                return statements
+        scanned = scan(text, max_heredoc=max_heredoc_size())
+'''
+
+# parse(): a line-fed construct still open is extended, not parsed whole.
+OLD_TREE = r'''        self._heredocs = scanned.heredocs
+        try:
+            tree = self._lark_parse(line, "start")
+'''
+
+NEW_TREE = r'''        self._heredocs = scanned.heredocs
+        try:
+            # ShardLure (shell-parse-bounds.py): a line-fed construct still
+            # open is extended by its new lines, not parsed whole again (see
+            # _extend_pending).
+            tree = self._extend_pending(line, scanned)
+            if tree is None:
+                tree = self._lark_parse(line, "start")
+'''
+
+# parse(): a RecursionError in the statement splitter fails this parse only,
+# and an input that ends inside an open compound command is remembered.
+OLD_SPLIT = r'''        except (LarkError, ParseTimeoutError):
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        statements = self._split_statements(line, tree)
+'''
+
+NEW_SPLIT = r'''        except (LarkError, ParseTimeoutError):
+            # ShardLure (shell-parse-bounds.py): a ParseRefusedError (nested
+            # too deep, budget spent, recursion limit) lands here too.
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        try:
+            statements = self._split_statements(line, tree)
+        except RecursionError:
+            self._log.warn(
+                "Shell parse hit the recursion limit (input: {length} characters)",
+                length=len(line),
+            )
+            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        self._remember_pending(line, scanned, tree, statements)
+'''
+
+# _lark_parse(), _end_line() and _node_line(): the one grammar entry point,
+# and the line numbers a reused $(...) body must keep. Named OLD/NEW: the
+# release contract and check-cowrie-patches.sh's drift step read that name.
+OLD = r'''    def _lark_parse(self, text: str, start: str) -> Tree:
+        """Run the grammar from ``start`` over ``text`` under the parse time
+        limit, collecting the Earley garbage afterwards for larger input.
+        Raises the Lark error or :class:`ParseTimeoutError`."""
         timed_out = False
         try:
             with _parse_alarm(parse_timeout_seconds()):
-                tree = _parser.parse(line)
-        except UnexpectedCharacters as error:
-            return [
-                SyntaxError_(
-                    token=self._unexpected_char(line, error), lineno=error.line
-                )
-            ]
-        except LarkError:
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+                return _parser.parse(text, start=start)
         except ParseTimeoutError:
             timed_out = True
             self._log.warn(
                 "Shell parse exceeded {timeout}s (input: {length} characters)",
                 timeout=parse_timeout_seconds(),
-                length=len(line),
+                length=len(text),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            raise
         finally:
-            if timed_out or len(line) >= gc_collect_threshold():
+            if timed_out or len(text) >= gc_collect_threshold():
                 gc.collect()
-        return self._split_statements(line, tree)
+
+    def _end_line(self, line: str) -> int:
+        """The line bash reports an unexpected end of input on: the one after
+        the last."""
+        return len(line.rstrip("\n").split("\n")) + 1 + self._line_offset
+
+    def _node_line(self, node: Tree | Token | None) -> int:
+        """The 1-based source line a grammar node starts on, or 0."""
+        if isinstance(node, Token):
+            return node.line + self._line_offset if node.line else 0
+        if isinstance(node, Tree) and not node.meta.empty:
+            return node.meta.line + self._line_offset
+        return 0
 '''
 
-NEW = r'''        previous "unexpected end of file" fallback.
+NEW = r'''    def _lark_parse(self, text: str, start: str) -> Tree:
+        """Run the grammar from ``start`` over ``text`` under the parse time
+        limit, collecting the Earley garbage afterwards for larger input.
+        Raises the Lark error or :class:`ParseTimeoutError`.
 
-        ShardLure (shell-parse-bounds.py): the shell parses on the reactor
-        thread, so one input's parse stalls every session. A ``$(...)`` body
-        the evaluator is about to run is split from the tree its enclosing
-        line already produced (see _substitute), never parsed again. Input
-        nested deeper than MAX_NESTING_DEPTH is refused before the grammar
-        runs, an input this connection parsed recently is split from its
-        remembered tree (or answered its remembered syntax error) instead of
-        parsed again, a connection past PARSE_BUDGET_SECONDS of grammar time
-        is refused, and a RecursionError, from nesting the scan does not count
-        (if/while/{ ...; }), fails this parse instead of escaping into the
-        protocol. All three answer as bash answers an unclosed "( (" group:
-        "syntax error: unexpected end of file", status 2, the reply Cowrie
-        already gives an oversized or timed-out parse.
+        ShardLure (shell-parse-bounds.py): every grammar run of the shell
+        comes through here (a line or script, each re-parse of a line-fed
+        construct still open, a $(...) body that could not be reused, a
+        here-document body), so this is where one input's cost is bounded.
+        A result this connection remembers answers without the grammar.
+        Input nested deeper than MAX_NESTING_DEPTH, and any input once the
+        connection has spent PARSE_BUDGET_SECONDS of grammar time, raise
+        ParseRefusedError unparsed; a RecursionError raises it for this parse
+        only. ParseRefusedError is a ParseTimeoutError, so every caller
+        answers it as it answers a timed-out parse.
         """
-        reused, self._reuse = self._reuse, None
-        if reused is not None and reused[0] is line:
-            return self._split_reused(reused[0], reused[1], reused[2])
-        remembered = self._memo_lookup(line)
+        key = (start, str(text))
+        remembered = self._memo_lookup(key)
+        if isinstance(remembered, tuple):
+            _raise_remembered(remembered, text)
         if remembered is not None:
             return remembered
-        if nesting_too_deep(line):
+        # A here-document body's plain parentheses are text; only its $( and
+        # backtick bodies nest the grammar.
+        if (start == "start" or "$(" in text or "`" in text) and nesting_too_deep(text):
             self._log.warn(
                 "Shell parse refused: groups nested deeper than {limit}"
                 " (input: {length} characters)",
                 limit=MAX_NESTING_DEPTH,
-                length=len(line),
+                length=len(text),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            raise ParseRefusedError
         state = self._connection_state()
         if state["spent"] >= PARSE_BUDGET_SECONDS:
             if not state["warned"]:
@@ -306,79 +448,109 @@ NEW = r'''        previous "unexpected end of file" fallback.
                     " parse budget",
                     budget=PARSE_BUDGET_SECONDS,
                 )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            raise ParseRefusedError
         timed_out = False
         started = _parse_clock()
         try:
             with _parse_alarm(parse_timeout_seconds()):
-                tree = _parser.parse(line)
-        except UnexpectedCharacters as error:
-            return self._memo_error(
-                line, self._unexpected_char(line, error), error.line
-            )
-        except LarkError:
-            return self._memo_error(line, "", self._end_line(line))
+                tree = _parser.parse(text, start=start)
         except ParseTimeoutError:
             timed_out = True
             self._log.warn(
                 "Shell parse exceeded {timeout}s (input: {length} characters)",
                 timeout=parse_timeout_seconds(),
-                length=len(line),
+                length=len(text),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            raise
         except RecursionError:
             self._log.warn(
                 "Shell parse hit the recursion limit (input: {length} characters)",
-                length=len(line),
+                length=len(text),
             )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+            raise ParseRefusedError from None
+        except LarkError as error:
+            self._memo_put(key, _remembered_error(error))
+            raise
         finally:
             state["spent"] += _parse_clock() - started
-            if timed_out or len(line) >= gc_collect_threshold():
+            if timed_out or len(text) >= gc_collect_threshold():
                 gc.collect()
-        try:
-            statements = self._split_statements(line, tree)
-        except RecursionError:
-            self._log.warn(
-                "Shell parse hit the recursion limit (input: {length} characters)",
-                length=len(line),
-            )
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
-        self._memo_put(line, tree)
-        return statements
-'''
+        self._memo_put(key, tree)
+        return tree
 
-OLD_LINES = r'''    @staticmethod
-    def _end_line(line: str) -> int:
-        """The line bash reports an unexpected end of input on: the one after
-        the last."""
-        return len(line.rstrip("\n").split("\n")) + 1
-
-    @staticmethod
-    def _node_line(node: Tree | Token | None) -> int:
-        """The 1-based source line a grammar node starts on, or 0."""
-        if isinstance(node, Token):
-            return node.line or 0
-        if isinstance(node, Tree) and not node.meta.empty:
-            return node.meta.line
-        return 0
-'''
-
-NEW_LINES = r'''    # ShardLure (shell-parse-bounds.py): while _split_reused splits a $(...)
-    # body out of its enclosing line's tree, line numbers count from the
+    # ShardLure (shell-parse-bounds.py): while _split_reused splits a $(...)
+    # body out of its enclosing text's tree, line numbers count from the
     # body's first line and the input ends where the body ends, exactly as a
     # fresh parse of the body numbered them, so the "line N:" of its errors
     # is unchanged.
     _reuse: tuple[str, str, Tree] | None = None
     _line_shift = 0
     _reuse_end: int | None = None
+    # The last input that ended inside an open compound command, and its tree
+    # (see _extend_pending).
+    _pending_tree: tuple[str, Tree] | None = None
+
+    def _extend_pending(self, line: str, scanned: ScanResult) -> Tree | None:
+        """The tree of ``line`` built from the remembered tree of an earlier
+        input it extends and a parse of the new lines alone, or None.
+
+        A line-fed shell parses an open construct's whole pending text again
+        with every line (honeypot.py _feed_line), N(N+1)/2 lines of grammar
+        for N lines. The earlier text is remembered only when it ended at a
+        line boundary with nothing lexically open and no here-document, and
+        it parsed: no token, group or case clause then spans that boundary (an
+        open group is reported by the pre-scanner, an open case clause fails
+        the grammar), so the grammar's tree of the whole is the earlier tree
+        followed by the new lines' tree moved to their place. New lines the
+        grammar rejects on their own are parsed whole instead, so an error
+        keeps its positions."""
+        pending, self._pending_tree = self._pending_tree, None
+        if pending is None or isinstance(line, SourceText) or scanned.heredocs:
+            return None
+        prefix, tree = pending
+        if len(line) <= len(prefix) or not line.startswith(prefix):
+            return None
+        try:
+            tail = self._lark_parse(line[len(prefix):], "start")
+        except LarkError:
+            return None
+        shift, rows = len(prefix), prefix.count("\n")
+        meta = _copy.copy(tree.meta)
+        if not tail.meta.empty:
+            if meta.empty:
+                meta = _copy.copy(tail.meta)
+                meta.start_pos += shift
+                meta.line += rows
+            meta.end_pos = tail.meta.end_pos + shift
+            meta.end_line = tail.meta.end_line + rows
+            meta.end_column = tail.meta.end_column
+        children = [*tree.children, *(_moved(child, shift, rows) for child in tail.children)]
+        return Tree(tree.data, children, meta)
+
+    def _remember_pending(
+        self, line: str, scanned: ScanResult, tree: Tree, statements: list[Statement]
+    ) -> None:
+        """Keep ``line``'s tree for _extend_pending when it ends inside an
+        open compound command at a clean line boundary. One per parser: the
+        line-fed shell's, held while its construct stays open (at most
+        max_input_size characters of input)."""
+        if (
+            statements
+            and isinstance(statements[-1], SyntaxError_)
+            and statements[-1].incomplete
+            and scanned.incomplete is None
+            and not scanned.heredocs
+            and not isinstance(line, SourceText)
+            and line.endswith("\n")
+        ):
+            self._pending_tree = (str(line), tree)
 
     def _end_line(self, line: str) -> int:
         """The line bash reports an unexpected end of input on: the one after
         the last."""
         if self._reuse_end is not None:
             return self._reuse_end
-        return len(line.rstrip("\n").split("\n")) + 1
+        return len(line.rstrip("\n").split("\n")) + 1 + self._line_offset
 
     def _node_line(self, node: Tree | Token | None) -> int:
         """The 1-based source line a grammar node starts on, or 0."""
@@ -388,7 +560,7 @@ NEW_LINES = r'''    # ShardLure (shell-parse-bounds.py): while _split_reused spl
             raw = node.meta.line
         else:
             return 0
-        return raw - self._line_shift if raw else 0
+        return raw - self._line_shift + self._line_offset if raw else 0
 
     def _connection_state(self) -> dict:
         """Parse budget and memo shared by everything one SSH connection runs.
@@ -415,51 +587,45 @@ NEW_LINES = r'''    # ShardLure (shell-parse-bounds.py): while _split_reused spl
             return state
         return {"memo": {}, "chars": 0, "spent": 0.0, "warned": False}
 
-    def _memo_lookup(self, line: str) -> list[Statement] | None:
-        """What parse(line) answered last time, if this connection remembers
-        it: statements split afresh from the remembered tree (the evaluator
-        mutates statements, never the tree), or the same syntax error. Only
-        answers that depend on the input alone are remembered, never a
-        timeout or the recursion limit (load and stack depth decide those)."""
-        if len(line) > PARSE_MEMO_ENTRY_CHARS:
+    def _memo_lookup(self, key: tuple[str, str]) -> Tree | tuple | None:
+        """The remembered grammar result for (rule, input): a tree (the
+        evaluator mutates statements, never the tree) or a syntax error
+        record. Only results that depend on the input alone are remembered,
+        never a timeout or the recursion limit."""
+        if len(key[1]) > PARSE_MEMO_ENTRY_CHARS:
             return None
-        hit = self._connection_state()["memo"].get(line)
-        if hit is None:
-            return None
-        if isinstance(hit, tuple):
-            return [SyntaxError_(token=hit[0], lineno=hit[1])]
-        try:
-            return self._split_statements(line, hit)
-        except RecursionError:
-            return [SyntaxError_(token="", lineno=self._end_line(line))]
+        return self._connection_state()["memo"].get(key)
 
-    def _memo_put(self, line: str, entry: Tree | tuple[str, int]) -> None:
-        if len(line) > PARSE_MEMO_ENTRY_CHARS:
+    def _memo_put(self, key: tuple[str, str], entry: Tree | tuple) -> None:
+        if len(key[1]) > PARSE_MEMO_ENTRY_CHARS:
             return
         state = self._connection_state()
         memo = state["memo"]
-        if line in memo:
+        if key in memo:
             return
         while memo and (
             len(memo) >= PARSE_MEMO_ENTRIES
-            or state["chars"] + len(line) > PARSE_MEMO_CHARS
+            or state["chars"] + len(key[1]) > PARSE_MEMO_CHARS
         ):
             oldest = next(iter(memo))
             del memo[oldest]
-            state["chars"] -= len(oldest)
-        memo[line] = entry
-        state["chars"] += len(line)
+            state["chars"] -= len(oldest[1])
+        memo[key] = entry
+        state["chars"] += len(key[1])
 
-    def _memo_error(self, line: str, token: str, lineno: int) -> list[Statement]:
-        self._memo_put(line, (token, lineno))
-        return [SyntaxError_(token=token, lineno=lineno)]
-
-    def _split_reused(self, source: str, line: str, body: Tree) -> list[Statement]:
+    def _split_reused(self, source: str, line: str, body: Tree) -> list[Statement] | None:
         """The statements of a ``$(...)`` body, from the ``start`` tree the
-        grammar built for it inside ``line``: what parse(source) returns, with
-        the word trees still pointing into ``line``."""
+        grammar built for it inside ``line``: what parse(source) returns,
+        with the word trees still pointing into ``line``. None when the body
+        would not parse the same way on its own (it holds a here-document, or
+        is lexically open, e.g. ends in a line continuation): parse() then
+        reads it afresh, as stock does."""
+        scanned = scan(source, max_heredoc=max_heredoc_size())
+        if scanned.incomplete is not None or scanned.heredocs or scanned.stripped != source:
+            return None
+        self._heredocs = {}
         self._line_shift = line.count("\n", 0, body.meta.start_pos)
-        self._reuse_end = len(source.rstrip("\n").split("\n")) + 1
+        self._reuse_end = len(source.rstrip("\n").split("\n")) + 1 + self._line_offset
         try:
             return self._split_statements(line, body)
         except RecursionError:
@@ -467,8 +633,50 @@ NEW_LINES = r'''    # ShardLure (shell-parse-bounds.py): while _split_reused spl
         finally:
             self._line_shift = 0
             self._reuse_end = None
+
+    def _substitute(self, line: str, node: Tree) -> Awaitable[str]:
+        """Run a ``$(...)`` through the context's command_substitution.
+
+        ShardLure (shell-parse-bounds.py): the body was parsed with the
+        enclosing text, so its tree is handed to the parse() that the
+        substitution makes instead of the Earley parser reading the same text
+        again. A re-parse per evaluation made the cost the nesting depth
+        times the body (8 levels around 11 KB: 23 s) and every loop pass
+        (a 116-byte `while` line: 1,001 parses, 22 s), all on the reactor.
+        Text the pre-scanner cut here-documents out of (a SourceText) is
+        parsed afresh: its bodies are keyed by positions in that parse.
+        """
+        source = self._group_source(line, node)
+        body = next(
+            (
+                child
+                for child in node.children
+                if isinstance(child, Tree) and child.data == "start"
+            ),
+            None,
+        )
+        if source and body is not None and not isinstance(line, SourceText):
+            self._reuse = (source, line, body)
+        try:
+            return self.context.command_substitution(source)
+        finally:
+            self._reuse = None
 '''
 
+# _expand_heredoc(): a $(...) in a here-document body.
+OLD_HEREDOC = r'''            elif part.data == "cmdsub":
+                parts.append(
+                    await self.context.command_substitution(
+                        self._group_source(text, part)
+                    )
+                )
+'''
+
+NEW_HEREDOC = r'''            elif part.data == "cmdsub":
+                parts.append(await self._substitute(text, part))
+'''
+
+# A $(...) word atom.
 OLD_ATOM = r'''        if atom.data == "cmdsub":
             return await self.context.command_substitution(
                 self._group_source(line, atom)
@@ -481,63 +689,27 @@ NEW_ATOM = r'''        if atom.data == "cmdsub":
         if atom.data == "backtick":
 '''
 
-OLD_DQ = r'''            elif part.data == "cmdsub":
-                parts.append(
-                    await self.context.command_substitution(
-                        self._group_source(line, part)
-                    )
-                )
-            elif part.data == "backtick":
-                parts.append(
-                    await self.context.command_substitution(
-                        self._backtick_source(line, part)
-                    )
-                )
-        return "".join(parts)
+# A $(...) inside double quotes.
+OLD_DQ = r'''        if part.data == "cmdsub":
+            return await self.context.command_substitution(
+                self._group_source(line, part)
+            )
+        if part.data == "backtick":
 '''
 
-NEW_DQ = r'''            elif part.data == "cmdsub":
-                parts.append(await self._substitute(line, part))
-            elif part.data == "backtick":
-                parts.append(
-                    await self.context.command_substitution(
-                        self._backtick_source(line, part)
-                    )
-                )
-        return "".join(parts)
-
-    def _substitute(self, line: str, node: Tree) -> Awaitable[str]:
-        """Run a ``$(...)`` through the context's command_substitution.
-
-        ShardLure (shell-parse-bounds.py): the body was parsed with the
-        enclosing line, so its tree is handed to the parse() that the
-        substitution makes instead of the Earley parser reading the same text
-        again. A re-parse per evaluation made the cost the nesting depth
-        times the body (8 levels around 11 KB: 23 s) and every loop pass
-        (a 116-byte `while` line: 1,001 parses, 22 s), all on the reactor.
-        """
-        source = self._group_source(line, node)
-        body = next(
-            (
-                child
-                for child in node.children
-                if isinstance(child, Tree) and child.data == "start"
-            ),
-            None,
-        )
-        if source and body is not None:
-            self._reuse = (source, line, body)
-        try:
-            return self.context.command_substitution(source)
-        finally:
-            self._reuse = None
+NEW_DQ = r'''        if part.data == "cmdsub":
+            return await self._substitute(line, part)
+        if part.data == "backtick":
 '''
 
 
 BLOCKS = (
     (OLD_LIMITS, NEW_LIMITS),
+    (OLD_PARSE, NEW_PARSE),
+    (OLD_TREE, NEW_TREE),
+    (OLD_SPLIT, NEW_SPLIT),
     (OLD, NEW),
-    (OLD_LINES, NEW_LINES),
+    (OLD_HEREDOC, NEW_HEREDOC),
     (OLD_ATOM, NEW_ATOM),
     (OLD_DQ, NEW_DQ),
 )
@@ -568,7 +740,7 @@ def main() -> int:
     for old, new in BLOCKS:
         content = content.replace(old, new, 1)
     path.write_text(content, encoding="utf-8")
-    print(f"  [ok] {path}: patched (parse once per substitution, nesting bound)")
+    print(f"  [ok] {path}: patched (parse once per substitution, nesting bound, parse budget)")
     return 0
 
 

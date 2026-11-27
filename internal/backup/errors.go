@@ -2,6 +2,7 @@ package backup
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/networkshard/shardlure/internal/safefile"
 	"github.com/networkshard/shardlure/internal/store"
@@ -39,6 +40,10 @@ func (e *Failure) Error() string {
 	if errors.As(e.cause, &refusal) {
 		return e.Kind.Error() + ": " + refusal.Reason
 	}
+	var short *SpaceShortfall
+	if errors.As(e.cause, &short) {
+		return e.Kind.Error() + ": " + short.Error()
+	}
 	for _, reason := range pathFreeReasons {
 		if errors.Is(e.cause, reason) {
 			return e.Kind.Error() + ": " + reason.Error()
@@ -63,15 +68,32 @@ func RefusedPath(err error) (path, reason string, ok bool) {
 }
 
 // failureKind keeps the operation's default category except for a refused
-// location, which is always ErrUnsafePath: the fix is a different path, not a
-// retry.
+// location, which is always ErrUnsafePath (the fix is a different path, not a
+// retry), and a lack of space, which used to read as a generic I/O failure.
 func failureKind(defaultKind, cause error) error {
 	var refusal *safefile.PathRefusal
 	if errors.As(cause, &refusal) {
 		return ErrUnsafePath
 	}
+	if errors.Is(cause, ErrInsufficientSpace) {
+		return ErrInsufficientSpace
+	}
 	return defaultKind
 }
+
+// SpaceShortfall is a refusal for lack of space, in sizes only (never a
+// path): what the operation needs, what is available, and the free space it
+// keeps for capture (capture.min_free_bytes).
+type SpaceShortfall struct{ Need, Available, Reserve uint64 }
+
+func (s *SpaceShortfall) Error() string {
+	return fmt.Sprintf("needs %s and keeps %s free for capture (capture.min_free_bytes); %s available",
+		gib(s.Need), gib(s.Reserve), gib(s.Available))
+}
+
+func (s *SpaceShortfall) Is(target error) bool { return target == ErrInsufficientSpace }
+
+func gib(n uint64) string { return fmt.Sprintf("%.2f GiB", float64(n)/(1<<30)) }
 
 func failure(kind, cause error, stage string) error {
 	return &Failure{Kind: kind, Staging: stage, cause: cause}

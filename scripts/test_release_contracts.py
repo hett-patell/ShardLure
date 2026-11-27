@@ -1829,8 +1829,12 @@ checkout_fresh_cowrie
         self.assertNotIn("theme, home location", readme)
         self.assertNotIn("theme, home location —", readme)
         self.assertIn("Home coordinates remain in YAML", readme)
-        self.assertNotIn("Dragon", product)
-        for theme in ("Signal", "Meridian", "Sprite"):
+        # "Signal" stays a plain word there ("Signal over chrome"), so only the
+        # other retired theme names are checked for absence.
+        for retired in ("Dragon", "Meridian", "Sprite"):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, product)
+        for theme in ("Obsidian", "Kiln"):
             with self.subTest(theme=theme):
                 self.assertIn(theme, product)
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -30,11 +31,31 @@ func TestVersionIsSideEffectFreeWithoutWritableHome(t *testing.T) {
 		t.Fatalf("version failed without a writable HOME: %v\n%s", err, out)
 	}
 	got := strings.TrimSpace(string(out))
-	if want := fmt.Sprintf("shardlure %s (commit %s)", version, commit); got != want {
+	if want := fmt.Sprintf("shardlure %s (commit %s)", version, buildCommit()); got != want {
 		t.Fatalf("version output = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(home); !os.IsNotExist(err) {
 		t.Fatalf("version created files under HOME %q (stat error: %v)", home, err)
+	}
+}
+
+// A source build (make build, the shardlure.py installer) has no -ldflags, so
+// it printed "commit unknown" and stamped that into its backups; it now names
+// the revision Go embedded, as the release builds' short SHA.
+func TestVCSCommitNamesTheCheckoutRevision(t *testing.T) {
+	rev := debug.BuildSetting{Key: "vcs.revision", Value: "da0bed80f0de461e9d6e70d0f61faf5ac520d58c"}
+	for _, tc := range []struct {
+		settings []debug.BuildSetting
+		want     string
+	}{
+		{[]debug.BuildSetting{rev, {Key: "vcs.modified", Value: "false"}}, "da0bed8"},
+		{[]debug.BuildSetting{rev, {Key: "vcs.modified", Value: "true"}}, "da0bed8-dirty"},
+		{[]debug.BuildSetting{{Key: "vcs.modified", Value: "true"}}, ""},
+		{nil, ""},
+	} {
+		if got := vcsCommit(tc.settings); got != tc.want {
+			t.Errorf("vcsCommit(%v) = %q, want %q", tc.settings, got, tc.want)
+		}
 	}
 }
 

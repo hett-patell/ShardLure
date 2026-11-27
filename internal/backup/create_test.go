@@ -170,6 +170,40 @@ func TestCreateReportsUnsafeDatabaseReason(t *testing.T) {
 	}
 }
 
+// A bundle must leave capture.min_free_bytes free on its filesystem. Before,
+// it only had to fit: the pre-upgrade backup on the ARM host (2026-11-26) fit
+// with 1 GiB to spare, pausing capture on a disk the database and Cowrie
+// share. The refusal names the sizes, not a generic I/O failure, and leaves
+// no staging behind, whether the database snapshot or the files do not fit.
+func TestCreateKeepsTheCaptureFloorFree(t *testing.T) {
+	const floor = 2 << 30 // config.Default's capture.min_free_bytes
+	for name, space := range map[string][]uint64{
+		"snapshot": {floor + 4<<20},
+		"files":    {1 << 40, floor + 1<<10},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			parent := t.TempDir()
+			ops := nativeOperations()
+			calls := 0
+			ops.space = func(*safefile.Root) (uint64, error) {
+				calls++
+				return space[min(calls, len(space))-1], nil
+			}
+			_, err := createWithOperations(context.Background(), CreateOptions{ConfigPath: f.Config, Output: filepath.Join(parent, "backup")}, ops)
+			if !errors.Is(err, ErrInsufficientSpace) {
+				t.Fatalf("bundle eating the capture floor: %v, want ErrInsufficientSpace", err)
+			}
+			if !strings.Contains(err.Error(), "insufficient free space: needs") || !strings.Contains(err.Error(), "2.00 GiB free for capture") {
+				t.Fatalf("refusal does not say why: %v", err)
+			}
+			if entries, _ := os.ReadDir(parent); len(entries) != 0 {
+				t.Fatalf("refused create left %v behind", entries)
+			}
+		})
+	}
+}
+
 func TestCreateNamesRefusedOutputAncestor(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission refusal test must run as a non-root user")

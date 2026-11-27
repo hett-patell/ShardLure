@@ -4,11 +4,11 @@
 WHY (measured on the arm deployment): scp droppers (RedTail, Outlaw) upload
 with `scp -t /bin/<random>` and then run `/bin/<random>`. The client sends a
 C-record whose name is the LOCAL file's name (`C0755 <size> <name>`); the -t
-argument is where the server must put it. Cowrie v3.1.1 reads args[0] only
-under -d and otherwise saves the upload as <cwd>/<record name>, so the bot's
-run of <path> finds nothing (26 of 26 prod scp sessions failed there). Together
-with connection-shared-fs.py (the run arrives on a second channel) this is
-the whole tell.
+argument is where the server must put it. The pinned Cowrie v3.1.8 (as v3.1.1
+did) reads args[0] only under -d and otherwise saves the upload as
+<cwd>/<record name>, so the bot's run of <path> finds nothing (26 of 26 prod
+scp sessions failed there on v3.1.1). Together with connection-shared-fs.py
+(the run arrives on a second channel) this is the whole tell.
 
 Fix, following OpenSSH's sink (scp.c sink(): targisdir from stat(targ)):
   - an existing directory target (`scp -t /tmp`, `scp -t /tmp/`) receives the
@@ -17,7 +17,12 @@ Fix, following OpenSSH's sink (scp.c sink(): targisdir from stat(targ)):
     writes each record to targ when it is not a directory);
   - a target with a trailing slash that is not a directory is refused, as
     open(2) refuses it on a real box (EISDIR, or ENOTDIR for a file).
--d keeps Cowrie's existing behaviour, and with no -t argument nothing changes.
+-d keeps Cowrie's existing behaviour (v3.1.8's `-d` guard: without a
+positional argument it sets no directory), and with no -t argument nothing
+changes.
+
+Upstream main past v3.1.8 (d0855fb6, #40791) implements the -t target itself;
+once a release carries it, only the trailing-slash refusal is ShardLure's.
 
 Capture is unchanged: the bytes still land in download_path_uniq/<sha256>, and
 the cowrie.session.file_upload event keeps its shasum/outfile; only the fake-FS
@@ -33,7 +38,9 @@ OLD = """\
         self.out_dir = ""
 
         for opt in optlist:
-            if opt[0] == "-d":
+            # -d takes no getopt argument of its own; the target directory is
+            # the first positional argument, which need not be there.
+            if opt[0] == "-d" and args:
                 self.out_dir = args[0]
                 break
 """
@@ -45,7 +52,9 @@ NEW = """\
         self.sink_target = ""
 
         for opt in optlist:
-            if opt[0] == "-d":
+            # -d takes no getopt argument of its own; the target directory is
+            # the first positional argument, which need not be there.
+            if opt[0] == "-d" and args:
                 self.out_dir = args[0]
                 break
         else:
