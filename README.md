@@ -103,7 +103,7 @@ are exact-text edits to that commit's source, so `apply-stealth.sh` and
 | v1.x | not pinned (Cowrie's `main` at install time) | — |
 | v2.0.0 – v2.10.1 | v3.0.8 | `65ded95b2d2b6555be8e4eb95315036a4db361f9` |
 | v2.11.0 – v2.13.0 | v3.1.1 | `c17c9b73d6af0972334ea1e90b20d974cb24eeca` |
-| next release (after v2.13.0) | v3.1.8 | `183a3b1bc361bb941e1d54874922399baac42af0` |
+| v2.14.0 | v3.1.8 | `183a3b1bc361bb941e1d54874922399baac42af0` |
 
 Upgrading ShardLure across a row of this table moves Cowrie too. The installers
 do not move an existing box: they refuse a running host (and any host installed
