@@ -253,6 +253,87 @@ func TestAbuseIPDBReportAllFirstRateLimitIsNotSuccess(t *testing.T) {
 	}
 }
 
+func TestAbuseIPDBSelectionStreamsBeforeCompletionAndReportsOnlyConfirmedIPs(t *testing.T) {
+	st, keys := seedReportSources(t, false)
+	// Another eligible IP exists but isn't part of the confirmed selection.
+	now := time.Now().UTC()
+	events := make([]*models.Event, 0, 400)
+	for i := range 400 {
+		events = append(events, &models.Event{
+			TS: now.Add(-time.Duration(i) * time.Second), Source: models.SourceJournal,
+			Kind: models.KindFailedPass, SrcIP: "1.1.1.1", ActorID: "journal:1.1.1.1",
+			Username: []string{"root", "admin", "postgres", "oracle"}[i%4],
+		})
+	}
+	if err := st.AppendEventsAndUpsertActorsAgg(events, []*models.AggregatedActor{{Actor: &models.Actor{
+		ID: "journal:1.1.1.1", Source: models.SourceJournal, PrimaryIP: "1.1.1.1",
+		FirstSeen: now.Add(-time.Hour), LastSeen: now, EventCount: 400, UniqueUsers: 4,
+		Playbook: "dictionary_spray", ProbeScore: 85, AttemptsPerHour: 400,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	var posts atomic.Int32
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		if err := r.ParseForm(); err != nil || r.Form.Get("ip") != "8.8.8.8" {
+			t.Errorf("provider received unintended IP %q: %v", r.Form.Get("ip"), err)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"abuseConfidenceScore":70}}`))
+	}))
+	defer upstream.Close()
+	s := New(st, keys, "127.0.0.1:0", Options{AbuseReportEnabled: true,
+		AbuseEndpoint: upstream.URL, AbuseMinProbe: 60})
+	server := httptest.NewServer(s.guard(s.handleAbuseIPDBReportAll))
+	defer server.Close()
+	client := server.Client()
+	client.Timeout = 5 * time.Second
+	res, err := client.Post(server.URL+abuseReportSelectionPath, "application/json",
+		strings.NewReader(`["8.8.8.8","9.9.9.9"]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.Header.Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("stream response: %s / %s", res.Status, res.Header.Get("Content-Type"))
+	}
+	decoder := json.NewDecoder(res.Body)
+	next := func() reportBatchEvent {
+		t.Helper()
+		var event reportBatchEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatalf("read progress event: %v", err)
+		}
+		return event
+	}
+	// The provider is still blocked: this event cannot come from a buffered
+	// end-of-batch response.
+	if start := next(); start.Status != "started" || start.Final != nil {
+		t.Fatalf("first event = %+v; want started", start)
+	}
+	close(release)
+	if report := next(); report.Status != "reported" || report.IP != "8.8.8.8" {
+		t.Fatalf("durable report event = %+v", report)
+	}
+	if recorded, err := st.AbuseIPDBReported("8.8.8.8", 24*time.Hour); err != nil || !recorded {
+		t.Fatalf("progress before durable ledger write: recorded=%t err=%v", recorded, err)
+	}
+	if skip := next(); skip.Status != "skipped" || skip.IP != "9.9.9.9" {
+		t.Fatalf("unvetted IP outcome = %+v; want skipped", skip)
+	}
+	if final := next().Final; final == nil || final.Status != "ok" || final.Reported != 1 || final.Skipped != 1 {
+		t.Fatalf("final event = %+v; want one report, one skip", final)
+	}
+	if got := posts.Load(); got != 1 {
+		t.Fatalf("provider received %d reports; want only the selected and vetted IP", got)
+	}
+}
+
 // The report pool is intentionally ordered by lifetime actor rate, but a
 // batch submission must spend scarce provider quota on the strongest CURRENT
 // target first. Source selection and final cross-IP ranking are separate: a

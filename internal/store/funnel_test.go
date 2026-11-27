@@ -118,12 +118,18 @@ func TestPayloadFunnelCountsEachStage(t *testing.T) {
 	if err := s.RecordThreatFoxSubmission("198.51.100.7:80", "ip:port", "elf.mirai", "ok", old); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.RecordThreatFoxSubmission("198.51.100.7:443", "ip:port", "elf.mirai", "submitted", in); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordThreatFoxSubmission("198.51.100.7:8080", "ip:port", "elf.mirai", "duplicate", in); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := s.PayloadFunnel(context.Background(), since, pol)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := FunnelCounts{Connected: 4, LoggedIn: 2, RanCommands: 2, DownloadAttempt: 2, Captured: 2, NewPayloads: 1, SharedBazaar: 1, SharedURLhaus: 2, SharedThreatFox: 0}
+	want := FunnelCounts{Connected: 4, LoggedIn: 2, RanCommands: 2, DownloadAttempt: 2, Captured: 2, NewPayloads: 1, SharedBazaar: 1, SharedURLhaus: 2, SharedThreatFox: 1}
 	if got != want {
 		t.Fatalf("funnel = %+v, want %+v", got, want)
 	}

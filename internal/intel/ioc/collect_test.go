@@ -58,6 +58,23 @@ func TestCollect(t *testing.T) {
 	}
 }
 
+func TestCollectKeepsNewestNonemptyCommandInAnyOrder(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	const ip = "192.0.2.1"
+	old := &models.Event{TS: t0, SrcIP: ip, Command: "echo old"}
+	newest := &models.Event{TS: t0.Add(time.Second), SrcIP: ip, Command: "echo newest"}
+	connect := &models.Event{TS: t0.Add(2 * time.Second), SrcIP: ip}
+	for _, events := range [][]*models.Event{
+		{connect, newest, old},
+		{old, connect, newest},
+	} {
+		got := Collect(events, []Kind{KindIP})
+		if len(got) != 1 || got[0].SampleCommand != newest.Command || !got[0].LastSeen.Equal(connect.TS) {
+			t.Fatalf("indicators = %+v; want newest command with later observation time", got)
+		}
+	}
+}
+
 func TestWriteCSV(t *testing.T) {
 	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	indicators := []Indicator{

@@ -14,6 +14,9 @@ import (
 // The ledger is NEVER purged (like urlhaus_submissions) — a submitted IOC stays
 // recorded so we never re-POST it even after the artifact ages out.
 
+// Duplicates settle the IOC for deduplication but do not add to ThreatFox.
+const threatfoxNotDuplicateWhere = "status <> 'duplicate'"
+
 // ThreatFoxSubmission is one indicator submitted to ThreatFox.
 type ThreatFoxSubmission struct {
 	IOC         string
@@ -46,10 +49,9 @@ func (s *Store) ThreatFoxSubmitted(ioc string) (bool, error) {
 	return n > 0, err
 }
 
-// RecordThreatFoxSubmission upserts the row for a submitted IOC. Only
-// successful submissions are recorded — network failures and auth rejections
-// are left unrecorded so the next run retries them, matching
-// RecordURLhausSubmission. Satisfies threatfox.SubmitRecorder.
+// RecordThreatFoxSubmission records a newly added or already-listed IOC.
+// Network failures and rejections are left unrecorded so a later run can retry.
+// Satisfies threatfox.SubmitRecorder.
 func (s *Store) RecordThreatFoxSubmission(ioc, iocType, malware, status string, at time.Time) error {
 	if ioc == "" {
 		return nil
@@ -72,12 +74,14 @@ ON CONFLICT(ioc) DO UPDATE SET
   malware=excluded.malware,
   submitted_at=excluded.submitted_at,
   submitted_at_key=excluded.submitted_at_key,
-  status=excluded.status`,
+  status=excluded.status
+WHERE excluded.status <> 'duplicate' OR threatfox_submissions.status = 'duplicate'`,
 		ioc, iocType, malware, ts, status, formatFixedUTC(at))
 	return err
 }
 
 // ThreatFoxStats holds aggregate counts for the ThreatFox sharing widget.
+// TotalSubmitted and LastSubmittedAt exclude already-listed IOCs.
 type ThreatFoxStats struct {
 	TotalSubmitted  int
 	Pending         int
@@ -101,7 +105,7 @@ func (s *Store) ThreatFoxSubmissionStats(activeDays int) (ThreatFoxStats, error)
 	}
 	var st ThreatFoxStats
 	var lastTS *string
-	if err := s.db.QueryRow("SELECT COUNT(1), ("+latestLedgerTimeSQL(threatfoxLedger)+") FROM threatfox_submissions").Scan(&st.TotalSubmitted, &lastTS); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(1), ("+latestLedgerTimeSQL(threatfoxLedger, threatfoxNotDuplicateWhere)+") FROM threatfox_submissions WHERE "+threatfoxNotDuplicateWhere).Scan(&st.TotalSubmitted, &lastTS); err != nil {
 		return st, err
 	}
 	if lastTS != nil {

@@ -261,6 +261,32 @@ func TestHandleIntelURLhausReportsStateAndKeySharing(t *testing.T) {
 	}
 }
 
+func TestHandleIntelThreatFoxSeparatesAddedAndAlreadyListed(t *testing.T) {
+	s := newIntelTestServer(t, nil)
+	addedAt := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	if err := s.st.RecordThreatFoxSubmission("192.0.2.1:443", "ip:port", "elf.mirai", "submitted", addedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.RecordThreatFoxSubmission("192.0.2.2:443", "ip:port", "elf.mirai", "duplicate", addedAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleIntelThreatFox(w, httptest.NewRequest(http.MethodGet, "/api/intel/threatfox", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d: %s", w.Code, w.Body.String())
+	}
+	var out threatfoxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.TotalSubmitted != 1 || out.LastSubmittedAt != addedAt.Format(time.RFC3339) {
+		t.Fatalf("submitted: %d at %s, want one at %v", out.TotalSubmitted, out.LastSubmittedAt, addedAt)
+	}
+	if len(out.Rows) != 2 || out.Rows[0].Status != "duplicate" || out.Rows[1].Status != "submitted" {
+		t.Fatalf("history = %+v; want duplicate and submitted rows", out.Rows)
+	}
+}
+
 // Verdict JSON field names are BOTH the dashboard API contract and the
 // on-disk cache format. They are camelCase to match every other endpoint; a
 // rename silently zeroes cached rows (Resolver.Cached self-heals that, but the

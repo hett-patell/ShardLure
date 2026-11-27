@@ -131,6 +131,7 @@ type accumulator struct {
 	srcs        setBuilder
 	actors      setBuilder
 	sample      string
+	sampleAt    time.Time
 }
 
 func (a *accumulator) record(ts time.Time, source, actorID, sample string) {
@@ -146,8 +147,9 @@ func (a *accumulator) record(ts time.Time, source, actorID, sample string) {
 	// Use the most-recent non-empty command we see; that's typically
 	// the most useful context (post-auth commands rather than initial
 	// connection-only events).
-	if sample != "" {
+	if sample != "" && (a.sample == "" || ts.After(a.sampleAt)) {
 		a.sample = sample
+		a.sampleAt = ts
 	}
 }
 

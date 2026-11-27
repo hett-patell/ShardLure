@@ -383,16 +383,13 @@ type ArtifactAggregate struct {
 	Shareable bool
 }
 
-// ListArtifactsAggregatedSince returns at most `limit` unique payloads
-// (grouped by sha256) ingested since the given time. Rows with empty
-// sha256 are skipped (they cannot be deduped meaningfully). Results
-// are ordered by most-recent capture timestamp DESC.
-// CountDistinctPayloadsSince returns the TRUE number of distinct payloads
-// (by sha256) captured in the window — what the payload library should report
-// as "N unique". ListArtifactsAggregatedSince applies a row LIMIT, so its
-// len() is the page size, not the population; reporting that as the total made
-// "1000 unique" appear regardless of how many actually existed. Uses the same
-// window + non-empty-sha criteria as the aggregation.
+// TTY recordings belong to session details, not the payload library. Apply
+// this before grouping so transcripts neither consume page slots nor inflate
+// counts or replace the newest payload observation.
+const payloadArtifactPredicate = "origin <> 'cowrie_tty'"
+
+// CountDistinctPayloadsSince counts the same distinct hashes as the library
+// query before its page limit.
 func (s *Store) CountDistinctPayloadsSince(since time.Time) (int, error) {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return 0, err
@@ -402,10 +399,12 @@ func (s *Store) CountDistinctPayloadsSince(since time.Time) (int, error) {
 	err := s.db.QueryRow(`
 SELECT COUNT(DISTINCT sha256) FROM artifacts
 WHERE COALESCE(ts, created_at) >= ?
-  AND sha256 IS NOT NULL AND sha256 != ''`, cutoff).Scan(&n)
+  AND sha256 IS NOT NULL AND sha256 != '' AND `+payloadArtifactPredicate, cutoff).Scan(&n)
 	return n, err
 }
 
+// ListArtifactsAggregatedSince returns the newest distinct payload hashes in
+// the window, excluding TTY recordings.
 // pol narrows which rows count toward the group's Shareable flag. Pass the
 // same policy the share path uses (bazaar.MinSampleBytes / ShareableOrigins),
 // or the zero value to mark nothing shareable.
@@ -444,7 +443,7 @@ WITH win AS (
          COALESCE(ts, created_at) AS effective_ts
   FROM artifacts
   WHERE COALESCE(ts, created_at) >= ?
-    AND sha256 IS NOT NULL AND sha256 != ''
+    AND sha256 IS NOT NULL AND sha256 != '' AND `+payloadArtifactPredicate+`
 ),
 grp AS (
   SELECT sha256,
@@ -634,9 +633,8 @@ WHERE sha256=?
 	return n > 0, err
 }
 
-// GetArtifactBySHA returns the most recent artifact matching the SHA-256.
-// Multiple rows can share a hash if attackers re-host the same payload
-// at different URLs; we return the most recently captured row.
+// GetArtifactBySHA returns the newest non-transcript artifact matching the
+// hash. Session recordings are retrieved by session instead.
 func (s *Store) GetArtifactBySHA(sha256 string) (*Artifact, error) {
 	if err := s.ensureArtifactsTable(); err != nil {
 		return nil, err
@@ -644,7 +642,7 @@ func (s *Store) GetArtifactBySHA(sha256 string) (*Artifact, error) {
 	row := s.db.QueryRow(`
 SELECT `+artifactColumns+`
 FROM artifacts
-WHERE sha256=?
+WHERE sha256=? AND `+payloadArtifactPredicate+`
 ORDER BY COALESCE(ts, created_at) DESC
 LIMIT 1`, sha256)
 	a, err := scanArtifact(row)

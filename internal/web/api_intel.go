@@ -800,9 +800,9 @@ type payloadsResponse struct {
 	Rows        []payloadRow `json:"rows"`
 }
 
-// payloadRow is one unique payload (grouped by sha256). URL/Actor/
-// Session/SrcIP/TS describe the most-recent capture and the *Count
-// fields surface delivery breadth across the window.
+// payloadRow is one artifact hash. URL/Actor/Session/SrcIP/TS describe
+// the most recent record, and the *Count fields and Occurrences describe
+// observations across the window.
 type payloadRow struct {
 	SHA256       string `json:"sha256"`
 	Origin       string `json:"origin,omitempty"`
@@ -814,7 +814,7 @@ type payloadRow struct {
 	SrcIP        string `json:"srcIp,omitempty"`   // last-seen src IP
 	TS           string `json:"ts"`                // last-seen timestamp
 	FirstTS      string `json:"firstTs,omitempty"` // first-seen timestamp
-	Occurrences  int    `json:"occurrences"`       // total captures of this sha
+	Occurrences  int    `json:"occurrences"`       // artifact records for this hash
 	URLCount     int    `json:"urlCount"`          // distinct URLs
 	IPCount      int    `json:"ipCount"`           // distinct source IPs
 	ActorCount   int    `json:"actorCount"`        // distinct actors
@@ -894,7 +894,8 @@ func (s *Server) handleIntelPayloads(w http.ResponseWriter, r *http.Request) {
 	// is the LIMIT-capped page size). Returned = rows actually sent.
 	total, err := s.st.CountDistinctPayloadsSince(since)
 	if err != nil {
-		total = len(arts) // fall back to page size rather than failing the panel
+		httpError(w, "payload count", err, http.StatusInternalServerError)
+		return
 	}
 	_ = json.NewEncoder(w).Encode(payloadsResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -1635,10 +1636,16 @@ type reportAllResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// handleAbuseIPDBReportAll reports every currently-suggested brute-forcer in
-// one batch, reusing the abuseipdb.Report orchestrator (which vets each
-// candidate, dedups against the re-report window, paces the POSTs, and halts
-// cleanly on a 429). Same gating as the single-report path: opt-in + key.
+const abuseReportSelectionPath = "/api/intel/abuseipdb/report-selection"
+
+type reportBatchEvent struct {
+	IP     string             `json:"ip,omitempty"`
+	Status string             `json:"status,omitempty"`
+	Final  *reportAllResponse `json:"final,omitempty"`
+}
+
+// handleAbuseIPDBReportAll runs the same vetted, paced report pipeline for
+// both the full batch API and the dashboard's confirmed, streaming selection.
 func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDashboardAuth(w, r) {
 		return
@@ -1670,21 +1677,46 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 	}
 	defer s.abuseReportBatchMu.Unlock()
 
-	// Resolve each target using the same source-specific evidence and ranking
-	// as suggestions. Report re-runs Vet and the submission ledger check.
-	actors, err := s.st.ActorsForReportingContext(r.Context(), time.Now().Add(-recentRateWindow), 1000)
-	if err != nil {
-		httpError(w, "api_intel", err, http.StatusInternalServerError)
-		return
+	// The interactive route accepts only the IPs shown in the confirmation.
+	// Never let refreshing suggestions expand the already-confirmed batch.
+	selection := r.URL.Path == abuseReportSelectionPath
+	var targets []string
+	if selection {
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		if err := decodeJSONBody(r, &targets, 4097); err != nil || len(targets) == 0 || len(targets) > 15 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "Confirm 1 to 15 displayed IPs"})
+			return
+		}
+		for i, ip := range targets {
+			parsed := net.ParseIP(ip)
+			if parsed == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(reportAllResponse{Status: "error", Error: "Invalid IP address in selection"})
+				return
+			}
+			targets[i] = parsed.String()
+		}
+	} else {
+		actors, err := s.st.ActorsForReportingContext(r.Context(), time.Now().Add(-recentRateWindow), 1000)
+		if err != nil {
+			httpError(w, "api_intel", err, http.StatusInternalServerError)
+			return
+		}
+		targets = make([]string, 0, len(actors))
+		for _, a := range actors {
+			targets = append(targets, a.PrimaryIP)
+		}
 	}
-	seen := map[string]bool{}
-	cands := make([]abuseipdb.ReportCandidate, 0, len(actors))
-	for _, a := range actors {
-		if a.PrimaryIP == "" || seen[a.PrimaryIP] {
+	// Resolve fresh source-specific evidence. Report re-runs Vet and dedup.
+	seen := make(map[string]bool, len(targets))
+	cands := make([]abuseipdb.ReportCandidate, 0, len(targets))
+	for _, ip := range targets {
+		if ip == "" || seen[ip] {
 			continue
 		}
-		seen[a.PrimaryIP] = true
-		cand, err := s.reportCandidateForIP(r.Context(), a.PrimaryIP)
+		seen[ip] = true
+		cand, err := s.reportCandidateForIP(r.Context(), ip)
 		if err != nil {
 			httpError(w, "report evidence", err, http.StatusInternalServerError)
 			return
@@ -1711,7 +1743,39 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		WaitForSlot:   s.waitForAbuseReportSlot,
 	}
 	rec := &abuseReportRecorderAdapter{st: s.st}
-	reported, skipped, ferr := abuseipdb.Report(r.Context(), rec, cands, opts)
+	ctx := r.Context()
+	enc := json.NewEncoder(w)
+	var send func(reportBatchEvent)
+	if selection {
+		batchCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		ctx = batchCtx
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		controller := http.NewResponseController(w)
+		// A paced batch may outlast the server-wide write deadline. Bound
+		// the wait for each write instead.
+		send = func(event reportBatchEvent) {
+			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			if enc.Encode(event) != nil || controller.Flush() != nil {
+				cancel()
+			}
+		}
+		send(reportBatchEvent{Status: "started"})
+		opts.OnProgress = func(c abuseipdb.ReportCandidate, _ *abuseipdb.Result, err error) {
+			status := "reported"
+			switch {
+			case err == nil:
+			case strings.HasPrefix(err.Error(), "skip:"):
+				status = "skipped"
+			default:
+				status = "failed"
+			}
+			send(reportBatchEvent{IP: c.SrcIP, Status: status})
+		}
+	}
+	reported, skipped, ferr := abuseipdb.Report(ctx, rec, cands, opts)
 
 	resp := reportAllResponse{Status: "ok", Reported: reported, Skipped: skipped}
 	if errors.Is(ferr, abuseipdb.ErrRateLimited) {
@@ -1727,7 +1791,11 @@ func (s *Server) handleAbuseIPDBReportAll(w http.ResponseWriter, r *http.Request
 		resp.Status = "partial"
 		resp.Error = "some reports failed — see server logs"
 	}
-	json.NewEncoder(w).Encode(resp)
+	if selection {
+		send(reportBatchEvent{Final: &resp})
+	} else {
+		_ = enc.Encode(resp)
+	}
 }
 
 // ==== /api/intel/abuseipdb/suggestions ============================

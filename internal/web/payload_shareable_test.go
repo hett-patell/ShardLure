@@ -50,9 +50,12 @@ func TestPayloadsShareableUsesBazaarPolicy(t *testing.T) {
 		// 217 B dropper: above bazaar's 64 B floor, below the old 1024 pre-filter.
 		{URL: "http://x/small", SHA256: "cc", LocalPath: onDisk, SizeBytes: 217,
 			Origin: "cowrie_download", Status: "fetched", TS: now.Add(-4 * time.Hour)},
-		// TTY transcript: hard-rejected by Vet, must never get a button.
-		{URL: "http://x/tty", SHA256: "dd", LocalPath: onDisk, SizeBytes: 65536,
-			Origin: "cowrie_tty", Status: "fetched", TS: now.Add(-5 * time.Hour)},
+		// Newest TTY observations must not consume a page slot or become
+		// the representative record for a hash that also has payload data.
+		{URL: "cowrie-tty:tty-only", SHA256: "dd", LocalPath: onDisk, SizeBytes: 65536,
+			Origin: "cowrie_tty", Status: "fetched", TS: now.Add(-time.Minute)},
+		{URL: "cowrie-tty:mixed", SHA256: "aa", LocalPath: onDisk, SizeBytes: 65536,
+			Origin: "cowrie_tty", Status: "fetched", TS: now.Add(-2 * time.Minute)},
 		// Sub-floor junk.
 		{URL: "http://x/sentinel", SHA256: "ee", LocalPath: onDisk, SizeBytes: 1,
 			Origin: "cowrie_download", Status: "fetched", TS: now.Add(-6 * time.Hour)},
@@ -64,19 +67,20 @@ func TestPayloadsShareableUsesBazaarPolicy(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	s.handleIntelPayloads(w, httptest.NewRequest(http.MethodGet, "/api/intel/payloads?window=24h&limit=100", nil))
+	s.handleIntelPayloads(w, httptest.NewRequest(http.MethodGet, "/api/intel/payloads?window=24h&limit=4", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /api/intel/payloads → %d: %s", w.Code, w.Body.String())
 	}
-	var out struct {
-		Rows []struct {
-			SHA256    string `json:"sha256"`
-			Origin    string `json:"origin"`
-			Shareable bool   `json:"shareable"`
-		} `json:"rows"`
-	}
+	var out payloadsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+	if out.Total != 4 || out.Returned != 4 || len(out.Rows) != 4 {
+		t.Fatalf("payload totals/page = %d/%d (%d rows), want four non-TTY hashes",
+			out.Total, out.Returned, len(out.Rows))
+	}
+	if r := out.Rows[0]; r.SHA256 != "aa" || r.Occurrences != 2 || r.SizeBytes != 8192 {
+		t.Fatalf("latest payload row = %+v; a transcript changed the aggregate", r)
 	}
 	got := map[string]bool{}
 	origins := map[string]string{}
@@ -100,10 +104,9 @@ func TestPayloadsShareableUsesBazaarPolicy(t *testing.T) {
 			"provenance; `origin LIKE '%download%'` never matched it", true},
 		{"cc", "217 B dropper: bazaar's floor is 64 B, and a real dropper script is " +
 			"routinely a few hundred bytes", true},
-		{"dd", "tty transcript, hard-rejected by Vet", false},
 		{"ee", "1-byte sentinel, below the size floor", false},
 	} {
-		if got[tc.sha] != tc.want {
+		if shareable, ok := got[tc.sha]; !ok || shareable != tc.want {
 			t.Errorf("payload %s: shareable = %v, want %v — %s", tc.sha, got[tc.sha], tc.want, tc.why)
 		}
 	}
@@ -147,6 +150,8 @@ func TestPayloadDetailShareableIsGroupLevel(t *testing.T) {
 			Origin: "cowrie_download", Status: "fetched", TS: now.Add(-2 * time.Hour)},
 		{URL: "http://x/mixed-b", SHA256: "aa", LocalPath: onDisk, SizeBytes: 8192,
 			Origin: "quarantine_fetch", Status: "fetched", TS: now.Add(-1 * time.Hour)},
+		{URL: "cowrie-tty:mixed", SHA256: "aa", LocalPath: onDisk, SizeBytes: 65536,
+			Origin: "cowrie_tty", Status: "fetched", TS: now.Add(-time.Minute)},
 		{URL: "http://x/tty", SHA256: "dd", LocalPath: onDisk, SizeBytes: 65536,
 			Origin: "cowrie_tty", Status: "fetched", TS: now.Add(-5 * time.Hour)},
 		// Newest row is a FAILED re-fetch over a payload we already have. The
@@ -191,8 +196,10 @@ func TestPayloadDetailShareableIsGroupLevel(t *testing.T) {
 		t.Error("detail modal says the mixed-origin payload is not shareable — it must " +
 			"answer for the whole sha group, not the newest row it happens to load")
 	}
-	if _, _, ttyShareable := detail("dd"); ttyShareable {
-		t.Error("detail modal offers a share button for a tty transcript")
+	w := httptest.NewRecorder()
+	s.handleIntelPayload(w, httptest.NewRequest(http.MethodGet, "/api/intel/payload?sha=dd", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("TTY-only hash exposed through payload detail: HTTP %d", w.Code)
 	}
 
 	// The partial-group case: the row the modal loaded is a failed re-fetch, but

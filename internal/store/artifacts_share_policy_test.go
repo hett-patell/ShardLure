@@ -227,8 +227,8 @@ func TestAggregateShareableIsGroupLevel(t *testing.T) {
 			"with bytes on disk — shareability is satisfied by ANY qualifying row, not by " +
 			"all of them, and the newest row here is a failed re-fetch")
 	}
-	if byShare["t1"].Shareable {
-		t.Fatal("cowrie_tty transcript marked shareable")
+	if _, ok := byShare["t1"]; ok {
+		t.Fatal("cowrie_tty transcript occupied a slot in the payload list")
 	}
 	if byShare["j1"].Shareable {
 		t.Fatal("1-byte sentinel marked shareable")

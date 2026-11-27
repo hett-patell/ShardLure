@@ -63,7 +63,7 @@ Longer operational guides (installation, backup, security, troubleshooting) live
 - **Honeypot status panel:** Cowrie's real uptime read from systemd (`ActiveEnterTimestamp`), plus seconds-since-last-event and total ingested. Strictly read-only — ShardLure never starts, stops, or reconfigures the Cowrie unit; the two systemd units stay independent with the JSON log as their only contract. On a host without systemd it reports `unknown` rather than inventing a number, and the last-event signal still works (a Cowrie that is "up" but not logging is the real failure mode).
 - **Dashboard settings panel:** configure API keys, theme, and enrichment providers from the UI. Keys are masked on read and validated with a per-provider connection test before save. Home coordinates remain in YAML under `dashboard.home_*` and are not edited by Settings.
 - **One-click MalwareBazaar upload:** share captured payloads to abuse.ch directly from the payload inspector modal. No CLI required.
-- **AbuseIPDB reporting:** report confirmed brute-forcers back to AbuseIPDB from the dashboard (Report All) or CLI (`report abuseipdb`). Vetting gate enforces probe-score floor, private/admin IP exclusion, and 24h re-report dedup.
+- **AbuseIPDB reporting:** report confirmed brute-forcers back to AbuseIPDB from the dashboard (**Report shown**) or CLI (`report abuseipdb`). The vetting gate enforces the probe-score floor, private/admin IP exclusion, and 24h re-report dedup.
 - **Seven-provider IP enrichment:** look up any attacker IP against AbuseIPDB, VirusTotal, GreyNoise, Shodan, AlienVault OTX, IPQualityScore, and IPinfo in parallel — normalized verdict + score + tags, cached 24h. Two work with no API key.
 - **Runtime keystore:** API keys and appearance settings live in SQLite, editable from the settings panel. DB wins over env vars; env vars win over config file. No restart needed.
 - **Tunnel tracking:** captures and aggregates `direct-tcpip` forwarding attempts (attacker proxy pivots) — powers the "Proxy Targets" widget and tunnel IOC export.
@@ -103,7 +103,7 @@ are exact-text edits to that commit's source, so `apply-stealth.sh` and
 | v1.x | not pinned (Cowrie's `main` at install time) | — |
 | v2.0.0 – v2.10.1 | v3.0.8 | `65ded95b2d2b6555be8e4eb95315036a4db361f9` |
 | v2.11.0 – v2.13.0 | v3.1.1 | `c17c9b73d6af0972334ea1e90b20d974cb24eeca` |
-| v3.0.0 | v3.1.8 | `183a3b1bc361bb941e1d54874922399baac42af0` |
+| v3.0.0 – v3.0.1 | v3.1.8 | `183a3b1bc361bb941e1d54874922399baac42af0` |
 
 Upgrading ShardLure across a row of this table moves Cowrie too. The installers
 do not move an existing box: they refuse a running host (and any host installed
@@ -393,10 +393,10 @@ curl -s localhost:8080/api/intel     -o /tmp/i.json
 sudo python3 scripts/verify-widgets.py
 ```
 
-`verify-widgets.py` recomputes **every** widget's numbers straight from `events`
-and `actors`, using queries written independently of the application's own, and
-prints a per-check pass/fail table (36 checks, including a per-bucket comparison
-of all heatmap cells and sparkline buckets). Live ingest means the API snapshot
+`verify-widgets.py` independently recomputes the Overview checks from `events`
+and `actors`. It prints a per-check pass/fail table (36 checks, including the
+heatmap cells and sparkline buckets). It does not verify the Red or Blue team
+widgets or external provider verdicts. Live ingest means the API snapshot
 and the SQL query cannot be simultaneous, so monotonic counters allow a small
 drift and the delta is always printed — drift can never be mistaken for
 agreement.
@@ -407,6 +407,20 @@ wrong quantity**. All four were clean while the threat gauge sat frozen at 52 fo
 months and the Brute-Force Radar listed eight attackers that had been silent for
 weeks. The only thing that catches that is recomputing the number a different
 way, so if you change a widget's data source, run this.
+
+For the team tabs, compare windowed counts with retained event and artifact
+records, and sharing counts with the status in the corresponding local ledger.
+The payload library groups non-TTY artifact records by hash before applying
+its page limit. Cowrie TTY transcripts remain in session details; they are
+not payloads. An artifact record is not proof of a distinct successful
+download.
+Pending uploads covers the current library page only. ThreatFox and
+MalwareBazaar history keeps already-listed results for deduplication, but those
+results are not new submissions. ATT&CK matches, report suggestions, and
+provider verdicts are signals, not independently confirmed outcomes.
+ThreatFox history distinguishes SHA-256 file hashes from network indicators.
+AbuseIPDB **Report shown** reports only the confirmed rows, with live per-IP
+outcomes while the server continues to vet, deduplicate, and pace requests.
 
 The binary can also launch the VPS wrapper:
 
@@ -793,7 +807,9 @@ Every candidate passes a **vetting gate** (`internal/intel/abuseipdb/vet.go`) be
 - A 24h re-report window prevents spamming the API (AbuseIPDB permits 15min, but 24h keeps us well within fair use).
 - The generated comment carries session stats (event count, username count, MITRE TTPs) but NOTHING identifying the honeypot host.
 
-The same gate runs for both the CLI and the dashboard's "Report All" button. The dashboard also prevents concurrent batch reports — a second click returns "batch already in progress" instead of deadlocking.
+The same gate runs for the CLI and the dashboard’s **Report shown** button.
+The dashboard sends only the confirmed IPs, displays per-IP progress, and
+prevents concurrent batches. Provider pacing and re-report limits still apply.
 
 **Setup**
 
@@ -1099,7 +1115,7 @@ sudo userdel -r cowrie
 - [x] 3D Cobe globe with WebGL arcs, drag rotation, and proper listener lifecycle
 - [x] Dashboard settings panel (API keys and theme — masked + connection-tested; home remains YAML)
 - [x] Runtime keystore (DB > env > config precedence, no restart needed)
-- [x] AbuseIPDB outbound reporting (CLI + dashboard Report All, vetting gate, 24h dedup)
+- [x] AbuseIPDB outbound reporting (CLI + dashboard Report shown, vetting gate, 24h dedup)
 - [x] Tunnel/proxy target tracking (`direct-tcpip` aggregation + red-team widget)
 - [x] Connection-driven globe (turns to each new source, labels it, draws its route)
 - [x] Ambient globe dashboard (analyst widgets consolidated in `/intel`)
