@@ -287,15 +287,39 @@ class CowrieUpgradeTests(unittest.TestCase):
             (home / rel).write_text(text)
         return home
 
-    def _upgrade(self, data: Path, head: str, install, handoff=None) -> list:
-        calls = []
+    def _upgrade(self, data: Path, head: str, install, handoff=None, *, unit=None,
+                 initial="active", failure=None) -> list:
+        self.calls = []
+        starts = 0
+        reads = 0
 
         def fake_run(args, **kwargs):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, "active\n" if "show" in args else "", "")
+            nonlocal starts, reads
+            self.calls.append(args)
+            rc, out = 0, ""
+            if args[:2] == ["systemctl", "start"]:
+                starts += 1
+                reads = 0
+                rc = int(starts == 1 and failure == "start")
+            elif args[:2] == ["systemctl", "show"]:
+                if "--property=FragmentPath" in args:
+                    out = f"LoadState=loaded\nNeedDaemonReload=no\nActiveState={initial}\nFragmentPath={unit or ''}\n"
+                else:
+                    reads += 1
+                    if starts == 1 and failure == "crash" and reads > 1:
+                        out = "ActiveState=activating\nSubState=auto-restart\nMainPID=0\nNRestarts=0\n"
+                    else:
+                        out = "ActiveState=active\nSubState=running\nMainPID=1234\nNRestarts=0\n"
+            elif args[0] == "ss":
+                pid = 4321 if starts == 1 and failure == "crash" else 1234
+                out = f'LISTEN 0 50 127.0.0.1:22 0.0.0.0:* users:(("python",pid={pid},fd=8))\n'
+            return subprocess.CompletedProcess(args, rc, out, "")
 
         with (mock.patch.object(shardlure, "DATA_DIR", data),
               mock.patch.object(shardlure, "COWRIE_HOME", data / "cowrie"),
+              mock.patch.object(shardlure, "SYSTEMD_DIR", unit.parent if unit else data.parent / "units"),
+              mock.patch.object(shardlure, "PERSONA_REGEN_LIB", data.parent / "persona"),
+              mock.patch.object(shardlure.shutil, "which", return_value="/usr/bin/ss"),
               mock.patch.object(shardlure, "COWRIE_USER", pwd.getpwuid(os.getuid()).pw_name),
               mock.patch.object(shardlure, "need_root"),
               mock.patch.object(shardlure, "require_cowrie_python"),
@@ -311,7 +335,7 @@ class CowrieUpgradeTests(unittest.TestCase):
                 shardlure.cmd_cowrie_upgrade()
             finally:
                 self.installed = installed.call_args_list
-        return calls
+        return self.calls
 
     @staticmethod
     def _fresh_tree(home: Path) -> None:
@@ -327,7 +351,7 @@ class CowrieUpgradeTests(unittest.TestCase):
             inode = (home / "var/log/cowrie/cowrie.json").stat().st_ino
             calls = self._upgrade(data, self.OLD, lambda port: self._fresh_tree(home))
             aside = data / f"cowrie.{self.OLD[:12]}"
-            self.assertEqual([c[1] for c in calls if c[0] == "systemctl"], ["show", "stop", "start"])
+            self.assertEqual([c[1] for c in calls if c[0] == "systemctl"], ["show", "stop", "start", "show"])
             self.assertEqual(self.installed, [mock.call(22)])
             # Ingest keeps its place: the same file, not a copy.
             self.assertEqual((home / "var/log/cowrie/cowrie.json").stat().st_ino, inode)
@@ -364,6 +388,103 @@ class CowrieUpgradeTests(unittest.TestCase):
                 failed = list(data.glob(f"cowrie.failed-{EXPECTED_PIN[:12]}-*"))
                 self.assertEqual(len(failed), 1)
                 self.assertTrue((failed[0] / "var/log/cowrie/.gitignore").exists())
+
+    def test_failed_start_or_crash_rolls_back_and_restarts_original(self):
+        for failure in ("start", "crash"):
+            with self.subTest(failure), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp) / "data"
+                home = self._host(data)
+                log = home / "var/log/cowrie/cowrie.json"
+                inode = log.stat().st_ino
+                with self.assertRaises(SystemExit):
+                    self._upgrade(data, self.OLD, lambda port: self._fresh_tree(home), failure=failure)
+                actions = [c[1] for c in self.calls if c[0] == "systemctl" and c[1] != "show"]
+                self.assertEqual(actions, ["stop", "start", "stop", "start"])
+                self.assertEqual((home / "etc/cowrie.cfg").read_text(), "hand-edited\n")
+                self.assertEqual(log.stat().st_ino, inode)
+
+    def test_failed_start_restores_the_old_startup_helpers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            data = parent / "data"
+            home = self._host(data)
+            persona = parent / "persona"
+            persona.mkdir(mode=0o700)
+            (persona / "shardlure.py").write_bytes(b"old helper")
+            (persona / "operator.py").write_bytes(b"keep")
+
+            def install(port):
+                self._fresh_tree(home)
+                (persona / "shardlure.py").write_bytes(b"new helper")
+                (persona / "installer_safety.py").write_bytes(b"added helper")
+
+            with self.assertRaises(SystemExit):
+                self._upgrade(data, self.OLD, install, failure="start")
+            self.assertEqual({p.name: p.read_bytes() for p in persona.iterdir()},
+                             {"shardlure.py": b"old helper", "operator.py": b"keep"})
+
+    def _legacy_host(self, base, variant, *, managed=True):
+        data = base / 'data "quoted" $VALUE %n'
+        data.mkdir(mode=0o700)
+        units = base / "units"
+        units.mkdir(mode=0o700)
+        unit = units / "cowrie.service"
+        state = shardlure.installer_safety.InstallationState(data, units)
+        state.begin()
+        home = self._host(data)
+        py, launcher = (("venv/bin/python", "venv/bin/cowrie") if variant == "modern"
+                        else ("venv/bin/python3", "bin/cowrie"))
+        start = (f"ExecStart=/usr/bin/authbind --deep {shardlure.systemd_exec_arg(str(home / py))} "
+                 f"{shardlure.systemd_exec_arg(str(home / launcher))} start -n --umask=0027\n")
+        env = "Environment=AUTHBIND_ENABLED=yes\n" if variant == "modern" else ""
+        original = ("[Service]\nUser=cowrie\nEnvironment=TZ=UTC\n" + env + start + "Restart=always\n").encode()
+        if managed:
+            state.publish(unit, original, 0o600)
+        else:
+            unit.write_bytes(original)
+        dropin = units / "cowrie.service.d" / "local.conf"
+        dropin.parent.mkdir()
+        dropin.write_text("[Service]\nRestartSec=8s\n")
+        return data, home, state, unit, original, dropin
+
+    def test_failed_legacy_service_is_migrated_and_started(self):
+        for variant in ("modern", "fallback"):
+            with self.subTest(variant), tempfile.TemporaryDirectory() as tmp:
+                data, home, state, unit, _, dropin = self._legacy_host(Path(tmp), variant)
+                self._upgrade(data, self.OLD, lambda port: self._fresh_tree(home), unit=unit, initial="failed")
+                text = unit.read_text()
+                self.assertIn(f'ExecStart=/usr/bin/authbind --deep '
+                              f'{shardlure.systemd_exec_arg(str(home / "venv/bin/python"))} '
+                              f'{shardlure.systemd_exec_arg(str(home / "venv/bin/twistd"))} '
+                              '--umask 0027 --nodaemon --pidfile= -l - cowrie\n', text)
+                self.assertIn(f'Environment={shardlure.systemd_environment("PYTHONPATH", str(home / "src"))}\n', text)
+                self.assertNotIn("AUTHBIND_ENABLED", text)
+                self.assertTrue(text.endswith("Restart=always\n"))
+                self.assertEqual(dropin.read_text(), "[Service]\nRestartSec=8s\n")
+                state.check_resources([unit])
+                self.assertEqual([c[1] for c in self.calls if c[0] == "systemctl" and c[1] != "show"],
+                                 ["stop", "daemon-reload", "reset-failed", "start"])
+
+    def test_failed_legacy_cutover_restores_owned_unit_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data, home, state, unit, original, _ = self._legacy_host(Path(tmp), "modern")
+            with self.assertRaises(SystemExit):
+                self._upgrade(data, self.OLD, lambda port: self._fresh_tree(home), unit=unit,
+                              initial="failed", failure="start")
+            self.assertEqual(unit.read_bytes(), original)
+            state.check_resources([unit])
+            self.assertEqual((home / "etc/cowrie.cfg").read_text(), "hand-edited\n")
+            self.assertEqual([c[1] for c in self.calls if c[0] == "systemctl" and c[1] != "show"],
+                             ["stop", "daemon-reload", "reset-failed", "start", "stop", "daemon-reload"])
+
+    def test_unverified_legacy_unit_is_left_unchanged_before_stopping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data, home, _, unit, original, _ = self._legacy_host(Path(tmp), "modern", managed=False)
+            with self.assertRaises(SystemExit):
+                self._upgrade(data, self.OLD, lambda port: self.fail("touched an unverified install"), unit=unit)
+            self.assertEqual(unit.read_bytes(), original)
+            self.assertEqual((home / "etc/cowrie.cfg").read_text(), "hand-edited\n")
+            self.assertEqual([c[1] for c in self.calls], ["show"])
 
     def test_cowrie_at_the_pin_is_left_alone(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1754,6 +1754,69 @@ def systemd_environment(key: str, value: str) -> str:
     return systemd_value(key + "=" + value)
 
 
+def _cowrie_twistd_args() -> str:
+    py = systemd_exec_arg(str(COWRIE_HOME / "venv/bin/python"))
+    twistd = systemd_exec_arg(str(COWRIE_HOME / "venv/bin/twistd"))
+    return f"{py} {twistd} --umask 0027 --nodaemon --pidfile= -l - cowrie"
+
+
+def _cowrie_exec_environment() -> str:
+    pythonpath = systemd_environment("PYTHONPATH", str(COWRIE_HOME / "src"))
+    path = systemd_environment("PATH", str(COWRIE_HOME / "venv/bin") + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    return f"Environment={pythonpath}\nEnvironment={path}\n"
+
+
+def _legacy_cowrie_unit(unit: Path) -> tuple[bytes, bytes, int] | None:
+    """Plan a launcher-only migration for a provenance-verified install.sh unit."""
+    old = installer_safety.read_regular(unit)
+    text = old.decode()
+    start_lines = [line for line in text.splitlines() if line.strip().startswith("ExecStart=")]
+    variants = {
+        f"ExecStart=/usr/bin/authbind --deep {systemd_exec_arg(str(COWRIE_HOME / py))} "
+        f"{systemd_exec_arg(str(COWRIE_HOME / launcher))} start -n --umask=0027"
+        for py, launcher in (("venv/bin/python", "venv/bin/cowrie"), ("venv/bin/python3", "bin/cowrie"))
+    }
+    if len(start_lines) != 1 or start_lines[0] not in variants:
+        return None
+    try:
+        installation_state().check_resources([unit])
+    except (OSError, ValueError) as exc:
+        raise ValueError("legacy Cowrie launcher in an unverified unit; update ExecStart to run twistd before upgrading") from exc
+    replacement = _cowrie_exec_environment() + f"ExecStart=/usr/bin/authbind --deep {_cowrie_twistd_args()}"
+    modern = text.replace("Environment=AUTHBIND_ENABLED=yes\n" + start_lines[0], start_lines[0], 1)
+    modern = modern.replace(start_lines[0], replacement, 1)
+    return old, modern.encode(), stat.S_IMODE(unit.stat().st_mode)
+
+
+def _cowrie_unit_state(*properties: str) -> dict[str, str]:
+    result = run(["systemctl", "show", "cowrie.service", *(f"--property={p}" for p in properties)],
+                 capture_output=True, text=True, timeout=5)
+    result.check_returncode()
+    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def _start_cowrie_and_wait(port: int) -> None:
+    run(["systemctl", "start", "cowrie.service"], timeout=100).check_returncode()
+    # Type=simple starts before twistd has bound its socket. Require the unit's
+    # own main PID (not sshd or another service on the same port) to listen.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        # A crash-loop may still have a PID in systemd's first snapshot.
+        state = _cowrie_unit_state("ActiveState", "SubState", "MainPID", "NRestarts")
+        if state.get("ActiveState") in ("failed", "inactive", "deactivating") or (
+            state.get("SubState") == "auto-restart" or state.get("NRestarts") != "0"
+        ):
+            break
+        pid = state.get("MainPID", "0")
+        if state.get("ActiveState") == "active" and pid.isdecimal() and int(pid):
+            listeners = run(["ss", "-H", "-ltnp", f"sport = :{port}"], capture_output=True, text=True, timeout=5)
+            listeners.check_returncode()
+            if re.search(rf"\bpid={pid},", listeners.stdout):
+                return
+        time.sleep(0.2)
+    raise RuntimeError(f"cowrie.service did not listen on TCP port {port}; see journalctl -u cowrie")
+
+
 def render_services(honeypot_port: int, dash_port: int) -> dict[str, str]:
     # Validate the complete input set before writing either unit.
     for value in (DATA_DIR, COWRIE_HOME, COWRIE_LOG, CONFIG_FILE, BIN_DIR, SYSTEMD_DIR):
@@ -1783,14 +1846,9 @@ def render_services(honeypot_port: int, dash_port: int) -> dict[str, str]:
             'do address=$$("$$1" ip -4) && test -n "$$address" && exit 0; '
             f"sleep 1; done; exit 1' sh {tailscale_arg}\n"
         )
-    py = COWRIE_HOME / "venv/bin/python"
-    twistd = COWRIE_HOME / "venv/bin/twistd"
     authbind_bin = shutil.which("authbind")
     if honeypot_port < 1024 and authbind_bin:
-        cowrie_exec = (
-            f"{systemd_exec_arg(os.path.abspath(authbind_bin))} --deep {systemd_exec_arg(str(py))} {systemd_exec_arg(str(twistd))} "
-            f"--umask 0027 --nodaemon --pidfile= -l - cowrie"
-        )
+        cowrie_exec = f"{systemd_exec_arg(os.path.abspath(authbind_bin))} --deep {_cowrie_twistd_args()}"
     else:
         # systemd refuses an Exec executable path containing `$` (and `$$` is
         # only unescaped in arguments), so the venv interpreter under a data
@@ -1798,8 +1856,7 @@ def render_services(honeypot_port: int, dash_port: int) -> dict[str, str]:
         # instead: the path stays a literal argument and the shell never
         # parses it ("$@" expands positional parameters without re-splitting).
         cowrie_exec = (
-            "/bin/sh -c 'exec \"$$@\"' cowrie-launch "
-            f"{systemd_exec_arg(str(py))} {systemd_exec_arg(str(twistd))} --umask 0027 --nodaemon --pidfile= -l - cowrie"
+            f"/bin/sh -c 'exec \"$$@\"' cowrie-launch {_cowrie_twistd_args()}"
         )
     cowrie_text = f"""[Unit]
 Description=Cowrie SSH honeypot (ShardLure)
@@ -1810,9 +1867,7 @@ Type=simple
 User={COWRIE_USER}
 Group={COWRIE_USER}
 WorkingDirectory={systemd_path(str(COWRIE_HOME))}
-Environment={systemd_environment("PYTHONPATH",str(COWRIE_HOME / "src"))}
-Environment={systemd_environment("PATH",str(COWRIE_HOME / "venv/bin")+":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
-Environment=TZ=UTC
+{_cowrie_exec_environment()}Environment=TZ=UTC
 UMask=0027
 {persona_regen_prestart(COWRIE_HOME)}ExecStart={cowrie_exec}
 Restart=always
@@ -2137,9 +2192,8 @@ def cmd_cowrie_upgrade() -> None:
     """Move an installed Cowrie to the tested commit (README "Cowrie version").
 
     `run` and `finish` refuse a running host, and hosts installed before
-    v2.8.0 altogether; this replaces only the Cowrie tree. SSH, the units,
-    accounts, the ShardLure config and binary are left as they are. The old
-    tree is moved aside, not deleted, and put back if anything fails."""
+    v2.8.0 altogether. Replace Cowrie, and migrate the managed install.sh
+    launcher if needed, without touching admin SSH or the live service."""
     need_root()
     require_cowrie_python()
     validate_existing_accounts()
@@ -2161,34 +2215,99 @@ def cmd_cowrie_upgrade() -> None:
     aside = COWRIE_HOME.with_name(f"{COWRIE_HOME.name}.{current[:12]}")
     if aside.exists() or aside.is_symlink():
         die(f"{aside} already exists, probably from an earlier move; delete or rename it first. Nothing was changed")
-    state = run(["systemctl", "show", "cowrie.service", "--property=ActiveState", "--value"],
-                capture_output=True, text=True)
-    restart = (state.stdout or "").strip() in ("active", "activating", "reloading")
-    # Stop it even when it is not running: an auto-restart would otherwise
-    # start the half-built tree, unpatched, in the middle of the install.
+    unit = SYSTEMD_DIR / "cowrie.service"
+    try:
+        state = _cowrie_unit_state("LoadState", "ActiveState", "SubState", "FragmentPath", "NeedDaemonReload")
+        if state.get("LoadState") != "loaded" or state.get("NeedDaemonReload") != "no":
+            raise ValueError("cowrie.service is not loaded or needs systemctl daemon-reload")
+        migration = _legacy_cowrie_unit(unit) if state.get("FragmentPath") == str(unit) else None
+        retrying = state.get("SubState") == "auto-restart"
+        was_running = not retrying and state.get("ActiveState") in ("active", "activating", "reloading")
+        should_start = was_running or bool(migration and (retrying or state.get("ActiveState") == "failed"))
+        if should_start and not shutil.which("ss"):
+            raise ValueError("ss (iproute2) is required to verify Cowrie starts")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        die(f"Cowrie move preflight refused: {exc}. Nothing was changed")
+    # The new install also publishes the per-start helpers outside its tree.
+    # Save them before stopping so a rollback starts with the old helpers.
+    try:
+        persona_before = _cowrie_persona_files()
+    except (OSError, ValueError) as exc:
+        die(f"cannot save Cowrie startup helpers: {exc}. Nothing was changed")
+
     if run(["systemctl", "stop", "cowrie.service"]).returncode != 0:
-        die("cannot stop cowrie.service. Nothing was changed")
+        die("cannot stop cowrie.service; the checkout was not changed")
     log(f"moving Cowrie {current[:12]} to {pin[:12]}; the old tree is kept at {aside}")
-    os.rename(COWRIE_HOME, aside)
+    tree_moved = unit_attempted = start_attempted = False
     moved: list[tuple[str, str]] = []
     try:
+        os.rename(COWRIE_HOME, aside)
+        tree_moved = True
         install_cowrie(honeypot)
         installer_safety.carry_cowrie_state(aside, COWRIE_HOME, COWRIE_USER, moved)
-        # Hand the carried logs and captures over with the rest of the tree.
         installer_safety.prepare_cowrie_tree(DATA_DIR, COWRIE_USER)
+        if migration:
+            old_unit, new_unit, mode = migration
+            unit_attempted = True
+            installation_state().publish(unit, new_unit, mode)
+            run(["systemctl", "daemon-reload"]).check_returncode()
+        if should_start:
+            if not was_running:
+                # A broken legacy launcher may already have hit StartLimitBurst.
+                run(["systemctl", "reset-failed", "cowrie.service"]).check_returncode()
+            start_attempted = True
+            _start_cowrie_and_wait(honeypot)
     except BaseException as exc:
-        restore_cowrie_tree(aside, pin, moved, restart)
-        if isinstance(exc, (OSError, ValueError, subprocess.CalledProcessError)):
+        try:
+            if start_attempted:
+                run(["systemctl", "stop", "cowrie.service"]).check_returncode()
+            if tree_moved:
+                _restore_cowrie_tree(aside, pin, moved)
+                _restore_cowrie_persona(persona_before)
+            if unit_attempted:
+                on_disk = installer_safety.read_regular(unit)
+                if on_disk == new_unit:
+                    installation_state().publish(unit, old_unit, mode)
+                    run(["systemctl", "daemon-reload"]).check_returncode()
+                elif on_disk != old_unit:
+                    raise ValueError("Cowrie unit changed during upgrade; preserving it")
+            if was_running:
+                _start_cowrie_and_wait(honeypot)
+        except Exception as rollback:
+            die(f"Cowrie move failed ({exc}); rollback could not finish ({rollback}); inspect {COWRIE_HOME} and {aside}")
+        log("previous Cowrie installation restored")
+        if isinstance(exc, (OSError, ValueError, RuntimeError, subprocess.SubprocessError)):
             die(f"Cowrie move failed ({exc}); the previous Cowrie is back in place")
         raise
-    if restart and run(["systemctl", "start", "cowrie.service"]).returncode != 0:
-        die(f"Cowrie {pin[:12]} is installed but cowrie.service did not start; see journalctl -u cowrie")
     log(f"Cowrie {pin[:12]} installed with the persona and patches; its logs, downloads, TTY logs, "
         "userdb.txt, sensor uuid and host keys came from the old tree")
-    log(f"delete {aside} once the new Cowrie runs; edits to its etc/cowrie.cfg were not carried over")
+    log(f"keep {aside} until the new Cowrie is verified; edits to its etc/cowrie.cfg were not carried over")
 
 
-def restore_cowrie_tree(aside: Path, pin: str, moved: list, start: bool) -> None:
+def _cowrie_persona_files() -> dict[str, bytes]:
+    files = {}
+    for name in PERSONA_REGEN_FILES:
+        try:
+            files[name] = installer_safety.read_regular(PERSONA_REGEN_LIB / name, 4 << 20)
+        except FileNotFoundError:
+            pass
+    return files
+
+
+def _restore_cowrie_persona(previous: dict[str, bytes]) -> None:
+    current = _cowrie_persona_files()
+    changed = {name: raw for name, raw in previous.items() if current.get(name) != raw}
+    if changed:
+        installer_safety.install_root_files(PERSONA_REGEN_LIB, changed)
+    added = current.keys() - previous.keys()
+    if added:
+        with installer_safety.directory(PERSONA_REGEN_LIB) as fd:
+            for name in added:
+                os.unlink(name, dir_fd=fd)
+            os.fsync(fd)
+
+
+def _restore_cowrie_tree(aside: Path, pin: str, moved: list[tuple[str, str]]) -> None:
     log(f"Cowrie move failed; restoring the previous tree from {aside}")
     installer_safety.return_cowrie_state(aside, COWRIE_HOME, COWRIE_USER, moved)
     if COWRIE_HOME.exists() or COWRIE_HOME.is_symlink():
@@ -2196,8 +2315,6 @@ def restore_cowrie_tree(aside: Path, pin: str, moved: list, start: bool) -> None
         os.rename(COWRIE_HOME, failed)
         log(f"the incomplete {pin[:12]} tree is kept at {failed}")
     os.rename(aside, COWRIE_HOME)
-    if start:
-        run(["systemctl", "start", "cowrie.service"])
 
 
 def restore_sshd() -> set[int]:

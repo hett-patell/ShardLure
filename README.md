@@ -115,16 +115,25 @@ release:
 sudo python3 scripts/shardlure.py cowrie-upgrade
 ```
 
-It stops `cowrie.service`, moves the Cowrie tree aside to `cowrie.<old commit>`,
-installs the pinned commit with the persona and every patch, moves back the
-logs, downloads, TTY logs, `etc/userdb.txt`, the sensor `uuid` and the SSH host
-keys, and starts Cowrie again. Everything moves by rename, so ingest keeps its
-place in `cowrie.json`. SSH, the units, your ShardLure config and the binary are
-not touched. It needs GitHub and PyPI, and the honeypot is down while it builds
-(about a minute on a 4-core ARM VPS). If a step fails, the old tree is put back and started again,
-and the incomplete new one is kept as `cowrie.failed-<commit>-<time>`. Hand
-edits to the old `etc/cowrie.cfg` are not carried over: compare it with the new
-one, then delete the old tree.
+It stops `cowrie.service`, moves its tree aside as `cowrie.<old commit>`, and
+installs the pinned commit with the persona and patches. It moves the logs,
+downloads, TTY logs, `etc/userdb.txt`, sensor UUID and SSH host keys back by
+rename, so ingest keeps its place in `cowrie.json`. Hand edits to the old
+`etc/cowrie.cfg` stay in the old tree; review them before deleting it.
+
+It also updates a verified `install.sh`-managed unit that still uses
+`cowrie start -n --umask=0027` to run `twistd` directly. Custom units and
+drop-ins are not rewritten. An unverified unit with that launcher must be
+fixed by the operator before upgrading. Admin SSH, the ShardLure service,
+config and binary are not changed.
+
+The move needs GitHub and PyPI. The honeypot is down during the build (about
+a minute on a 4-core ARM VPS). The command starts and checks a previously
+running Cowrie or a failed legacy launcher; a deliberately stopped service
+stays stopped. If the replacement fails to start or listen, the upgrade
+stops it, restores the old tree and any changed unit, and brings back the
+previous service if it had been running. A failed replacement is kept as
+`cowrie.failed-<commit>-<time>` for inspection.
 
 ### Supported data filesystems
 
