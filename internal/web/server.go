@@ -1034,6 +1034,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/intel/threatfox/submit", s.guard(s.handleThreatFoxSubmit))
 	mux.HandleFunc("/api/intel/abuseipdb/report", s.guard(s.handleAbuseIPDBReport))
 	mux.HandleFunc("/api/intel/abuseipdb/report-all", s.guard(s.handleAbuseIPDBReportAll))
+	mux.HandleFunc(abuseReportSelectionPath, s.guard(s.handleAbuseIPDBReportAll))
 	mux.HandleFunc("/api/intel/abuseipdb/suggestions", s.guardRead(s.handleAbuseIPDBSuggestions))
 	mux.HandleFunc("/api/intel/tunnels", s.guardRead(s.handleIntelTunnels))
 	s.registerCampaignRoutes(mux)

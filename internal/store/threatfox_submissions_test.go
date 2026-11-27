@@ -82,3 +82,40 @@ func TestThreatFoxDedupLedger(t *testing.T) {
 		t.Error("a different ip:port must be independent in the ledger")
 	}
 }
+
+func TestThreatFoxStatsExcludeAlreadyListed(t *testing.T) {
+	st := newTestStore(t, "threatfox-duplicates.db")
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	submittedAt := now.Add(-time.Hour)
+	const added, listed = "192.0.2.1:443", "192.0.2.2:443"
+	for _, row := range []struct {
+		ioc, status string
+		at          time.Time
+	}{
+		{added, "submitted", submittedAt},
+		{listed, "duplicate", now},
+		{added, "duplicate", now},
+	} {
+		if err := st.RecordThreatFoxSubmission(row.ioc, "ip:port", "elf.mirai", row.status, row.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := st.ThreatFoxSubmissionStats(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TotalSubmitted != 1 || !stats.LastSubmittedAt.Equal(submittedAt) {
+		t.Fatalf("stats = %+v, want one new IOC at %v", stats, submittedAt)
+	}
+	rows, err := st.ListThreatFoxSubmissions(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].IOC != listed || rows[0].Status != "duplicate" ||
+		rows[1].IOC != added || rows[1].Status != "submitted" {
+		t.Fatalf("history = %+v, want already-listed IOC and original submission", rows)
+	}
+	if seen, err := st.ThreatFoxSubmitted(listed); err != nil || !seen {
+		t.Fatalf("already listed IOC dedup = %t, %v; want true, nil", seen, err)
+	}
+}

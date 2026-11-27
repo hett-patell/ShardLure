@@ -193,10 +193,13 @@ func TestBazaarPanelShowsVetDecision(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &pl); err != nil {
 		t.Fatal(err)
 	}
-	if len(pl.Rows) != 6 {
-		t.Fatalf("payload library rows = %d, want all 6 fixtures", len(pl.Rows))
+	if len(pl.Rows) != 5 {
+		t.Fatalf("payload library rows = %d, want five non-transcript fixtures", len(pl.Rows))
 	}
 	for _, r := range pl.Rows {
+		if r.SHA256 == fx.tty {
+			t.Fatal("TTY transcript leaked into payload library")
+		}
 		if r.Shareable != (r.SHA256 == fx.eligibleELF) {
 			t.Errorf("payload %s shareable=%v; only the Vet-eligible, unshared sample may be shareable", r.SHA256[:12], r.Shareable)
 		}

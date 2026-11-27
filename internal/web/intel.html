@@ -462,8 +462,11 @@
   /* ==== TTP harvesting ==== */
   .ttp-table { table-layout: fixed; }
   .ttp-table .ttp-tmpl { width: 48%; }
-  .ttp-table td.tmpl { word-break: break-all; white-space: normal; cursor: pointer; }
-  .ttp-table td.tmpl:hover { text-decoration: underline; }
+  .ttp-table td.tmpl { white-space: normal; overflow-wrap: anywhere; }
+  .ttp-table .tmpl summary { cursor: pointer; }
+  .ttp-table .ttp-preview { display: inline-block; vertical-align: middle; max-inline-size: calc(100% - 1.5em); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ttp-table .ttp-detail { margin-top: 6px; max-block-size: 18rem; overflow: auto; }
+  .ttp-table .ttp-full { margin-bottom: 8px; }
   /* Placeholders the normaliser substituted: an inset token, not a colour. */
   .ttp-table .ph-IP, .ttp-table .ph-URL, .ttp-table .ph-PATH,
   .ttp-table .ph-HEX, .ttp-table .ph-N, .ttp-table .ph-PORT {
@@ -474,9 +477,8 @@
   .ttp-table td.tcol { white-space: normal; }
   .ttp-table td.tcol .tt { margin: 1px 3px 1px 0; }
   .ttp-table td.range { color: var(--dim); font-size: var(--fs-xs); }
-  .ttp-table tr.expand-row td { padding: 12px 14px; background: var(--glass-2); white-space: normal; }
   .ttp-table .ttp-samples { display: grid; gap: 4px; font-size: var(--fs-xs); }
-  .ttp-table .ttp-samples .ts-line { padding: 2px 0; word-break: break-all; }
+  .ttp-table .ttp-samples .ts-line { padding: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .ttp-table .ttp-samples .ts-line::before { content: '$ '; color: var(--dim-2); }
   .ttp-table .ttp-actors-list { margin-top: 8px; color: var(--dim); font-size: var(--fs-xs); }
 
@@ -1008,7 +1010,7 @@
           <div class="sess-panel-body">
             <div class="sess-scroll" id="sessions-scroll" tabindex="0" role="region" aria-label="Cowrie session list">
               <div class="sess-head">
-                <span>#</span><span>Started</span><span>Source IP</span><span>User</span>
+                <span>#</span><span title="First Cowrie event for this session within the selected window">First seen</span><span>Source IP</span><span>User</span>
                 <span>Client</span><span>HASSH</span><span class="n">Duration</span>
                 <span class="n">Events</span><span class="n">Commands</span><span>Actor</span>
               </div>
@@ -1025,7 +1027,7 @@
 
         <section class="panel full intel-workbench" id="panel-mitre">
           <div class="panel-head">
-            <h2>MITRE ATT&amp;CK coverage</h2>
+            <h2 title="Heuristic matches on observed events; not proof a technique succeeded or a measure of detection coverage">MITRE ATT&amp;CK matches</h2>
             <span class="meta" id="mitre-meta">—</span>
           </div>
           <div id="mitre-grid" class="mitre-grid"></div>
@@ -1112,10 +1114,10 @@
           <div class="panel-head">
             <h2>Suggested AbuseIPDB reports</h2>
             <span class="meta" id="abuse-suggest-meta">ranked by report priority</span>
-            <button type="button" class="bz-btn" id="abuse-report-all-btn" onclick="reportAllSuggested(this)" style="display:none">Report all</button>
+            <button type="button" class="bz-btn" id="abuse-report-all-btn" onclick="reportAllSuggested(this)" style="display:none">Report shown</button>
           </div>
           <div class="panel-body">
-          <div id="abuse-suggest-note" class="abuse-note" style="display:none"></div>
+          <div id="abuse-suggest-note" class="abuse-note" role="status" style="display:none"></div>
           <table class="dense" id="abuse-suggest-table">
             <thead>
               <tr>
@@ -1146,8 +1148,8 @@
           <div class="panel-body">
           <div class="stats tight" id="urlhaus-stats">
             <div class="stat"><div class="num" id="uh-submitted">0</div><div class="label">Submitted</div></div>
-            <div class="stat"><div class="num" id="uh-eligible">0</div><div class="label">Eligible now</div></div>
-            <div class="stat"><div class="num" id="uh-pending">0</div><div class="label">Candidates</div></div>
+            <div class="stat"><div class="num" id="uh-eligible">0</div><div class="label">Eligible shown</div></div>
+            <div class="stat"><div class="num" id="uh-pending">0</div><div class="label">Candidates shown</div></div>
             <div class="stat"><div class="num" id="uh-last">—</div><div class="label">Last submitted</div></div>
           </div>
           <div id="urlhaus-note" class="abuse-note" style="display:none"></div>
@@ -1185,8 +1187,8 @@
           <div class="panel-body">
           <div class="stats tight" id="threatfox-stats">
             <div class="stat"><div class="num" id="tf-submitted">0</div><div class="label">IOCs submitted</div></div>
-            <div class="stat"><div class="num" id="tf-eligible">0</div><div class="label">Eligible now</div></div>
-            <div class="stat"><div class="num" id="tf-pending">0</div><div class="label">Candidates</div></div>
+            <div class="stat"><div class="num" id="tf-eligible">0</div><div class="label">Eligible shown</div></div>
+            <div class="stat"><div class="num" id="tf-pending">0</div><div class="label">Candidates shown</div></div>
             <div class="stat"><div class="num" id="tf-last">—</div><div class="label">Last submitted</div></div>
           </div>
           <div id="threatfox-note" class="abuse-note" style="display:none"></div>
@@ -1206,9 +1208,10 @@
             </tbody>
           </table>
           <div id="threatfox-log-wrap" class="log-wrap" style="display:none">
-            <div class="meta">Recent submissions</div>
+            <div class="meta">Recent submissions and already-listed IOCs</div>
+            <p class="meta">A SHA-256 file hash identifies a payload. URLs and IP:port entries identify infrastructure. History reflects the recorded response, not current listing status.</p>
             <table class="dense" id="threatfox-log">
-              <thead><tr><th>IOC</th><th style="width:96px">Type</th><th style="width:120px">Malware</th><th style="width:150px">Submitted</th></tr></thead>
+              <thead><tr><th>Indicator value</th><th style="width:120px">Type</th><th style="width:120px">Malware</th><th>Status</th><th style="width:150px">Recorded</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -1286,19 +1289,20 @@
         <section class="panel full panel-collapse" id="panel-payloads">
           <div class="panel-head">
             <h2><button type="button" class="panel-toggle" aria-expanded="true" aria-controls="payloads-body">Payload library</button></h2>
-            <span class="meta" id="payloads-meta">Captured binaries and scripts</span>
+            <span class="meta" id="payloads-meta">Artifact records grouped by SHA256</span>
             <button type="button" class="bz-btn" id="upload-all-btn" onclick="uploadAllToBazaar(this)">Upload all to MalwareBazaar</button>
           </div>
           <div class="panel-body" id="payloads-body">
+          <p class="meta">TTY transcripts are session recordings. Find them in Blue team → Cowrie sessions.</p>
           <table class="dense" id="payloads-table">
             <thead>
               <tr>
                 <th>SHA256</th>
                 <th class="num">Size</th>
-                <th class="num" title="Distinct delivery URLs · distinct source IPs · distinct actors">Delivery</th>
+                <th class="num" title="Artifact records and distinct source IPs for this hash">Observations</th>
                 <th>Last URL</th>
                 <th>Last actor</th>
-                <th>Status</th>
+                <th title="Status of the newest artifact record, not a check of current file availability">Last status</th>
                 <th style="width:100px" title="VirusTotal engine verdict for this hash. Cached results show automatically; 'check' spends one lookup (free tier is ~4/min).">VirusTotal</th>
                 <th style="width:84px">Bazaar</th>
               </tr>
@@ -1418,7 +1422,7 @@
         <section class="panel full" id="panel-pending">
           <div class="panel-head">
             <h2>Pending uploads</h2>
-            <span class="meta" id="pending-meta">Payloads not yet on MalwareBazaar</span>
+            <span class="meta" id="pending-meta">Eligible unshared hashes from the payload library</span>
             <button type="button" class="bz-btn" id="upload-pending-btn" onclick="uploadAllPending(this)">Upload all pending</button>
           </div>
           <div class="panel-body">
@@ -1446,10 +1450,10 @@
             <button type="button" class="bz-btn" id="bazaar-upload-all-btn" onclick="uploadAllBazaarCandidates(this)" style="display:none">Upload all eligible</button>
           </div>
           <div class="stats tight" id="bazaar-stats">
-            <div class="stat"><div class="num" id="bz-uploaded">0</div><div class="label">Uploaded</div></div>
-            <div class="stat"><div class="num" id="bz-dupes">0</div><div class="label">Duplicates</div></div>
+            <div class="stat"><div class="num" id="bz-uploaded">0</div><div class="label">New uploads</div></div>
+            <div class="stat"><div class="num" id="bz-dupes">0</div><div class="label">Already known</div></div>
             <div class="stat"><div class="num" id="bz-pending">0</div><div class="label">Pending</div></div>
-            <div class="stat"><div class="num" id="bz-last">—</div><div class="label">Last upload</div></div>
+            <div class="stat"><div class="num" id="bz-last">—</div><div class="label">Last recorded</div></div>
           </div>
           <div id="bazaar-note" class="abuse-note" style="display:none"></div>
           <div class="meta bz-sub" id="bazaar-cand-meta">Candidates, through the MalwareBazaar vetting gate</div>
@@ -1468,7 +1472,7 @@
               <tbody><tr><td colspan="8"><div class="empty">loading…</div></td></tr></tbody>
             </table>
           </div>
-          <div class="meta bz-sub">Recent uploads</div>
+          <div class="meta bz-sub">Recent MalwareBazaar responses</div>
           <div class="scroll" id="bazaar-table-wrap">
             <table id="bazaar-table">
               <thead><tr>
@@ -2969,7 +2973,7 @@ function applyClientSearch() {
     '#actors-table tbody tr, #cmds-table tbody tr, #capture-table tbody tr,' +
     '#sessions-list .sess-row,' +
     '#ioc-table tbody tr,' +
-    '#ttp-table tbody tr, .ttp-row,' +
+    '#ttp-table tbody tr,' +
     '#payloads-table tbody tr,' +
     '#bazaar-table tbody tr,' +
     '#deobf-rows .deobf-row,' +
@@ -3119,7 +3123,7 @@ function renderSessions(data) {
   // to the oldest session whenever the tab was open while it loaded.
   const hadRows = !!list.querySelector('.sess-row');
   const atBottom = hadRows && scrollEl && (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 24);
-  var win = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
+  const win = data.windowHours + 'h';
   if (!data.sessions || data.sessions.length === 0) {
     list.innerHTML = '<div class="empty">no cowrie sessions in window</div>';
     meta.textContent = '0 sessions · ' + win + ' window';
@@ -3185,6 +3189,7 @@ async function refreshSessions() {
     const r = await fetch('/api/intel/sessions?window=' + encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
     const resp = await r.json();
+    if (window !== (Filters.window || '24h')) return;
     _lastSessions = resp.sessions || [];
     renderSessions(resp);
   } catch (_) {}
@@ -3300,6 +3305,7 @@ pollEvery(30000, function() {
 if (readTabFromHash() === 'blue') refreshSessions();
 
 // ==== Suggested AbuseIPDB reports =================================
+let abuseBatch = null;
 function priClass(p) {
   if (p >= 75) return 'pri-hi';
   if (p >= 50) return 'pri-mid';
@@ -3321,9 +3327,9 @@ function renderAbuseSuggest(data) {
   // The "Report All" button appears only when reporting is armed AND there is
   // at least one candidate to report.
   const allBtn = document.getElementById('abuse-report-all-btn');
-  if (allBtn) allBtn.style.display = (data.enabled && list.length) ? '' : 'none';
+  if (allBtn) allBtn.style.display = (abuseBatch || (data.enabled && list.length)) ? '' : 'none';
   // When reporting isn't armed, the list is advisory only — say so once.
-  if (!data.enabled) {
+  if (!data.enabled && !abuseBatch && note.dataset.sticky !== '1') {
     note.style.display = 'block';
     note.dataset.sticky = '';
     note.style.borderColor = '';
@@ -3342,7 +3348,8 @@ function renderAbuseSuggest(data) {
     // The button is only functional when reporting is armed; otherwise show a
     // disabled hint so the ranking is still useful as guidance.
     const btn = data.enabled
-      ? '<button class="bz-btn sg-btn" data-ip="' + escHtml(s.srcIp) + '" onclick="reportSuggested(this)">Report</button>'
+      ? '<button class="bz-btn sg-btn" data-ip="' + escHtml(s.srcIp) + '" onclick="reportSuggested(this)"' +
+        (abuseBatch ? ' disabled' : '') + '>Report</button>'
       : '<span class="sg-disabled" title="enable reporting to arm">—</span>';
     return '<tr data-ip="' + escHtml(s.srcIp) + '">' +
       '<td><span class="pri-badge ' + priClass(s.priority) + '">' + s.priority + '</span></td>' +
@@ -3362,7 +3369,7 @@ function renderAbuseSuggest(data) {
 // uses. On success the row is struck through and the button removed.
 async function reportSuggested(btn) {
   const ip = btn.dataset.ip;
-  if (!ip) return;
+  if (!ip || abuseBatch) return;
   btn.disabled = true;
   btn.textContent = '…';
   try {
@@ -3385,42 +3392,76 @@ async function reportSuggested(btn) {
   }
 }
 
-// reportAllSuggested batch-reports every currently-suggested brute-forcer via
-// the server-side orchestrator (which vets, dedups, paces and halts on 429).
-// Confirms first — this is a live, public, multi-IP action.
+// One paced server-side run, scoped to the rows the operator confirmed.
 async function reportAllSuggested(btn) {
-  // Count exactly what's about to be sent so the operator confirms a number,
-  // not a vague "ALL". This is a live, public, per-IP action with account-strike
-  // stakes if abused, so the confirm names the count and destination.
-  const rows = document.querySelectorAll('#abuse-suggest-table tbody tr[data-ip]');
-  const n = rows.length;
-  if (!n) { showAbuseBanner('nothing to report — the suggestions list is empty.', 'warn'); return; }
-  if (!window.confirm('Report ' + n + ' IP' + (n === 1 ? '' : 's') + ' to AbuseIPDB now?\n\n' +
-      'This is a LIVE, public submission attributed to your account. Reported IPs drop off the list until the re-report window elapses.')) return;
+  if (abuseBatch || btn.disabled) return;
+  const rows = Array.from(document.querySelectorAll('#abuse-suggest-table tbody tr[data-ip]'));
+  const ips = rows.map(row => row.dataset.ip);
+  if (!ips.length) return;
+  if (!window.confirm('Report these ' + ips.length + ' displayed IP addresses to AbuseIPDB?\n\n' +
+      'This is a public submission attributed to your account.')) return;
+  abuseBatch = new Map(rows.map(row => [row.dataset.ip, row]));
+  for (const row of rows) {
+    const action = row.querySelector('button');
+    if (action) action.disabled = true;
+  }
   btn.disabled = true;
-  const orig = btn.textContent;
-  btn.textContent = 'reporting…';
-  showAbuseBanner('reporting ' + n + ' IP' + (n === 1 ? '' : 's') + '…', 'pending');
+  const label = btn.textContent;
+  btn.textContent = '0/' + ips.length + ' checked';
+  showAbuseBanner('Checking current evidence for ' + ips.length + ' IPs…', 'pending');
   try {
-    const r = await fetch('/api/intel/abuseipdb/report-all?_=' + Date.now(), { method: 'POST', cache: 'no-store' });
-    const d = await r.json().catch(function(){ return {}; });
-    if (d.status === 'ok' || d.status === 'partial') {
-      // Durable banner (survives the list auto-refresh below, which would wipe a
-      // message written to the meta line).
-      showAbuseBanner('✓ reported ' + (d.reported || 0) + ' · skipped ' + (d.skipped || 0) +
-        (d.status === 'partial' ? ' · some failed — check server logs' : '') +
-        ' · at ' + new Date().toLocaleTimeString(),
-        d.status === 'partial' ? 'warn' : 'ok');
-      // Refresh so reported IPs drop out of the list (dedup window).
-      setTimeout(refreshAbuseSuggest, 800);
-    } else {
-      showAbuseBanner('✗ report-all failed: ' + (d.error || d.status || 'unknown'), 'bad');
+    const r = await fetch('/api/intel/abuseipdb/report-selection', {
+      method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ips)
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      showAbuseBanner(d.error || 'Batch could not start (HTTP ' + r.status + ')', 'bad');
+      return;
     }
-  } catch (e) {
-    showAbuseBanner('✗ request failed', 'bad');
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '', doneCount = 0, reported = 0, failed = 0, final;
+    try {
+      while (!final) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        pending += decoder.decode(chunk.value, { stream: true });
+        let lineEnd;
+        while ((lineEnd = pending.indexOf('\n')) >= 0) {
+          const event = JSON.parse(pending.slice(0, lineEnd));
+          pending = pending.slice(lineEnd + 1);
+          if (event.final) { final = event.final; break; }
+          const row = abuseBatch.get(event.ip);
+          if (row) {
+            row.cells[row.cells.length - 1].textContent = event.status;
+            if (event.status === 'reported') reported++;
+            if (event.status === 'failed') failed++;
+            btn.textContent = ++doneCount + '/' + ips.length + ' checked';
+          }
+          showAbuseBanner(reported + ' reported · ' + doneCount + '/' + ips.length +
+            ' checked · provider requests are paced', 'pending');
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+    if (!final) throw new Error('batch response ended early');
+    showAbuseBanner(final.reported + ' reported · ' + final.skipped + ' skipped' +
+      (failed ? ' · ' + failed + ' failed' : '') +
+      (doneCount < ips.length ? ' · ' + (ips.length - doneCount) + ' without an outcome' : '') +
+      (final.error ? ' · ' + final.error : ''), final.status === 'ok' ? 'ok' : 'warn');
+  } catch (_) {
+    showAbuseBanner('Connection interrupted. Refreshing suggestions; completed reports may already be recorded.', 'warn');
   } finally {
+    btn.textContent = label;
+    for (const row of rows) {
+      const action = row.querySelector('button');
+      if (action) action.disabled = false;
+    }
+    abuseBatch = null;
+    await refreshAbuseSuggest();
     btn.disabled = false;
-    btn.textContent = orig;
   }
 }
 
@@ -3441,9 +3482,11 @@ function showAbuseBanner(msg, kind) {
 
 async function refreshAbuseSuggest() {
   try {
+    if (abuseBatch) return;
     const r = await fetch('/api/intel/abuseipdb/suggestions?limit=15&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
-    renderAbuseSuggest(await r.json());
+    const data = await r.json();
+    if (!abuseBatch) renderAbuseSuggest(data);
   } catch (_) {}
 }
 
@@ -3454,7 +3497,7 @@ setActiveView = function(name) {
     // Clear any lingering sticky Report banner from a previous visit so it
     // isn't mistaken for a fresh result.
     const note = document.getElementById('abuse-suggest-note');
-    if (note) note.dataset.sticky = '';
+    if (note && !abuseBatch) note.dataset.sticky = '';
     const uhNote = document.getElementById('urlhaus-note');
     if (uhNote) uhNote.dataset.sticky = '';
     const tfNote = document.getElementById('threatfox-note');
@@ -3480,9 +3523,14 @@ if (readTabFromHash() === 'blue') { refreshAbuseSuggest(); refreshURLhaus(); ref
 // Stage keys are a closed server-side set; labels still go through esc().
 const FUNNEL_LABELS = {
   connected: 'connected', logged_in: 'logged in', ran_commands: 'ran commands',
-  download_attempt: 'tried a download', captured: 'payloads captured',
-  new_payloads: 'new payloads (first seen)', shared_bazaar: 'shared: MalwareBazaar',
+  download_attempt: 'sessions with transfer signals', captured: 'qualifying fetched hashes',
+  new_payloads: 'first seen in retained records', shared_bazaar: 'shared: MalwareBazaar',
   shared_urlhaus: 'shared: URLhaus', shared_threatfox: 'shared: ThreatFox'
+};
+const FUNNEL_DETAILS = {
+  download_attempt: 'Cowrie uploads or downloads, or command text referencing a remote address. References alone do not prove a transfer.',
+  captured: 'Distinct hashes with a recorded successful fetch that meet the MalwareBazaar size and origin pre-filter. This does not check eligibility or current file availability.',
+  new_payloads: 'Qualifying fetched hashes with no earlier observation in the retained artifact records.'
 };
 async function refreshFunnel() {
   try {
@@ -3509,10 +3557,11 @@ function renderFunnel(d) {
     return;
   }
   tb.innerHTML = stages.map(function(s) {
-    return '<tr><td>' + esc(FUNNEL_LABELS[s.stage] || s.stage) + '</td><td class="num">' + esc(fmt(s.day)) +
-      '</td><td class="num">' + esc(fmt(s.week)) + '</td></tr>';
+    const detail = FUNNEL_DETAILS[s.stage];
+    return '<tr><td' + (detail ? ' title="' + esc(detail) + '"' : '') + '>' + esc(FUNNEL_LABELS[s.stage] || s.stage) +
+      '</td><td class="num">' + esc(fmt(s.day)) + '</td><td class="num">' + esc(fmt(s.week)) + '</td></tr>';
   }).join('');
-  meta.textContent = 'cowrie sessions → payloads → shared · computed ' + fmtShortTime(d.at) +
+  meta.textContent = 'sessions, hashes and submissions · computed ' + fmtShortTime(d.at) +
     (d.available ? '' : ' (stale)');
 }
 
@@ -3765,10 +3814,12 @@ function renderThreatFox(d) {
   if (rows.length) {
     wrap.style.display = '';
     logTb.innerHTML = rows.map(function(rw) {
+      const type = ({ sha256_hash: 'SHA-256 file hash', 'ip:port': 'IP:port', url: 'URL', domain: 'Domain' })[rw.iocType];
       return '<tr>' +
         '<td class="bz-sha" title="' + escHtml(rw.ioc) + '">' + escHtml(rw.ioc) + '</td>' +
-        '<td>' + escHtml(rw.iocType || '—') + '</td>' +
+        '<td>' + escHtml(type || rw.iocType || '—') + '</td>' +
         '<td>' + escHtml(rw.malware || '—') + '</td>' +
+        '<td>' + escHtml(rw.status === 'duplicate' ? 'Already listed' : (rw.status || '—')) + '</td>' +
         '<td class="range">' + (rw.submittedAt ? fmtShortTime(rw.submittedAt) : '—') + '</td>' +
         '</tr>';
     }).join('');
@@ -3860,14 +3911,13 @@ function fmtShortTime(iso) {
 function renderIOC(data) {
   const tb = document.querySelector('#ioc-table tbody');
   const meta = document.getElementById('ioc-meta');
-  var iwin = (typeof Filters !== 'undefined' && Filters.window) ? Filters.window : (data.windowHours + 'h');
   // The table is capped server-side (limit=50); disclose "top N of M" when
   // truncated so the header total isn't read as the on-screen row count. The
   // CSV/STIX exports return the full set. (Same honesty pattern as the
   // sessions/payload/graph widgets.)
   var iocShown = (data.indicators || []).length, iocTotal = data.total || 0;
   meta.textContent = (iocShown < iocTotal ? ('top ' + fmt(iocShown) + ' of ' + fmt(iocTotal)) : fmt(iocTotal)) +
-    ' indicators · ' + IOC.kind + ' · ' + iwin + ' window' + sampledNote(data);
+    ' observed indicators · ' + data.kind + ' · ' + data.windowHours + 'h window' + sampledNote(data);
 
   if (!data.indicators || data.indicators.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no indicators in window</div></td></tr>';
@@ -3889,24 +3939,27 @@ function renderIOC(data) {
 
 async function refreshIOC() {
   const window = Filters.window || '24h';
+  const kind = IOC.kind;
   const csvLink = document.getElementById('ioc-dl-csv');
   const stixLink = document.getElementById('ioc-dl-stix');
   // Header-only /api downloads: fetch with the auth header + Blob-download
   // (see downloadWithAuth) instead of a query-string token that would 401.
   csvLink.onclick = function (e) {
     e.preventDefault(); e.stopPropagation();
-    downloadWithAuth('/api/ioc/csv?kind=' + IOC.kind + '&window=' + encodeURIComponent(window),
-                     'shardlure-ioc-' + IOC.kind + '.csv');
+    downloadWithAuth('/api/ioc/csv?kind=' + kind + '&window=' + encodeURIComponent(window),
+                     'shardlure-ioc-' + kind + '.csv');
   };
   stixLink.onclick = function (e) {
     e.preventDefault(); e.stopPropagation();
     downloadWithAuth('/api/ioc/stix?window=' + encodeURIComponent(window), 'shardlure-ioc.stix.json');
   };
   try {
-    const r = await fetch('/api/ioc/list?kind=' + IOC.kind + '&window=' + encodeURIComponent(window) +
+    const r = await fetch('/api/ioc/list?kind=' + kind + '&window=' + encodeURIComponent(window) +
                          '&limit=50&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
-    renderIOC(await r.json());
+    const data = await r.json();
+    if (kind !== IOC.kind || window !== (Filters.window || '24h')) return;
+    renderIOC(data);
   } catch (_) {}
 }
 
@@ -3931,14 +3984,16 @@ pollEvery(30000, function() {
 if (readTabFromHash() === 'blue') refreshIOC();
 
 // ==== Slice E: threat intel enrichment ============================
+let enrichRequest = 0;
 function renderEnrichCard(r) {
   const verdict = (r.verdict || 'unknown').toLowerCase();
   const cls = r.error && !r.cached ? 'verdict-error' : 'verdict-' + verdict;
   const status = r.cached
     ? (r.stale ? '<span class="ec-status stale">cached · stale</span>'
                : '<span class="ec-status">cached</span>')
-    : (r.configured ? '<span class="ec-status">live</span>'
-                    : '<span class="ec-status">unconfigured</span>');
+    : (r.error ? '<span class="ec-status">lookup failed</span>'
+               : (r.configured ? '<span class="ec-status">live</span>'
+                               : '<span class="ec-status">unconfigured</span>'));
 
   let meta = '';
   if (r.asn || r.asOwner) meta += '<span><b>' + escHtml(r.asn || '') + '</b> ' + escHtml(r.asOwner || '') + '</span>';
@@ -3953,7 +4008,7 @@ function renderEnrichCard(r) {
   }
 
   const link = r.url ? '<a class="ec-link" href="' + safeUrl(r.url) + '" target="_blank" rel="noopener">open ↗</a>' : '';
-  const summary = r.summary || (r.error ? 'error: ' + escHtml(r.error)
+  const summary = r.summary || (r.error ? 'error: ' + r.error
                               : (r.configured ? 'no data' : 'set API key in env'));
 
   return '<div class="enrich-card ' + cls + '">' +
@@ -3969,21 +4024,25 @@ function renderEnrichCard(r) {
 }
 
 async function runEnrich(ip) {
+  const request = ++enrichRequest;
   const box = document.getElementById('enrich-cards');
   const meta = document.getElementById('enrich-meta');
   meta.textContent = 'looking up ' + ip + '…';
   box.innerHTML = '<div class="empty">contacting providers…</div>';
   try {
     const r = await fetch('/api/intel/enrich?ip=' + encodeURIComponent(ip), { cache: 'no-store' });
+    if (request !== enrichRequest) return;
     if (!r.ok) {
       box.innerHTML = '<div class="empty">lookup failed (' + r.status + ')</div>';
       meta.textContent = 'AbuseIPDB · VirusTotal · GreyNoise · Shodan · OTX · IPQS · IPinfo';
       return;
     }
     const d = await r.json();
-    meta.textContent = ip + ' · ' + d.results.length + ' providers';
+    if (request !== enrichRequest) return;
+    meta.textContent = d.ip + ' · ' + d.results.length + ' provider results';
     box.innerHTML = d.results.map(renderEnrichCard).join('');
   } catch (e) {
+    if (request !== enrichRequest) return;
     box.innerHTML = '<div class="empty">error: ' + escHtml(e.message) + '</div>';
   }
 }
@@ -4026,7 +4085,8 @@ function highlightTemplate(tmpl) {
 function renderTTP(data) {
   const tb = document.querySelector('#ttp-table tbody');
   const meta = document.getElementById('ttp-meta');
-  meta.textContent = data.total + ' templates · ' + data.windowHours + 'h window' + sampledNote(data);
+  meta.textContent = listCount((data.rows || []).length, data.total, 'templates') +
+    ' · ranked by actor count · ' + data.windowHours + 'h window' + sampledNote(data);
 
   if (!data.rows || data.rows.length === 0) {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">no commands captured in window</div></td></tr>';
@@ -4034,13 +4094,20 @@ function renderTTP(data) {
   }
 
   let html = '';
-  data.rows.forEach(function(r, i) {
+  data.rows.forEach(function(r) {
     const techs = (r.techniques || []).map(function(t) {
       return '<span class="tt">' + escHtml(t) + '</span>';
     }).join('');
     const range = fmtShortTime(r.firstSeen) + ' → ' + fmtShortTime(r.lastSeen);
-    html += '<tr class="ttp-row" data-i="' + i + '">' +
-      '<td class="tmpl">' + highlightTemplate(r.template) + '</td>' +
+    const preview = r.template.length > 160 ? r.template.slice(0, 159) + '…' : r.template;
+    const samples = (r.samples || []).map(s => '<div class="ts-line">' + escHtml(s) + '</div>').join('');
+    const actors = (r.actors || []).join(', ');
+    html += '<tr><td class="tmpl"><details><summary><span class="ttp-preview">' + highlightTemplate(preview) +
+      '</span></summary><div class="ttp-detail" tabindex="0" aria-label="Full template and samples">' +
+      '<div class="ttp-full">' + highlightTemplate(r.template) + '</div>' +
+      (samples ? '<div class="ttp-samples">' + samples + '</div>' : '') +
+      (actors ? '<div class="ttp-actors-list">Actors: ' + escHtml(actors) + '</div>' : '') +
+      '</div></details></td>' +
       '<td class="num">' + r.count + '</td>' +
       '<td class="num">' + r.actorCount + '</td>' +
       '<td class="tcol">' + techs + '</td>' +
@@ -4048,30 +4115,6 @@ function renderTTP(data) {
       '</tr>';
   });
   tb.innerHTML = html;
-
-  // Click-to-expand: insert a samples row below the clicked template.
-  tb.querySelectorAll('.ttp-row').forEach(function(row) {
-    row.addEventListener('click', function() {
-      const i = parseInt(row.dataset.i, 10);
-      const r = data.rows[i];
-      const next = row.nextElementSibling;
-      if (next && next.classList.contains('expand-row')) {
-        next.remove();
-        return;
-      }
-      const samples = (r.samples || []).map(function(s) {
-        return '<div class="ts-line">' + escHtml(s) + '</div>';
-      }).join('');
-      const actors = (r.actors || []).join(', ');
-      const exp = document.createElement('tr');
-      exp.className = 'expand-row';
-      exp.innerHTML = '<td colspan="5">' +
-        '<div class="ttp-samples">' + samples + '</div>' +
-        (actors ? '<div class="ttp-actors-list">actors: ' + escHtml(actors) + '</div>' : '') +
-        '</td>';
-      row.parentNode.insertBefore(exp, row.nextSibling);
-    });
-  });
 }
 
 async function refreshTTP() {
@@ -4715,18 +4758,16 @@ function renderPayloads(data) {
   const meta = document.getElementById('payloads-meta');
   const unique = data.total || 0;
   const returned = (data.returned != null) ? data.returned : (data.rows || []).length;
-  let shownCaptures = 0;
-  (data.rows || []).forEach(function(p) { shownCaptures += (p.occurrences || 1); });
-  // `unique` is the full-window distinct-payload count; the captures sum is only
-  // over the rows actually returned (page-capped). Label honestly so the two
-  // figures aren't read as describing the same population.
-  const capturesLabel = returned < unique
-    ? (fmt(shownCaptures) + ' captures in top ' + returned)
-    : (fmt(shownCaptures) + ' captures');
-  meta.textContent = fmt(unique) + ' unique · ' + capturesLabel + ' · ' + data.windowHours + 'h window';
+  const records = (data.rows || []).reduce(function(sum, p) { return sum + p.occurrences; }, 0);
+  const recordLabel = fmt(records) + ' artifact records' + (returned < unique ? ' in newest ' + fmt(returned) : '');
+  meta.textContent = fmt(unique) + ' unique hashes · ' + recordLabel + ' · ' + data.windowHours + 'h window';
+
+  // The pending panel always reflects this page, including when it's empty.
+  _lastPayloadData = data;
+  renderPending(data);
 
   if (!data.rows || data.rows.length === 0) {
-    tb.innerHTML = '<tr><td colspan="8"><div class="empty">no captured payloads in window</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">No payload hashes observed in this window</div></td></tr>';
     return;
   }
   let html = '';
@@ -4739,7 +4780,7 @@ function renderPayloads(data) {
     const ips = p.ipCount || 0;
     const actors = p.actorCount || 0;
     const fanClass = occ === 1 ? 'pl-fan pl-fan-1' : 'pl-fan';
-    const fanTitle = occ + 'x captured · ' + (p.urlCount || 0) + ' urls · ' + ips + ' ips · ' + actors + ' actors · ' + (p.sessionCount || 0) + ' sessions';
+    const fanTitle = occ + ' artifact records · ' + (p.urlCount || 0) + ' urls · ' + ips + ' ips · ' + actors + ' actors · ' + (p.sessionCount || 0) + ' sessions';
     const fan = '<span class="' + fanClass + '" title="' + escHtml(fanTitle) + '">' + occ + 'x · ' + ips + 'ip</span>';
     var shareBtn;
     if (_bazaarSharedSet[sha]) {
@@ -4748,24 +4789,11 @@ function renderPayloads(data) {
     } else if (isUploadEligible(p)) {
       shareBtn = '<button class="bz-btn" onclick="event.stopPropagation();uploadToBazaar(\'' + escHtml(sha) + '\',this)">Share</button>';
     } else {
-      // Not MB-eligible. Show why instead of a share button the server would
-      // only reject — this is what fixed the "share on all 92" anomaly.
-      //
-      // The reason is a best-effort LABEL for a verdict the server already made
-      // (p.shareable); it is not the gate. These tests are ordered to match how
-      // the server narrows, but if none of them explains the rejection we say
-      // "ineligible" rather than inventing a cause — a label that disagreed with
-      // the gate is how the origin drift stayed invisible for so long.
-      var why = (sha === '—' || !p.hasLocal) ? 'no file'
-        : ((p.status || '') !== 'fetched') ? (p.status || 'not fetched')
-        : ((p.sizeBytes || 0) < 64) ? 'too small'
-        : ((p.origin || '') === 'cowrie_tty') ? 'tty transcript'
-        // Vet's own reason from the bazaar panel's candidate list (same
-        // response cycle), cut to its leading clause ("benign content (SSH
-        // key)", "unconfirmed", "stale") so it fits the cell.
-        : _bazaarGate[sha] ? _bazaarGate[sha].split(':')[0]
-        : 'ineligible';
-      shareBtn = '<span style="color:var(--dim-2)" title="not eligible for MalwareBazaar: ' + escHtml(why) + '">— ' + escHtml(why) + '</span>';
+      // Gate reasons refer to the hash group; the newest observation alone
+      // cannot explain why the candidate review did not offer this hash.
+      const reason = _bazaarGate[sha] || 'Not marked eligible in the current candidate review';
+      shareBtn = '<span style="color:var(--dim-2)" title="' + escHtml(reason) + '">— ' +
+        escHtml(_bazaarGate[sha] ? reason.split(':')[0] : 'not offered') + '</span>';
     }
     html += '<tr data-sha="' + escHtml(sha) + '" data-has-local="' + (p.hasLocal ? '1' : '0') + '">' +
       '<td title="' + escHtml(sha) + '">' + escHtml(shaShort) + '</td>' +
@@ -4789,10 +4817,6 @@ function renderPayloads(data) {
       if (sha && sha !== '—') openPayload(sha);
     });
   });
-  // The pending panel is a filtered view of the same payload data, so keep
-  // it in lockstep with the library on every refresh.
-  _lastPayloadData = data;
-  renderPending(data);
 }
 
 // isUploadEligible reports whether a payload row COULD be shipped to
@@ -4833,24 +4857,19 @@ function isPending(p) {
   return true;
 }
 
-// renderPending fills the "Pending uploads" panel with only the payloads that
-// still need to be shared to MalwareBazaar. Reuses the payloads API data
-// already fetched for the library so there is no extra request.
+// The pending panel filters the current library page, not all windowed hashes.
 function renderPending(data) {
   var tb = document.querySelector('#pending-table tbody');
   var meta = document.getElementById('pending-meta');
   if (!tb) return;
-  var rows = (data && data.rows ? data.rows : []).filter(isPending);
-  // Label the window so this never looks like it should equal the all-history
-  // "MalwareBazaar sharing → pending" stat. Same eligibility filter, different
-  // time scope: this is "eligible & unshared in the last Nh".
+  var page = data.rows || [];
+  var rows = page.filter(isPending);
   if (meta) {
-    var wh = (data && data.windowHours) ? data.windowHours : 168;
-    var winLabel = wh % 24 === 0 ? (wh / 24) + 'd' : wh + 'h';
-    meta.textContent = rows.length + ' pending in ' + winLabel;
+    var scope = page.length < data.total ? ' · newest ' + fmt(page.length) + ' of ' + fmt(data.total) + ' hashes' : '';
+    meta.textContent = fmt(rows.length) + ' pending on page' + scope + ' · ' + data.windowHours + 'h window';
   }
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="5"><div class="empty">nothing pending in this window — eligible payloads are shared</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">No hashes on this page marked eligible and unshared</div></td></tr>';
     return;
   }
   var html = '';
@@ -4890,10 +4909,12 @@ async function refreshPayloads() {
     ]);
     if (!pr.ok) return;
     var pd = await pr.json();
+    if (win !== (Filters.window || '7d')) return;
+    var bd = br.ok ? await br.json() : null;
+    if (win !== (Filters.window || '7d')) return;
     _lastPayloads = pd.rows || [];
-    if (br.ok) {
+    if (bd) {
       var freshSet = {};
-      var bd = await br.json();
       (bd.uploads || []).forEach(function(u) { freshSet[u.sha256] = u.mbUrl || true; });
       _bazaarSharedSet = freshSet;
       // Render the bazaar panel from this same response — it used to run
@@ -5009,15 +5030,15 @@ const WL = { kind: 'users' };
 function renderWordlist(data) {
   const box = document.getElementById('wl-preview');
   const meta = document.getElementById('wl-meta');
-  meta.textContent = data.total + ' ' + WL.kind + ' · ' + data.windowHours + 'h window';
+  meta.textContent = listCount((data.entries || []).length, data.total, data.kind) + ' · ' + data.windowHours + 'h window';
 
   if (!data.entries || data.entries.length === 0) {
-    box.innerHTML = '<div class="empty">no ' + WL.kind + ' captured in window</div>';
+    box.innerHTML = '<div class="empty">no ' + escHtml(data.kind) + ' captured in window</div>';
     return;
   }
   let html = '';
   data.entries.slice(0, 50).forEach(function(e, i) {
-    const value = WL.kind === 'combos'
+    const value = data.kind === 'combos'
       ? (escHtml(e.username || '') + ':' + escHtml(e.password || ''))
       : escHtml(e.username || e.password || '');
     html += '<div class="wl-row">' +
@@ -5031,17 +5052,20 @@ function renderWordlist(data) {
 
 async function refreshWordlist() {
   const window = Filters.window || '30d';
+  const kind = WL.kind;
   const dl = document.getElementById('wl-dl');
   dl.onclick = function (e) {
     e.preventDefault(); e.stopPropagation();
-    downloadWithAuth('/api/intel/wordlist?kind=' + WL.kind + '&format=txt&window=' + encodeURIComponent(window),
-                     'shardlure-wordlist-' + WL.kind + '.txt');
+    downloadWithAuth('/api/intel/wordlist?kind=' + kind + '&format=txt&window=' + encodeURIComponent(window),
+                     'shardlure-wordlist-' + kind + '.txt');
   };
   try {
-    const r = await fetch('/api/intel/wordlist?kind=' + WL.kind + '&format=json&limit=50&window=' +
+    const r = await fetch('/api/intel/wordlist?kind=' + kind + '&format=json&limit=50&window=' +
                          encodeURIComponent(window) + '&_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
-    renderWordlist(await r.json());
+    const data = await r.json();
+    if (kind !== WL.kind || window !== (Filters.window || '30d')) return;
+    renderWordlist(data);
   } catch (_) {}
 }
 
@@ -5478,7 +5502,7 @@ async function refreshBazaar() {
 function renderBazaar(d) {
   renderBazaarCandidates(d);
   var st = d.stats || {};
-  document.getElementById('bz-uploaded').textContent = fmt(st.totalUploaded || 0);
+  document.getElementById('bz-uploaded').textContent = fmt((st.totalUploaded || 0) - (st.duplicates || 0));
   document.getElementById('bz-dupes').textContent = fmt(st.duplicates || 0);
   document.getElementById('bz-pending').textContent = bazaarPendingLabel(d);
   document.getElementById('bz-last').textContent = st.lastUploadAt ? rel(st.lastUploadAt) : '—';
@@ -5486,7 +5510,7 @@ function renderBazaar(d) {
   var rows = d.uploads || [];
   var tb = document.querySelector('#bazaar-table tbody');
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="empty">No submissions yet. Run <code>shardlure share bazaar</code></td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="empty">No MalwareBazaar responses recorded yet</td></tr>';
     return;
   }
   tb.innerHTML = rows.map(function(u) {

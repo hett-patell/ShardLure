@@ -149,6 +149,39 @@ func TestBazaarPendingLabelDisclosesTruncation(t *testing.T) {
 	}
 }
 
+func TestPendingPanelReportsPageScopeAndClearsAfterEmptyLibrary(t *testing.T) {
+	js := inlineScripts(intelHTML)
+	start, end := strings.Index(js, "function renderPayloads("), strings.Index(js, "var _bazaarSharedSet")
+	if start < 0 || end <= start {
+		t.Fatal("payload and pending renderers not found")
+	}
+	var out struct {
+		Caption, EmptyCaption, EmptyTable string
+		InitialRow                        bool
+	}
+	decodeJS(t, runBazaarJS(t, js[start:end]+`
+  let _lastPayloadData;
+  const fmt = n => n.toLocaleString('en-US');
+  const escHtml = esc;
+  const fmtSize = fmt;
+  const vtCellHTML = () => '';
+  const refreshVTBadges = () => {};
+  const pending = document.querySelector('#pending-table tbody');
+  const meta = document.getElementById('pending-meta');
+  renderPayloads({ rows: [{ sha256: 'aa', occurrences: 5, sizeBytes: 100, shareable: true }], total: 401, windowHours: 168 });
+  const Caption = meta.textContent;
+  const InitialRow = pending.innerHTML.includes('data-sha="aa"');
+  renderPayloads({ rows: [], total: 0, windowHours: 1 });
+  console.log(JSON.stringify({ Caption, InitialRow, EmptyCaption: meta.textContent, EmptyTable: pending.innerHTML }));
+`), &out)
+	if !out.InitialRow || !strings.Contains(out.Caption, "1 pending on page · newest 1 of 401 hashes") {
+		t.Errorf("first page: row rendered=%t, caption=%q", out.InitialRow, out.Caption)
+	}
+	if !strings.Contains(out.EmptyCaption, "0 pending on page") || strings.Contains(out.EmptyTable, `data-sha="aa"`) {
+		t.Errorf("empty window retains pending results: %q / %q", out.EmptyCaption, out.EmptyTable)
+	}
+}
+
 // TestBazaarUploadAllSendsOnlyEligible pins that the batch button posts the
 // eligible rows and nothing else (the server re-checks each with Vet anyway).
 func TestBazaarUploadAllSendsOnlyEligible(t *testing.T) {

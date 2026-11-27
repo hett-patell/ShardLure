@@ -19,16 +19,11 @@ type FunnelCounts struct {
 	SharedBazaar, SharedURLhaus, SharedThreatFox      int64
 }
 
-// funnelDownloadPredicate marks a session as having attempted a download: a
-// Cowrie file transfer, or a command naming a remote URL or /dev/tcp target.
-// It approximates capture.ExtractURLs in SQL (store must not import capture);
-// tftp/ftp are included because Mirai-style loaders use them. The match is
-// case-sensitive on the scheme, like capture's reHTTP.
-//
-// This is an *attempt* stage and is deliberately wider than what capture acts
-// on: capture never fetches ftp:// or tftp, so a gap between DownloadAttempt and
-// Captured is partly by construction. Don't "fix" that gap by blaming capture
-// or by narrowing this predicate — it measures attacker intent, not our reach.
+// funnelDownloadPredicate identifies sessions with transfer signals: a Cowrie
+// file transfer in either direction, or a command naming a remote address.
+// Command text isn't proof a transfer ran. The match approximates
+// capture.ExtractURLs in SQL, but is deliberately broader (it includes FTP
+// and TFTP even though capture cannot fetch them).
 const funnelDownloadPredicate = `kind IN ('file_download','file_upload') OR (kind='command' AND (instr(command,'http://')>0 OR instr(command,'https://')>0 OR instr(command,'ftp://')>0 OR instr(command,'tftp ')>0 OR instr(command,'tftp'||char(9))>0 OR instr(lower(command),'/dev/tcp/')>0))`
 
 // funnelLedgerCountSQL counts one submission ledger's rows at or after a
@@ -136,7 +131,7 @@ FROM (SELECT DISTINCT sha256 FROM artifacts
 		// Historical already_queued rows are the same answer from an older
 		// build, so both statuses are excluded.
 		{&out.SharedURLhaus, funnelLedgerCountSQL(urlhausLedger, urlhausNotSubmittedWhere)},
-		{&out.SharedThreatFox, funnelLedgerCountSQL(threatfoxLedger, "")},
+		{&out.SharedThreatFox, funnelLedgerCountSQL(threatfoxLedger, threatfoxNotDuplicateWhere)},
 	}
 	for _, l := range ledgers {
 		if err := tx.QueryRowContext(ctx, l.query, key, key).Scan(l.dst); err != nil {
